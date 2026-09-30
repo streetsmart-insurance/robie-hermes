@@ -41,6 +41,7 @@ from robie_job_engine.progressive_bop import (
     parse_report_rows,
     parse_xls_export,
     apply_bop_report_dates,
+    _DATE_MENU_NEXT_DIV,
     _PENDING_CANCEL_PDF_EXPORT,
     _PENDING_CANCEL_XLS_EXPORT,
     policies_from_report_text,
@@ -1214,10 +1215,11 @@ class _MissingControl:
 
 
 class _MenuInput:
-    def __init__(self, page: "_ExportPage", css: str):
+    def __init__(self, page: "_ExportPage", css: str, *, chained_to_name: bool = False):
         self.page = page
         self.css = css
         self.value = ""
+        self.chained_to_name = chained_to_name
 
     def count(self):
         if not self.page.has_inputs:
@@ -1239,19 +1241,26 @@ class _MenuInput:
             return self.page.input_type
         return None
 
+    def _store(self) -> "_MenuInput":
+        if self.css == ".report-start":
+            return self.page.menu.start
+        return self.page.menu.end
+
     def fill(self, value):
         if not self.is_visible():
             raise RuntimeError("hidden")
-        if not self.page.dates_stick:
-            self.value = ""
-        else:
-            self.value = value
-        self.page.date_values[self.css] = self.value
+        stored = value if self.page.dates_stick else ""
+        self._store().value = stored
+        self.page.date_values[self.css] = stored
 
     def input_value(self):
+        if self.chained_to_name and self.page.button_text != "Select Date Range":
+            raise RuntimeError("Select Date Range resolved to 0 elements")
+        if not self.page.menu_open:
+            self.page.hidden_value_reads += 1
         if self.page.applied and self.page.dates in {"button-text", "unchanged"}:
             return ""
-        return self.value
+        return self._store().value
 
 
 class _ApplyButton:
@@ -1272,10 +1281,12 @@ class _ApplyButton:
     def click(self):
         self.page.date_clicks.append("apply")
         self.page.applied = True
-        if self.page.dates == "button-text":
+        if self.page.dates in {"button-text", "renamed"}:
             start = self.page.menu.start.value
             end = self.page.menu.end.value
             self.page.button_text = f"{start} - {end}"
+        if self.page.dates == "renamed":
+            self.page.menu_open = False
 
 
 class _DateMenu:
@@ -1292,10 +1303,11 @@ class _DateMenu:
 
     def locator(self, selector):
         self.page.menu_queries.append(selector)
+        chained = self.page.menu_source == "role"
         if selector == ".report-start":
-            return self.start
+            return _MenuInput(self.page, ".report-start", chained_to_name=chained)
         if selector == ".report-end":
-            return self.end
+            return _MenuInput(self.page, ".report-end", chained_to_name=chained)
         return _MissingControl()
 
     def get_by_role(self, role, name=None, exact=True):
@@ -1312,8 +1324,12 @@ class _DateToggle:
 
     def count(self):
         if self.via == "role":
+            if self.page.button_text != "Select Date Range":
+                return 0
             return self.page.role_count
-        return self.page.id_count
+        if self.via == "id":
+            return self.page.id_count
+        return 1
 
     def is_visible(self):
         return self.count() == 1
@@ -1329,22 +1345,29 @@ class _DateToggle:
             self.page.menu_open = True
 
     def inner_text(self):
+        self.page.text_reads.append(self.via)
+        if self.via == "role" and self.page.button_text != "Select Date Range":
+            raise RuntimeError("Select Date Range resolved to 0 elements")
         return self.page.button_text
 
     def locator(self, selector):
         self.page.menu_queries.append(selector)
-        if (
-            self.page.menu_via == "sibling"
-            and self.page.has_menu
-            and ("dropdown-menu" in selector or "role='menu'" in selector)
-        ):
+        if self.via == "role" and self.count() == 0:
+            raise RuntimeError("Select Date Range resolved to 0 elements")
+        self.page.menu_source = self.via
+        if self.page.has_menu and selector == _DATE_MENU_NEXT_DIV:
             return self.page.menu
         return _MissingControl()
 
     def get_attribute(self, name):
         if name == "id":
-            return "dropdownMenu2"
+            return self.page.element_id
         return None
+
+    def element_handle(self):
+        if self.count() != 1:
+            return None
+        return _DateToggle(self.page, "handle")
 
 
 class _ExportPage(FakePage):
@@ -1378,7 +1401,10 @@ class _ExportPage(FakePage):
         self.role_count = 0 if dates in {"missing", "id", "duplicate-id"} else 2 if dates == "ambiguous" else 1
         self.id_count = 0 if dates == "missing" else 2 if dates == "duplicate-id" else 1
         self.has_menu = dates not in {"missing", "no-menu"}
-        self.menu_via = "aria" if dates == "aria" else "sibling"
+        self.element_id = None if dates == "captured" else "dropdownMenu2"
+        self.menu_source = ""
+        self.hidden_value_reads = 0
+        self.text_reads: list[str] = []
         self.has_inputs = dates != "no-inputs"
         self.start_count = 2 if dates == "duplicate-start" else 1
         self.apply_count = 0 if dates == "no-apply" else 2 if dates == "duplicate-apply" else 1
@@ -1408,8 +1434,10 @@ class _ExportPage(FakePage):
         self.locators.append(selector)
         if selector == "#dropdownMenu2":
             return _DateToggle(self, "id")
-        if selector == "[aria-labelledby='dropdownMenu2']" and self.menu_via == "aria":
-            return self.menu
+        if selector == ".report-start":
+            return _MenuInput(self, ".report-start")
+        if selector == ".report-end":
+            return _MenuInput(self, ".report-end")
         return super().locator(selector)
 
     def get_by_role(self, role, name=None, exact=True):
@@ -1596,7 +1624,7 @@ class PendingCancelExportTests(unittest.TestCase):
         )
         self.assertTrue(all(row.report_date == DAY for row in report.policies))
         self.assertEqual(page.clicked, [("button", _PENDING_CANCEL_PDF_EXPORT)])
-        self.assertEqual(page.date_clicks, ["role", "apply"])
+        self.assertEqual(page.date_clicks, ["id", "apply"])
         self.assertEqual(
             page.date_values,
             {
@@ -1604,9 +1632,14 @@ class PendingCancelExportTests(unittest.TestCase):
                 ".report-end": DAY.strftime("%m/%d/%Y"),
             },
         )
-        self.assertNotIn(".report-start", page.locators)
-        self.assertNotIn(".report-end", page.locators)
-        self.assertNotIn("#dropdownMenu2", page.locators)
+        self.assertEqual(
+            [item for item in page.role_lookups if item == ("button", "Select Date Range")],
+            [("button", "Select Date Range")],
+        )
+        self.assertLess(page.locators.index("#dropdownMenu2"), page.locators.index(".report-start"))
+        self.assertIn(".report-end", page.locators)
+        self.assertIn(_DATE_MENU_NEXT_DIV, page.menu_queries)
+        self.assertNotIn("role", page.text_reads)
         self.assertNotIn(("button", "Apply"), page.role_lookups)
         self.assertIn(("button", "Apply"), page.menu_roles)
         with self.assertRaises(IntakeHold):
@@ -1733,7 +1766,7 @@ class PendingCancelExportTests(unittest.TestCase):
             read_report_from_page(page, DAY)
         self.assertIn("report start did not accept", str(caught.exception))
         self.assertIn("export was not downloaded", str(caught.exception))
-        self.assertEqual(page.date_clicks, ["role"])
+        self.assertEqual(page.date_clicks, ["id"])
         self.assertFalse(page.exported)
 
     def test_date_input_uses_iso_and_text_input_uses_month_day_year(self):
@@ -1749,7 +1782,7 @@ class PendingCancelExportTests(unittest.TestCase):
             typed.date_values,
             {".report-start": DAY.isoformat(), ".report-end": DAY.isoformat()},
         )
-        self.assertEqual(typed.date_clicks, ["role", "apply"])
+        self.assertEqual(typed.date_clicks, ["id", "apply"])
 
     def test_id_fallback_is_used_only_when_the_button_name_is_absent(self):
         page = _ExportPage(
@@ -1759,14 +1792,14 @@ class PendingCancelExportTests(unittest.TestCase):
         apply_bop_report_dates(page, DAY)
         self.assertEqual(page.date_clicks, ["id", "apply"])
         self.assertIn("#dropdownMenu2", page.locators)
-        labelled = _ExportPage(
+        captured = _ExportPage(
             {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
-            dates="aria",
+            dates="captured",
         )
-        apply_bop_report_dates(labelled, DAY)
-        self.assertEqual(labelled.date_clicks, ["role", "apply"])
-        self.assertIn("[aria-labelledby='dropdownMenu2']", labelled.locators)
-        self.assertIn(".report-start", labelled.menu_queries)
+        apply_bop_report_dates(captured, DAY)
+        self.assertEqual(captured.date_clicks, ["handle", "apply"])
+        self.assertNotIn("#dropdownMenu2", captured.locators)
+        self.assertIn(_DATE_MENU_NEXT_DIV, captured.menu_queries)
         ambiguous = _ExportPage(
             {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
             dates="ambiguous",
@@ -1838,6 +1871,36 @@ class PendingCancelExportTests(unittest.TestCase):
         self.assertIn("did not accept 2026-09-26", str(caught.exception))
         self.assertIn("apply", cleared.date_clicks)
         self.assertFalse(cleared.exported)
+
+    def test_apply_rewrites_the_button_and_keeps_hidden_input_values(self):
+        html = _fixture("report_dates_applied.html").decode("utf-8")
+        labels = _button_labels(html)
+        self.assertIn("09/29/2026 - 09/29/2026", labels)
+        self.assertNotIn("Select Date Range", labels)
+        self.assertIn('id="dropdownMenu2"', html)
+        self.assertIn('class="report-start" type="text" value="09/29/2026"', html)
+        self.assertIn('class="report-end" type="text" value="09/29/2026"', html)
+        self.assertLess(html.index('id="dropdownMenu2"'), html.index('class="dropdown-menu"'))
+        self.assertLess(html.index("</button>"), html.index('class="dropdown-menu"'))
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="renamed",
+        )
+        report = read_report_from_page(page, DAY)
+        shown = f"{DAY.strftime('%m/%d/%Y')} - {DAY.strftime('%m/%d/%Y')}"
+        self.assertTrue(report.blank)
+        self.assertEqual(page.button_text, shown)
+        self.assertGreaterEqual(page.hidden_value_reads, 2)
+        self.assertEqual(page.text_reads, ["id"])
+        self.assertEqual(
+            [item for item in page.role_lookups if item == ("button", "Select Date Range")],
+            [("button", "Select Date Range")],
+        )
+        self.assertTrue(page.exported)
+        renamed = page.get_by_role("button", name="Select Date Range")
+        self.assertEqual(renamed.count(), 0)
+        with self.assertRaises(RuntimeError):
+            renamed.inner_text()
 
     def test_button_text_is_enough_when_apply_clears_the_inputs(self):
         page = _ExportPage(

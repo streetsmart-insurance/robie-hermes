@@ -42,15 +42,19 @@ tab and writes one QA pack for `--report-date`:
    control still showed `Select Date Range`. A later check of the select
    attempt held with Report Dates missing: there is no combobox by that
    name, and that text is not a label for an input. The control is a
-   dropdown button whose text is `Select Date Range`. Before either export,
-   the pull clicks that button (or `#dropdownMenu2` only when the button
-   name is absent and the id is unique), fills `.report-start` and
-   `.report-end` inside the open menu with the process date, and clicks
-   Apply. A `type=date` input gets `YYYY-MM-DD`. A text input gets
-   `MM/DD/YYYY`. It reads the input values or the button text back and
-   waits for the network to go idle. Then it exports. A missing control, a
-   value that does not stick, or a page that does not finish loading holds.
-   The export is not downloaded.
+   dropdown button whose text starts as `Select Date Range`. On
+   hermes-test-01 that button was found by name, the menu opened, and both
+   text inputs took `MM/DD/YYYY` (jQuery datepicker `mm/dd/yy`). Apply was
+   clicked. The button then read `09/29/2026 - 09/29/2026` and the inputs
+   kept that date, but the name `Select Date Range` was gone, so the
+   read-back held. The pull now keeps the button by `#dropdownMenu2` (or
+   the element it already found). The menu is the div right after that
+   button. After Apply it reads page-level `.report-start` and
+   `.report-end` with `input_value` even though the menu is closed, and it
+   reads the pinned button text. Either one showing the process date is
+   enough. It waits for the network to go idle. Then it exports. A missing
+   control, a value that does not stick, or a page that does not finish
+   loading holds. The export is not downloaded.
    The click only downloads. It does not bind, cancel, or pay.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from the PDF export, or from the Xls export. The PDF export is
@@ -228,20 +232,20 @@ is a failed pull, not a partial success. This code has not been run on
   read-only page has no select and no combobox named Report Dates. The
   words Report Dates are not a label for an input. The control is a
   dropdown button, text `Select Date Range`, `id="dropdownMenu2"`, which
-  opens a menu. The menu has unlabeled inputs `.report-start` and
-  `.report-end`, plus Apply. This dropdown change has not been run there.
-  Do not deploy it while that host is in use.
-- Whether the button's accessible name is exactly `Select Date Range`. If
-  it is not, the pull uses `#dropdownMenu2` only when that id is unique.
-- Whether the open menu is the button's next sibling, a direct child of
-  the button's parent (`dropdown-menu` or `role="menu"`), or the one
-  element with `aria-labelledby` set to the button id. A different wrapper
-  holds before export.
-- Whether `.report-start` and `.report-end` are `type=date` or text. Text
-  is filled as `MM/DD/YYYY`. A type that is neither holds.
-- Whether Apply leaves the values in the inputs or rewrites the button
-  text to that same day. Either one is acceptance. A button label this
-  pull cannot read as that day, with empty inputs, holds.
+  opens a menu. The menu has unlabeled text inputs `.report-start` and
+  `.report-end`, plus Apply. Commit `673e611` found the button by name,
+  filled both inputs as `MM/DD/YYYY`, and clicked Apply. The button then
+  read `09/29/2026 - 09/29/2026` and both inputs kept that date. The pull
+  held with `Progressive BOP Report Dates could not be read after it was
+  set` because the name `Select Date Range` no longer matched. This
+  read-back change has not been run there. Do not deploy it while that
+  host is in use.
+- The inputs are text fields with jQuery datepicker format `mm/dd/yy`.
+  `MM/DD/YYYY` was accepted. A different type still holds.
+- The menu is the div immediately after `#dropdownMenu2`. A different
+  wrapper holds before export.
+- After Apply the inputs are hidden. Their values still read. The pinned
+  button text is `MM/DD/YYYY - MM/DD/YYYY`. Either one is acceptance.
 - Whether the network goes idle after Apply and the export is then
   non-empty for 9/29 and 9/30. A 0-byte file must still hold and must not
   become an empty pack.

@@ -48,12 +48,14 @@ View Reports control. It has ``Export Pending Cancel for Non-Payment Pdf``
 and ``Export Pending Cancel for Non-Payment Xls``. The PDF export is tried
 first. Before that download, the pull sets the report range. A live check
 of the earlier select-based attempt held: there is no combobox named
-Report Dates. The control is a dropdown button whose text is ``Select
-Date Range`` (``#dropdownMenu2`` only when that button name is absent and
-the id is unique). The pull opens that menu, fills ``.report-start`` and
-``.report-end`` with the process date in the format the input type needs,
-clicks Apply, and reads the values or the button text back. It waits for
-the network to go idle, then exports. A missing control, a value that does
+Report Dates. The control is a dropdown button whose text starts as ``Select Date
+Range``. After Apply that text becomes the chosen range, so the pull
+keeps the button by its id (``#dropdownMenu2``) or by the element it
+already found, not by the name. The menu is the div right after that
+button. The pull fills ``.report-start`` and ``.report-end`` with the
+process date, clicks Apply, and reads those inputs back from the page
+even when the menu has closed. The button text is the other proof. It
+waits for the network to go idle, then exports. A missing control, a value that does
 not stick, or a page that does not finish loading holds, and the export
 is not downloaded. A list PDF yields insured, policy number, and cancel
 date. An empty or truncated download is a hold, not an empty report. This
@@ -2318,16 +2320,7 @@ class ReportDateChoice:
 
 _DATE_TOGGLE_NAME = "Select Date Range"
 _DATE_TOGGLE_CSS = "#dropdownMenu2"
-_DATE_MENU_SIBLING = (
-    "xpath=following-sibling::*["
-    "contains(concat(' ', normalize-space(@class), ' '), ' dropdown-menu ')"
-    " or @role='menu']"
-)
-_DATE_MENU_PARENT = (
-    "xpath=parent::*/*["
-    "contains(concat(' ', normalize-space(@class), ' '), ' dropdown-menu ')"
-    " or @role='menu']"
-)
+_DATE_MENU_NEXT_DIV = "xpath=following-sibling::div[1]"
 _REPORT_START_CSS = ".report-start"
 _REPORT_END_CSS = ".report-end"
 _APPLY_NAME = "Apply"
@@ -2383,14 +2376,44 @@ def _same_day(observed: str, day: date) -> bool:
         return False
 
 
+def _pin_date_toggle(page: Any, found: Any) -> Any:
+    """Keep the button after Apply rewrites its name.
+
+    A role locator named ``Select Date Range`` matches nothing once the
+    button reads ``09/29/2026 - 09/29/2026``. The id locator, or the
+    element captured now, still points at that button.
+    """
+    try:
+        raw = _norm(str(found.get_attribute("id") or ""))
+    except Exception as exc:
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates control could not be kept."
+        ) from exc
+    if re.fullmatch(r"[A-Za-z][\w-]*", raw):
+        pinned = page.locator(f"#{raw}")
+        if _locator_count(pinned) == 1:
+            return pinned
+    capture = getattr(found, "element_handle", None)
+    if callable(capture):
+        try:
+            element = capture()
+        except Exception as exc:
+            raise _export_not_downloaded(
+                "Progressive BOP Report Dates control could not be kept."
+            ) from exc
+        if element is not None:
+            return element
+    raise IntakeHold(_REPORT_DATES_MISSING)
+
+
 def _date_toggle(page: Any) -> Any:
-    """The Select Date Range dropdown button. The id is only a unique fallback."""
+    """The Select Date Range dropdown button, then a stable handle to it."""
     button = page.get_by_role("button", name=_DATE_TOGGLE_NAME, exact=True)
     count = _locator_count(button)
     if count == 1:
         if not _wait_visible(button):
             raise IntakeHold(_REPORT_DATES_MISSING)
-        return button
+        return _pin_date_toggle(page, button)
     if count != 0:
         raise IntakeHold(_REPORT_DATES_MISSING)
     fallback = page.locator(_DATE_TOGGLE_CSS)
@@ -2399,36 +2422,30 @@ def _date_toggle(page: Any) -> Any:
     return fallback
 
 
-def _labelled_menu(page: Any, toggle: Any) -> Any | None:
-    """Bootstrap marks the open menu with aria-labelledby set to the toggle id."""
-    try:
-        raw = _norm(str(toggle.get_attribute("id") or ""))
-    except Exception:
-        return None
-    if not re.fullmatch(r"[A-Za-z][\w:-]*", raw):
-        return None
-    menu = page.locator(f"[aria-labelledby='{raw}']")
-    count = _locator_count(menu)
-    if count == 1:
-        return menu
-    if count != 0:
-        raise IntakeHold(_REPORT_DATES_MISSING)
-    return None
-
-
-def _unique_menu(page: Any, toggle: Any) -> Any | None:
-    for selector in (_DATE_MENU_SIBLING, _DATE_MENU_PARENT):
-        menu = toggle.locator(selector)
+def _next_menu_div(toggle: Any) -> Any | None:
+    """The menu is the div immediately after the pinned button."""
+    locate = getattr(toggle, "locator", None)
+    if callable(locate):
+        menu = locate(_DATE_MENU_NEXT_DIV)
         count = _locator_count(menu)
         if count == 1:
             return menu
         if count != 0:
             raise IntakeHold(_REPORT_DATES_MISSING)
-    return _labelled_menu(page, toggle)
+        return None
+    query = getattr(toggle, "query_selector", None)
+    if not callable(query):
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    try:
+        return query(_DATE_MENU_NEXT_DIV)
+    except Exception as exc:
+        raise _export_not_downloaded(
+            "Progressive BOP Select Date Range could not be opened."
+        ) from exc
 
 
-def _open_date_menu(page: Any, toggle: Any) -> Any:
-    menu = _unique_menu(page, toggle)
+def _open_date_menu(toggle: Any) -> Any:
+    menu = _next_menu_div(toggle)
     if menu is not None and _menu_inputs_visible(menu):
         return menu
     try:
@@ -2439,28 +2456,65 @@ def _open_date_menu(page: Any, toggle: Any) -> Any:
         raise _export_not_downloaded(
             "Progressive BOP Select Date Range could not be opened."
         ) from exc
-    menu = _unique_menu(page, toggle)
+    menu = _next_menu_div(toggle)
     if menu is None:
         raise _export_not_downloaded(_DATES_NOT_ON_PAGE)
     return menu
 
 
+def _element_visible(node: Any) -> bool:
+    check = getattr(node, "is_visible", None)
+    if not callable(check):
+        return True
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def _nodes(parent: Any, selector: str) -> list[Any] | None:
+    """Locators stay locators. A captured element returns its matching nodes."""
+    locate = getattr(parent, "locator", None)
+    if callable(locate):
+        return None
+    query_all = getattr(parent, "query_selector_all", None)
+    if not callable(query_all):
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    try:
+        return list(query_all(selector))
+    except Exception as exc:
+        raise _export_not_downloaded(_DATES_NOT_ON_PAGE) from exc
+
+
 def _menu_inputs_visible(menu: Any) -> bool:
-    start = menu.locator(_REPORT_START_CSS)
-    end = menu.locator(_REPORT_END_CSS)
-    return _is_visible(start) and _is_visible(end)
+    nodes = _nodes(menu, _REPORT_START_CSS)
+    if nodes is None:
+        return _is_visible(menu.locator(_REPORT_START_CSS)) and _is_visible(menu.locator(_REPORT_END_CSS))
+    end_nodes = _nodes(menu, _REPORT_END_CSS)
+    if end_nodes is None or len(nodes) != 1 or len(end_nodes) != 1:
+        return False
+    return _element_visible(nodes[0]) and _element_visible(end_nodes[0])
 
 
 def _require_menu_input(menu: Any, selector: str) -> Any:
-    locator = menu.locator(selector)
-    count = _locator_count(locator)
-    if count != 1:
-        if count == 0:
+    nodes = _nodes(menu, selector)
+    if nodes is None:
+        locator = menu.locator(selector)
+        count = _locator_count(locator)
+        if count != 1:
+            if count == 0:
+                raise _export_not_downloaded(_DATES_NOT_ON_PAGE)
+            raise IntakeHold(_REPORT_DATES_MISSING)
+        if not _wait_visible(locator):
+            raise _export_not_downloaded(_DATES_NOT_ON_PAGE)
+        return locator
+    if len(nodes) != 1:
+        if len(nodes) == 0:
             raise _export_not_downloaded(_DATES_NOT_ON_PAGE)
         raise IntakeHold(_REPORT_DATES_MISSING)
-    if not _wait_visible(locator):
+    if not _element_visible(nodes[0]):
         raise _export_not_downloaded(_DATES_NOT_ON_PAGE)
-    return locator
+    return nodes[0]
 
 
 def _date_text_for_input(locator: Any, day: date) -> str:
@@ -2499,12 +2553,28 @@ def _fill_menu_input(locator: Any, label: str, day: date) -> str:
 
 
 def _click_apply(menu: Any) -> None:
-    button = menu.get_by_role("button", name=_APPLY_NAME, exact=True)
-    count = _locator_count(button)
-    if count != 1 or not _wait_visible(button):
-        raise _export_not_downloaded(
-            "Progressive BOP Apply button is missing or ambiguous."
-        )
+    role = getattr(menu, "get_by_role", None)
+    if callable(role):
+        button = role("button", name=_APPLY_NAME, exact=True)
+        count = _locator_count(button)
+        if count != 1 or not _wait_visible(button):
+            raise _export_not_downloaded(
+                "Progressive BOP Apply button is missing or ambiguous."
+            )
+    else:
+        found = []
+        for node in _nodes(menu, "button") or []:
+            try:
+                text = _norm(str(node.inner_text() or ""))
+            except Exception:
+                continue
+            if text == _APPLY_NAME:
+                found.append(node)
+        if len(found) != 1 or not _element_visible(found[0]):
+            raise _export_not_downloaded(
+                "Progressive BOP Apply button is missing or ambiguous."
+            )
+        button = found[0]
     try:
         button.click()
     except IntakeHold:
@@ -2527,21 +2597,35 @@ def _button_shows_day(text: str, day: date) -> bool:
     return all(item == day for item in found)
 
 
-def _range_was_accepted(start: Any, end: Any, toggle: Any, day: date) -> bool:
+def _saved_input_value(page: Any, selector: str) -> str | None:
+    """Read one date input from the page. It stays filled after the menu closes."""
+    locator = page.locator(selector)
+    if _locator_count(locator) != 1:
+        return None
     try:
-        if _same_day(_norm(str(start.input_value() or "")), day) and _same_day(
-            _norm(str(end.input_value() or "")), day
-        ):
-            return True
+        return _norm(str(locator.input_value() or ""))
     except Exception:
-        pass
+        return None
+
+
+def _range_was_accepted(page: Any, toggle: Any, day: date) -> bool:
+    start = _saved_input_value(page, _REPORT_START_CSS)
+    end = _saved_input_value(page, _REPORT_END_CSS)
+    inputs_ok = (
+        start is not None
+        and end is not None
+        and _same_day(start, day)
+        and _same_day(end, day)
+    )
     try:
         text = _norm(str(toggle.inner_text() or ""))
     except Exception as exc:
+        if inputs_ok:
+            return True
         raise _export_not_downloaded(
             "Progressive BOP Report Dates could not be read after it was set."
         ) from exc
-    return _button_shows_day(text, day)
+    return inputs_ok or _button_shows_day(text, day)
 
 
 def _wait_for_report_refresh(page: Any) -> None:
@@ -2560,24 +2644,25 @@ def _wait_for_report_refresh(page: Any) -> None:
 def apply_bop_report_dates(page: Any, report_date: date) -> ReportDateChoice:
     """Open Select Date Range and set both menu inputs to ``report_date``.
 
-    The live control is a dropdown button, not a Report Dates combobox.
-    ``#dropdownMenu2`` is used only when that button name is missing and the
-    id matches one element. The open menu is the toggle's next sibling, a
-    direct child of its parent, or the one element labelled by the toggle
-    id. The date inputs are ``.report-start`` and ``.report-end`` inside
-    that menu. A ``type=date`` input is filled
-    with ``YYYY-MM-DD``. A text input is filled with ``MM/DD/YYYY``. Apply
-    is clicked, then the input values or the button text must show that
-    day. The network is idle before the caller exports.
+    The live control is a dropdown button. Apply changes its text from
+    ``Select Date Range`` to the chosen range, so the button is pinned by
+    id or by the element found before that click. The menu is the next
+    div. ``.report-start`` and ``.report-end`` are filled from that open
+    menu. A ``type=date`` input is filled with ``YYYY-MM-DD``. A text
+    input is filled with ``MM/DD/YYYY``, which is the jQuery datepicker
+    ``mm/dd/yy`` format on this page. After Apply the inputs are hidden
+    and are read with ``input_value`` from the page. The pinned button
+    text is the other proof. Either one must show the process date. The
+    network is idle before the caller exports.
     """
     toggle = _date_toggle(page)
-    menu = _open_date_menu(page, toggle)
+    menu = _open_date_menu(toggle)
     start = _require_menu_input(menu, _REPORT_START_CSS)
     end = _require_menu_input(menu, _REPORT_END_CSS)
     _fill_menu_input(start, "report start", report_date)
     _fill_menu_input(end, "report end", report_date)
     _click_apply(menu)
-    if not _range_was_accepted(start, end, toggle, report_date):
+    if not _range_was_accepted(page, toggle, report_date):
         raise _export_not_downloaded(
             f"Progressive BOP Report Dates did not accept {report_date.isoformat()}."
         )
