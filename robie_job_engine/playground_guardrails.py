@@ -259,6 +259,9 @@ def normalize(text: str) -> str:
     if body.lower().startswith("subject:") and "\n\n" in body:
         body = body.split("\n\n", 1)[1]
     body = _MENTION.sub("", body.strip())
+    # Canonical matching only. Keep the original proposal/body untouched so
+    # exact note text is never rewritten for punctuation convenience.
+    body = body.translate(str.maketrans({"\u2019": "'", "\u2018": "'"}))
     return " ".join(body.casefold().split())
 
 
