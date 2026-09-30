@@ -653,18 +653,22 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             job = JobStore(bound_db).get_job(bound_job_id)
         except Exception:
             job = None
-    try:
-        from robie_job_engine.chat_turn_control import (
-            agent_stop_requested,
-            refuse_hand_driven_ezlynx,
-        )
-        from robie_job_engine.store import JobStore
+    from robie_job_engine.chat_turn_control import agent_output_blocked
 
-        if bound_job_id and agent_stop_requested(bound_job_id):
-            return _finish(tool_error(
-                "PLAYWRIGHT_BLOCKED: this job was stopped. Do not continue."
-            ))
-        note_store = JobStore(bound_db) if bound_job_id and bound_db else None
+    note_store = None
+    if bound_job_id and bound_db:
+        try:
+            from robie_job_engine.store import JobStore
+
+            note_store = JobStore(bound_db)
+        except Exception:
+            note_store = None
+    stopped = agent_output_blocked(bound_job_id, note_store)
+    if stopped:
+        return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: {stopped}"))
+    try:
+        from robie_job_engine.chat_turn_control import refuse_hand_driven_ezlynx
+
         hand = refuse_hand_driven_ezlynx(job, store=note_store)
         if hand:
             return _finish(tool_error(hand))

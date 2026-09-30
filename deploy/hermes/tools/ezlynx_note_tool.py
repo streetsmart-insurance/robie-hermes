@@ -108,6 +108,11 @@ def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
 
 
 def ezlynx_discussion_note_handler(args: dict, **kwargs):
+    from robie_job_engine.chat_turn_control import refuse_current_tool_call
+
+    stopped = refuse_current_tool_call(kwargs)
+    if stopped:
+        return tool_error(stopped)
     try:
         report = _file_note(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary

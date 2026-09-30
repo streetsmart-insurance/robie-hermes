@@ -203,6 +203,11 @@ def _mark_policy_setup_complete() -> None:
 
 
 def ezlynx_policy_setup_handler(args: dict, **kwargs):
+    from robie_job_engine.chat_turn_control import refuse_current_tool_call
+
+    stopped = refuse_current_tool_call(kwargs)
+    if stopped:
+        return tool_error(stopped)
     policy_number = str((args or {}).get("policy_number") or "").strip()
     if not policy_number:
         return tool_error("policy_number is required")

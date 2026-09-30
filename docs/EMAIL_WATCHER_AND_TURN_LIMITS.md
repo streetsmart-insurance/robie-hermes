@@ -24,10 +24,14 @@ that file. The Chat adapter enforces a separate total ceiling,
 `ROBIE_GATEWAY_MAX_TURN_SECONDS`.
 
 The gateway's `handle_message` starts the agent in the background and
-returns. The ceiling waits on that background task, not on the wrapper.
-When the limit fires, or someone sends `/stop`, the adapter cancels the
-agent task and kills in-flight browser processes. The job is marked FAILED
-and the thread gets "I stopped after 10 minutes." or the cancelled reply.
+returns. The Chat handler must return too. The gateway reads one Chat
+message at a time (`GOOGLE_CHAT_MAX_MESSAGES` stays 1), so a ceiling wait
+inside the handler blocks `/stop` until the job ends. The ceiling is a
+background watchdog. It does not hold the message slot. When the limit
+fires, or someone sends `/stop`, the adapter awaits the session interrupt,
+cancels the agent task, and kills in-flight browser processes. A stopped
+job cannot post another message or start another tool call. The thread
+gets "I stopped after 10 minutes." or the cancelled reply.
 
 A gateway restart fails Chat jobs still marked RUNNING, even if they have
 a recent heartbeat. That heartbeat belonged to the process that just died.

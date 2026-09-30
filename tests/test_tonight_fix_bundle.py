@@ -43,15 +43,20 @@ from robie_job_engine.chat_turn_control import (
     DEFAULT_GATEWAY_MAX_TURN_SECONDS,
     HAND_DRIVEN_EZLYNX_STOP,
     STOPPED_AFTER_TEN_MINUTES,
+    STOPPED_OUTPUT,
     _abandon_timed_out_gateway_turn,
+    agent_output_blocked,
     fail_cancelled_chat_job,
     gateway_max_turn_seconds,
     is_stop_command,
     kill_agent_processes,
     record_note_tool_failure,
+    refuse_current_tool_call,
     refuse_hand_driven_ezlynx,
     register_agent_process,
+    request_agent_stop,
     terminate_gateway_agent,
+    watch_turn_ceiling,
 )
 from robie_job_engine.ezlynx_discussions import discussion_request_headers
 from robie_job_engine.email_agent_runner import (
@@ -300,13 +305,35 @@ class StopCommandTests(unittest.TestCase):
         ceiling = adapter.split("async def _run_gateway_turn_with_ceiling", 1)[1]
         ceiling = ceiling.split("async def _apply_chat_stop", 1)[0]
         self.assertIn("running_agent_task", ceiling)
-        self.assertIn("await asyncio.wait_for(agent, timeout=limit)", ceiling)
+        self.assertIn("asyncio.create_task(", ceiling)
+        self.assertIn("watch_turn_ceiling(", ceiling)
+        self.assertNotIn("await asyncio.wait_for", ceiling)
+        self.assertNotIn("await watch_turn_ceiling", ceiling)
+        self.assertNotIn("await agent", ceiling)
         self.assertNotIn("wait_for(self.handle_message", ceiling)
+        self.assertIn('os.getenv("GOOGLE_CHAT_MAX_MESSAGES", "1")', adapter)
+        self.assertIn("robie_stop_notice", adapter)
+        self.assertIn("agent_output_blocked", adapter)
         self.assertIn("terminate_gateway_agent", adapter)
         self.assertIn("fail_gateway_restart_orphans", adapter)
         control = (ROOT / "robie_job_engine/chat_turn_control.py").read_text(encoding="utf-8")
+        watch = control.split("async def watch_turn_ceiling", 1)[1]
+        watch = watch.split("def running_agent_task", 1)[0]
+        self.assertIn("await asyncio.wait_for(asyncio.shield(agent), timeout=limit)", watch)
+        terminate = control.split("async def terminate_gateway_agent", 1)[1]
+        self.assertIn("inspect.isawaitable(result)", terminate)
+        self.assertIn("await result", terminate)
         self.assertIn("cancel_session_processing", control)
         self.assertIn("kill_agent_processes", control)
+        for relative in (
+            "deploy/hermes/tools/ezlynx_note_tool.py",
+            "deploy/hermes/tools/ezlynx_document_tool.py",
+            "deploy/hermes/tools/policy_setup_tool.py",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("refuse_current_tool_call", source)
+        playwright = (ROOT / "deploy/hermes/tools/playwright_tool.py").read_text(encoding="utf-8")
+        self.assertIn("agent_output_blocked", playwright)
 
 
 class PurposeBuiltRouteTests(unittest.TestCase):
@@ -705,6 +732,469 @@ class ProveFollowUpTests(unittest.TestCase):
         )
         self.assertIn("setuptools>=70,<81", requirements)
         self.assertIn("continuing without stealth", source)
+
+
+def _clear_agent_stop(job_id: str) -> None:
+    from robie_job_engine import chat_turn_control as control
+
+    with control._PROC_LOCK:
+        control._ABORTED_JOBS.discard(str(job_id))
+
+
+def _load_hermes_tool(module_name: str, filename: str):
+    """Load a Hermes tool without the real tools package."""
+    import importlib.util
+    import sys
+    from types import ModuleType
+
+    tools_pkg = sys.modules.get("tools")
+    created_tools = tools_pkg is None
+    if created_tools:
+        tools_pkg = ModuleType("tools")
+    registry_mod = ModuleType("tools.registry")
+
+    def tool_error(message):
+        return {"ok": False, "error": message}
+
+    def tool_result(payload):
+        return {"ok": True, "result": payload}
+
+    class DummyRegistry:
+        def register(self, *args, **kwargs):
+            return None
+
+    registry_mod.registry = DummyRegistry()
+    registry_mod.tool_error = tool_error
+    registry_mod.tool_result = tool_result
+    previous = {name: sys.modules.get(name) for name in ("tools", "tools.registry")}
+    sys.modules["tools"] = tools_pkg
+    sys.modules["tools.registry"] = registry_mod
+    tools_pkg.registry = registry_mod
+    path = ROOT / "deploy" / "hermes" / "tools" / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module, previous, created_tools
+
+
+def _restore_modules(previous: dict, created_tools: bool) -> None:
+    import sys
+
+    for name, module in previous.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+    if created_tools:
+        sys.modules.pop("tools", None)
+
+
+class StopWhileJobRunsTests(unittest.TestCase):
+    def test_stop_is_handled_while_a_long_job_is_still_running(self):
+        """One Chat slot. The job handler must return so /stop is not stuck behind it."""
+        import asyncio
+
+        class OneSlot:
+            def __init__(self):
+                self.busy = False
+                self.order = []
+                self.agent = None
+                self.watchdog = None
+
+            async def dispatch(self, kind):
+                if self.busy:
+                    raise AssertionError(f"{kind} is stuck behind the running job")
+                self.busy = True
+                try:
+                    if kind == "job":
+                        await self._start_job()
+                    else:
+                        self.order.append("stop")
+                        if self.agent is not None and not self.agent.done():
+                            self.agent.cancel()
+                        if self.watchdog is not None and not self.watchdog.done():
+                            self.watchdog.cancel()
+                finally:
+                    self.busy = False
+
+            async def _start_job(self):
+                async def long_agent():
+                    await asyncio.sleep(30)
+
+                self.agent = asyncio.create_task(long_agent())
+                self.ceiling_fired = False
+
+                async def on_timeout():
+                    self.ceiling_fired = True
+
+                self.watchdog = asyncio.create_task(
+                    watch_turn_ceiling(
+                        self.agent,
+                        limit=30,
+                        on_timeout=on_timeout,
+                        stop_requested=lambda: False,
+                    )
+                )
+                self.order.append("job-handler-returned")
+
+        async def scenario():
+            slot = OneSlot()
+            await asyncio.wait_for(slot.dispatch("job"), timeout=1)
+            self.assertEqual(slot.order, ["job-handler-returned"])
+            self.assertFalse(slot.agent.done())
+            await asyncio.wait_for(slot.dispatch("stop"), timeout=1)
+            self.assertEqual(slot.order, ["job-handler-returned", "stop"])
+            with self.assertRaises(asyncio.CancelledError):
+                await slot.watchdog
+            self.assertFalse(slot.ceiling_fired)
+            return slot
+
+        asyncio.run(scenario())
+
+    def test_ceiling_fires_from_the_watchdog_after_the_handler_returns(self):
+        import asyncio
+
+        job_id = "job-ceiling-watch"
+
+        async def scenario():
+            async def long_agent():
+                await asyncio.sleep(30)
+
+            agent = asyncio.create_task(long_agent())
+            notices = []
+
+            async def on_timeout():
+                request_agent_stop(job_id)
+                agent.cancel()
+                notices.append("ceiling")
+
+            outcome = await watch_turn_ceiling(
+                agent,
+                limit=0.05,
+                on_timeout=on_timeout,
+                stop_requested=lambda: False,
+            )
+            return outcome, notices
+
+        try:
+            outcome, notices = asyncio.run(scenario())
+            self.assertEqual(outcome, "timeout")
+            self.assertEqual(notices, ["ceiling"])
+            self.assertEqual(agent_output_blocked(job_id, None), STOPPED_OUTPUT)
+            self.assertEqual(refuse_current_tool_call({"job_id": job_id}), STOPPED_OUTPUT)
+        finally:
+            _clear_agent_stop(job_id)
+
+    def test_interrupt_coroutine_is_awaited(self):
+        import asyncio
+
+        seen = []
+
+        class Adapter:
+            def __init__(self):
+                self._session_tasks = {}
+                self._background_tasks = set()
+
+            async def interrupt_session_activity(self, key, chat_id):
+                seen.append(("interrupt", key, chat_id))
+
+            async def cancel_session_processing(self, key):
+                seen.append(("cancel", key))
+
+        class Source:
+            chat_id = "spaces/1"
+            thread_id = "thread"
+
+        class Event:
+            source = Source()
+
+        try:
+            asyncio.run(
+                terminate_gateway_agent(Adapter(), Event(), "job-await", reason="/stop")
+            )
+            self.assertIn(("interrupt", "chat:spaces/1:thread", "spaces/1"), seen)
+            self.assertIn(("cancel", "chat:spaces/1:thread"), seen)
+            self.assertEqual(agent_output_blocked("job-await", None), STOPPED_OUTPUT)
+        finally:
+            _clear_agent_stop("job-await")
+
+    def test_stopped_or_timed_out_job_cannot_send_or_call_tools(self):
+        import asyncio
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            running = store.create_job("hermes.google_chat_task", {"text": "working"})
+            store.transition(
+                running["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+            )
+            self.assertIsNone(agent_output_blocked(running["id"], store))
+            self.assertIsNone(
+                refuse_current_tool_call({"job_id": running["id"], "db_path": db})
+            )
+
+            timed = store.create_job("hermes.google_chat_task", {"text": "too long"})
+            store.transition(timed["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            store.transition(
+                timed["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.RUNNING},
+                error="I stopped after 10 minutes.",
+            )
+            store.checkpoint(timed["id"], "gateway_turn_timeout", {"reason": "limit"})
+            cancelled = store.create_job("hermes.google_chat_task", {"text": "stop me"})
+            store.transition(
+                cancelled["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+            )
+            store.transition(
+                cancelled["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.RUNNING},
+                error="Cancelled.",
+            )
+            store.checkpoint(cancelled["id"], "cancelled", {"by": "/stop"})
+            answer = store.create_job(
+                "hermes.plain_english", {"text": "Which carriers?"}
+            )
+            store.transition(
+                answer["id"], JobStatus.UNVERIFIED, expected={JobStatus.PENDING}
+            )
+
+            self.assertEqual(agent_output_blocked(timed["id"], store), STOPPED_OUTPUT)
+            self.assertEqual(
+                agent_output_blocked(cancelled["id"], store), STOPPED_OUTPUT
+            )
+            self.assertIsNone(agent_output_blocked(answer["id"], store))
+
+            request_agent_stop(running["id"])
+            try:
+                self.assertEqual(
+                    refuse_current_tool_call({"job_id": running["id"], "db_path": db}),
+                    STOPPED_OUTPUT,
+                )
+                note, previous, created = _load_hermes_tool(
+                    "ezlynx_note_tool_stop_test", "ezlynx_note_tool.py"
+                )
+                playwright, playwright_previous, playwright_created = _load_hermes_tool(
+                    "playwright_tool_stop_test", "playwright_tool.py"
+                )
+                try:
+                    with mock.patch(
+                        "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                        side_effect=AssertionError("stopped job must not file a note"),
+                    ):
+                        note_result = note.ezlynx_discussion_note_handler(
+                            {"applicant_id": "26356199", "note_text": "Robie was here"},
+                            job_id=running["id"],
+                            db_path=db,
+                        )
+                    with mock.patch(
+                        "subprocess.Popen",
+                        side_effect=AssertionError("stopped job must not start a browser"),
+                    ):
+                        browser_result = playwright.playwright_exec(
+                            "page.goto('https://app.ezlynx.com')",
+                            job_id=running["id"],
+                            db_path=db,
+                        )
+                finally:
+                    _restore_modules(previous, created)
+                    _restore_modules(playwright_previous, playwright_created)
+            finally:
+                _clear_agent_stop(running["id"])
+
+            self.assertFalse(note_result["ok"])
+            self.assertIn(STOPPED_OUTPUT, note_result["error"])
+            self.assertNotIn("note_id", note_result)
+            self.assertFalse(browser_result["ok"])
+            self.assertIn("PLAYWRIGHT_BLOCKED", browser_result["error"])
+            self.assertIn(STOPPED_OUTPUT, browser_result["error"])
+
+        async def already_stopped():
+            calls = []
+
+            async def agent():
+                return "posted late"
+
+            task = asyncio.create_task(agent())
+            await task
+
+            async def on_timeout():
+                calls.append("timeout")
+
+            outcome = await watch_turn_ceiling(
+                task,
+                limit=5,
+                on_timeout=on_timeout,
+                stop_requested=lambda: True,
+            )
+            return outcome, calls
+
+        outcome, calls = asyncio.run(already_stopped())
+        self.assertEqual(outcome, "stopped")
+        self.assertEqual(calls, [])
+
+
+class LiveDiscussionApiTests(unittest.TestCase):
+    def test_live_mode_uses_prod_host_and_browser_login_and_fails_closed(self):
+        from robie_job_engine.ezlynx_api import EzlynxApiConfig, EzlynxApiConfigurationError
+        from robie_job_engine.ezlynx_api_only_writes import (
+            discussion_api_target,
+            load_discussion_api_config,
+        )
+        from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
+        from robie_job_engine.ezlynx_write_scope import (
+            EzlynxWriteScopeError,
+        )
+        import robie_job_engine.ezlynx_write_scope as scope
+
+        live = EzlynxApiConfig(
+            token_endpoint="https://app.ezlynx.com/auth/connect/token",
+            document_base_url="https://app.ezlynx.com/documentapi/",
+            client_id="cid",
+            client_secret="csecret",
+            username="vendor-json-user",
+            integration_group_id="159",
+            scope="DocumentApi openid",
+        )
+        uat = EzlynxApiConfig(
+            token_endpoint="https://app.uatezlynx.com/auth/connect/token",
+            document_base_url="https://app.uatezlynx.com/documentapi/",
+            client_id="cid",
+            client_secret="csecret",
+            username="uat-user",
+            integration_group_id="159",
+            scope="DocumentApi openid",
+        )
+        calls = []
+
+        def loader(*args, **kwargs):
+            calls.append(kwargs.get("environment"))
+            if kwargs.get("environment") == "PRODUCTION":
+                return live
+            raise AssertionError("UAT load must not run in live mode")
+
+        class Accessor:
+            def __init__(self):
+                self.refs = []
+
+            def access(self, ref):
+                self.refs.append(ref)
+                if ref.endswith("ezlynx-username/versions/latest"):
+                    return "SSRobie"
+                if ref.endswith("ezlynx-password/versions/latest"):
+                    return "live-login-secret"
+                raise AssertionError(f"unexpected secret {ref}")
+
+        environ = {
+            "ROBIE_EZLYNX_DISCUSSION_API": "live",
+            "ROBIE_EZLYNX_API_PROD_SECRET": "projects/p/secrets/ezlynx-api-prod/versions/latest",
+            "ROBIE_EZLYNX_USERNAME_SECRET": "projects/p/secrets/ezlynx-username/versions/latest",
+            "ROBIE_EZLYNX_PASSWORD_SECRET": "projects/p/secrets/ezlynx-password/versions/latest",
+            "ROBIE_ENV": "TEST",
+        }
+        accessor = Accessor()
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", side_effect=loader
+        ):
+            config = load_discussion_api_config(accessor=accessor, environ=environ)
+        self.assertEqual(calls, ["PRODUCTION"])
+        self.assertEqual(config.username, "SSRobie")
+        self.assertEqual(config.password, "live-login-secret")
+        self.assertIn("app.ezlynx.com", config.discussion_base_url)
+        self.assertNotIn("uatezlynx", config.discussion_base_url)
+        self.assertNotIn("live-login-secret", repr(config))
+        self.assertNotIn("password", repr(config).casefold())
+
+        from urllib import parse
+
+        from robie_job_engine.ezlynx_discussions import DiscussionApiClient
+
+        class FakeResponse:
+            def read(self):
+                return b'{"access_token":"tok","expires_in":3600}'
+
+        class Urlopen:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, url, *, data=None, headers=None, timeout=None):
+                self.calls.append(data)
+                return FakeResponse()
+
+        urlopen = Urlopen()
+        client = DiscussionApiClient(config, urlopen=urlopen)
+        self.assertEqual(client.get_token(), "tok")
+        form = parse.parse_qs(urlopen.calls[0].decode("utf-8"))
+        self.assertEqual(form["password"], ["live-login-secret"])
+        self.assertEqual(form["username"], ["SSRobie"])
+
+        missing = dict(environ)
+        missing.pop("ROBIE_EZLYNX_PASSWORD_SECRET")
+        calls.clear()
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", side_effect=loader
+        ):
+            with self.assertRaises(RuntimeError) as missing_secret:
+                load_discussion_api_config(accessor=accessor, environ=missing)
+        self.assertIn("Refusing to fall back to UAT", str(missing_secret.exception))
+        self.assertNotIn("live-login-secret", str(missing_secret.exception))
+        self.assertEqual(calls, ["PRODUCTION"])
+
+        def uat_host(*args, **kwargs):
+            calls.append(kwargs.get("environment"))
+            return uat
+
+        calls.clear()
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", side_effect=uat_host
+        ):
+            with self.assertRaises(RuntimeError) as wrong_host:
+                load_discussion_api_config(accessor=accessor, environ=environ)
+        self.assertIn("points at UAT", str(wrong_host.exception))
+        self.assertNotIn(None, calls)
+        self.assertNotIn("TEST", calls)
+
+        def broken(*args, **kwargs):
+            calls.append(kwargs.get("environment"))
+            raise EzlynxApiConfigurationError("prod secret missing")
+
+        calls.clear()
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", side_effect=broken
+        ):
+            with self.assertRaises(RuntimeError) as broken_secret:
+                load_discussion_api_config(accessor=accessor, environ=environ)
+        self.assertIn("Refusing to fall back to UAT", str(broken_secret.exception))
+        self.assertEqual(calls, ["PRODUCTION"])
+
+        self.assertEqual(discussion_api_target({}), "env")
+        with self.assertRaises(RuntimeError):
+            discussion_api_target({"ROBIE_EZLYNX_DISCUSSION_API": "maybe"})
+
+        class NoteClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_discussions(self, applicant_id):
+                self.calls += 1
+                raise AssertionError("HTTP must not run for a refused applicant")
+
+        note_client = NoteClient()
+        with mock.patch.object(
+            scope, "ALLOWED_EZLYNX_WRITE_APPLICANT_IDS", frozenset({"26356199"})
+        ), mock.patch.object(scope, "_CERT_SWEEP_INDEX_APPLICANT_IDS", None):
+            with self.assertRaises(EzlynxWriteScopeError):
+                file_note_to_existing_discussion(note_client, "220250093", "Robie was here")
+        self.assertEqual(note_client.calls, 0)
+
+        runbook = (ROOT / "docs/TEST_HERMES_OPERATOR_RUNBOOK.md").read_text(encoding="utf-8")
+        self.assertIn("ROBIE_EZLYNX_DISCUSSION_API=live", runbook)
+        self.assertIn("ROBIE_EZLYNX_WRITE_APPLICANT_IDS=26356199", runbook)
+        self.assertIn("does not fall back to UAT", runbook)
+        example = (ROOT / "deploy/systemd/robie-ezlynx.env.example").read_text(encoding="utf-8")
+        self.assertIn("# ROBIE_EZLYNX_DISCUSSION_API=live", example)
 
 
 if __name__ == "__main__":

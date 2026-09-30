@@ -183,6 +183,33 @@ never delete Job state during deploy or rollback.
 `live_test_complete` stays `false` until an independent reviewer has stored live
 Test evidence on the Test host.
 
+## Discussion notes on Test
+
+Buster Brown `26356199` exists in live EZLynx, not in UAT. The note tool
+follows `ROBIE_ENV` unless you point it at live. On hermes-test-01, set
+these on the gateway service environment (`robie-gateway` /
+`hermes-gateway`). Do not raise `GOOGLE_CHAT_MAX_MESSAGES`.
+
+```
+ROBIE_EZLYNX_DISCUSSION_API=live
+ROBIE_EZLYNX_WRITE_APPLICANT_IDS=26356199
+ROBIE_EZLYNX_API_PROD_SECRET=projects/<project-id>/secrets/ezlynx-api-prod/versions/latest
+ROBIE_EZLYNX_USERNAME_SECRET=projects/<project-id>/secrets/ezlynx-username/versions/latest
+ROBIE_EZLYNX_PASSWORD_SECRET=projects/<project-id>/secrets/ezlynx-password/versions/latest
+```
+
+`ROBIE_EZLYNX_DISCUSSION_API=live` loads the live API host from
+`ROBIE_EZLYNX_API_PROD_SECRET` and the SSRobie login from
+`ezlynx-username` / `ezlynx-password`, the same secrets the Test browser
+already uses. Store resource names only. Never put the password in this
+file, in Chat, or in the job ledger.
+
+If any of those secrets is missing, or the production secret points at
+`app.uatezlynx.com`, the note tool stops. It does not fall back to UAT.
+An applicant id that is not in `ROBIE_EZLYNX_WRITE_APPLICANT_IDS` is
+refused before any EZLynx request. Leave this unset on Production. Prod
+already uses the live API through `ROBIE_ENV=PRODUCTION`.
+
 ## What this runbook does not do
 
 - It does not modify Production.

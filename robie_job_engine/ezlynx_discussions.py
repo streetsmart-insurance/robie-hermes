@@ -43,7 +43,7 @@ import os
 import re
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib import error, parse, request
 from urllib.parse import urlparse
@@ -102,6 +102,8 @@ class DiscussionApiConfig:
     username: str
     integration_group_id: str
     scope: str = "DiscussionApi openid"
+    # Live SSRobie password. Empty for the UAT vendor grant. Never logged.
+    password: str = field(default="", repr=False)
 
 
 def _default_urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
@@ -263,6 +265,8 @@ class DiscussionApiClient:
             "username": self._config.username,
             "integration_group_id": self._config.integration_group_id,
         }
+        if str(self._config.password or "").strip():
+            form["password"] = self._config.password
         body = self._request_json(
             "POST",
             self._config.token_endpoint,

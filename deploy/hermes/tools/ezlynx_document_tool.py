@@ -130,6 +130,11 @@ def _upload_document(args: dict) -> dict:
 
 
 def ezlynx_document_upload_handler(args: dict, **kwargs):
+    from robie_job_engine.chat_turn_control import refuse_current_tool_call
+
+    stopped = refuse_current_tool_call(kwargs)
+    if stopped:
+        return tool_error(stopped)
     try:
         report = _upload_document(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary

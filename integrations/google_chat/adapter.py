@@ -1538,17 +1538,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
     async def _run_gateway_turn_with_ceiling(self, job_id: str, event: MessageEvent) -> None:
-        """Total-time ceiling for one Chat turn. Does not change max_turns.
+        """Start one Chat turn and return so the next message can be read.
 
-        ``handle_message`` starts the agent in the background and returns.
-        The ceiling waits on that agent task. On expiry it cancels the task
-        and kills in-flight browser processes, then marks the job FAILED.
+        ``handle_message`` starts the agent and returns. The 10 minute ceiling
+        watches that agent from a background task. Waiting here would hold the
+        gateway's single Chat slot, so /stop could not arrive until the job
+        ended. This does not raise GOOGLE_CHAT_MAX_MESSAGES.
         """
         from robie_job_engine.chat_turn_control import (
             _abandon_timed_out_gateway_turn,
             gateway_max_turn_seconds,
             running_agent_task,
             turn_key,
+            watch_turn_ceiling,
         )
 
         source = event.source
@@ -1560,17 +1562,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._gateway_turns[key] = {
             "task": None,
             "job_id": job_id,
+            "watchdog": None,
         }
         limit = gateway_max_turn_seconds()
         try:
             await self.handle_message(event)
-            agent = running_agent_task(self, event, before=before)
+        except Exception:
             current = self._gateway_turns.get(key)
             if current and current.get("job_id") == job_id:
-                current["task"] = agent
-            if agent is not None:
-                await asyncio.wait_for(agent, timeout=limit)
-        except asyncio.TimeoutError:
+                self._gateway_turns.pop(key, None)
+            raise
+        agent = running_agent_task(self, event, before=before)
+        current = self._gateway_turns.get(key)
+        if not current or current.get("job_id") != job_id:
+            return
+
+        def stop_requested() -> bool:
+            record = self._gateway_turns.get(key)
+            return not record or record.get("job_id") != job_id
+
+        async def on_timeout() -> None:
+            if stop_requested():
+                return
+            self._gateway_turns.pop(key, None)
             await self._terminate_running_agent(
                 event, job_id, reason="gateway_max_turn_seconds"
             )
@@ -1585,12 +1599,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     source.chat_id,
                     reply,
                     reply_to=event.message_id,
-                    metadata={"thread_id": getattr(source, "thread_id", None)},
+                    metadata={
+                        "thread_id": getattr(source, "thread_id", None),
+                        "robie_stop_notice": True,
+                    },
                 )
-        finally:
-            current = self._gateway_turns.get(key)
-            if current and current.get("job_id") == job_id:
-                self._gateway_turns.pop(key, None)
+
+        current["task"] = agent
+        watchdog = asyncio.create_task(
+            watch_turn_ceiling(
+                agent,
+                limit=limit,
+                on_timeout=on_timeout,
+                stop_requested=stop_requested,
+            ),
+            name=f"robie-turn-ceiling:{job_id}",
+        )
+        current["watchdog"] = watchdog
 
     async def _apply_chat_stop(self, event: MessageEvent) -> None:
         """Skip job creation, stop the running agent, fail the linked job."""
@@ -1616,6 +1641,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
             cancel_task = getattr(task, "cancel", None)
             if callable(cancel_task) and not getattr(task, "done", lambda: False)():
                 cancel_task()
+        watchdog = (record or {}).get("watchdog")
+        if (
+            watchdog is not None
+            and watchdog is not asyncio.current_task()
+            and not getattr(watchdog, "done", lambda: True)()
+        ):
+            watchdog.cancel()
         if job_id:
             reply = await asyncio.to_thread(
                 fail_cancelled_chat_job, JobStore(ROBIE_JOB_DB), job_id
@@ -1626,7 +1658,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             source.chat_id,
             reply,
             reply_to=event.message_id,
-            metadata={"thread_id": getattr(source, "thread_id", None)},
+            metadata={
+                "thread_id": getattr(source, "thread_id", None),
+                "robie_stop_notice": True,
+            },
         )
 
     @staticmethod
@@ -3838,6 +3873,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     success=False,
                     error="durable reply-to-Job lookup failed",
                 )
+        if not (metadata or {}).get("robie_stop_notice") and job_id:
+            from robie_job_engine.chat_turn_control import agent_output_blocked
+
+            blocked = agent_output_blocked(job_id, JobStore(ROBIE_JOB_DB))
+            if blocked:
+                logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
+                return SendResult(success=False, error=blocked)
         content = redact_text(content)
         content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)

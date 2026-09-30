@@ -283,6 +283,89 @@ def session_key_from_adapter(adapter: Any, event: Any) -> str:
     return f"chat:{chat_id}:{thread_id}"
 
 
+STOPPED_OUTPUT = (
+    "This job was stopped. Do not send another message or call another tool."
+)
+
+
+def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
+    """Block a tool call when this job was stopped or hit the ceiling."""
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    store = None
+    if job_id and db_path:
+        try:
+            from .store import JobStore
+
+            store = JobStore(db_path)
+        except Exception:
+            store = None
+    return agent_output_blocked(job_id, store)
+
+
+def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
+    """Refuse another send or tool call after /stop or the time ceiling."""
+    if not job_id:
+        return None
+    if agent_stop_requested(job_id):
+        return STOPPED_OUTPUT
+    if store is None:
+        return None
+    try:
+        job = store.get_job(job_id)
+    except Exception:
+        return None
+    status = str((job or {}).get("status") or "")
+    if status not in {JobStatus.FAILED.value, "FAILED"}:
+        return None
+    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+        try:
+            if store.get_checkpoint(job_id, kind):
+                return STOPPED_OUTPUT
+        except Exception:
+            continue
+    return None
+
+
+async def watch_turn_ceiling(
+    agent: Any,
+    *,
+    limit: float,
+    on_timeout: Any,
+    stop_requested: Any,
+) -> str:
+    """Enforce the turn ceiling without holding the Chat message handler.
+
+    The handler starts this as a background task and returns, so /stop and
+    other messages are not stuck behind the running agent.
+    """
+    try:
+        if agent is None:
+            await asyncio.sleep(limit)
+        else:
+            await asyncio.wait_for(asyncio.shield(agent), timeout=limit)
+    except asyncio.TimeoutError:
+        if stop_requested():
+            return "stopped"
+        result = on_timeout()
+        if inspect.isawaitable(result):
+            await result
+        return "timeout"
+    except asyncio.CancelledError:
+        # /stop cancels this watchdog. Do not also send the ceiling reply.
+        raise
+    if stop_requested():
+        return "stopped"
+    return "finished"
+
+
 def running_agent_task(adapter: Any, event: Any, *, before: set | None = None) -> Any:
     """The background agent task. handle_message returns before this finishes."""
     key = session_key_from_adapter(adapter, event)
@@ -327,14 +410,16 @@ async def terminate_gateway_agent(
     interrupt = getattr(adapter, "interrupt_session_activity", None)
     if callable(interrupt):
         try:
-            interrupt(key, chat_id)
+            result = interrupt(key, chat_id)
         except TypeError:
             try:
-                interrupt(key)
+                result = interrupt(key)
             except Exception:
-                pass
+                result = None
         except Exception:
-            pass
+            result = None
+        if inspect.isawaitable(result):
+            await result
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
