@@ -139,7 +139,7 @@ class GuardrailTests(unittest.TestCase):
             "How do we insure a truck?": "sop",
             "What's Buster Brown's phone number?": "lookup",
             "Draft a certificate for Buster Brown, holder Test Holder LLC, applicant 26356199.": "cert_draft",
-            "File a note on the existing Policy Change Request discussion for Buster Brown.": "note",
+            "File a note on the existing Policy Change Request discussion for Buster Brown saying Checked renewal.": "note",
             ADDRESS: "simple_edit",
             "Change the phone to 555-0199 for Buster Brown applicant 26356199.": "simple_edit",
             "Change the email to new@example.com for Buster Brown applicant 26356199.": "simple_edit",
@@ -588,6 +588,7 @@ class CarrierAndPracticeTests(unittest.TestCase):
             applicant_id="26356199",
             discussion_title="Policy Change Request",
             new_value="checked",
+            body="Exact requested note text",
             client="Buster Brown",
             field="note",
         )
@@ -609,7 +610,7 @@ class CarrierAndPracticeTests(unittest.TestCase):
             return_value=_Lock(),
         ), mock.patch(
             "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-            return_value={"status": "filed", "note_id": "n1"},
+            return_value={"status": "filed", "note_id": "n1", "read_back": True},
         ):
             filed = default_apply(proposal)
         self.assertTrue(filed.applied)
