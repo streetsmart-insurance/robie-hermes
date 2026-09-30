@@ -36,10 +36,48 @@ WRITE_ACTIONS = frozenset(
 _TARGET_KEYS = ("applicant_id", "policy_number", "discussion", "discussion_title")
 _FENCE = re.compile(r"^```[a-zA-Z]*\n?|\n?```$", re.MULTILINE)
 
-PLAN_REQUIRED = (
-    "State the plan before this write. Pass plan with write, target, and values. "
-    "The write was not sent."
-)
+PLAN_MAX_OUTPUT_TOKENS = 4096
+REFUSAL_CHECKPOINT = "write_plan_refusal"
+MAX_SAME_REFUSAL = 2
+
+_PLAN_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "write": {"type": "STRING"},
+        "target": {
+            "type": "OBJECT",
+            "properties": {
+                "applicant_id": {"type": "STRING"},
+                "policy_number": {"type": "STRING"},
+                "discussion": {"type": "STRING"},
+                "discussion_title": {"type": "STRING"},
+            },
+        },
+        "values": {"type": "OBJECT"},
+    },
+    "required": ["write", "target", "values"],
+}
+
+
+def plan_refusal(field: str) -> str:
+    """Name the field that blocked the write. The write is not sent."""
+    name = str(field or "plan").strip() or "plan"
+    return (
+        f"The plan field {name} is wrong. "
+        "Pass plan with write, target, and values. The write was not sent."
+    )
+
+
+def plan_stop_refusal(field: str) -> str:
+    """After two refusals the tool tells the model to stop."""
+    name = str(field or "plan").strip() or "plan"
+    return (
+        "Stop. Do not call this tool again. "
+        f"Nothing was changed or noted. The plan field {name} is wrong."
+    )
+
+
+PLAN_REQUIRED = plan_refusal("plan")
 
 
 def is_ezlynx_write_job(job: dict[str, Any] | None) -> bool:
@@ -98,43 +136,83 @@ def locked_plan_instructions(plan: Mapping[str, Any]) -> str:
     )
 
 
-def parse_model_plan(raw: str | Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """The model's plan, or None when it did not state one."""
-    if isinstance(raw, Mapping):
-        data: Any = dict(raw)
-    else:
-        text = str(raw or "").strip()
-        if text.startswith("```"):
-            text = _FENCE.sub("", text).strip()
-        if not text.startswith("{"):
-            return None
-        try:
-            data = json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            return None
-    if not isinstance(data, dict):
+def _strip_fence(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = _FENCE.sub("", text).strip()
+    return text
+
+
+def repair_truncated_json(raw: str) -> str:
+    """Close a cut-off JSON object. Does not add a field or a value."""
+    text = _strip_fence(raw)
+    start = text.find("{")
+    if start < 0:
+        return text
+    body = text[start:]
+    in_string = False
+    escape = False
+    depth = 0
+    for char in body:
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+    if escape:
+        body += "\\"
+    if in_string:
+        body += '"'
+    if depth:
+        body += "}" * depth
+    return body
+
+
+def _loads_object(text: str) -> dict[str, Any] | None:
+    body = str(text or "").strip()
+    if not body.startswith("{"):
         return None
     try:
-        return _validated_statement(data)
-    except ValueError:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
+    return data
 
 
-def _validated_statement(data: Mapping[str, Any]) -> dict[str, Any]:
-    write = " ".join(str(data.get("write") or "").split()).strip()
-    target_raw = data.get("target")
-    values_raw = data.get("values")
-    if not write:
-        raise ValueError("plan requires write")
-    if not isinstance(target_raw, Mapping) or not isinstance(values_raw, Mapping):
-        raise ValueError("plan requires target and values objects")
-    target = {
+def _normalize_target(target_raw: Any) -> dict[str, str]:
+    """A string target is an account id, a policy number, or a discussion."""
+    if isinstance(target_raw, str):
+        text = " ".join(target_raw.split()).strip()
+        if not text:
+            return {}
+        if text.isdigit():
+            return {"applicant_id": text}
+        if re.search(r"[A-Za-z]", text) and re.search(r"\d", text):
+            return {"policy_number": text}
+        return {"discussion": text}
+    if not isinstance(target_raw, Mapping):
+        return {}
+    return {
         key: " ".join(str(target_raw.get(key) or "").split()).strip()
         for key in _TARGET_KEYS
         if str(target_raw.get(key) or "").strip()
     }
-    if not target:
-        raise ValueError("plan target must name an account, policy, or discussion")
+
+
+def _clean_values(values_raw: Any) -> dict[str, Any]:
+    if not isinstance(values_raw, Mapping):
+        return {}
     values: dict[str, Any] = {}
     for raw_name, raw_value in values_raw.items():
         name = str(raw_name or "").strip()
@@ -145,6 +223,69 @@ def _validated_statement(data: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(raw_value, str) and not raw_value.strip():
             continue
         values[name] = raw_value
+    return values
+
+
+def parse_model_plan(raw: str | Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The model's plan, or None when it did not state one.
+
+    Truncated JSON is closed once. A string target is normalized. No
+    value is invented.
+    """
+    data = _plan_object(raw, repair=True)
+    if data is None:
+        return None
+    try:
+        return _validated_statement(data)
+    except ValueError:
+        return None
+
+
+def _plan_object(raw: str | Mapping[str, Any] | None, *, repair: bool) -> dict[str, Any] | None:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    text = _strip_fence(str(raw or ""))
+    data = _loads_object(text)
+    if data is None and repair:
+        data = _loads_object(repair_truncated_json(text))
+    return data
+
+
+def _statement_if_complete(raw: str | Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """A plan whose JSON already closed. Truncation does not count."""
+    data = _plan_object(raw, repair=False)
+    if data is None:
+        return None
+    try:
+        return _validated_statement(data)
+    except ValueError:
+        return None
+
+
+def plan_field_problem(statement: Any) -> str | None:
+    """The first wrong field, or None when this plan can lock."""
+    data = statement
+    if isinstance(statement, str):
+        data = _plan_object(statement, repair=True)
+    if not isinstance(data, Mapping):
+        return "plan"
+    if not " ".join(str(data.get("write") or "").split()).strip():
+        return "write"
+    if not _normalize_target(data.get("target")):
+        return "target"
+    if not _clean_values(data.get("values")):
+        return "values"
+    return None
+
+
+def _validated_statement(data: Mapping[str, Any]) -> dict[str, Any]:
+    write = " ".join(str(data.get("write") or "").split()).strip()
+    if not write:
+        raise ValueError("plan requires write")
+    target = _normalize_target(data.get("target"))
+    if not target:
+        raise ValueError("plan target must name an account, policy, or discussion")
+    values = _clean_values(data.get("values"))
     if not values:
         raise ValueError("plan requires at least one value")
     return {"write": write, "target": target, "values": values}
@@ -205,11 +346,25 @@ def prepare_write_plan(
     existing = get_locked_plan(store, str(job.get("id") or ""))
     if existing is not None:
         return existing
-    raw = model_fn(plan_prompt_for_job(job))
-    statement = parse_model_plan(raw)
+    prompt = plan_prompt_for_job(job)
+    raw = _call_plan_model(model_fn, prompt)
+    statement = _statement_if_complete(raw)
+    if statement is None:
+        # One retry. The first reply is often cut off at the token cap.
+        retried = _call_plan_model(model_fn, prompt)
+        if retried:
+            raw = retried
+        statement = parse_model_plan(raw)
     if statement is None:
         return remember_unlocked_plan(store, job, str(raw or ""))
     return lock_stated_plan(store, job, statement)
+
+
+def _call_plan_model(model_fn: Callable[[str], str], prompt: str) -> str:
+    try:
+        return str(model_fn(prompt) or "")
+    except Exception:
+        return ""
 
 
 def default_plan_model(prompt: str) -> str:
@@ -250,8 +405,9 @@ def _gemini_plan_text(prompt: str) -> str:
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0,
-                "maxOutputTokens": 512,
+                "maxOutputTokens": PLAN_MAX_OUTPUT_TOKENS,
                 "responseMimeType": "application/json",
+                "responseSchema": _PLAN_RESPONSE_SCHEMA,
             },
         }
     ).encode("utf-8")
@@ -546,6 +702,47 @@ def _store_readback_evidence(store: Any, job_id: str, plan: Mapping[str, Any], r
         return
 
 
+def write_landed(store: Any, job: Mapping[str, Any]) -> bool:
+    """True when a note, a document, or a passed readback is on the job."""
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    status = str(note.get("status") or "")
+    if status in {"filed", "posted, verifying"} or note.get("read_back") or note.get("note_id"):
+        return True
+    for kind in ("document_upload", "uploaded_document", "ezlynx_document"):
+        document = store.get_checkpoint(job_id, kind) or {}
+        if document.get("document_id") or document.get("read_back"):
+            return True
+    readback = store.get_checkpoint(job_id, READBACK_CHECKPOINT) or {}
+    return bool(readback.get("passed"))
+
+
+def nothing_written_line(reason: str) -> str:
+    """One line when a write job changed nothing."""
+    clean = " ".join(str(reason or "").split()).strip().rstrip(".")
+    if not clean:
+        clean = "the write did not land"
+    return f"Nothing was changed or noted. {clean}."
+
+
+def unwritten_write_reason(store: Any, job: Mapping[str, Any]) -> str:
+    """Why the write did not land, for the one-line user reply."""
+    job_id = str(job.get("id") or "")
+    refusal = store.get_checkpoint(job_id, REFUSAL_CHECKPOINT) or {} if job_id else {}
+    if int(refusal.get("count") or 0) >= MAX_SAME_REFUSAL:
+        field = str(refusal.get("field") or "plan")
+        return f"The plan field {field} is wrong"
+    readback = store.get_checkpoint(job_id, READBACK_CHECKPOINT) or {} if job_id else {}
+    failure = str(readback.get("failure") or "").strip()
+    if failure:
+        return failure
+    if job_id and not plan_is_locked(store, job_id):
+        return "the plan was not locked"
+    return "the write did not land"
+
+
 def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] | None) -> str | None:
     """Block an EZLynx write until the model has locked a plan.
 
@@ -577,9 +774,22 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     if plan_is_locked(store, job_id):
         return None
     statement = args.get("plan")
-    if isinstance(statement, Mapping):
-        parsed = parse_model_plan(statement)
+    problem = plan_field_problem(statement)
+    if problem is None:
+        parsed = parse_model_plan(statement if isinstance(statement, (str, Mapping)) else None)
         if parsed is not None:
             lock_stated_plan(store, job, parsed)
             return None
-    return PLAN_REQUIRED
+        problem = "plan"
+    prior = store.get_checkpoint(job_id, REFUSAL_CHECKPOINT) or {}
+    counts = dict(prior.get("counts") or {})
+    count = int(counts.get(problem) or 0) + 1
+    counts[problem] = count
+    store.checkpoint(
+        job_id,
+        REFUSAL_CHECKPOINT,
+        {"count": count, "field": problem, "counts": counts},
+    )
+    if count >= MAX_SAME_REFUSAL:
+        return plan_stop_refusal(problem)
+    return plan_refusal(problem)

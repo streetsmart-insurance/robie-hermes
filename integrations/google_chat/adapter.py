@@ -3044,20 +3044,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             from robie_job_engine.chat_turn_control import (
                 BUSY_SESSION_REPLY,
-                incoming_message_action,
+                busy_session_should_defer,
                 running_chat_job_id,
-                session_is_busy,
                 session_key_from_adapter,
             )
 
             if (
                 id(event) not in self._robie_deferred_release_ids
                 and event.source is not None
-                and incoming_message_action(
-                    session_busy=session_is_busy(self, event),
-                    is_stop=False,
-                )
-                == "defer"
+                and busy_session_should_defer(self, event, db_path=ROBIE_JOB_DB)
             ):
                 busy_job_id = running_chat_job_id(self, event)
                 logger.info(
@@ -3100,12 +3095,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _drain_deferred_chat(self, key: str) -> None:
         """Run queued messages only after this session's guard is free."""
-        from robie_job_engine.chat_turn_control import session_is_busy
+        from robie_job_engine.chat_turn_control import busy_session_should_defer
 
         try:
             while self._robie_deferred.get(key):
                 event = self._robie_deferred[key][0]
-                if session_is_busy(self, event):
+                if busy_session_should_defer(self, event, db_path=ROBIE_JOB_DB):
                     await asyncio.sleep(0.25)
                     continue
                 self._robie_deferred[key].pop(0)

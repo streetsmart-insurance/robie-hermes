@@ -460,6 +460,42 @@ def chat_turn_keeps_context(db_path: str, job_id: str | None) -> bool:
         return False
 
 
+_WAITING_ON_USER = {
+    JobStatus.NEEDS_CLARIFICATION.value,
+    JobStatus.AWAITING_HUMAN_INPUT.value,
+}
+
+
+def job_is_waiting_on_user(job: dict | None) -> bool:
+    """The job has asked the user for something and is not working."""
+    if not job:
+        return False
+    return str(job.get("status") or "") in _WAITING_ON_USER
+
+
+def busy_session_should_defer(adapter: Any, event: Any, *, db_path: str = "") -> bool:
+    """True when a second message must wait.
+
+    A session looks busy while its turn record is still up. If that job
+    is waiting on the user, the next message answers it. The sender id
+    is not read.
+    """
+    if not session_is_busy(adapter, event):
+        return False
+    job_id = running_chat_job_id(adapter, event)
+    if not job_id or not db_path:
+        return True
+    try:
+        from .store import JobStore
+
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return True
+    if job_is_waiting_on_user(job):
+        return False
+    return True
+
+
 def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:
     """What to do with a Chat message while a turn may already be running.
 
