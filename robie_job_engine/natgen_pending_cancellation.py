@@ -2,7 +2,11 @@
 
 The playbook walks natgenagency.com: Agent Dashboard, Your Notifications,
 Policy To Dos, Pending Cancellations, then the policy, Policy History, and
-the most recent Pending Cancellation / NOC Forms View PDF.
+the most recent Pending Cancellation / NOC Forms View PDF. When the tab is
+already the Pending Cancellations report — that URL, or an Agency Activity
+report page that shows the heading and the table — Agent Dashboard is not
+required. A missing Agent Dashboard does not hold by itself. The pull still
+holds when the report is not reached.
 
 The Pending Cancellations list is not day-filtered. Rows are scrubbed by
 process date. A Monday in the requested window also keeps the preceding
@@ -451,12 +455,178 @@ def click_named(page: Any, name: str, *, roles: tuple[str, ...]) -> None:
     matches[0][1].click()
 
 
+_PENDING_REPORT_URL = re.compile(r"pending[-_\s]?cancellat", re.IGNORECASE)
+_AGENCY_ACTIVITY_URL = re.compile(r"agency[-_\s]?activity", re.IGNORECASE)
+_AGENCY_ACTIVITY_REPORTS = re.compile(r"agencyactivityreports\.aspx", re.IGNORECASE)
+_PENDING_HEADING = re.compile(r"pending cancellations", re.IGNORECASE)
+# 2026-09-28 hermes-test prove: Pending Cancellations is this report id.
+_PENDING_ACTIVITY_REPORT_ID = "5"
+
+
+def _natgen_host(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    return host == "natgenagency.com" or host.endswith(".natgenagency.com")
+
+
+def _url_blob(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    raw = f"{parsed.path}?{parsed.query}"
+    return urllib.parse.unquote(raw).replace("+", " ")
+
+
+def _role_count(page: Any, role: str, name: Any, *, exact: bool) -> int:
+    try:
+        return int(page.get_by_role(role, name=name, exact=exact).count())
+    except Exception:
+        return -1
+
+
+def _named_state(page: Any, name: str, roles: tuple[str, ...]) -> str:
+    matches = []
+    for role in roles:
+        count = _role_count(page, role, name, exact=True)
+        if count:
+            matches.append(count)
+    if any(count < 0 for count in matches):
+        return "error"
+    if not matches:
+        return "missing"
+    if len(matches) != 1 or matches[0] != 1:
+        return "ambiguous"
+    return "one"
+
+
+def _heading_state(page: Any) -> str:
+    count = _role_count(page, "heading", _PENDING_HEADING, exact=False)
+    if count < 0:
+        return "error"
+    if count == 0:
+        return "none"
+    if count == 1:
+        return "one"
+    return "many"
+
+
+def _single_report_table(page: Any, *, require_rows: bool) -> bool:
+    try:
+        tables = page.locator("table")
+        if int(tables.count()) != 1:
+            return False
+        if not require_rows:
+            return True
+        return int(tables.locator("tbody tr").count()) >= 1
+    except Exception:
+        return False
+
+
+def _safe_title(page: Any) -> str:
+    title_fn = getattr(page, "title", None)
+    if not callable(title_fn):
+        return ""
+    try:
+        return str(title_fn() or "")
+    except Exception:
+        return ""
+
+
+def _safe_body(page: Any) -> str:
+    try:
+        return str(page.locator("body").inner_text() or "")
+    except Exception:
+        return ""
+
+
+def _mentions_pending(page: Any) -> bool:
+    """Heading, document title, or visible text. A nav link alone is not enough."""
+    if _heading_state(page) == "one":
+        return True
+    if _PENDING_HEADING.search(_safe_title(page)):
+        return True
+    return _PENDING_HEADING.search(_safe_body(page)) is not None
+
+
+def _activity_report_ids(url: str) -> list[str]:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if not _AGENCY_ACTIVITY_REPORTS.search(parsed.path or ""):
+        return []
+    found: list[str] = []
+    for name, values in urllib.parse.parse_qs(parsed.query).items():
+        if name.casefold() != "r":
+            continue
+        found.extend(str(value) for value in values)
+    return found
+
+
+def _is_pending_activity_report_url(url: str) -> bool:
+    """AgencyActivityReports.aspx?r=5 is the Pending Cancellations list.
+
+    Other ``r`` values are different Agency Activity reports and are not this list.
+    """
+    if not _natgen_host(url):
+        return False
+    return _PENDING_ACTIVITY_REPORT_ID in _activity_report_ids(url)
+
+
+def _already_on_pending_report(page: Any) -> bool:
+    """True when this tab is already the Pending Cancellations report.
+
+    ``/Reports/AgencyActivityReports.aspx?r=5`` is that list even when the
+    page has no Agent Dashboard control and does not use the words "Pending
+    Cancellations" as a heading. A pending-cancellations URL is also enough.
+    An Agency Activity URL qualifies when the page names Pending Cancellations
+    and has one table. Any other NatGen page qualifies when it names that
+    report and has one table with rows, and Agent Dashboard is not on the
+    page. A dashboard that still shows Agent Dashboard keeps the playbook clicks.
+    """
+    url = str(getattr(page, "url", "") or "")
+    if not _natgen_host(url):
+        return False
+    if _is_pending_activity_report_url(url):
+        return True
+    blob = _url_blob(url)
+    if _PENDING_REPORT_URL.search(blob):
+        return True
+    mentioned = _mentions_pending(page)
+    if not mentioned:
+        return False
+    if _AGENCY_ACTIVITY_URL.search(blob) and _single_report_table(page, require_rows=False):
+        return True
+    if not _single_report_table(page, require_rows=True):
+        return False
+    if _heading_state(page) == "one":
+        return True
+    return _named_state(page, "Agent Dashboard", ("link", "button")) == "missing"
+
+
 def open_pending_cancellations(page: Any) -> None:
-    """Open the Pending Cancellations list. There is no process-date filter to fill."""
+    """Open the Pending Cancellations list. There is no process-date filter to fill.
+
+    Already sitting on that report skips Agent Dashboard. A missing Agent
+    Dashboard is skipped. Ambiguous controls still hold. If the report is
+    never reached, the pull holds before scrape.
+    """
     assert_authenticated(page)
+    if _already_on_pending_report(page):
+        return
+    clicked_pending = False
     for name, roles in _NAV_STEPS:
+        if _already_on_pending_report(page):
+            return
+        state = _named_state(page, name, roles)
+        if state in {"ambiguous", "error"}:
+            raise IntakeHold(f"NatGen control {name!r} is missing or ambiguous")
+        if state != "one":
+            continue
         click_named(page, name, roles=roles)
-    assert_authenticated(page)
+        if name == "Pending Cancellations":
+            clicked_pending = True
+    if clicked_pending or _already_on_pending_report(page):
+        assert_authenticated(page)
+        return
+    raise IntakeHold("Pending Cancellations report was not found")
 
 
 def click_forms_view(page: Any) -> None:

@@ -31,6 +31,8 @@ from robie_job_engine.progressive_bop import (
     build_parser,
     main,
     module_import_names,
+    _allowed_pdf_url,
+    _BopFrameSurface,
     navigate_to_pending_cancel,
     noc_filename,
     parse_excel_report,
@@ -102,6 +104,12 @@ class FakeLocator:
         if self.selector.startswith("embed"):
             return 0
         if self.role is not None:
+            if isinstance(self.name, re.Pattern):
+                return sum(
+                    1
+                    for role, name in self.page.roles
+                    if role == self.role and self.name.search(str(name))
+                )
             return 1 if (self.role, self.name) in self.page.roles else 0
         return 0
 
@@ -134,6 +142,15 @@ class FakePage:
         self.password_count = 0
         self.clicked = []
         self.popup = popup
+        self.closed = False
+        self.close_raises = False
+        self.frames = None
+        self.context = None
+
+    def close(self):
+        self.closed = True
+        if self.close_raises:
+            raise RuntimeError("HPLanding close failed")
 
     def locator(self, selector):
         return FakeLocator(self, selector)
@@ -401,6 +418,167 @@ class ProgressiveBopTests(unittest.TestCase):
         with self.assertRaises(IntakeHold):
             navigate_to_pending_cancel(ambiguous, "CA33617")
         self.assertEqual(ambiguous.clicked, [])
+
+    def test_bop_application_host_is_an_allowed_report_pdf_source(self):
+        self.assertTrue(_allowed_pdf_url("https://bop.americanstrategic.com/report.pdf"))
+        self.assertFalse(_allowed_pdf_url("http://bop.americanstrategic.com/report.pdf"))
+        self.assertFalse(_allowed_pdf_url("https://evil.example/report.pdf"))
+
+    def test_hplanding_popup_attaches_to_the_bop_app_and_closes(self):
+        app = FakePage(
+            {("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")},
+            url="https://bop.americanstrategic.com/reports",
+            body="VIEW REPORTS",
+        )
+        landing = FakePage(
+            {("button", "Close this window")},
+            url="https://www.foragentsonly.com/HPLanding",
+            body="The application opened in another window.",
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=landing,
+        )
+        shell.context = type("Ctx", (), {"pages": [shell, app]})()
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, app)
+        self.assertTrue(landing.closed)
+        self.assertEqual(
+            app.clicked,
+            [("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")],
+        )
+        self.assertNotIn(("link", "Manage Policies"), shell.clicked)
+        self.assertEqual(landing.clicked, [])
+
+    def test_hplanding_close_failure_still_attaches_to_the_bop_app(self):
+        app = FakePage(
+            {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://bop.americanstrategic.com/",
+        )
+        landing = FakePage(
+            set(),
+            url="https://www.foragentsonly.com/home",
+            body="Please Close this window",
+        )
+        landing.close_raises = True
+        shell = FakePage(
+            {("link", "Go to Businessowner/Contractor GL policy search")},
+            url="https://www.foragentsonly.com/home",
+            popup=landing,
+        )
+        shell.context = type("Ctx", (), {"pages": [app]})()
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, app)
+        self.assertTrue(landing.closed)
+        self.assertEqual(app.clicked[0], ("link", "View Reports"))
+
+    def test_hplanding_frame_is_the_bop_application(self):
+        frame = FakePage(
+            {("link", "VIEW REPORTS"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://bop.americanstrategic.com/home",
+        )
+        landing = FakePage(
+            {("button", "Close this window")},
+            url="https://www.foragentsonly.com/HPLanding/session",
+            body="Close this window",
+        )
+        landing.frames = [landing, frame]
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/home",
+            popup=landing,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIsInstance(opened, _BopFrameSurface)
+        self.assertEqual(opened.url, frame.url)
+        self.assertFalse(landing.closed)
+        self.assertEqual(
+            frame.clicked,
+            [("link", "VIEW REPORTS"), ("button", "Pending Cancel for Nonpayment")],
+        )
+
+    def test_hplanding_waits_for_bop_americanstrategic_before_view_reports(self):
+        app = FakePage(
+            {("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")},
+            url="https://bop.americanstrategic.com/",
+        )
+        landing = FakePage(
+            {("button", "Close this window")},
+            url="https://sbr1.foragentsonly.com/portal/HPLanding.aspx",
+            body="Close this window",
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=landing,
+        )
+
+        class _Ctx:
+            def __init__(self):
+                self.pages = [shell, landing]
+                self.listeners = []
+
+            def on(self, event, fn):
+                if event == "page":
+                    self.listeners.append(fn)
+
+            def remove_listener(self, event, fn):
+                if fn in self.listeners:
+                    self.listeners.remove(fn)
+
+        ctx = _Ctx()
+        shell.context = ctx
+        landing.context = ctx
+
+        def wait(_ms):
+            if app not in ctx.pages:
+                ctx.pages.append(app)
+                for fn in list(ctx.listeners):
+                    fn(app)
+
+        shell.wait_for_timeout = wait
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, app)
+        self.assertTrue(landing.closed)
+        self.assertEqual(landing.clicked, [])
+        self.assertEqual(
+            app.clicked,
+            [("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")],
+        )
+        self.assertNotIn(("link", "Manage Policies"), shell.clicked)
+
+    def test_hplanding_without_the_bop_app_holds_before_view_reports(self):
+        landing = FakePage(
+            {("button", "Close this window"), ("link", "View Reports")},
+            url="https://www.foragentsonly.com/HPLanding",
+            body="Close this window",
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/",
+            popup=landing,
+        )
+        with self.assertRaisesRegex(IntakeHold, "HPLanding"):
+            navigate_to_pending_cancel(shell, "CA33617")
+        self.assertEqual(landing.clicked, [])
+
+    def test_two_bop_windows_hold(self):
+        first = FakePage(set(), url="https://bop.americanstrategic.com/one")
+        second = FakePage(set(), url="https://bop.americanstrategic.com/two")
+        landing = FakePage(
+            {("button", "Close this window")},
+            url="https://www.foragentsonly.com/HPLanding",
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/home",
+            popup=landing,
+        )
+        shell.context = type("Ctx", (), {"pages": [first, second]})()
+        with self.assertRaisesRegex(IntakeHold, "more than one BOP window"):
+            navigate_to_pending_cancel(shell, "CA33617")
+        self.assertFalse(landing.closed)
 
     def test_blank_page_text_does_not_require_an_export(self):
         page = FakePage(set(), body="Pending Cancel for Nonpayment. No records.")

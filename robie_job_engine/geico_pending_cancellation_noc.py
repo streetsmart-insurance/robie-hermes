@@ -2,8 +2,11 @@
 
 The manual prove on 2026-09-26 walked gateway2.geico.com/client-alerts:
 Client Alerts, Pending Cancellations, then each personal-lines notice saved
-as ``[PolicyNumber] NOC Geico.pdf``. Commercial Auto with Billing only and
-no Documents route was held, not downloaded.
+as ``[PolicyNumber] NOC Geico.pdf``. The 2026-09-28 hermes-test Gateway
+instead shows filter chips on that same URL. ``Pending Cancellations`` may
+include a count, for example ``Pending Cancellations (3)``. When that chip
+is on the page, Client Alerts is not required. Commercial Auto with Billing
+only and no Documents route was held, not downloaded.
 
 Accessible names below are that path, not a certified live DOM. A missing or
 non-unique control raises IntakeHold. This module does not log in, does not
@@ -385,6 +388,106 @@ def assert_authenticated(page: Any) -> None:
         raise IntakeHold("Geico Gateway session is not authenticated")
 
 
+# Modern Gateway filter chip. The count badge is part of the accessible name.
+_PENDING_CHIP_NAME = re.compile(
+    r"^pending cancellations(?:\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
+_ALL_ALERTS_CHIP_NAME = re.compile(
+    r"^all alerts(?:\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
+_CHIP_ROLES = ("button", "radio", "link")
+_TOGGLE_TRUE = frozenset({"true", "page", "step"})
+# Pages whose Pending Cancellations chip was clicked in this process.
+# Live Gateway leaves both "Pending Cancellations (3)" and "All Alerts (50)"
+# on screen, and the pending button may not expose aria-pressed.
+_PENDING_CHIP_CLICKED: set[int] = set()
+
+
+def _locator_count(locator: Any) -> int:
+    try:
+        return int(locator.count())
+    except Exception:
+        return -1
+
+
+def _attr(locator: Any, name: str) -> str | None:
+    getter = getattr(locator, "get_attribute", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter(name)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    return str(value).strip().casefold()
+
+
+def _chip_toggle(locator: Any) -> str:
+    """selected, unselected, or bare (no toggle attribute)."""
+    values = [
+        _attr(locator, "aria-pressed"),
+        _attr(locator, "aria-selected"),
+        _attr(locator, "aria-checked"),
+    ]
+    current = _attr(locator, "aria-current")
+    present = [value for value in values if value is not None]
+    if any(value == "true" for value in present) or current in _TOGGLE_TRUE:
+        return "selected"
+    if any(value == "false" for value in present) or current == "false":
+        return "unselected"
+    return "bare"
+
+
+def _pending_chip_matches(page: Any) -> list[tuple[int, Any]]:
+    found = []
+    for role in _CHIP_ROLES:
+        locator = page.get_by_role(role, name=_PENDING_CHIP_NAME, exact=False)
+        count = _locator_count(locator)
+        if count:
+            found.append((count, locator))
+    return found
+
+
+def _pending_chip_view(page: Any) -> str:
+    """selected, unselected, bare, absent, ambiguous, or error."""
+    matches = _pending_chip_matches(page)
+    if any(count < 0 for count, _locator in matches):
+        return "error"
+    if not matches:
+        return "absent"
+    if len(matches) != 1 or matches[0][0] != 1:
+        return "ambiguous"
+    return _chip_toggle(matches[0][1])
+
+
+def _alerts_table_count(page: Any) -> int:
+    try:
+        return int(page.locator("table").count())
+    except Exception:
+        return -1
+
+
+def _filter_chip_count(page: Any, name: re.Pattern) -> int:
+    total = 0
+    for role in _CHIP_ROLES:
+        count = _locator_count(page.get_by_role(role, name=name, exact=False))
+        if count < 0:
+            return -1
+        total += count
+    return total
+
+
+def _click_pending_chip(page: Any) -> None:
+    matches = _pending_chip_matches(page)
+    if len(matches) != 1 or matches[0][0] != 1:
+        raise IntakeHold("Pending Cancellations view is missing or ambiguous")
+    matches[0][1].click()
+    _PENDING_CHIP_CLICKED.add(id(page))
+
+
 def pending_view_selected(page: Any) -> bool:
     combos = page.get_by_role("combobox")
     count = combos.count()
@@ -395,8 +498,25 @@ def pending_view_selected(page: Any) -> bool:
     tab = page.get_by_role("tab", name="Pending Cancellations", exact=True)
     if tab.count() > 1:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
-    if tab.count() == 1:
-        return tab.get_attribute("aria-selected") == "true"
+    if tab.count() == 1 and tab.get_attribute("aria-selected") == "true":
+        return True
+    chip = _pending_chip_view(page)
+    if chip in {"ambiguous", "error"}:
+        raise IntakeHold("Pending Cancellations view is missing or ambiguous")
+    if chip == "selected":
+        return True
+    # The prove page shows button "Pending Cancellations (3)" beside
+    # "All Alerts (50)". That pending button is not selected just because
+    # a table is visible. A click of the one pending button is the selection
+    # when the control does not expose aria-pressed.
+    if id(page) in _PENDING_CHIP_CLICKED and chip in {"bare", "unselected", "selected"}:
+        return True
+    if (
+        chip == "bare"
+        and _alerts_table_count(page) == 1
+        and _filter_chip_count(page, _ALL_ALERTS_CHIP_NAME) == 0
+    ):
+        return True
     return False
 
 
@@ -412,15 +532,44 @@ def click_named(page: Any, name: str, *, roles: tuple[str, ...]) -> None:
     matches[0][1].click()
 
 
+def _named_control_state(page: Any, name: str, roles: tuple[str, ...]) -> str:
+    matches = []
+    for role in roles:
+        locator = page.get_by_role(role, name=name, exact=True)
+        count = _locator_count(locator)
+        if count:
+            matches.append(count)
+    if any(count < 0 for count in matches):
+        return "error"
+    if not matches:
+        return "absent"
+    if len(matches) != 1 or matches[0] != 1:
+        return "ambiguous"
+    return "one"
+
+
 def ensure_pending_view(page: Any) -> None:
+    """Select Pending Cancellations. Filter chips do not need Client Alerts."""
     assert_authenticated(page)
     if not _is_gateway_app_url(str(getattr(page, "url", "") or "")):
         raise IntakeHold("Expected exactly one Geico Gateway tab")
     if pending_view_selected(page):
         return
-    click_named(page, "Client Alerts", roles=("link", "button"))
-    if pending_view_selected(page):
+    chip = _pending_chip_view(page)
+    if chip in {"ambiguous", "error"}:
+        raise IntakeHold("Pending Cancellations view is missing or ambiguous")
+    if chip in {"unselected", "bare"}:
+        _click_pending_chip(page)
+        if not pending_view_selected(page):
+            raise IntakeHold("Pending Cancellations view did not become selected")
         return
+    alerts = _named_control_state(page, "Client Alerts", ("link", "button"))
+    if alerts == "one":
+        click_named(page, "Client Alerts", roles=("link", "button"))
+        if pending_view_selected(page):
+            return
+    elif alerts in {"ambiguous", "error"}:
+        click_named(page, "Client Alerts", roles=("link", "button"))
     click_named(page, "Pending Cancellations", roles=("option", "button", "link", "tab"))
     if not pending_view_selected(page):
         raise IntakeHold("Pending Cancellations view did not become selected")

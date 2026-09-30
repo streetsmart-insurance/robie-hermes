@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -696,9 +697,18 @@ class FakeNode:
             found.extend(child.find(selector))
         return found
 
+    def _name_ok(self, name, exact):
+        if name is None:
+            return True
+        if isinstance(name, re.Pattern):
+            return name.search(self.name or "") is not None
+        if exact:
+            return self.name == name
+        return name in (self.name or "")
+
     def find_role(self, role, name, exact):
         found = []
-        if self.role == role and (name is None or ((self.name == name) if exact else name in self.name)):
+        if self.role == role and self._name_ok(name, exact):
             found.append(self)
         for child in self.children:
             found.extend(child.find_role(role, name, exact))
@@ -759,7 +769,7 @@ class NodeLocator:
 
 class NavPage:
     def __init__(self, *, start="list", password=False, url=None, duplicate_alerts=False,
-                 next_mode="none", go_back_restores=True):
+                 next_mode="none", go_back_restores=True, chip_mode=None):
         self.password = password
         self.url = url or (LIST_URL if start == "list" else HOME_URL)
         self.duplicate_alerts = duplicate_alerts
@@ -769,6 +779,12 @@ class NavPage:
         self.state = "list" if start == "list" else "home"
         self.combo_text = "Pending Cancellations" if start == "list" else ""
         self.table_visible = start == "list"
+        self.chip_mode = chip_mode
+        if chip_mode:
+            self.url = url or LIST_URL
+            self.state = "chips"
+            self.combo_text = ""
+            self.table_visible = chip_mode != "bare-empty"
         self.policy = ""
         self.docs_open = False
         self.billing_open = False
@@ -797,6 +813,21 @@ class NavPage:
         nodes = []
         if self.password:
             nodes.append(FakeNode("input", attrs={"type": "password"}))
+        if self.state == "chips":
+            if self.chip_mode == "pressed":
+                attrs = {"aria-pressed": "true"}
+            elif self.chip_mode in {"open", "duplicate"}:
+                attrs = {"aria-pressed": "false"}
+            else:
+                attrs = {}
+            nodes.append(FakeNode("button", "Pending Cancellations (3)", attrs=attrs))
+            if self.chip_mode == "duplicate":
+                nodes.append(FakeNode("link", "Pending Cancellations (3)", attrs=dict(attrs)))
+            if self.chip_mode == "among":
+                nodes.append(FakeNode("button", "All Alerts (50)"))
+            if self.table_visible:
+                nodes.append(self.table)
+            return nodes
         if self.state == "home":
             nodes.append(FakeNode("link", "Client Alerts"))
             if self.duplicate_alerts:
@@ -843,7 +874,7 @@ class NavPage:
 
     def screenshot(self, full_page=True, type="png"):
         self.screenshot_calls += 1
-        if full_page and type == "png" and self.table_visible and self.state == "list":
+        if full_page and type == "png" and self.table_visible and self.state in {"list", "chips"}:
             return LIST_PNG
         return b""
 
@@ -867,11 +898,17 @@ class NavPage:
             self.state = "choose"
             self.url = LIST_URL
             self.combo_text = "All Alerts"
+        elif self.state == "chips" and str(node.name).startswith("Pending Cancellations"):
+            if self.chip_mode == "open":
+                self.chip_mode = "pressed"
+            elif self.chip_mode == "bare-empty":
+                self.chip_mode = "bare"
+                self.table_visible = True
         elif node.name == "Pending Cancellations" and self.state == "choose":
             self.state = "list"
             self.combo_text = "Pending Cancellations"
             self.table_visible = True
-        elif node.name in {COMMERCIAL, GUEVARA, PANELLA} and self.state == "list":
+        elif node.name in {COMMERCIAL, GUEVARA, PANELLA} and self.state in {"list", "chips"}:
             self.policy = node.name
             self.state = "policy"
             self.url = f"https://gateway2.geico.com/policy/{node.name}"
@@ -938,6 +975,58 @@ class NavigationTests(unittest.TestCase):
         notice_at = page.clicks.index("Pending Cancellation Notice")
         self.assertLess(page.clicks.index("Documents"), notice_at)
         self.assertLess(page.clicks.index("Billing"), notice_at)
+
+    def test_filter_chip_selects_pending_cancellations_without_client_alerts(self):
+        page = NavPage(chip_mode="open")
+        browser = PlaywrightGeicoNocBrowser(page)
+        receipt = run_pull(
+            browser,
+            LocalDeliveryLedger(self.output / "chips"),
+            SourceArchive(self.output / "chips" / "sources"),
+            as_of=AS_OF,
+        )
+        self.assertEqual(receipt["status"], "PULLED")
+        self.assertEqual(receipt["count"], 2)
+        self.assertEqual(page.clicks[0], "Pending Cancellations (3)")
+        self.assertNotIn("Client Alerts", page.clicks)
+        self.assertTrue((self.output / "chips" / PERSONAL_NAMES[0]).is_file())
+        self.assertFalse((self.output / "chips" / f"{COMMERCIAL} NOC Geico.pdf").exists())
+
+    def test_pressed_or_bare_chip_with_the_list_does_not_reclick(self):
+        for mode in ("pressed", "bare"):
+            page = NavPage(chip_mode=mode)
+            browser = PlaywrightGeicoNocBrowser(page)
+            grid = browser.load_pending_cancellations()
+            self.assertEqual(
+                [alert.policy_number for alert in parse_alert_grid(grid)],
+                [COMMERCIAL, GUEVARA, PANELLA],
+            )
+            self.assertEqual(page.clicks, [])
+
+    def test_unselected_chip_without_a_table_is_clicked_before_the_list(self):
+        page = NavPage(chip_mode="bare-empty")
+        browser = PlaywrightGeicoNocBrowser(page)
+        grid = browser.load_pending_cancellations()
+        self.assertEqual(len(parse_alert_grid(grid)), 3)
+        self.assertEqual(page.clicks, ["Pending Cancellations (3)"])
+        self.assertNotIn("Client Alerts", page.clicks)
+
+    def test_pending_chip_among_all_alerts_is_clicked_without_client_alerts(self):
+        page = NavPage(chip_mode="among")
+        browser = PlaywrightGeicoNocBrowser(page)
+        grid = browser.load_pending_cancellations()
+        self.assertEqual(
+            [alert.policy_number for alert in parse_alert_grid(grid)],
+            [COMMERCIAL, GUEVARA, PANELLA],
+        )
+        self.assertEqual(page.clicks, ["Pending Cancellations (3)"])
+        self.assertNotIn("Client Alerts", page.clicks)
+
+    def test_duplicate_pending_chips_hold_before_a_policy_opens(self):
+        page = NavPage(chip_mode="duplicate")
+        with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+            PlaywrightGeicoNocBrowser(page).load_pending_cancellations()
+        self.assertEqual(page.clicks, [])
 
     def test_already_on_the_list_does_not_reclick_client_alerts(self):
         page = NavPage(start="list", next_mode="disabled")
