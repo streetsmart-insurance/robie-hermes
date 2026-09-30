@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -336,10 +338,25 @@ def ingest_sops(drive: DrivePort, index_path: str | None = None) -> dict[str, An
                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }
         )
-    payload = {"documents": docs}
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
-    return {"count": len(docs), "path": path}
+    payload = {"schema_version": 1, "imported_at": datetime.now(timezone.utc).isoformat(),
+               "documents": docs}
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         prefix=".sop-index-", delete=False) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"count": len(docs), "path": str(target), "schema_version": 1}
 
 
 def load_index(index_path: str | None = None) -> list[dict[str, Any]]:
@@ -354,7 +371,26 @@ def load_index(index_path: str | None = None) -> list[dict[str, Any]]:
     docs = payload.get("documents") if isinstance(payload, dict) else None
     if not isinstance(docs, list):
         return []
-    return [item for item in docs if isinstance(item, dict)]
+    if payload.get("schema_version") not in (None, 1):
+        return []
+    validated = []
+    for item in docs:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not str(item.get("doc_id") or "").strip():
+            return []
+        digest = str(item.get("sha256") or "")
+        # Legacy indexes remain readable when no digest was recorded. A
+        # digest that is present is binding; never answer from altered text.
+        if digest and digest != hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return []
+        if payload.get("schema_version") == 1 and not digest:
+            return []
+        if text_is_excluded(text):
+            continue
+        validated.append(item)
+    return validated
 
 
 def retrieve_sop(
