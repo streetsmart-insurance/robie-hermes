@@ -417,7 +417,10 @@ def _start(
     if decision.intent == "lookup":
         found = ""
         if read is not None and decision.proposal is not None:
-            found = str(read(decision.proposal) or "")
+            try:
+                found = str(read(decision.proposal) or "")
+            except Exception:
+                logger.info("playground lookup unavailable job=%s", job_id)
         reply = lookup_reply(found=found, job_id=job_id)
         _note("answered")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
