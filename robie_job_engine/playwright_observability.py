@@ -156,19 +156,14 @@ _API_NOT_UI_ACTIONS = frozenset(
         "ezlynx.reassign",
     }
 )
-# Routed types that drive a browser. The silent-gap audit reads this set
-# or payload["expected_ui"]. It does not scan the request text.
+# Chat routes whose missing Playwright rows are a silent gap. Other
+# browser actions prove themselves through their own verifiers. The audit
+# reads this set or payload["expected_ui"] and does not scan request text.
 _UI_DRIVING_ACTIONS = frozenset(
     {
-        "browser.read",
         "ezlynx.commercial_auto",
         "ezlynx.policy_setup",
         "ezlynx.quote",
-        "ezlynx.submission_audit",
-        "ezlynx.overdue_submission_reports",
-        "ezlynx.session_refresh",
-        "ezlynx.move_document",
-        "ezlynx.apply_label",
     }
 )
 
@@ -227,9 +222,12 @@ def job_requires_playwright(job: dict[str, Any] | None) -> bool:
     if action in _API_NOT_UI_ACTIONS:
         return False
     flagged = _payload_expected_ui(job)
-    if flagged is not None:
-        return flagged
-    return action in _UI_DRIVING_ACTIONS
+    if flagged is False:
+        return False
+    screen_route = action in _UI_DRIVING_ACTIONS
+    if flagged is True:
+        return screen_route or action in CHAT_PLAYWRIGHT_ACTIONS
+    return screen_route
 
 
 def job_expected_to_drive_ui(job: dict[str, Any] | None) -> bool:

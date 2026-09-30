@@ -431,15 +431,9 @@ def _is_skill_update(text: str) -> bool:
 
 _UI_DRIVING_ACTIONS = frozenset(
     {
-        "browser.read",
         "ezlynx.commercial_auto",
         "ezlynx.policy_setup",
         "ezlynx.quote",
-        "ezlynx.submission_audit",
-        "ezlynx.overdue_submission_reports",
-        "ezlynx.session_refresh",
-        "ezlynx.move_document",
-        "ezlynx.apply_label",
     }
 )
 _API_ROUTE_ACTIONS = frozenset(
