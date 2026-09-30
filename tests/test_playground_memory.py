@@ -357,7 +357,7 @@ class MemoryTests(unittest.TestCase):
                 )
                 waiting = handle_playground_chat(
                     db,
-                    "File a note for Buster Brown applicant 26356199.",
+                    "File a note for Buster Brown applicant 26356199 saying Reviewed renewal.",
                     conversation_id=SPACE,
                     thread_id="disc-2",
                     message_id="disc-2",
