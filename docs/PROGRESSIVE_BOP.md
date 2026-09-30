@@ -38,16 +38,19 @@ tab and writes one QA pack for `--report-date`:
    on 2026-09-30 has no View Reports control. It has
    `Export Pending Cancel for Non-Payment Pdf` and
    `Export Pending Cancel for Non-Payment Xls`. Those buttons are already
-   the report. On 2026-09-30 both downloads were 0 bytes while Report Dates
-   still showed `Select Date Range`. Before either export, the pull sets
-   that field. `Select Date Range` is the custom option: the same phrase as
-   the FAO preset `<select>`, not a filled date picker. The pull chooses it,
-   waits until Start Date and End Date are visible, and sets both to the
-   process date. If that option is not offered, it chooses the smallest
-   preset that covers the process date. It reads the value back and, when
-   the page supports it, waits for the network to go idle. Then it exports.
-   A missing control, a value that does not stick, an unknown preset, or a
-   page that does not finish loading holds. The export is not downloaded.
+   the report. On 2026-09-30 both downloads were 0 bytes while the date
+   control still showed `Select Date Range`. A later check of the select
+   attempt held with Report Dates missing: there is no combobox by that
+   name, and that text is not a label for an input. The control is a
+   dropdown button whose text is `Select Date Range`. Before either export,
+   the pull clicks that button (or `#dropdownMenu2` only when the button
+   name is absent and the id is unique), fills `.report-start` and
+   `.report-end` inside the open menu with the process date, and clicks
+   Apply. A `type=date` input gets `YYYY-MM-DD`. A text input gets
+   `MM/DD/YYYY`. It reads the input values or the button text back and
+   waits for the network to go idle. Then it exports. A missing control, a
+   value that does not stick, or a page that does not finish loading holds.
+   The export is not downloaded.
    The click only downloads. It does not bind, cancel, or pay.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from the PDF export, or from the Xls export. The PDF export is
@@ -213,26 +216,35 @@ is a failed pull, not a partial success. This code has not been run on
   exact link or button), `View Reports`, `Pending Cancel for Nonpayment`,
   `Export Pending Cancel for Non-Payment Pdf`,
   `Export Pending Cancel for Non-Payment Xls`,
-  `Report Dates`, `Start Date`, `End Date`,
+  `Select Date Range`, `Apply`, `.report-start`, `.report-end`,
   the shell policy search, `Documents`, and the `Policy` document tab. A
   mismatch holds; do not widen these from Production.
 - Whether Businessowner/Contractor GL opens exactly one new window.
 - Page-ready wait, reported from hermes-test-01 on 2026-09-30: the reports
   page showed the Pending Cancel for Non-Payment row and its pdf and xls
-  icons. Both exports were 0 bytes, and the hold named the empty file.
-  Report Dates was still `Select Date Range` because that build did not set
-  it. This date-range change has not been run there. Do not deploy it while
-  that host is in use.
-- Report Dates is modeled as a preset `<select>` (Playwright combobox)
-  because the live field displayed an option phrase, and FAO uses that same
-  `Select Date Range` text on `select#PDDateRange`. The BOP element id is
-  not known. Start Date and End Date are the FAO date-input names, not a
-  label seen on the BOP page. A live check has to confirm the accessible
-  name is exactly `Report Dates`, that choosing `Select Date Range` shows
-  those two date inputs, and what the preset labels are if it does not.
-- Whether a finished export is non-empty after the process date is accepted
-  for 9/29 and 9/30. A 0-byte file must still hold and must not become an
-  empty pack.
+  icons. Both exports were 0 bytes while the date control still showed
+  `Select Date Range`. Commit `cb066a9` then held with `Progressive BOP
+  Report Dates control is missing or ambiguous` and did not export. The
+  read-only page has no select and no combobox named Report Dates. The
+  words Report Dates are not a label for an input. The control is a
+  dropdown button, text `Select Date Range`, `id="dropdownMenu2"`, which
+  opens a menu. The menu has unlabeled inputs `.report-start` and
+  `.report-end`, plus Apply. This dropdown change has not been run there.
+  Do not deploy it while that host is in use.
+- Whether the button's accessible name is exactly `Select Date Range`. If
+  it is not, the pull uses `#dropdownMenu2` only when that id is unique.
+- Whether the open menu is the button's next sibling, a direct child of
+  the button's parent (`dropdown-menu` or `role="menu"`), or the one
+  element with `aria-labelledby` set to the button id. A different wrapper
+  holds before export.
+- Whether `.report-start` and `.report-end` are `type=date` or text. Text
+  is filled as `MM/DD/YYYY`. A type that is neither holds.
+- Whether Apply leaves the values in the inputs or rewrites the button
+  text to that same day. Either one is acceptance. A button label this
+  pull cannot read as that day, with empty inputs, holds.
+- Whether the network goes idle after Apply and the export is then
+  non-empty for 9/29 and 9/30. A 0-byte file must still hold and must not
+  become an empty pack.
 - Whether the PDF export is a policy list (insured, policy number, cancel
   date) or a packet of per-policy notices. A list is parsed. The per-policy
   Notice of Non Payment is still downloaded from FAO Documents. A cancel date
