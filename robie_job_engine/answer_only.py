@@ -278,9 +278,12 @@ def strip_internal_user_markers(text: str) -> str:
     return cleaned.strip()
 
 
+_ZERO_WIDTH_CHARS = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
+
+
 def scrub_user_reply(text: str) -> str:
     """User text only. Fixture policy numbers are not agency records."""
-    raw = str(text or "")
+    raw = str(text or "").translate(_ZERO_WIDTH_CHARS)
     if FIXTURE_POLICY_MARKER in raw:
         return LIVE_LOOKUP_FAILED
     return strip_internal_user_markers(raw)

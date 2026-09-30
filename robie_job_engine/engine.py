@@ -558,6 +558,12 @@ class JobEngine:
                 except RunIsolationError:
                     pass
             if status_name in {"COMPLETE", "FAILED", "UNVERIFIED"}:
+                if self.recordings is not None:
+                    # Chat starts the recording outside this engine, so
+                    # recording_started is false and the audit used to read
+                    # a row still marked RECORDING. Stop it first. safe_stop
+                    # does not change the job status.
+                    self.recordings.safe_stop(job_id, status_name)
                 try:
                     from .playwright_observability import (
                         fail_closed_zero_playwright_rows,

@@ -540,8 +540,15 @@ def iter_discussion_notes(record: Any):
                 yield from iter_discussion_notes(row)
 
 
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
 def _same_note_text(left: str, right: str) -> bool:
-    return " ".join(str(left or "").split()) == " ".join(str(right or "").split())
+    def _norm(value: str) -> str:
+        cleaned = _ZERO_WIDTH_RE.sub("", str(value or ""))
+        return " ".join(cleaned.split())
+
+    return _norm(left) == _norm(right)
 
 
 def find_identical_note(record: Any, note_body: str) -> dict[str, Any] | None:

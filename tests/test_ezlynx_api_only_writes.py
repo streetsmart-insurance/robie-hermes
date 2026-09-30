@@ -429,7 +429,47 @@ class NoteToolTests(unittest.TestCase):
                 )
             self.assertTrue(result["ok"])
             self.assertEqual(result["note_id"], "n7")
+            self.assertIn("Robie was here", result["note_text"])
             mocked.assert_called_once()
+        finally:
+            _restore_modules(previous)
+
+    def test_checkpoint_keeps_note_text_for_discussion_readback(self):
+        from durable_temp import durable_temporary_directory
+
+        from robie_job_engine.store import JobStore
+
+        tool, previous = self._load()
+        try:
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                job = JobStore(db).create_job(
+                    "hermes.plain_english", {"text": "hello"}
+                )
+                with patch(
+                    "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                    return_value={
+                        "status": "filed",
+                        "note_id": "n7",
+                        "discussion_id": "848144886",
+                        "discussion_title": "follw up 1",
+                        "read_back": True,
+                    },
+                ):
+                    tool.ezlynx_discussion_note_handler(
+                        {
+                            "applicant_id": ALLOWED_APPLICANT,
+                            "note_text": "Hello\n\nRobie was here",
+                            "title_hint": "follw up 1",
+                        },
+                        job_id=job["id"],
+                        db_path=db,
+                    )
+                saved = JobStore(db).get_checkpoint(job["id"], "discussion_note")
+            self.assertEqual(saved["note_text"], "Hello\n\nRobie was here")
+            self.assertEqual(saved["discussion_id"], "848144886")
+            self.assertEqual(saved["applicant_id"], ALLOWED_APPLICANT)
+            self.assertEqual(saved["discussion_title"], "follw up 1")
         finally:
             _restore_modules(previous)
 

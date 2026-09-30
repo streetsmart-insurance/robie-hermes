@@ -514,6 +514,34 @@ def compare_plan_to_api(
     }
 
 
+def _observed_from_discussion(
+    discussion_id: str, plan: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Map planned values off a re-read discussion. No policy number."""
+    try:
+        from .ezlynx_api_read_port import EzlynxApiClientReadPort
+        from .ezlynx_discussions import _note_body, find_identical_note
+    except Exception as exc:
+        return {"_error": f"EZLynx API readback was not run: {type(exc).__name__}"}
+    try:
+        record = EzlynxApiClientReadPort().get_discussion(discussion_id)
+    except Exception as exc:
+        return {"_error": f"EZLynx API readback failed: {type(exc).__name__}"}
+    if not isinstance(record, dict) or not record:
+        return {"_error": f"discussion {discussion_id} is not on the EZLynx record"}
+    observed: dict[str, Any] = {}
+    for name, expected in dict(plan.get("values") or {}).items():
+        key = str(name or "")
+        if key.casefold() in {"note_text", "note", "body", "text", "note_body"}:
+            matched = find_identical_note(record, str(expected or ""))
+            observed[name] = _note_body(matched) if matched else None
+        elif key in record:
+            observed[name] = record.get(key)
+        else:
+            observed[name] = None
+    return observed
+
+
 def readback_is_live() -> bool:
     """The API read runs on Test, where the discussion API is live.
 
@@ -540,6 +568,9 @@ def default_ezlynx_observed(plan: Mapping[str, Any]) -> dict[str, Any]:
         from .evidence_fetchers import _POLICY_FIELD_KEYS, _first_present
     except Exception as exc:
         return {"_error": f"EZLynx API readback was not run: {type(exc).__name__}"}
+    discussion_id = str(target.get("discussion_id") or "").strip()
+    if not policy_number and discussion_id:
+        return _observed_from_discussion(discussion_id, plan)
     if not policy_number:
         return {"_error": "EZLynx API readback needs a policy number on the plan"}
     try:
@@ -643,6 +674,18 @@ def write_reply_if_planned(
     plan = get_locked_plan(store, job_id) if job_id else None
     if plan is None:
         return ""
+    plan = dict(plan)
+    target = dict(plan.get("target") or {})
+    if (
+        not str(target.get("policy_number") or "").strip()
+        and not str(target.get("discussion_id") or "").strip()
+        and job_id
+    ):
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+        discussion_id = str(note.get("discussion_id") or "").strip()
+        if discussion_id:
+            target["discussion_id"] = discussion_id
+            plan["target"] = target
     fetcher = fetch_fn or default_ezlynx_observed
     try:
         observed = dict(fetcher(plan) or {})

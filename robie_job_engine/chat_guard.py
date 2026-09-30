@@ -41,7 +41,7 @@ from .playwright_observability import (
     fail_closed_zero_playwright_rows,
     maybe_snapshot_and_bind,
 )
-from .post_job_audit import format_audit_chat_message, maybe_audit_terminal_job
+from .post_job_audit import maybe_audit_terminal_job
 from .store import JobStore
 
 
@@ -1701,24 +1701,27 @@ def _post_job_audit_note(
     job_id: str,
     recordings: RecordingManager | None = None,
 ) -> str:
-    """Append the four-answer audit. Posted by the existing Chat APP send()."""
+    """Persist the audit on the job. The CSR reply does not include it.
+
+    The full checklist stays in the job log and the health-channel poster.
+    Stop the recording first so the audit does not read a row still
+    marked RECORDING.
+    """
     try:
-        audit = maybe_audit_terminal_job(db_path, job_id)
+        if recordings is not None:
+            status = JobStatus.UNVERIFIED.value
+            try:
+                status = str(JobStore(db_path).get_job(job_id).get("status") or status)
+            except Exception:
+                status = JobStatus.UNVERIFIED.value
+            if status not in _RECORDING_KEEP_OPEN:
+                recordings.safe_stop(job_id, status)
+        maybe_audit_terminal_job(db_path, job_id)
         if recordings is not None:
             recordings.release_local_after_audit(job_id)
-    except Exception as exc:
-        return (
-            f"\n\nROBIE post-job audit — {job_id} — UNKNOWN\n"
-            f"1. Heartbeat gateway_progress: UNKNOWN ({type(exc).__name__})\n"
-            f"2. Destination evidence: UNKNOWN\n"
-            f"3. Recording motion: FAIL (audit crashed; fail-closed)\n"
-            f"4. Tool vs recording: UNKNOWN\n"
-            f"5. Playwright tool rows: UNKNOWN\n"
-            "Audit verdict: FAIL (does not authorize COMPLETE)"
-        )
-    if not audit:
-        return ""
-    return "\n\n" + format_audit_chat_message(audit)
+    except Exception:
+        logger.exception("post-job audit stayed in the ledger only job=%s", job_id)
+    return ""
 
 
 def _login_secret_chat_note(store: JobStore, job_id: str) -> str:
@@ -1918,7 +1921,12 @@ def _render_chat_terminal(
 
         ref = status_format.short_job_ref(job["id"])
         body = forced if not ref else f"{forced}\n\n{ref}"
+        _post_job_audit_note(str(store.path), job["id"], recordings)
         return body.strip() + "\n"
+    note_reply = _discussion_note_user_reply(store, job)
+    if note_reply:
+        _post_job_audit_note(str(store.path), job["id"], recordings)
+        return note_reply if note_reply.endswith("\n") else note_reply + "\n"
     # A question is answered in the reply. EZLynx is not the destination.
     if is_answer_only_job(job):
         return render_job_end_state(
@@ -2073,6 +2081,90 @@ def _render_chat_terminal(
         ),
         job_id=job_id,
     )
+
+
+def _account_display_name(job: dict[str, Any]) -> str:
+    payload = dict(job.get("payload") or {})
+    for key in (
+        "account_name",
+        "client_name",
+        "company_name",
+        "applicant_name",
+        "customer_name",
+    ):
+        name = " ".join(str(payload.get(key) or "").split()).strip()
+        if name:
+            return name
+    return "the account"
+
+
+def _is_address_or_holder_job(job: dict[str, Any]) -> bool:
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or "")
+    folded = text.casefold()
+    action = str(job.get("action_type") or "")
+    address = action == "ezlynx.policy_change" or "mailing address" in folded
+    holder = action == "ezlynx.certificate" or (
+        "certificate" in folded or "certificate holder" in folded
+    )
+    return address or holder
+
+
+def _discussion_note_user_reply(store: JobStore, job: dict[str, Any]) -> str:
+    """Two lines for a discussion-note job. The audit stays off this reply."""
+    note = store.get_checkpoint(job["id"], "discussion_note") or {}
+    discussion_id = str(note.get("discussion_id") or "").strip()
+    if not discussion_id or _is_address_or_holder_job(job):
+        return ""
+    from . import status_format
+    from .post_job_audit import api_readback_confirms_write
+
+    name = _account_display_name(job)
+    title = " ".join(str(note.get("discussion_title") or "").split()).strip() or "the discussion"
+    text = " ".join(str(note.get("note_text") or "").split()).strip()
+    if api_readback_confirms_write(store, job["id"]):
+        sentence = (
+            f'Done. Added a note to {name} on "{title}": "{text}". '
+            "I re-checked EZLynx and it's there."
+        )
+    else:
+        sentence = (
+            f'I tried to add the note to {name} on "{title}" but couldn\'t confirm it landed. '
+            "Please check before counting it done."
+        )
+    ref = status_format.short_job_ref(job["id"])
+    body = sentence if not ref else f"{sentence}\n{ref}"
+    return body.strip()
+
+
+def _merge_discussion_note_destination(store: JobStore, job_id: str) -> None:
+    """Put the filed note's keys on the action claim so readback can re-read it.
+
+    Policy number still wins for a policy-level write. note_id stays off the
+    destination so the discussion id remains the identity when there is no
+    policy number.
+    """
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    discussion_id = str(note.get("discussion_id") or "").strip()
+    note_text = str(note.get("note_text") or "").strip()
+    if not discussion_id or not note_text:
+        return
+    action = store.get_checkpoint(job_id, "action")
+    if not isinstance(action, dict):
+        return
+    destination = dict(action.get("destination") or {})
+    destination["discussion_id"] = discussion_id
+    destination["note_text"] = note_text
+    applicant = str(note.get("applicant_id") or "").strip()
+    if applicant and not str(destination.get("applicant_id") or "").strip():
+        destination["applicant_id"] = applicant
+    title = str(note.get("discussion_title") or "").strip()
+    if title and not str(destination.get("discussion_title") or "").strip():
+        destination["discussion_title"] = title
+    destination["write_kind"] = "discussion_note"
+    updated = dict(action)
+    updated["destination"] = destination
+    store.checkpoint(job_id, "action", updated)
 
 
 def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
@@ -2326,6 +2418,7 @@ def _guard_chat_response_impl(
         from .chat_destination_binding import bind_destination_for_job, claimed_from_job
 
         bind_destination_for_job(store, job, claimed=claimed_from_job(job, content))
+    _merge_discussion_note_destination(store, job_id)
     action = store.get_checkpoint(job_id, "action")
     registry = dict(verifiers or _default_chat_verifiers())
     verifier = registry.get(job["action_type"])

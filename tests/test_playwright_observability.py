@@ -86,7 +86,7 @@ class ZeroToolRowFailClosedTests(unittest.TestCase):
             self.assertNotEqual(final["status"], JobStatus.COMPLETE.value)
             self.assertIn("PLAYWRIGHT_SILENT", final["last_error"])
             self.assertIn(SILENT_GAP_JOB[:8], final["last_error"])
-            self.assertIn("FAILED", response)
+            self.assertIn("Failed.", response)
             self.assertNotIn("— UNVERIFIED", response)
             self.assertNotIn("— COMPLETE", response)
             self.assertIn("zero playwright_exec", response.casefold())
