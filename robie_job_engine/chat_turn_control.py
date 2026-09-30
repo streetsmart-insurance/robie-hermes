@@ -414,6 +414,52 @@ BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
 NOTHING_RUNNING_REPLY = "Nothing is running right now."
 
 
+def stop_reply_line(job_id: str) -> str:
+    """The only /stop sentence. No audit, no model text."""
+    return f"Stopped. That job is cancelled. Ref: job {job_id}"
+
+
+def job_was_stopped_or_ceiling(store: Any, job: dict | None) -> bool:
+    """True when /stop or the time ceiling already ended this job."""
+    if not job or store is None:
+        return False
+    status = str(job.get("status") or "")
+    if status not in {JobStatus.FAILED.value, "FAILED"}:
+        return False
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+        try:
+            if store.get_checkpoint(job_id, kind):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def conversation_must_start_fresh(store: Any, job: dict | None) -> bool:
+    """The next Chat message opens a new job after stop, the ceiling, or completion."""
+    if not job:
+        return False
+    status = str(job.get("status") or "")
+    if status in {JobStatus.COMPLETE.value, "COMPLETE"}:
+        return True
+    return job_was_stopped_or_ceiling(store, job)
+
+
+def chat_turn_keeps_context(db_path: str, job_id: str | None) -> bool:
+    """A clarification reply stays on the same job and keeps its transcript."""
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        return bool(JobStore(db_path).get_checkpoint(job_id, "keep_chat_context"))
+    except Exception:
+        return False
+
+
 def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:
     """What to do with a Chat message while a turn may already be running.
 
@@ -1182,7 +1228,7 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
     status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
         return NOTHING_RUNNING_REPLY
-    reply = f"Stopped. That job is cancelled.\n\nRef: job {job_id}"
+    reply = stop_reply_line(job_id)
     store.transition(
         job_id,
         JobStatus.FAILED,

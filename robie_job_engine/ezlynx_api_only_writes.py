@@ -516,8 +516,12 @@ def add_note_to_discussion(
     )
     if filed.get("status") != "filed":
         return filed
+    if filed.get("read_back") and str(filed.get("verified_by") or "") == "text":
+        return filed
     note_id = str(filed.get("note_id") or "").strip()
     discussion_id = str(filed.get("discussion_id") or "").strip()
+    if not note_id:
+        return filed
     confirm_discussion_note(client, discussion_id, note_id)
     filed["read_back"] = True
     return filed

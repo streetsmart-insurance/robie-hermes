@@ -69,6 +69,9 @@ CERT_ROUTE = (
     "Route: certificate. Use ezlynx_discussion_note and "
     "robie_job_engine.certificate_filing to draft and file the holder note "
     "on the existing discussion. Draft only. "
+    "The note must say the certificate holder was requested/drafted until a "
+    "readback shows the holder was added. Do not say the holder was added "
+    "before that readback. "
     "Do not bind, take payment, or email the client or the certificate holder. "
     "Do not browse EZLynx by hand. Do not read Robie's source, jobs.db, or token files."
 )
@@ -156,6 +159,98 @@ def rewrite_unproved_address_note(note_text: str, *, proved: bool = False) -> st
     for pattern, replacement in _ADDRESS_COMPLETION_CLAIMS:
         text = pattern.sub(replacement, text)
     return text
+
+
+_HOLDER_COMPLETION_CLAIMS = (
+    (
+        re.compile(r"\badded certificate holder\b", re.IGNORECASE),
+        "Requested/drafted certificate holder",
+    ),
+    (
+        re.compile(r"\bcertificate holder was added\b", re.IGNORECASE),
+        "certificate holder was requested/drafted",
+    ),
+    (
+        re.compile(r"\bcertificate holder added\b", re.IGNORECASE),
+        "certificate holder requested/drafted",
+    ),
+)
+
+
+def holder_readback_proved(args: dict | None = None) -> bool:
+    """True only when this call or a checkpoint says the holder was read back."""
+    payload = dict(args or {})
+    flag = payload.get("holder_readback_proved")
+    if flag is True or str(flag or "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    import os
+
+    job_id = str(
+        payload.get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        note = JobStore(db_path).get_checkpoint(job_id, "holder_readback")
+    except Exception:
+        return False
+    if not note:
+        return False
+    if note.get("passed") is True or note.get("proved") is True:
+        return True
+    return str(note.get("status") or "").casefold() == "passed"
+
+
+def rewrite_unproved_holder_note(note_text: str, *, proved: bool = False) -> str:
+    """A holder note says requested/drafted until a readback proves the add."""
+    text = str(note_text or "")
+    if proved:
+        return text
+    for pattern, replacement in _HOLDER_COMPLETION_CLAIMS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def field_change_user_reply(discussion: str, *, kind: str) -> str:
+    """What Robie tells the user when the note landed and the field write did not."""
+    title = " ".join(str(discussion or "").split()).strip() or "the discussion"
+    field = "holder" if str(kind or "").casefold() == "holder" else "address"
+    return (
+        f"I noted the request on {title}; I can't change the {field} myself yet, "
+        "so a CSR needs to make it."
+    )
+
+
+_BLANK_SAVED_SPAN = re.compile(r"\s*saved to\s+through\s*\.?", re.IGNORECASE)
+
+
+def saved_span_sentence(start_path: str, end_path: str) -> str:
+    """Name both files, or say nothing when a path is missing.
+
+    An empty interpolation used to post ``saved to  through .``
+    """
+    start = str(start_path or "").strip()
+    end = str(end_path or "").strip()
+    if start and end:
+        return f"saved to {start} through {end}."
+    if start or end:
+        return f"saved to {start or end}."
+    return ""
+
+
+def strip_blank_saved_span(text: str) -> str:
+    """Drop the broken save sentence. Do not leave the empty path clause."""
+    cleaned = _BLANK_SAVED_SPAN.sub(" ", str(text or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 FORBIDDEN_READ_RULE = (
     "Do not read Robie's own source, jobs.db, .hermes/google_token.json, "

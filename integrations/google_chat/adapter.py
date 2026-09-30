@@ -1572,7 +1572,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         }
         limit = gateway_max_turn_seconds()
         try:
-            await self._begin_fresh_chat_turn(event)
+            from robie_job_engine.chat_turn_control import chat_turn_keeps_context
+
+            if not chat_turn_keeps_context(ROBIE_JOB_DB, job_id):
+                await self._begin_fresh_chat_turn(event)
             await self.handle_message(event)
         except Exception:
             current = self._gateway_turns.get(key)
@@ -3177,21 +3180,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if await self._halt_retry_refusal(event, job_id, text):
             return
         if related_only:
-            # A corrective reply may safely retarget the exact active
-            # zero-attempt Job to a bounded destination action. Execute
-            # that same Job ID instead of dispatching Hermes or creating
-            # a duplicate. Ordinary status/questions remain conversational.
-            if (
-                job_id
-                and correction.action_type in BOUNDED_ENGINE_ACTIONS
-                and await self._enqueue_bounded_chat_job(
-                    event, job_id, related_only=True
-                )
-            ):
+            from robie_job_engine.chat_turn_control import chat_turn_keeps_context
+
+            # A clarification reply stays on this job. Do not wipe its thread.
+            if not (job_id and chat_turn_keeps_context(ROBIE_JOB_DB, job_id)):
+                # A corrective reply may safely retarget the exact active
+                # zero-attempt Job to a bounded destination action. Execute
+                # that same Job ID instead of dispatching Hermes or creating
+                # a duplicate. Ordinary status/questions remain conversational.
+                if (
+                    job_id
+                    and correction.action_type in BOUNDED_ENGINE_ACTIONS
+                    and await self._enqueue_bounded_chat_job(
+                        event, job_id, related_only=True
+                    )
+                ):
+                    return
+                await self._begin_fresh_chat_turn(event)
+                await self.handle_message(event)
                 return
-            await self._begin_fresh_chat_turn(event)
-            await self.handle_message(event)
-            return
         # Test AND Production: operational bounded work goes through
         # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
         # DurableWorkLedger. Ledger/path failures fail closed. Hermes
@@ -4008,6 +4015,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # The running job is still open. Do not run the post-job guard,
             # which would rewrite this ack and replace the job's real reply.
             content = str(content or "").strip()
+        elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "stop":
+            from robie_job_engine.chat_guard import guard_chat_notice
+            from robie_job_engine.chat_turn_control import stop_reply_line
+
+            # One fixed line. The post-job audit, including any tool-mismatch
+            # note, stays in the ledger and is not sent.
+            if job_id:
+                content = stop_reply_line(job_id)
+            content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
         elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "ceiling":
             from robie_job_engine.chat_guard import guard_chat_notice
 

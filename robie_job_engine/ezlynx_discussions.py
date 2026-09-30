@@ -493,6 +493,68 @@ def select_discussion_for_note(
     )
 
 
+def _note_body(row: Any) -> str:
+    if isinstance(row, str):
+        return row.strip()
+    if not isinstance(row, dict):
+        return ""
+    for key in ("body", "Body", "text", "Text", "noteText", "NoteText"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = _note_body(value)
+            if nested:
+                return nested
+    return ""
+
+
+def _note_id_of(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("noteId", "NoteId", "id", "Id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def iter_discussion_notes(record: Any):
+    """Yield note dicts from a discussion payload. Does not invent ids."""
+    if isinstance(record, list):
+        for item in record:
+            yield from iter_discussion_notes(item)
+        return
+    if not isinstance(record, dict):
+        return
+    body = _note_body(record)
+    if body and (
+        _note_id_of(record)
+        or any(key in record for key in ("body", "Body", "text", "Text"))
+    ):
+        yield record
+    for key in ("notes", "Notes", "items", "Items", "data", "Data"):
+        rows = record.get(key)
+        if isinstance(rows, list):
+            for row in rows:
+                yield from iter_discussion_notes(row)
+
+
+def _same_note_text(left: str, right: str) -> bool:
+    return " ".join(str(left or "").split()) == " ".join(str(right or "").split())
+
+
+def find_identical_note(record: Any, note_body: str) -> dict[str, Any] | None:
+    """The note already on this discussion whose text matches, if any."""
+    want = str(note_body or "").strip()
+    if not want:
+        return None
+    for row in iter_discussion_notes(record):
+        if _same_note_text(_note_body(row), want):
+            return row
+    return None
+
+
 def file_note_to_existing_discussion(
     client: DiscussionApiClient,
     applicant_id: str,
@@ -539,6 +601,7 @@ def file_note_to_existing_discussion(
             "discussion_id": None,
             "note_id": None,
         }
+    title = discussion_title_of(record)
     if dry_run:
         return {
             "status": "dry_run",
@@ -546,35 +609,90 @@ def file_note_to_existing_discussion(
             "reason": "dry run: note validated, nothing written",
             "applicant_id": applicant,
             "discussion_id": discussion_id,
-            "discussion_title": discussion_title_of(record),
+            "discussion_title": title,
             "note_id": None,
+        }
+    # A retry must not post the same words again. EZLynx often accepts the
+    # first write and omits the note id, which used to look like a failure.
+    already = None
+    getter = getattr(client, "get_discussion", None)
+    if callable(getter):
+        try:
+            already = find_identical_note(getter(discussion_id), text)
+        except Exception:
+            already = None
+    if already is not None:
+        existing_id = _note_id_of(already)
+        return {
+            "status": "filed",
+            "reason_code": None,
+            "reason": "identical note already on the discussion; not posted again",
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": existing_id or None,
+            "read_back": True,
+            "verified_by": "text",
+            "idempotent": True,
+            "response": already,
         }
     created = client.append_note(discussion_id, text, note_type=note_type)
     note_id = ""
     if isinstance(created, dict):
-        for key in ("noteId", "NoteId", "id", "Id"):
-            value = str(created.get(key) or "").strip()
-            if value:
-                note_id = value
-                break
-    if not note_id:
-        raise DiscussionApiError(
-            None,
-            "DiscussionApi append returned no note_id; refusing success",
-        )
-    # Fresh GET before success. Playwright/DOM is never this proof.
+        note_id = _note_id_of(created)
     from .ezlynx_api_only_writes import confirm_discussion_note
 
-    confirm_discussion_note(client, discussion_id, note_id)
+    if note_id:
+        # Fresh GET before success. Playwright/DOM is never this proof.
+        confirm_discussion_note(client, discussion_id, note_id)
+        return {
+            "status": "filed",
+            "reason_code": None,
+            "reason": "note appended to existing discussion",
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": note_id,
+            "read_back": True,
+            "verified_by": "note_id",
+            "response": created,
+        }
+    # 2xx with no id is not a failure. Read the notes back and match the text.
+    matched = None
+    if callable(getter):
+        try:
+            matched = find_identical_note(getter(discussion_id), text)
+        except Exception:
+            matched = None
+    if matched is None:
+        return {
+            "status": "posted, verifying",
+            "reason_code": None,
+            "reason": (
+                "DiscussionApi accepted the note without a note_id; "
+                "the text was not on the discussion yet"
+            ),
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": None,
+            "read_back": False,
+            "verified_by": None,
+            "response": created,
+        }
+    matched_id = _note_id_of(matched)
+    if matched_id:
+        confirm_discussion_note(client, discussion_id, matched_id)
     return {
         "status": "filed",
         "reason_code": None,
-        "reason": "note appended to existing discussion",
+        "reason": "note posted and confirmed by matching the discussion text",
         "applicant_id": applicant,
         "discussion_id": discussion_id,
-        "discussion_title": discussion_title_of(record),
-        "note_id": note_id,
+        "discussion_title": title,
+        "note_id": matched_id or None,
         "read_back": True,
+        "verified_by": "text",
         "response": created,
     }
 

@@ -173,7 +173,9 @@ def render_answer_only(
     ask = _ask_text(payload) or _fragment(str(worker_text or ""))
     answer = _strip_internal_reasoning(str(worker_text or ""))
     answer = strip_answer_verifier_noise(str(answer or ""))
-    answer = str(answer or "").strip()
+    from .answer_only import strip_blank_saved_span
+
+    answer = strip_blank_saved_span(str(answer or ""))
     if end_state_report_enabled():
         scorer = client if client is not None else build_jev_client()
         state = redact_mapping({"ask": ask, "answer": answer[:4000]})

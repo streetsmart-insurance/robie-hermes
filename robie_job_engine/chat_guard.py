@@ -920,6 +920,12 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     text = add_synced_context(text)
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    if store.get_checkpoint(job_id, "keep_chat_context") or store.get_checkpoint(
+        job_id, "clarification_reply"
+    ):
+        combined = str((job.get("payload") or {}).get("text") or "").strip()
+        if combined:
+            text = combined
     if (
         job["action_type"] == "hermes.google_chat_task"
         and job["status"] == JobStatus.RUNNING.value
@@ -1189,6 +1195,26 @@ def open_chat_job(
         related_only = False
         explicit_continuation = False
     resume_context = queue.active_conversation_job(context_key)
+    from .chat_turn_control import conversation_must_start_fresh
+
+    active_for_turn = None
+    active_for_turn_id = (resume_context or {}).get("job_id")
+    if active_for_turn_id:
+        try:
+            active_for_turn = store.get_job(active_for_turn_id)
+        except KeyError:
+            active_for_turn = None
+    continue_clarification = bool(
+        active_for_turn
+        and JobStatus(active_for_turn["status"]) == JobStatus.NEEDS_CLARIFICATION
+        and not conversation_must_start_fresh(store, active_for_turn)
+    )
+    if active_for_turn and conversation_must_start_fresh(store, active_for_turn):
+        # The stopped, timed-out, or finished job must not swallow the next message.
+        queue.deactivate_conversation(context_key)
+        resume_context = None
+        related_only = False
+        explicit_continuation = False
     resume_state = dict((resume_context or {}).get("interaction_state") or {})
     if (
         resume_state.get("resume_mode") == "direct"
@@ -1196,7 +1222,36 @@ def open_chat_job(
     ):
         explicit_continuation = True
     continued_job: dict[str, Any] | None = None
-    if related_only or explicit_continuation:
+    if continue_clarification and active_for_turn is not None:
+        original = str((active_for_turn.get("payload") or {}).get("text") or "").strip()
+        reply = str(text or "").strip()
+        combined = original
+        if reply and reply not in original:
+            combined = f"{original}\n\nUser reply: {reply}".strip()
+        payload = dict(active_for_turn.get("payload") or {})
+        payload["text"] = combined
+        payload["clarification_reply"] = reply
+        store.update_payload(active_for_turn["id"], payload)
+        store.checkpoint(
+            active_for_turn["id"],
+            "clarification_reply",
+            {"message_id": message_id, "text": reply, "combined": combined},
+        )
+        store.checkpoint(
+            active_for_turn["id"],
+            "keep_chat_context",
+            {"reason": "needs_clarification"},
+        )
+        store.resume(active_for_turn["id"])
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=active_for_turn["id"],
+            message_id=message_id,
+            event_id=message_id,
+            relation="CONTINUATION",
+        )
+        continued_job = store.get_job(active_for_turn["id"])
+    elif related_only or explicit_continuation:
         current = queue.active_conversation_job(context_key)
         active_job_id = current.get("job_id") if current else None
         if is_retry_text(text):
@@ -1666,9 +1721,16 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
     if not recording:
         return ""
     if recording.get("status") == "READY" and recording.get("drive_url"):
+        from .answer_only import saved_span_sentence
+
+        start = str(recording.get("local_path") or "").strip()
+        end = str(recording.get("drive_url") or "").strip()
+        span = saved_span_sentence(start, end)
+        saved = f"\n{span}" if start and end else ""
         return (
             "\n\n🎥 Review this job recording: "
-            f"{recording['drive_url']}\n"
+            f"{recording['drive_url']}"
+            f"{saved}\n"
             "Reply in this thread with what ROBIE should correct or retry."
         )
     if recording.get("status") == "FAILED":
@@ -1825,6 +1887,13 @@ def _render_chat_terminal(
     from .answer_only import is_answer_only_job
     from .end_state_report import end_state_report_enabled, render_job_end_state
 
+    forced = _unproved_field_user_reply(store, job)
+    if forced:
+        from . import status_format
+
+        ref = status_format.short_job_ref(job["id"])
+        body = forced if not ref else f"{forced}\n\n{ref}"
+        return body.strip() + "\n"
     # A question is answered in the reply. EZLynx is not the destination.
     if is_answer_only_job(job):
         return render_job_end_state(
@@ -1959,6 +2028,49 @@ def _render_chat_terminal(
     )
 
 
+def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
+    """The user-facing line when a note was filed and the field was not changed."""
+    note = store.get_checkpoint(job["id"], "discussion_note") or {}
+    status = str(note.get("status") or "")
+    if status not in {"filed", "posted, verifying"} and not note.get("read_back"):
+        return ""
+    title = str(note.get("discussion_title") or "").strip()
+    if not title:
+        return ""
+    from .answer_only import (
+        address_readback_proved,
+        field_change_user_reply,
+        holder_readback_proved,
+    )
+
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or "")
+    folded = text.casefold()
+    action = str(job.get("action_type") or "")
+    proof_args = {"job_id": job["id"], "db_path": str(getattr(store, "path", "") or "")}
+    address = action == "ezlynx.policy_change" or "mailing address" in folded
+    holder = action == "ezlynx.certificate" or (
+        "certificate" in folded or "certificate holder" in folded
+    )
+    if address and not holder:
+        if address_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="address")
+    if holder and not address:
+        if holder_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="holder")
+    if address and holder:
+        if "mailing address" in folded or action == "ezlynx.policy_change":
+            if address_readback_proved(proof_args):
+                return ""
+            return field_change_user_reply(title, kind="address")
+        if holder_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="holder")
+    return ""
+
+
 def guard_chat_response(
     db_path: str,
     job_id: str | None,
@@ -1967,7 +2079,9 @@ def guard_chat_response(
     verifiers: dict[str, Any] | None = None,
     recordings: RecordingManager | None = None,
 ) -> str:
-    content = redact_text(content)
+    from .answer_only import strip_blank_saved_span
+
+    content = strip_blank_saved_span(redact_text(content))
     from .hitl import sanitize_hitl_chat_text
 
     content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
@@ -1981,6 +2095,9 @@ def guard_chat_response(
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    forced = _unproved_field_user_reply(store, job)
+    if forced:
+        content = forced
     recordings = recordings or RecordingManager(db_path)
     from .policy_setup_dispatch import is_policy_setup_honest_hitl
 

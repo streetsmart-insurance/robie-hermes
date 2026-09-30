@@ -303,6 +303,8 @@ class StopCommandTests(unittest.TestCase):
         self.assertEqual(saved["last_error"], "Cancelled.")
         self.assertIn("cancelled", reply.casefold())
         self.assertIn(f"Ref: job {job['id']}", reply)
+        self.assertNotIn("\n", reply)
+        self.assertNotIn("playwright", reply.casefold())
         self.assertIsNotNone(cancelled)
 
     def test_adapter_handles_stop_before_it_creates_a_job(self):
@@ -2275,6 +2277,200 @@ class ProveSessionReleaseTests(unittest.TestCase):
                 for job_id in opened:
                     if job_id:
                         stop_generic_chat_job_heartbeat(db, job_id)
+
+
+class Round6ConversationTests(unittest.TestCase):
+    def test_message_after_stop_or_ceiling_opens_a_new_job(self):
+        from robie_job_engine.chat_turn_control import stop_reply_line
+
+        question = "what does COI stand for?"
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            stopped = open_chat_job(
+                db,
+                "m-stop",
+                "Upload the renewal document in EZLynx",
+                conversation_id="spaces/dm",
+            )
+            self.assertIsNotNone(stopped)
+            current = store.get_job(stopped)
+            if current["status"] == JobStatus.PENDING.value:
+                store.transition(stopped, JobStatus.RUNNING, expected={JobStatus.PENDING})
+            if store.get_job(stopped)["status"] != JobStatus.FAILED.value:
+                store.transition(
+                    stopped,
+                    JobStatus.FAILED,
+                    expected={JobStatus(store.get_job(stopped)["status"])},
+                    error="Cancelled.",
+                    release_lease=True,
+                )
+            store.checkpoint(stopped, "cancelled", {"by": "/stop"})
+            store.checkpoint(stopped, "agent_abort", {"reason": "/stop"})
+            nxt = open_chat_job(db, "m-next", question, conversation_id="spaces/dm")
+            self.assertIsNotNone(nxt)
+            self.assertNotEqual(nxt, stopped)
+            self.assertEqual(agent_output_blocked(stopped, store), STOPPED_OUTPUT)
+            self.assertIsNone(agent_output_blocked(nxt, store))
+            ceiling = open_chat_job(
+                db,
+                "m-ceil-job",
+                "Finish the commercial auto quote for the test account",
+                conversation_id="spaces/ceiling",
+            )
+            if store.get_job(ceiling)["status"] == JobStatus.PENDING.value:
+                store.transition(ceiling, JobStatus.RUNNING, expected={JobStatus.PENDING})
+            if store.get_job(ceiling)["status"] != JobStatus.FAILED.value:
+                store.transition(
+                    ceiling,
+                    JobStatus.FAILED,
+                    expected={JobStatus(store.get_job(ceiling)["status"])},
+                    error="gateway_max_turn_seconds",
+                    release_lease=True,
+                )
+            store.checkpoint(ceiling, "gateway_turn_timeout", {"seconds": 600})
+            after_ceiling = open_chat_job(
+                db, "m-after-ceiling", question, conversation_id="spaces/ceiling"
+            )
+            self.assertNotEqual(after_ceiling, ceiling)
+            self.assertEqual(agent_output_blocked(ceiling, store), STOPPED_OUTPUT)
+            self.assertIsNone(agent_output_blocked(after_ceiling, store))
+        self.assertEqual(
+            stop_reply_line("abc"),
+            "Stopped. That job is cancelled. Ref: job abc",
+        )
+        self.assertNotIn("\n", stop_reply_line("abc"))
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        send = adapter.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
+        stop = send.split('delivery_kind == "stop"', 1)[1].split("elif", 1)[0]
+        self.assertIn("stop_reply_line", stop)
+        self.assertIn("guard_chat_notice", stop)
+        self.assertNotIn("guard_chat_response", stop)
+        self.assertIn(
+            "job_id = await asyncio.to_thread(\n                open_chat_job",
+            adapter,
+        )
+
+    def test_clarification_reply_continues_the_same_job(self):
+        ask = "can you do a book for me"
+        reply = "Buster Brown's policies"
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            first = open_chat_job(db, "m-vague", ask, conversation_id="spaces/clarify")
+            self.assertEqual(store.get_job(first)["status"], JobStatus.NEEDS_CLARIFICATION.value)
+            continued = open_chat_job(
+                db, "m-reply", reply, conversation_id="spaces/clarify"
+            )
+            self.assertEqual(continued, first)
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+            payload = store.get_job(first)["payload"]
+            self.assertIn(ask, payload["text"])
+            self.assertIn(reply, payload["text"])
+            self.assertIsNotNone(store.get_checkpoint(first, "keep_chat_context"))
+            self.assertIn(ask, build_chat_execution_text(db, first, reply))
+            self.assertIn(reply, build_chat_execution_text(db, first, reply))
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        ceiling = adapter.split("async def _run_gateway_turn_with_ceiling", 1)[1]
+        ceiling = ceiling.split("async def _begin_fresh_chat_turn", 1)[0]
+        self.assertIn("chat_turn_keeps_context", ceiling)
+        self.assertLess(
+            ceiling.index("chat_turn_keeps_context"),
+            ceiling.index("self.handle_message"),
+        )
+
+    def test_note_without_id_is_confirmed_by_text_and_not_posted_twice(self):
+        from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
+
+        title = "Policy Change Request Checkup - Mailing Address update"
+        body = "Mailing address change requested. Robie was here"
+
+        class Client:
+            def __init__(self):
+                self.appended = 0
+                self.notes: list[dict] = []
+
+            def get_discussions(self, applicant_id):
+                return [{"discussionId": "d-mail", "title": title}]
+
+            def get_discussion(self, discussion_id):
+                return {"discussionId": discussion_id, "title": title, "notes": list(self.notes)}
+
+            def append_note(self, discussion_id, text, note_type="Note"):
+                self.appended += 1
+                self.notes.append({"body": text})
+                return {}
+
+        client = Client()
+        first = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
+        self.assertEqual(first["status"], "filed")
+        self.assertTrue(first["read_back"])
+        self.assertEqual(first["verified_by"], "text")
+        self.assertEqual(first["discussion_title"], title)
+        self.assertEqual(client.appended, 1)
+        self.assertNotIn("no note_id", str(first.get("reason") or ""))
+        second = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
+        self.assertEqual(second["status"], "filed")
+        self.assertTrue(second.get("idempotent"))
+        self.assertEqual(client.appended, 1)
+
+    def test_holder_note_and_field_reply_say_what_was_and_was_not_done(self):
+        from robie_job_engine.answer_only import (
+            field_change_user_reply,
+            rewrite_unproved_holder_note,
+            saved_span_sentence,
+            strip_blank_saved_span,
+        )
+
+        raw = "Added certificate holder: Robie Test Holder Six LLC"
+        rewritten = rewrite_unproved_holder_note(raw)
+        self.assertIn("Requested/drafted", rewritten)
+        self.assertNotIn("Added", rewritten)
+        self.assertEqual(rewrite_unproved_holder_note(raw, proved=True), raw)
+        address = field_change_user_reply(
+            "Policy Change Request Checkup - Mailing Address update",
+            kind="address",
+        )
+        holder = field_change_user_reply("Certificate Request", kind="holder")
+        self.assertEqual(
+            address,
+            "I noted the request on Policy Change Request Checkup - Mailing Address update; "
+            "I can't change the address myself yet, so a CSR needs to make it.",
+        )
+        self.assertIn("I can't change the holder myself yet", holder)
+        self.assertNotIn("nothing was filed", address.casefold())
+        self.assertEqual(saved_span_sentence("", ""), "")
+        self.assertNotIn("through", saved_span_sentence("", ""))
+        self.assertNotIn("through", saved_span_sentence("/tmp/a.webm", ""))
+        self.assertEqual(
+            saved_span_sentence("/tmp/a.webm", "/tmp/b.webm"),
+            "saved to /tmp/a.webm through /tmp/b.webm.",
+        )
+        self.assertNotIn("through", strip_blank_saved_span("The file was saved to  through ."))
+        self.assertIn("The file was", strip_blank_saved_span("The file was saved to  through ."))
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "ezlynx.policy_change",
+                {"text": "Change the mailing address for Buster Brown"},
+            )
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            store.checkpoint(
+                job["id"],
+                "discussion_note",
+                {
+                    "status": "filed",
+                    "discussion_title": "Policy Change Request Checkup - Mailing Address update",
+                    "read_back": True,
+                    "verified_by": "text",
+                },
+            )
+            reply = guard_chat_response(db, job["id"], "nothing was filed")
+        self.assertIn("I noted the request on Policy Change Request Checkup", reply)
+        self.assertIn("I can't change the address myself yet", reply)
+        self.assertNotIn("nothing was filed", reply.casefold())
 
 
 def _child_pids(pid: int) -> list[int]:
