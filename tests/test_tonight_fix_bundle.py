@@ -56,6 +56,7 @@ from robie_job_engine.chat_turn_control import (
     is_stop_command,
     kill_agent_processes,
     kill_job_recordings,
+    record_busy_reply,
     record_chat_delivery,
     record_note_tool_failure,
     refuse_current_tool_call,
@@ -1219,6 +1220,106 @@ class LiveDiscussionApiTests(unittest.TestCase):
         example = (ROOT / "deploy/systemd/robie-ezlynx.env.example").read_text(encoding="utf-8")
         self.assertIn("# ROBIE_EZLYNX_DISCUSSION_API=live", example)
 
+    def test_note_tool_uses_the_newest_enabled_password_not_the_pin(self):
+        from types import SimpleNamespace
+
+        from robie_job_engine.ezlynx_api import EzlynxApiConfig
+        from robie_job_engine.ezlynx_api_only_writes import load_discussion_api_config
+
+        live = EzlynxApiConfig(
+            token_endpoint="https://app.ezlynx.com/auth/connect/token",
+            document_base_url="https://app.ezlynx.com/documentapi/",
+            client_id="cid",
+            client_secret="csecret",
+            username="vendor-json-user",
+            integration_group_id="159",
+            scope="DocumentApi openid",
+        )
+        password_parent = "projects/p/secrets/ezlynx-password"
+        username_parent = "projects/p/secrets/ezlynx-username"
+        stale_password = "pw-v7-STALE-DO-NOT-LOG"
+        current_password = "pw-v15-CURRENT-DO-NOT-LOG"
+
+        class Client:
+            def list_secret_versions(self, request):
+                parent = request["parent"]
+                if parent == password_parent:
+                    return [
+                        SimpleNamespace(name=parent + "/versions/7", create_time=7),
+                        SimpleNamespace(name=parent + "/versions/15", create_time=15),
+                    ]
+                return [
+                    SimpleNamespace(name=parent + "/versions/3", create_time=3),
+                ]
+
+        class Accessor:
+            def __init__(self, client):
+                self._client = client
+                self.refs = []
+
+            def access(self, ref):
+                self.refs.append(ref)
+                if ref == username_parent + "/versions/3":
+                    return "SSRobie"
+                if ref == password_parent + "/versions/15":
+                    return current_password
+                if ref.endswith("/versions/7"):
+                    return stale_password
+                raise AssertionError(ref)
+
+        environ = {
+            "ROBIE_EZLYNX_DISCUSSION_API": "live",
+            "ROBIE_EZLYNX_API_PROD_SECRET": "projects/p/secrets/ezlynx-api-prod/versions/latest",
+            "ROBIE_EZLYNX_USERNAME_SECRET": username_parent + "/versions/2",
+            "ROBIE_EZLYNX_PASSWORD_SECRET": password_parent + "/versions/7",
+            "ROBIE_ENV": "TEST",
+        }
+        accessor = Accessor(Client())
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", return_value=live
+        ), self.assertLogs("robie_job_engine.ezlynx_api_only_writes", level="INFO") as logs:
+            config = load_discussion_api_config(accessor=accessor, environ=environ)
+        self.assertEqual(config.password, current_password)
+        self.assertNotEqual(config.password, stale_password)
+        self.assertIn(password_parent + "/versions/15", accessor.refs)
+        self.assertNotIn(password_parent + "/versions/7", accessor.refs)
+        self.assertIn(username_parent + "/versions/3", accessor.refs)
+        logged = "\n".join(logs.output)
+        self.assertIn("versions/7", logged)
+        self.assertIn("versions/15", logged)
+        self.assertNotIn(current_password, logged)
+        self.assertNotIn(stale_password, logged)
+
+        class PinnedAccessor:
+            def __init__(self):
+                self.refs = []
+
+            def access(self, ref):
+                self.refs.append(ref)
+                if ref.endswith("ezlynx-username/versions/latest"):
+                    return "SSRobie"
+                if ref.endswith("ezlynx-password/versions/latest"):
+                    return "pw-latest-alias-DO-NOT-LOG"
+                raise AssertionError(ref)
+
+        pinned_env = dict(environ)
+        pinned_env["ROBIE_EZLYNX_USERNAME_SECRET"] = (
+            "projects/p/secrets/ezlynx-username/versions/latest"
+        )
+        pinned_env["ROBIE_EZLYNX_PASSWORD_SECRET"] = password_parent + "/versions/7"
+        pinned = PinnedAccessor()
+        with mock.patch(
+            "robie_job_engine.ezlynx_api.load_ezlynx_api_config", return_value=live
+        ), self.assertLogs("robie_job_engine.ezlynx_api_only_writes", level="INFO") as pinned_logs:
+            pinned_config = load_discussion_api_config(accessor=pinned, environ=pinned_env)
+        self.assertEqual(pinned_config.password, "pw-latest-alias-DO-NOT-LOG")
+        self.assertIn(password_parent + "/versions/latest", pinned.refs)
+        self.assertNotIn(password_parent + "/versions/7", pinned.refs)
+        pinned_text = "\n".join(pinned_logs.output)
+        self.assertIn("versions/latest", pinned_text)
+        self.assertNotIn("pw-latest-alias-DO-NOT-LOG", pinned_text)
+        self.assertNotIn(stale_password, pinned_text)
+
 
 class ProveSessionReleaseTests(unittest.TestCase):
     def test_stop_ends_the_agent_and_releases_the_session_lease(self):
@@ -1316,6 +1417,167 @@ class ProveSessionReleaseTests(unittest.TestCase):
             self.assertTrue(released.get("awaited"))
             self.assertEqual(released.get("key"), "google_chat:dm:spaces/1")
             self.assertEqual(adapter.interrupts, [])
+
+    def test_stop_cancels_the_real_runner_session_key(self):
+        import asyncio
+
+        real = "agent:main:google_chat:dm:spaces/AAQAZbLJO78"
+        derived = "chat:spaces/AAQAZbLJO78"
+        other = "agent:main:google_chat:dm:spaces/OTHER"
+
+        async def scenario(store, job_id):
+            class Agent:
+                def __init__(self):
+                    self.alive = True
+                    self.beats = 0
+                    self.tool_calls = 0
+
+                def tool(self):
+                    if not self.alive:
+                        return "blocked"
+                    self.tool_calls += 1
+                    return "ran"
+
+                def interrupt(self, reason=None):
+                    self.alive = False
+
+            agent = Agent()
+
+            class Turn:
+                def __init__(self, running):
+                    self.agent = running
+
+            class State:
+                def __init__(self, running):
+                    self.turn = Turn(running)
+
+            async def loop():
+                while agent.alive:
+                    agent.beats += 1
+                    agent.tool()
+                    await asyncio.sleep(0.05)
+
+            task = asyncio.create_task(loop())
+            await asyncio.sleep(0.08)
+
+            class Runner:
+                def __init__(self):
+                    self._sessions = {real: State(agent)}
+                    self.calls = []
+
+                def _peek_session_state(self, key):
+                    return self._sessions.get(key)
+
+                async def _interrupt_and_clear_session(
+                    self,
+                    key,
+                    source,
+                    *,
+                    interrupt_reason,
+                    invalidation_reason,
+                    release_running_state=True,
+                ):
+                    self.calls.append(key)
+                    state = self._sessions.get(key)
+                    if state is None:
+                        return
+                    state.turn.agent.alive = False
+
+                def _drop_turn_slot(self, key):
+                    self._sessions.pop(key, None)
+
+            class Adapter:
+                def __init__(self):
+                    self._active_sessions = {
+                        real: asyncio.Event(),
+                        other: asyncio.Event(),
+                    }
+                    self._session_tasks = {real: task}
+                    self._pending_messages = {real: ["held"]}
+                    self.gateway_runner = Runner()
+
+                def _event_session_key(self, event):
+                    return derived
+
+                async def cancel_session_processing(self, key):
+                    found = self._session_tasks.pop(key, None)
+                    if found is not None and not found.done():
+                        found.cancel()
+
+            class Source:
+                chat_id = "spaces/AAQAZbLJO78"
+                thread_id = ""
+
+            class Event:
+                source = Source()
+
+            adapter = Adapter()
+            event = Event()
+            self.assertTrue(session_is_busy(adapter, event))
+            with self.assertLogs("robie.chat_turn", level="WARNING") as logs:
+                await terminate_gateway_agent(
+                    adapter, event, job_id, reason="/stop", store=store
+                )
+            beats = agent.beats
+            tools = agent.tool_calls
+            await asyncio.sleep(0.2)
+            first_keys = store.get_checkpoint(job_id, "session_stop_keys")
+            await terminate_gateway_agent(
+                adapter, event, job_id, reason="/stop", store=store
+            )
+            await asyncio.sleep(0.2)
+            return adapter, agent, task, beats, tools, logs, first_keys
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job("hermes.google_chat_task", {"text": "long job"})
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            try:
+                adapter, agent, task, beats, tools, logs, first_keys = asyncio.run(
+                    scenario(store, job["id"])
+                )
+                self.assertEqual(
+                    refuse_current_tool_call({"job_id": job["id"], "db_path": db}),
+                    STOPPED_OUTPUT,
+                )
+            finally:
+                _clear_agent_stop(job["id"])
+            self.assertEqual(adapter.gateway_runner.calls[0], real)
+            self.assertFalse(agent.alive)
+            self.assertTrue(task.done())
+            self.assertEqual(agent.beats, beats)
+            self.assertEqual(agent.tool_calls, tools)
+            self.assertGreater(tools, 0)
+            self.assertEqual(agent.tool(), "blocked")
+            self.assertNotIn(real, adapter._active_sessions)
+            self.assertNotIn(real, adapter._session_tasks)
+            self.assertNotIn(real, adapter._pending_messages)
+            self.assertNotIn(real, adapter.gateway_runner._sessions)
+            self.assertIn(other, adapter._active_sessions)
+            logged = "\n".join(logs.output)
+            self.assertIn(real, logged)
+            self.assertIn(derived, logged)
+            self.assertEqual(first_keys["resolved"], real)
+            self.assertEqual(first_keys["derived"], derived)
+            self.assertEqual(adapter.gateway_runner.calls[0], real)
+
+            class Source:
+                chat_id = "spaces/AAQAZbLJO78"
+                thread_id = ""
+
+            class Fresh:
+                source = Source()
+
+            fresh = Fresh()
+            self.assertFalse(session_is_busy(adapter, fresh))
+            self.assertEqual(
+                incoming_message_action(
+                    session_busy=session_is_busy(adapter, fresh),
+                    is_stop=False,
+                ),
+                "run",
+            )
 
     def test_stop_kills_the_recording_process_group(self):
         proc = subprocess.Popen(
@@ -1555,6 +1817,181 @@ class ProveSessionReleaseTests(unittest.TestCase):
         self.assertIn("record_chat_delivery", send)
         self.assertIn("robie_stop_notice", send)
         self.assertIn("sent_message_id", send)
+        self.assertLess(
+            send.index('get("robie_job_id")'),
+            send.index("conversation_job_for_event"),
+        )
+        stop = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        stop = stop.split("async def _apply_chat_stop", 1)[1].split(
+            "async def _stop_chat_queue_heartbeat", 1
+        )[0]
+        self.assertIn('"robie_job_id": job_id', stop)
+        self.assertIn('"robie_delivery_kind": "stop"', stop)
+
+    def test_ceiling_reply_is_the_one_line_only(self):
+        from robie_job_engine.chat_guard import guard_chat_notice
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job("hermes.google_chat_task", {"text": "long job"})
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.PENDING},
+                error="gateway_max_turn_seconds",
+            )
+
+            def boom(db_path, job_id):
+                raise RuntimeError("audit stays in the ledger")
+
+            with mock.patch(
+                "robie_job_engine.post_job_audit.maybe_audit_terminal_job",
+                side_effect=boom,
+            ):
+                text = guard_chat_notice(
+                    db, job["id"], "  " + STOPPED_AFTER_TEN_MINUTES + "  "
+                )
+        self.assertEqual(text, STOPPED_AFTER_TEN_MINUTES)
+        self.assertNotIn("Recording", text)
+        self.assertNotIn("audit", text.casefold())
+        send = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        send = send.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
+        self.assertIn("guard_chat_notice", send)
+        self.assertIn('delivery_kind == "ceiling"', send)
+        ceiling = send.split('delivery_kind == "ceiling"', 1)[0]
+        self.assertIn('delivery_kind == "busy"', ceiling)
+
+    def test_busy_reply_is_recorded_without_replacing_the_job_reply(self):
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job("hermes.google_chat_task", {"text": "working"})
+            store.checkpoint(job["id"], "worker_response", {"response_text": "keep me"})
+            self.assertFalse(
+                record_busy_reply(store, job["id"], "", BUSY_SESSION_REPLY)
+            )
+            self.assertIsNone(store.get_checkpoint(job["id"], "busy_reply"))
+            self.assertTrue(
+                record_busy_reply(
+                    store,
+                    job["id"],
+                    "spaces/1/messages/busy",
+                    BUSY_SESSION_REPLY,
+                )
+            )
+            saved = store.get_checkpoint(job["id"], "busy_reply")
+            self.assertEqual(saved["message_id"], "spaces/1/messages/busy")
+            self.assertTrue(saved["posted"])
+            self.assertEqual(saved["kind"], "busy")
+            self.assertEqual(saved["text"], BUSY_SESSION_REPLY)
+            self.assertEqual(
+                store.get_checkpoint(job["id"], "worker_response"),
+                {"response_text": "keep me"},
+            )
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        self.assertIn("[GoogleChat] busy-session reply", adapter)
+        self.assertIn('"robie_delivery_kind": "busy"', adapter)
+        self.assertIn('"robie_job_id": busy_job_id', adapter)
+        send = adapter.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
+        self.assertIn("record_busy_reply", send)
+        busy = send.split('delivery_kind == "busy"', 1)[1].split("elif", 1)[0]
+        self.assertNotIn("guard_chat_response", busy)
+
+    def test_playwright_silent_skips_proved_and_api_chat_jobs(self):
+        from datetime import datetime, timezone
+
+        from robie_job_engine.chat_guard import (
+            open_chat_job,
+            stop_generic_chat_job_heartbeat,
+        )
+        from robie_job_engine.models import VerificationEvidence
+        from robie_job_engine.playwright_observability import (
+            deterministic_path_succeeded,
+            fail_closed_zero_playwright_rows,
+            job_expected_to_drive_ui,
+            job_requires_playwright,
+        )
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            opened = []
+            try:
+                proved = open_chat_job(db, "spaces/p/messages/1", "finish the commercial auto")
+                opened.append(proved)
+                store.add_evidence(
+                    proved,
+                    True,
+                    VerificationEvidence(
+                        method="API",
+                        source="destination",
+                        expected={"note_id": "42"},
+                        observed={"note_id": "42"},
+                        authoritative=True,
+                        captured_at=datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                current = store.get_job(proved)
+                self.assertTrue(job_expected_to_drive_ui(current))
+                self.assertTrue(deterministic_path_succeeded(store, current))
+                kept = fail_closed_zero_playwright_rows(store, current)
+                self.assertNotEqual(kept["status"], JobStatus.FAILED.value)
+                self.assertNotIn("PLAYWRIGHT_SILENT", str(kept.get("last_error") or ""))
+                self.assertIsNone(store.get_checkpoint(proved, "playwright_silent"))
+
+                readback = open_chat_job(
+                    db,
+                    "spaces/p/messages/2",
+                    "finish the commercial auto in ezlynx",
+                )
+                opened.append(readback)
+                store.checkpoint(readback, "destination_readback", {"passed": True})
+                kept_readback = fail_closed_zero_playwright_rows(
+                    store, store.get_job(readback)
+                )
+                self.assertNotEqual(kept_readback["status"], JobStatus.FAILED.value)
+                self.assertNotIn(
+                    "PLAYWRIGHT_SILENT", str(kept_readback.get("last_error") or "")
+                )
+
+                note = store.create_job(
+                    "hermes.google_chat_task",
+                    {"text": "File a discussion note on the EZLynx applicant"},
+                )
+                store.transition(
+                    note["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+                )
+                note_job = store.get_job(note["id"])
+                self.assertTrue(job_requires_playwright(note_job))
+                self.assertFalse(job_expected_to_drive_ui(note_job))
+                kept_note = fail_closed_zero_playwright_rows(store, note_job)
+                self.assertNotEqual(kept_note["status"], JobStatus.FAILED.value)
+                self.assertNotIn("PLAYWRIGHT_SILENT", str(kept_note.get("last_error") or ""))
+
+                answer = store.create_job(
+                    "hermes.google_chat_task",
+                    {"text": "open ezlynx and answer the question", "answer_only": True},
+                )
+                store.transition(
+                    answer["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+                )
+                self.assertFalse(job_expected_to_drive_ui(store.get_job(answer["id"])))
+                kept_answer = fail_closed_zero_playwright_rows(
+                    store, store.get_job(answer["id"])
+                )
+                self.assertNotEqual(kept_answer["status"], JobStatus.FAILED.value)
+
+                silent = open_chat_job(
+                    db, "spaces/p/messages/4", "finish the commercial auto"
+                )
+                opened.append(silent)
+                failed = fail_closed_zero_playwright_rows(store, store.get_job(silent))
+                self.assertEqual(failed["status"], JobStatus.FAILED.value)
+                self.assertIn("PLAYWRIGHT_SILENT", failed["last_error"])
+            finally:
+                for job_id in opened:
+                    if job_id:
+                        stop_generic_chat_job_heartbeat(db, job_id)
 
 
 def _child_pids(pid: int) -> list[int]:

@@ -28,9 +28,11 @@ returns. The Chat handler must return too. The gateway reads one Chat
 message at a time (`GOOGLE_CHAT_MAX_MESSAGES` stays 1), so a ceiling wait
 inside the handler blocks `/stop` until the job ends. The ceiling is a
 background watchdog. It does not hold the message slot. When the limit
-fires, or someone sends `/stop`, the adapter calls the gateway runner's
-`_interrupt_and_clear_session` on the real session key. That stops the
-agent loop and releases the turn lease. The adapter then cancels the
+fires, or someone sends `/stop`, the adapter looks up the session key the
+runner is actually holding (`agent:main:google_chat:dm:spaces/...`) and
+calls `_interrupt_and_clear_session` on that key. A derived
+`chat:spaces/...` key is logged beside it and is not the key that is
+cancelled. That stops the agent loop and releases the turn lease. The adapter then cancels the
 session task, drops the session guard, and SIGKILLs the browser and
 recording process group (the capture process, ffmpeg, and the Playwright
 node). A stopped job cannot post another message or start another tool

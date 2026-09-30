@@ -1603,6 +1603,20 @@ def open_chat_job(
     return job["id"]
 
 
+def guard_chat_notice(db_path: str, job_id: str | None, content: str) -> str:
+    """Keep a ceiling notice to the one line. The audit stays in the ledger."""
+    text = str(content or "").strip()
+    if not job_id:
+        return text
+    try:
+        from .post_job_audit import maybe_audit_terminal_job
+
+        maybe_audit_terminal_job(db_path, job_id)
+    except Exception:
+        logger.exception("ceiling notice left the audit in the ledger only job=%s", job_id)
+    return text
+
+
 def _post_job_audit_note(
     db_path: str,
     job_id: str,

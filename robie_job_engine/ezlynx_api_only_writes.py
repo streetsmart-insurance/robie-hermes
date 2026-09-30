@@ -18,10 +18,13 @@ This module is the fail-closed contract:
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 EZLYNX_NOTE_DOC_API_ONLY = "EZLYNX_NOTE_DOC_API_ONLY"
@@ -569,6 +572,39 @@ def discussion_api_target(environ: dict[str, str] | None = None) -> str:
     )
 
 
+def _login_secret_resource(ref: str, accessor: Any) -> str:
+    """Newest ENABLED version. A numeric env pin is not the password to use.
+
+    The browser login lists ENABLED versions and ignores a stale pin such as
+    ``versions/7``. This does the same. If the list call is unavailable, the
+    ``versions/latest`` alias is used instead of the pin. The value is never
+    logged.
+    """
+    from .secret_manager import _newest_enabled_resource
+
+    resource = str(ref or "").strip()
+    if "/versions/" not in resource:
+        return resource
+    newest = _newest_enabled_resource(resource, accessor)
+    pinned = resource.rsplit("/", 1)[-1]
+    chosen = str(newest or resource).rsplit("/", 1)[-1]
+    if newest and newest != resource:
+        logger.info(
+            "note tool ignoring stale login secret pin env versions/%s; using versions/%s",
+            pinned,
+            chosen,
+        )
+        return str(newest)
+    if pinned == "latest":
+        return resource
+    parent = resource.rsplit("/versions/", 1)[0]
+    logger.info(
+        "note tool ignoring stale login secret pin env versions/%s; using versions/latest",
+        pinned,
+    )
+    return parent + "/versions/latest"
+
+
 def _required_secret_value(
     env_name: str,
     *,
@@ -581,6 +617,7 @@ def _required_secret_value(
             f"{env_name} must be set when {DISCUSSION_API_ENV}=live. "
             "Refusing to fall back to UAT."
         )
+    ref = _login_secret_resource(ref, accessor)
     try:
         value = str(accessor.access(ref) or "").strip()
     except Exception as exc:

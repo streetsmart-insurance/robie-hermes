@@ -149,6 +149,77 @@ def job_text(job: dict[str, Any]) -> str:
     )
 
 
+_API_NOT_UI_MARKERS = (
+    "mailing address",
+    "certificate of insurance",
+    "discussion note",
+    "ezlynx_discussion_note",
+)
+
+_API_NOT_UI_ACTIONS = frozenset(
+    {
+        "ezlynx.policy_change",
+        "ezlynx.certificate",
+        "ezlynx.reassign",
+    }
+)
+
+
+def deterministic_path_succeeded(store: JobStore, job: dict[str, Any] | None) -> bool:
+    """True when readback or an answer-only close already proved the job."""
+    if not job:
+        return False
+    from .answer_only import is_answer_only_job
+
+    if is_answer_only_job(job):
+        return True
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    try:
+        if store.get_checkpoint(job_id, "answer_only_close"):
+            return True
+    except Exception:
+        pass
+    try:
+        evidence = store.list_evidence(job_id)
+    except Exception:
+        evidence = []
+    for item in evidence:
+        if item.get("verified") and item.get("authoritative"):
+            return True
+    for kind in ("address_readback", "destination_readback"):
+        try:
+            note = store.get_checkpoint(job_id, kind) or {}
+        except Exception:
+            note = {}
+        if note.get("passed") is True or note.get("proved") is True:
+            return True
+        if str(note.get("status") or "").casefold() == "passed":
+            return True
+    return False
+
+
+def job_expected_to_drive_ui(job: dict[str, Any] | None) -> bool:
+    """True only when this job was supposed to drive a browser screen.
+
+    Notes, certificates, mailing-address changes, and answers use the API
+    or a plain reply. A missing Playwright row is not a failure for those.
+    """
+    if not job_requires_playwright(job):
+        return False
+    action = str((job or {}).get("action_type") or "")
+    if action in _API_NOT_UI_ACTIONS:
+        return False
+    payload = dict((job or {}).get("payload") or {})
+    if payload.get("answer_only"):
+        return False
+    text = job_text(job or {}).casefold()
+    if any(marker in text for marker in _API_NOT_UI_MARKERS):
+        return False
+    return True
+
+
 def job_requires_playwright(job: dict[str, Any] | None) -> bool:
     """True when a Chat job asked for EZLynx / Playwright browser work."""
     if not job:
@@ -406,6 +477,10 @@ def fail_closed_zero_playwright_rows(
     Playwright. UNVERIFIED prose is not an allowed hide.
     """
     current = store.get_job(job["id"])
+    if deterministic_path_succeeded(store, current):
+        return current
+    if not job_expected_to_drive_ui(current):
+        return current
     if not job_requires_playwright(current):
         return current
     if list_playwright_exec(store, current["id"]):

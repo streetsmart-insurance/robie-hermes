@@ -201,8 +201,10 @@ ROBIE_EZLYNX_PASSWORD_SECRET=projects/<project-id>/secrets/ezlynx-password/versi
 `ROBIE_EZLYNX_DISCUSSION_API=live` loads the live API host from
 `ROBIE_EZLYNX_API_PROD_SECRET` and the SSRobie login from
 `ezlynx-username` / `ezlynx-password`, the same secrets the Test browser
-already uses. Store resource names only. Never put the password in this
-file, in Chat, or in the job ledger.
+already uses. A numeric pin such as `versions/7` in an older env file is
+ignored. The note tool reads the newest ENABLED version, the same way the
+browser login does. Store resource names only. Never put the password in
+this file, in Chat, or in the job ledger.
 
 If any of those secrets is missing, or the production secret points at
 `app.uatezlynx.com`, the note tool stops. It does not fall back to UAT.

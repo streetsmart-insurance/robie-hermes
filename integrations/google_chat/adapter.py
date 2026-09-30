@@ -1608,6 +1608,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         "thread_id": getattr(source, "thread_id", None),
                         "robie_stop_notice": True,
                         "robie_delivery_kind": "ceiling",
+                        "robie_job_id": job_id,
                     },
                 )
 
@@ -1668,6 +1669,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "thread_id": getattr(source, "thread_id", None),
                 "robie_stop_notice": True,
                 "robie_delivery_kind": "stop",
+                "robie_job_id": job_id,
             },
         )
 
@@ -3011,6 +3013,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             from robie_job_engine.chat_turn_control import (
                 BUSY_SESSION_REPLY,
                 incoming_message_action,
+                running_chat_job_id,
                 session_is_busy,
                 session_key_from_adapter,
             )
@@ -3024,11 +3027,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 == "defer"
             ):
+                busy_job_id = running_chat_job_id(self, event)
+                logger.info(
+                    "[GoogleChat] busy-session reply chat=%s job=%s",
+                    event.source.chat_id,
+                    busy_job_id or "",
+                )
                 await self.send(
                     event.source.chat_id,
                     BUSY_SESSION_REPLY,
                     reply_to=event.message_id,
-                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                    metadata={
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "robie_job_id": busy_job_id,
+                        "robie_delivery_kind": "busy",
+                    },
                 )
                 key = session_key_from_adapter(self, event)
                 self._robie_deferred.setdefault(key, []).append(event)
@@ -3929,8 +3942,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         If ``content`` exceeds MAX_MESSAGE_LENGTH, the first chunk patches
         the typing card (if any), subsequent chunks are new messages.
         """
-        job_id = None
-        if reply_to:
+        job_id = str((metadata or {}).get("robie_job_id") or "").strip() or None
+        if reply_to and not job_id:
             try:
                 queue = await asyncio.to_thread(self._durable_chat_queue)
                 link = await asyncio.to_thread(
@@ -3939,7 +3952,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 job_id = link.get("job_id") if link else None
             except Exception:
                 # Fail closed: a transient durable-ledger error must not cause
-                # an unguarded completion claim.
+                # an unguarded completion claim. A stop notice already carries
+                # the cancelled job id and does not depend on this lookup.
                 logger.exception(
                     "[GoogleChat] durable reply-to-Job lookup failed reply=%s",
                     reply_to,
@@ -3956,7 +3970,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
                 return SendResult(success=False, error=blocked)
         content = redact_text(content)
-        content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
+        delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
+        if delivery_kind == "busy":
+            # The running job is still open. Do not run the post-job guard,
+            # which would rewrite this ack and replace the job's real reply.
+            content = str(content or "").strip()
+        elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "ceiling":
+            from robie_job_engine.chat_guard import guard_chat_notice
+
+            content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
+        else:
+            content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         self.pause_typing_for_chat(chat_id)
         try:
@@ -4030,26 +4054,42 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # Cleared in on_processing_complete.
             if patched_typing:
                 self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+            delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
             if (
-                (metadata or {}).get("robie_stop_notice")
-                and job_id
+                job_id
                 and last_result is not None
                 and getattr(last_result, "success", False)
+                and (
+                    (metadata or {}).get("robie_stop_notice")
+                    or delivery_kind == "busy"
+                )
             ):
                 try:
                     from robie_job_engine.chat_turn_control import (
+                        record_busy_reply,
                         record_chat_delivery,
                         sent_message_id,
                     )
 
-                    await asyncio.to_thread(
-                        record_chat_delivery,
-                        JobStore(ROBIE_JOB_DB),
-                        job_id,
-                        sent_message_id(last_result),
-                        content,
-                        str((metadata or {}).get("robie_delivery_kind") or "stop"),
-                    )
+                    posted_id = sent_message_id(last_result)
+                    kind = str((metadata or {}).get("robie_delivery_kind") or "stop")
+                    if kind == "busy":
+                        await asyncio.to_thread(
+                            record_busy_reply,
+                            JobStore(ROBIE_JOB_DB),
+                            job_id,
+                            posted_id,
+                            content,
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            record_chat_delivery,
+                            JobStore(ROBIE_JOB_DB),
+                            job_id,
+                            posted_id,
+                            content,
+                            kind,
+                        )
                 except Exception:
                     logger.exception(
                         "[GoogleChat] could not record stop delivery job=%s",

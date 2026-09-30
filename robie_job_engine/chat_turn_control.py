@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 import re
 import signal
 import threading
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("robie.chat_turn")
 
 from .models import TERMINAL_STATUSES, JobStatus
 
@@ -438,12 +441,154 @@ def _turn_record_running(record: Any) -> bool:
     return False
 
 
-def session_is_busy(adapter: Any, event: Any) -> bool:
-    """True when this Chat session already has a live agent turn."""
-    key = session_key_from_adapter(adapter, event)
+def _event_chat_thread(event: Any) -> tuple[str, str]:
+    source = getattr(event, "source", None)
+    return (
+        str(getattr(source, "chat_id", "") or ""),
+        str(getattr(source, "thread_id", "") or ""),
+    )
+
+
+def _key_matches_chat(key: str, chat_id: str, thread_id: str) -> bool:
+    """True when this live session key is the one for this chat.
+
+    A DM key with no thread suffix is the whole DM. A different thread
+    suffix belongs to someone else's turn.
+    """
+    text = str(key or "")
+    if not chat_id or chat_id not in text:
+        return False
+    suffix = text.split(chat_id, 1)[1].strip(":")
+    if not suffix:
+        return True
+    if thread_id and thread_id in suffix:
+        return True
+    if thread_id and thread_id not in suffix:
+        return False
+    return False
+
+
+def _iter_live_session_keys(adapter: Any) -> list[str]:
+    """Session keys the gateway is actually holding, exact strings."""
+    found: list[str] = []
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is not None:
+        sessions = getattr(runner, "_sessions", None)
+        if isinstance(sessions, dict):
+            found.extend(str(key) for key in sessions)
+        items = getattr(runner, "_running_agent_items", None)
+        if callable(items):
+            try:
+                for key, _agent in items() or ():
+                    found.append(str(key))
+            except Exception:
+                pass
+        for name in ("_running_agents", "_active_session_leases"):
+            mapping = getattr(runner, name, None)
+            if isinstance(mapping, dict):
+                found.extend(str(key) for key in mapping)
+    for name in ("_active_sessions", "_session_tasks", "_pending_messages"):
+        mapping = getattr(adapter, name, None)
+        if isinstance(mapping, dict):
+            found.extend(str(key) for key in mapping)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for key in found:
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+def _running_agent_for_key(adapter: Any, key: str) -> Any:
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None or not key:
+        return None
+    peek = getattr(runner, "_peek_session_state", None)
+    if callable(peek):
+        try:
+            state = peek(key)
+        except Exception:
+            state = None
+        agent = getattr(getattr(state, "turn", None), "agent", None)
+        if agent is not None:
+            return agent
+    running = getattr(runner, "_running_agents", None)
+    if isinstance(running, dict):
+        return running.get(key)
+    return None
+
+
+def _key_is_running(adapter: Any, key: str) -> bool:
+    if _running_agent_for_key(adapter, key) is not None:
+        return True
     active = getattr(adapter, "_active_sessions", None)
     if isinstance(active, dict) and key in active:
         return True
+    tasks = getattr(adapter, "_session_tasks", None)
+    if isinstance(tasks, dict):
+        task = tasks.get(key)
+        if task is not None and not getattr(task, "done", lambda: True)():
+            return True
+    return False
+
+
+def resolve_running_session_key(adapter: Any, event: Any) -> tuple[str, str]:
+    """Return ``(resolved, derived)``.
+
+    ``resolved`` is the key the runner's live agent is under, such as
+    ``agent:main:google_chat:dm:spaces/...``. ``derived`` is the adapter
+    lookup, which can be the useless ``chat:spaces/...`` fallback.
+    """
+    derived = session_key_from_adapter(adapter, event)
+    chat_id, thread_id = _event_chat_thread(event)
+    matches = [
+        key
+        for key in _iter_live_session_keys(adapter)
+        if _key_matches_chat(key, chat_id, thread_id) and _key_is_running(adapter, key)
+    ]
+    agent_keys = [key for key in matches if str(key).startswith("agent:")]
+    pool = agent_keys or matches
+    exact = f"agent:main:google_chat:dm:{chat_id}" if chat_id else ""
+    if exact and exact in pool:
+        return exact, derived
+    if pool:
+        return pool[0], derived
+    return derived, derived
+
+
+def running_chat_job_id(adapter: Any, event: Any) -> str | None:
+    """Job id of the turn already running in this chat, when there is one."""
+    turns = getattr(adapter, "_gateway_turns", None)
+    if not isinstance(turns, dict):
+        return None
+    chat_id, thread_id = _event_chat_thread(event)
+    wanted = turn_key(chat_id, thread_id)
+    record = turns.get(wanted)
+    if record is None and thread_id:
+        record = turns.get((chat_id, ""))
+    if isinstance(record, dict) and record.get("job_id"):
+        return str(record["job_id"])
+    for key, item in turns.items():
+        if not isinstance(item, dict) or not item.get("job_id"):
+            continue
+        if not isinstance(key, tuple) or str(key[0]) != chat_id:
+            continue
+        other = str(key[1]) if len(key) > 1 else ""
+        if thread_id and other not in {"", thread_id}:
+            continue
+        if _turn_record_running(item):
+            return str(item["job_id"])
+    return None
+
+
+def session_is_busy(adapter: Any, event: Any) -> bool:
+    """True when this Chat session already has a live agent turn."""
+    resolved, _derived = resolve_running_session_key(adapter, event)
+    if resolved and _key_is_running(adapter, resolved):
+        chat_id, thread_id = _event_chat_thread(event)
+        if _key_matches_chat(resolved, chat_id, thread_id):
+            return True
     turns = getattr(adapter, "_gateway_turns", None)
     if not isinstance(turns, dict):
         return False
@@ -464,6 +609,29 @@ def _release_session_guard(adapter: Any, key: str) -> None:
         mapping = getattr(adapter, name, None)
         if isinstance(mapping, dict):
             mapping.pop(key, None)
+
+
+def record_busy_reply(
+    store: Any,
+    job_id: str | None,
+    message_id: str | None,
+    text: str,
+) -> bool:
+    """Prove the busy-session ack was posted. Does not replace the job reply."""
+    posted_id = str(message_id or "").strip()
+    if store is None or not job_id or not posted_id:
+        return False
+    store.checkpoint(
+        job_id,
+        "busy_reply",
+        {
+            "message_id": posted_id,
+            "text": str(text or "")[:2000],
+            "kind": "busy",
+            "posted": True,
+        },
+    )
+    return True
 
 
 def record_chat_delivery(
@@ -632,6 +800,40 @@ async def _await_interrupt(result: Any) -> None:
         await result
 
 
+def _hard_stop_agent(agent: Any) -> None:
+    """Stop a live agent object even if the session-key interrupt missed."""
+    if agent is None:
+        return
+    interrupt = getattr(agent, "interrupt", None)
+    if callable(interrupt):
+        try:
+            interrupt("stopped")
+        except TypeError:
+            try:
+                interrupt()
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if hasattr(agent, "alive"):
+        try:
+            agent.alive = False
+        except Exception:
+            pass
+
+
+def _tasks_for_keys(adapter: Any, keys: list[str]) -> list[Any]:
+    tasks = []
+    mapping = getattr(adapter, "_session_tasks", None)
+    if not isinstance(mapping, dict):
+        return tasks
+    for key in keys:
+        task = mapping.get(key)
+        if task is not None and task not in tasks:
+            tasks.append(task)
+    return tasks
+
+
 async def terminate_gateway_agent(
     adapter: Any,
     event: Any,
@@ -640,17 +842,43 @@ async def terminate_gateway_agent(
     reason: str,
     store: Any = None,
 ) -> None:
-    """Stop the agent, release its session lease, and kill its process group.
+    """Stop the agent under the key it is actually running, and release the lease.
 
-    ``interrupt_session_activity`` only sets a flag. The gateway runner's
-    ``_interrupt_and_clear_session`` is what stops the agent loop and drops
-    the turn lease. The session maps are cleared even if that task is still
-    unwinding, so the next message does not wait for a gateway restart.
+    The derived ``chat:spaces/...`` key does not match
+    ``agent:main:google_chat:dm:spaces/...``. Both keys are logged. The
+    asyncio task is cancelled and the turn lease is dropped even if the
+    runner interrupt cannot finish in-process.
     """
     request_agent_stop(job_id)
+    resolved, derived = resolve_running_session_key(adapter, event)
+    chat_id, _thread_id = _event_chat_thread(event)
+    logger.warning(
+        "stop session keys resolved=%s derived=%s chat=%s reason=%s",
+        resolved,
+        derived,
+        chat_id,
+        reason,
+    )
     if store is not None and job_id:
         try:
-            store.checkpoint(job_id, "agent_abort", {"reason": str(reason or "")[:300]})
+            store.checkpoint(
+                job_id,
+                "agent_abort",
+                {
+                    "reason": str(reason or "")[:300],
+                    "session_key": resolved,
+                    "derived_session_key": derived,
+                },
+            )
+            store.checkpoint(
+                job_id,
+                "session_stop_keys",
+                {
+                    "resolved": resolved,
+                    "derived": derived,
+                    "reason": str(reason or "")[:300],
+                },
+            )
         except Exception:
             pass
         db_path = getattr(store, "path", None) or getattr(store, "db_path", None)
@@ -661,23 +889,31 @@ async def terminate_gateway_agent(
                 stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
             except Exception:
                 pass
-    key = session_key_from_adapter(adapter, event)
     source = getattr(event, "source", None)
-    chat_id = getattr(source, "chat_id", None)
-    task = _capture_session_task(adapter, event, key)
+    keys = [resolved]
+    if derived and derived not in keys:
+        keys.append(derived)
+    for key in _iter_live_session_keys(adapter):
+        if _key_matches_chat(key, chat_id, _thread_id) and key not in keys:
+            keys.append(key)
+    tasks = _tasks_for_keys(adapter, keys)
+    captured = _capture_session_task(adapter, event, resolved)
+    if captured is not None and captured not in tasks:
+        tasks.append(captured)
+    _hard_stop_agent(_running_agent_for_key(adapter, resolved))
     runner = getattr(adapter, "gateway_runner", None)
     clear = getattr(runner, "_interrupt_and_clear_session", None) if runner is not None else None
     if callable(clear):
         try:
             result = clear(
-                key,
+                resolved,
                 source,
                 interrupt_reason=reason,
                 invalidation_reason=reason,
             )
         except TypeError:
             try:
-                result = clear(key, source)
+                result = clear(resolved, source)
             except Exception:
                 result = None
         except Exception:
@@ -687,10 +923,10 @@ async def terminate_gateway_agent(
         interrupt = getattr(adapter, "interrupt_session_activity", None)
         if callable(interrupt):
             try:
-                result = interrupt(key, chat_id)
+                result = interrupt(resolved, chat_id)
             except TypeError:
                 try:
-                    result = interrupt(key)
+                    result = interrupt(resolved)
                 except Exception:
                     result = None
             except Exception:
@@ -699,10 +935,23 @@ async def terminate_gateway_agent(
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
-            result = cancel(key)
+            result = cancel(resolved)
             await _await_interrupt(result)
         except Exception:
             pass
+    if runner is not None:
+        drop = getattr(runner, "_drop_turn_slot", None)
+        if callable(drop):
+            try:
+                drop(resolved)
+            except Exception:
+                pass
+        release = getattr(runner, "_release_running_agent_state", None)
+        if callable(release):
+            try:
+                release(resolved)
+            except Exception:
+                pass
     kill_agent_processes(job_id)
     kill_job_recordings(job_id, store)
     current = None
@@ -710,7 +959,9 @@ async def terminate_gateway_agent(
         current = asyncio.current_task()
     except RuntimeError:
         current = None
-    if task is not None and task is not current:
+    for task in tasks:
+        if task is None or task is current:
+            continue
         cancel_task = getattr(task, "cancel", None)
         if callable(cancel_task) and not getattr(task, "done", lambda: False)():
             cancel_task()
@@ -719,7 +970,8 @@ async def terminate_gateway_agent(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
-    _release_session_guard(adapter, key)
+    for key in keys:
+        _release_session_guard(adapter, key)
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
