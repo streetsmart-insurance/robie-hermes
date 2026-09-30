@@ -33,12 +33,23 @@ already on Home still clicks Manage Policies, then exact
 
 The window that click opens is often a dead For Agents Only HPLanding page
 whose only control is ``Close this window``. The Businessowner application
-itself is ``https://bop.americanstrategic.com`` and its report control is
-``View Reports`` or ``VIEW REPORTS``. The pull attaches to that application
-page, or to the one frame on that host inside the landing window. It closes
-the landing page when the application is a different page. A failed close
-does not hold. HPLanding with no BOP application holds, and View Reports is
-not clicked there. This module never files to EZLynx.
+itself is ``https://bop.americanstrategic.com``. The pull attaches to that
+application page, or to the one frame on that host inside the landing window.
+It closes the landing page when the application is a different page. A failed
+close does not hold. HPLanding with no BOP application holds, and report
+controls are not clicked there.
+
+After the application is attached, the pull waits until a known reports
+control is visible, or until the network is idle. It does not sleep a fixed
+interval, and it does not look for controls before that. An older page still
+uses ``View Reports`` / ``VIEW REPORTS`` and then ``Pending Cancel for
+Nonpayment``. The reports page seen on hermes-test-01 on 2026-09-30 has no
+View Reports control. It has ``Export Pending Cancel for Non-Payment Pdf``
+and ``Export Pending Cancel for Non-Payment Xls``. The PDF export is tried
+first. A list PDF yields insured, policy number, and cancel date. An empty
+or truncated download is a hold, not an empty report. This click only
+downloads a report. It does not bind, cancel, or move money. This module
+never files to EZLynx.
 
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
@@ -48,6 +59,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import csv
 import hashlib
 import json
 import os
@@ -55,9 +67,12 @@ import re
 import sys
 import tempfile
 import urllib.parse
+import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from io import BytesIO
+from html.parser import HTMLParser
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -78,6 +93,12 @@ DOWNLOAD_TIMEOUT_MS = 8000
 # expect_popup returns the HPLanding window as soon as it opens. The BOP
 # application at https://bop.americanstrategic.com/ shows up after that.
 BOP_APP_ATTACH_TIMEOUT_MS = 20000
+# How long to wait for a reports control to become visible, or for the
+# network to go idle. This is a Playwright wait budget, not a sleep.
+BOP_REPORTS_READY_TIMEOUT_MS = 20000
+# Report exports are larger than one notice. save_as still waits until the
+# browser finishes the file; this is only the start/finish budget.
+BOP_EXPORT_TIMEOUT_MS = 30000
 LEDGER_NAME = "bop-noc-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 DEFAULT_OUTPUT_ROOT = Path(
@@ -130,8 +151,27 @@ _DOC_NAME_HEADERS = frozenset({
 _DOC_DATE_HEADERS = frozenset({
     "date", "document date", "processed date", "created", "created date", "notice date",
 })
-_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel")
-_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF")
+# Live 2026-09-30 accessible names on the BOP reports page. The older generic
+# names stay as fallbacks. Pdf is preferred over Xls.
+_PENDING_CANCEL_PDF_EXPORT = "Export Pending Cancel for Non-Payment Pdf"
+_PENDING_CANCEL_XLS_EXPORT = "Export Pending Cancel for Non-Payment Xls"
+_EXCEL_EXPORTS = (
+    _PENDING_CANCEL_XLS_EXPORT,
+    "Excel",
+    "Export to Excel",
+    "Download Excel",
+    "Export Excel",
+)
+_PDF_EXPORTS = (
+    _PENDING_CANCEL_PDF_EXPORT,
+    "PDF",
+    "Export to PDF",
+    "Download PDF",
+    "Export PDF",
+)
+_PENDING_CANCEL_NAV = "Pending Cancel for Nonpayment"
+_XLSX_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"
 _SEARCH_FIELDS = (
     ("searchbox", "Search"),
     ("textbox", "Policy number"),
@@ -370,11 +410,210 @@ def _blank_report(report_date: date, observed_date: date | None, source: str) ->
     )
 
 
+def _empty_export_hold(label: str) -> IntakeHold:
+    return IntakeHold(
+        f"Pending Cancel export {label!r} downloaded an empty file (0 bytes). "
+        "An empty download is not a report with no policies."
+    )
+
+
+def _truncated_export_hold(label: str) -> IntakeHold:
+    return IntakeHold(
+        f"Pending Cancel export {label!r} is truncated. "
+        "A partial download is not a report with no policies."
+    )
+
+
+def _unfinished_export_hold(label: str, detail: str = "") -> IntakeHold:
+    suffix = f" ({detail})" if detail else ""
+    return IntakeHold(
+        f"Pending Cancel export {label!r} did not finish downloading{suffix}. "
+        "An unfinished download is not a report with no policies."
+    )
+
+
+def _assert_export_bytes(blob: bytes | bytearray | None, *, label: str) -> bytes:
+    """Reject an empty or cut-off export. Never turn that file into 'no docs'."""
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) == 0:
+        raise _empty_export_hold(label)
+    raw = bytes(blob)
+    if raw.startswith(b"%PDF") and b"%%EOF" not in raw:
+        raise _truncated_export_hold(label)
+    if raw.startswith(b"PK"):
+        try:
+            with zipfile.ZipFile(BytesIO(raw)) as zipped:
+                bad = zipped.testzip()
+        except zipfile.BadZipFile as exc:
+            raise _truncated_export_hold(label) from exc
+        if bad is not None:
+            raise _truncated_export_hold(label)
+    if raw.startswith(_OLE_MAGIC) and len(raw) < 512:
+        raise _truncated_export_hold(label)
+    sample = raw.lstrip()[:16].lower()
+    if sample.startswith(b"<") and b"</table>" not in raw.lower() and b"</html>" not in raw.lower():
+        raise _truncated_export_hold(label)
+    return raw
+
+
+def _column_index(letters: str) -> int:
+    index = 0
+    for char in letters:
+        index = index * 26 + (ord(char) - 64)
+    return index
+
+
+def _xlsx_sheet_rows(blob: bytes) -> list[tuple[str, ...]]:
+    """Read the one populated worksheet from an xlsx zip. No openpyxl."""
+    ns = {"m": _XLSX_NS}
+    text_tag = f"{{{_XLSX_NS}}}t"
+    try:
+        with zipfile.ZipFile(BytesIO(blob)) as zipped:
+            names = set(zipped.namelist())
+            sheets = sorted(
+                name for name in names
+                if name.startswith("xl/worksheets/") and name.endswith(".xml")
+            )
+            if not sheets:
+                raise IntakeHold("Pending Cancel report workbook is missing or ambiguous")
+            shared: list[str] = []
+            if "xl/sharedStrings.xml" in names:
+                root = ET.fromstring(zipped.read("xl/sharedStrings.xml"))
+                for item in root.findall("m:si", ns):
+                    shared.append("".join(node.text or "" for node in item.iter(text_tag)))
+            populated: list[list[tuple[str, ...]]] = []
+            for sheet_name in sheets:
+                root = ET.fromstring(zipped.read(sheet_name))
+                grid: dict[int, dict[int, str]] = {}
+                for cell in root.findall(".//m:c", ns):
+                    ref = str(cell.attrib.get("r") or "")
+                    found = re.fullmatch(r"([A-Z]+)(\d+)", ref)
+                    if not found:
+                        continue
+                    column = _column_index(found.group(1))
+                    row_index = int(found.group(2))
+                    kind = cell.attrib.get("t")
+                    value_node = cell.find("m:v", ns)
+                    if kind == "s" and value_node is not None and value_node.text:
+                        value = shared[int(value_node.text)]
+                    elif kind == "inlineStr":
+                        value = "".join(node.text or "" for node in cell.iter(text_tag))
+                    elif value_node is not None and value_node.text:
+                        value = value_node.text
+                    else:
+                        value = ""
+                    grid.setdefault(row_index, {})[column] = _norm(value)
+                if not grid:
+                    continue
+                width = max(max(columns) for columns in grid.values())
+                rows: list[tuple[str, ...]] = []
+                for row_index in range(1, max(grid) + 1):
+                    columns = grid.get(row_index, {})
+                    rows.append(tuple(columns.get(column, "") for column in range(1, width + 1)))
+                while rows and not any(rows[-1]):
+                    rows.pop()
+                if rows:
+                    populated.append(rows)
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise IntakeHold("Pending Cancel report workbook is missing or ambiguous") from exc
+    if len(populated) != 1:
+        raise IntakeHold("Pending Cancel report workbook is missing or ambiguous")
+    return populated[0]
+
+
+def _parse_xlsx_zip(blob: bytes, *, report_date: date) -> PendingCancelReport:
+    return parse_report_rows(_xlsx_sheet_rows(blob), report_date=report_date, source="excel")
+
+
+class _HtmlTableParser(HTMLParser):
+    """Collect top-level HTML tables. Export-to-Xls from older sites is often HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tables: list[list[tuple[str, ...]]] = []
+        self._depth = 0
+        self._table: list[tuple[str, ...]] | None = None
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "table":
+            if self._depth == 0:
+                self._table = []
+            self._depth += 1
+        elif tag == "tr" and self._depth == 1:
+            self._row = []
+        elif tag in {"td", "th"} and self._row is not None and self._depth == 1:
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._cell is not None and self._row is not None:
+            self._row.append(_norm("".join(self._cell)))
+            self._cell = None
+        elif tag == "tr" and self._row is not None and self._depth == 1 and self._table is not None:
+            self._table.append(tuple(self._row))
+            self._row = None
+        elif tag == "table" and self._depth:
+            self._depth -= 1
+            if self._depth == 0 and self._table is not None:
+                self.tables.append(self._table)
+                self._table = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _looks_like_html(blob: bytes) -> bool:
+    sample = blob.lstrip()[:400].lower()
+    return sample.startswith(b"<html") or sample.startswith(b"<table") or b"<table" in sample
+
+
+def _rows_from_html(blob: bytes) -> list[tuple[str, ...]]:
+    parser = _HtmlTableParser()
+    parser.feed(blob.decode("utf-8", errors="replace"))
+    parser.close()
+    usable = [table for table in parser.tables if any(_header_indexes(row, kind="report") for row in table[:5])]
+    if len(usable) != 1:
+        raise IntakeHold("Pending Cancel report workbook is missing or ambiguous")
+    return usable[0]
+
+
+def _rows_from_delimited(blob: bytes) -> list[tuple[str, ...]] | None:
+    if blob.startswith((b"%PDF", b"PK", _OLE_MAGIC)) or _looks_like_html(blob):
+        return None
+    try:
+        text = blob.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+    sample = text[:4096]
+    if "," not in sample and "\t" not in sample:
+        return None
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        rows = [
+            tuple(_norm(cell) for cell in row)
+            for row in csv.reader(StringIO(text), dialect)
+            if any(_norm(cell) for cell in row)
+        ]
+    except csv.Error:
+        return None
+    if not rows or _header_indexes(rows[0], kind="report") is None:
+        return None
+    return rows
+
+
 def parse_excel_report(blob: bytes, *, report_date: date) -> PendingCancelReport:
     if not blob:
-        raise IntakeHold("Pending Cancel report workbook is missing or ambiguous")
+        raise _empty_export_hold("Xls")
     try:
         import openpyxl
+    except ImportError:
+        return _parse_xlsx_zip(blob, report_date=report_date)
+    try:
         workbook = openpyxl.load_workbook(BytesIO(blob), read_only=True, data_only=True)
     except IntakeHold:
         raise
@@ -397,6 +636,66 @@ def parse_excel_report(blob: bytes, *, report_date: date) -> PendingCancelReport
         workbook.close()
 
 
+_POLICY_TOKEN = re.compile(r"(?<!\d)(\d{6,12})(?!\d)")
+
+
+def _structured_list_rows(text: str) -> list[tuple[str, ...]] | None:
+    """Rows that carry a policy number, an insured name, and one cancel date.
+
+    Returns None when the text is not that kind of list, so the older
+    policy-line reader still handles a notice that only names a policy.
+    """
+    parsed: list[tuple[str, str, str]] = []
+    for raw_line in str(text or "").splitlines():
+        line = _norm(raw_line)
+        if not line:
+            continue
+        policy_match = _POLICY_TOKEN.search(line)
+        dates = list(_DATE_IN_TEXT.finditer(line))
+        if policy_match is None or not dates:
+            continue
+        if len(dates) != 1:
+            raise IntakeHold("Pending Cancel report date is missing or ambiguous")
+        policy = policy_match.group(1)
+        insured = line.replace(dates[0].group(0), " ", 1)
+        insured = re.sub(rf"(?<!\d){re.escape(policy)}(?!\d)", " ", insured, count=1)
+        insured = _norm(insured).strip(" -|")
+        if not insured:
+            raise IntakeHold("Pending Cancel insured name is missing")
+        parsed.append((policy, insured, dates[0].group(0)))
+    if not parsed:
+        return None
+    return [("Policy Number", "Named Insured", "Cancel Date"), *parsed]
+
+
+def parse_xls_export(blob: bytes, *, report_date: date) -> PendingCancelReport:
+    """Read a Pending Cancel Xls export without requiring an Excel package.
+
+    xlsx is a zip of XML (stdlib). Older 'Export Xls' buttons often send an
+    HTML table or a CSV. A real BIFF .xls file is named in the hold; this
+    release does not add a workbook library for a format that has not been
+    seen as a non-empty file.
+    """
+    raw = _assert_export_bytes(blob, label="Xls")
+    if raw.startswith(b"PK"):
+        return parse_excel_report(raw, report_date=report_date)
+    if _looks_like_html(raw):
+        return parse_report_rows(_rows_from_html(raw), report_date=report_date, source="excel")
+    delimited = _rows_from_delimited(raw)
+    if delimited is not None:
+        return parse_report_rows(delimited, report_date=report_date, source="excel")
+    if raw.startswith(_OLE_MAGIC):
+        raise IntakeHold(
+            "Pending Cancel Xls export is an older Excel workbook (.xls). "
+            "This release has no reader for that format. "
+            "The file was not treated as a report with no policies."
+        )
+    raise IntakeHold(
+        "Pending Cancel Xls export is not a list this pull can read. "
+        "The file was not treated as a report with no policies."
+    )
+
+
 def policies_from_report_text(text: str, *, report_date: date, source: str = "pdf") -> PendingCancelReport:
     raw = str(text or "")
     observed = {parse_report_date(match) for match in _REPORT_DATE_LABEL.findall(raw)}
@@ -408,6 +707,18 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
             "Pending Cancel report date "
             f"{observed_date.isoformat()} does not match {report_date.isoformat()}"
         )
+    structured = _structured_list_rows(raw)
+    if structured is not None:
+        report = parse_report_rows(structured, report_date=report_date, source=source)
+        if observed_date is not None and report.observed_date is None:
+            return PendingCancelReport(
+                report_date=report.report_date,
+                observed_date=observed_date,
+                policies=report.policies,
+                source=report.source,
+                blank=report.blank,
+            )
+        return report
     labeled = list(_POLICY_LINE.finditer(raw))
     found: list[tuple[str, str]] = []
     if labeled:
@@ -452,17 +763,21 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
 
 
 def parse_pdf_report(blob: bytes, *, report_date: date) -> PendingCancelReport:
-    if not _is_pdf(blob):
+    raw = _assert_export_bytes(blob, label="Pdf")
+    if not _is_pdf(raw):
         raise IntakeHold("Pending Cancel report is missing or ambiguous")
     try:
         from pypdf import PdfReader
-        reader = PdfReader(BytesIO(blob))
+        reader = PdfReader(BytesIO(raw))
         if not reader.pages:
             raise IntakeHold("Pending Cancel report is missing or ambiguous")
         text = "\n".join((page.extract_text() or "") for page in reader.pages)
     except IntakeHold:
         raise
     except Exception as exc:
+        detail = f"{type(exc).__name__} {exc}".casefold()
+        if "eof" in detail or "truncat" in detail:
+            raise _truncated_export_hold("Pdf") from exc
         raise IntakeHold("Pending Cancel report is missing or ambiguous") from exc
     return policies_from_report_text(text, report_date=report_date, source="pdf")
 
@@ -475,6 +790,10 @@ def report_from_extracted(
     pdf_bytes: bytes | None,
     report_date: date,
 ) -> PendingCancelReport:
+    if excel_bytes is not None:
+        excel_bytes = _assert_export_bytes(excel_bytes, label="Xls")
+    if pdf_bytes is not None:
+        pdf_bytes = _assert_export_bytes(pdf_bytes, label="Pdf")
     policy_tables = []
     for headers, rows in tables:
         if _header_indexes(headers, kind="report") is not None:
@@ -1355,6 +1674,13 @@ class _BopFrameSurface:
     def expect_download(self, *args: Any, **kwargs: Any) -> Any:
         return self._owner.expect_download(*args, **kwargs)
 
+    def wait_for_load_state(self, *args: Any, **kwargs: Any) -> Any:
+        for target in (self._frame, self._owner):
+            waiter = getattr(target, "wait_for_load_state", None)
+            if callable(waiter):
+                return waiter(*args, **kwargs)
+        raise TypeError("wait_for_load_state")
+
 
 def _is_bop_app_url(url: str) -> bool:
     parsed = urllib.parse.urlsplit(str(url or "").strip())
@@ -1668,9 +1994,125 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     return _attach_bop_application(page, opened)
 
 
+def _ready_control_names() -> tuple[str, ...]:
+    return _VIEW_REPORTS_NAMES + (
+        _PENDING_CANCEL_NAV,
+        _PENDING_CANCEL_PDF_EXPORT,
+        _PENDING_CANCEL_XLS_EXPORT,
+    )
+
+
+def _count_named(page: Any, name: str) -> int:
+    total = 0
+    for role in ("link", "button"):
+        count = _locator_count(page.get_by_role(role, name=name, exact=True))
+        if count < 0:
+            continue
+        if count > 1:
+            raise IntakeHold(f"Progressive control {name!r} is missing or ambiguous")
+        total += count
+    if total > 1:
+        raise IntakeHold(f"Progressive control {name!r} is missing or ambiguous")
+    return total
+
+
+def _any_ready_control(page: Any) -> bool:
+    return any(_count_named(page, name) == 1 for name in _ready_control_names())
+
+
+def _combined_ready_locator(page: Any) -> Any | None:
+    combined = None
+    for name in _ready_control_names():
+        for role in ("link", "button"):
+            locator = page.get_by_role(role, name=name, exact=True)
+            if combined is None:
+                combined = locator
+                continue
+            combine = getattr(combined, "or_", None)
+            if not callable(combine):
+                return None
+            combined = combine(locator)
+    return combined
+
+
+def wait_for_bop_reports_ready(page: Any) -> str:
+    """Wait until a reports control is visible, or the network is idle.
+
+    Returns ``controls`` when a known control is already there, or
+    ``networkidle`` when that was the ready signal. A fixed sleep is not used.
+    """
+    if _any_ready_control(page):
+        return "controls"
+    combined = _combined_ready_locator(page)
+    wait_for = getattr(combined, "wait_for", None) if combined is not None else None
+    if callable(wait_for):
+        try:
+            wait_for(state="visible", timeout=BOP_REPORTS_READY_TIMEOUT_MS)
+        except Exception as exc:
+            if not _is_download_timeout(exc):
+                raise IntakeHold("Progressive BOP reports page did not finish loading") from exc
+        else:
+            return "controls"
+    idle = getattr(page, "wait_for_load_state", None)
+    if callable(idle):
+        try:
+            idle("networkidle", timeout=BOP_REPORTS_READY_TIMEOUT_MS)
+        except Exception as exc:
+            raise IntakeHold("Progressive BOP reports page did not finish loading") from exc
+        return "networkidle"
+    raise IntakeHold("Progressive BOP reports page did not finish loading")
+
+
+def _export_surface_present(page: Any) -> bool:
+    return any(_count_named(page, name) == 1 for name in (_PENDING_CANCEL_PDF_EXPORT, _PENDING_CANCEL_XLS_EXPORT))
+
+
+def _unique_named_control(page: Any, names: tuple[str, ...]) -> Any | None:
+    matches = []
+    for name in names:
+        for role in ("link", "button"):
+            locator = page.get_by_role(role, name=name, exact=True)
+            count = _locator_count(locator)
+            if count < 0 or count == 0:
+                continue
+            matches.append((count, locator, name))
+    if not matches:
+        return None
+    if len(matches) != 1 or matches[0][0] != 1:
+        label = matches[0][2] if len({item[2] for item in matches}) == 1 else "reports"
+        raise IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
+    return matches[0][1]
+
+
 def open_pending_cancel_report(report_page: Any) -> None:
-    _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
-    click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+    """Land on Pending Cancel. Do not look for controls before the page is ready.
+
+    View Reports → Pending Cancel for Nonpayment remains the older page.
+    The 2026-09-30 reports page has the Pending Cancel export buttons and no
+    View Reports control. That page is already the report.
+    """
+    ready = wait_for_bop_reports_ready(report_page)
+    view = _unique_named_control(report_page, _VIEW_REPORTS_NAMES)
+    if view is None and _export_surface_present(report_page):
+        return
+    if view is not None:
+        view.click()
+        wait_for_bop_reports_ready(report_page)
+        if _export_surface_present(report_page) and _unique_named_control(report_page, (_PENDING_CANCEL_NAV,)) is None:
+            return
+        click_named(report_page, _PENDING_CANCEL_NAV, roles=("link", "button"))
+        wait_for_bop_reports_ready(report_page)
+        return
+    pending = _unique_named_control(report_page, (_PENDING_CANCEL_NAV,))
+    if pending is not None:
+        pending.click()
+        wait_for_bop_reports_ready(report_page)
+        return
+    if ready == "networkidle":
+        raise IntakeHold(
+            "Progressive BOP reports page has no View Reports control and no Pending Cancel export"
+        )
+    raise IntakeHold("Progressive BOP reports page did not finish loading")
 
 
 def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
@@ -1725,55 +2167,202 @@ def extract_tables(page: Any) -> list[tuple[tuple[str, ...], tuple[tuple[str, ..
     return found
 
 
-def _matching_exports(page: Any, names: tuple[str, ...]) -> list[Any]:
+def _matching_exports(page: Any, names: tuple[str, ...]) -> tuple[Any, str] | None:
     matches = []
     for name in names:
         for role in ("link", "button"):
             locator = page.get_by_role(role, name=name, exact=True)
-            count = locator.count()
-            if count:
-                matches.append(locator)
-                if count != 1:
-                    raise IntakeHold("Pending Cancel report export is missing or ambiguous")
-    if len(matches) > 1:
+            count = _locator_count(locator)
+            if count < 0 or count == 0:
+                continue
+            matches.append((locator, name, count))
+    if not matches:
+        return None
+    if len(matches) != 1 or matches[0][2] != 1:
         raise IntakeHold("Pending Cancel report export is missing or ambiguous")
-    return matches
+    return matches[0][0], matches[0][1]
+
+
+def _finished_download_bytes(download: Any, *, label: str) -> bytes:
+    """Wait until Playwright says the download finished, then read the file."""
+    failure = getattr(download, "failure", None)
+    if callable(failure):
+        try:
+            reason = failure()
+        except Exception as exc:
+            raise _unfinished_export_hold(label) from exc
+        if reason:
+            raise _unfinished_export_hold(label, str(reason))
+    handle = tempfile.NamedTemporaryFile(prefix="bop-export-", suffix=".bin", delete=False)
+    handle.close()
+    path = Path(handle.name)
+    try:
+        download.save_as(str(path))
+        return path.read_bytes()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _unfinished_export_hold(label) from exc
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _download_one_export(page: Any, click: Callable[[], None], *, label: str) -> bytes:
+    """Click one export and keep the one finished file.
+
+    A 0-byte or truncated file is a hold. It is not an empty policy list.
+    A PDF that opens in a new Progressive tab counts when the download itself
+    is empty.
+    """
+    context = getattr(page, "context", None)
+    if context is None:
+        raise IntakeHold(
+            f"Pending Cancel export {label!r} did not download. "
+            "A missing download is not a report with no policies."
+        )
+    opened: list[Any] = []
+
+    def on_page(new_page: Any) -> None:
+        opened.append(new_page)
+
+    context.on("page", on_page)
+    clicked = False
+    timed_out = False
+    blob = b""
+    try:
+        def wrapped() -> None:
+            nonlocal clicked
+            click()
+            clicked = True
+
+        try:
+            with page.expect_download(timeout=BOP_EXPORT_TIMEOUT_MS) as download_info:
+                wrapped()
+            blob = _finished_download_bytes(download_info.value, label=label)
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            if not clicked or not _is_download_timeout(exc):
+                raise IntakeHold(
+                    f"Pending Cancel export {label!r} did not download. "
+                    "A missing download is not a report with no policies."
+                ) from exc
+            timed_out = True
+        files: list[bytes] = []
+        if blob:
+            files.append(blob)
+        for item in opened:
+            if not _is_own_tab(item):
+                continue
+            wait = getattr(item, "wait_for_load_state", None)
+            if callable(wait):
+                try:
+                    wait("domcontentloaded", timeout=BOP_EXPORT_TIMEOUT_MS)
+                except Exception as exc:
+                    if not _is_download_timeout(exc):
+                        raise IntakeHold(
+                            f"Pending Cancel export {label!r} did not download. "
+                            "A missing download is not a report with no policies."
+                        ) from exc
+            files.extend(read_playwright_pdf_view(item).pdfs)
+        current_url = str(getattr(page, "url", "") or "")
+        if current_url.startswith("blob:") or _url_looks_like_pdf(current_url):
+            files.extend(read_playwright_pdf_view(page).pdfs)
+        real = [item for item in files if item]
+        if not real:
+            if timed_out:
+                raise _unfinished_export_hold(label)
+            raise _empty_export_hold(label)
+        if len(real) != 1:
+            raise IntakeHold("Pending Cancel report export is missing or ambiguous")
+        return _assert_export_bytes(real[0], label=label)
+    finally:
+        remover = getattr(context, "remove_listener", None)
+        if callable(remover):
+            try:
+                remover("page", on_page)
+            except Exception:
+                pass
+        for item in opened:
+            if not _is_own_tab(item):
+                continue
+            closer = getattr(item, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
 
 
 def download_export(page: Any, names: tuple[str, ...]) -> bytes | None:
-    matches = _matching_exports(page, names)
-    if not matches:
+    found = _matching_exports(page, names)
+    if found is None:
         return None
-    locator = matches[0]
+    locator, label = found
 
     def click() -> None:
         locator.click()
 
-    observation = collect_pdf(page, click)
-    blobs = list(observation.downloads)
-    for view in observation.pages:
-        blobs.extend(view.pdfs)
-    if len(blobs) != 1:
-        raise IntakeHold("Pending Cancel report export is missing or ambiguous")
-    return blobs[0]
+    return _download_one_export(page, click, label=label)
+
+
+def _export_failure_can_try_the_other(exc: BaseException) -> bool:
+    text = str(exc).casefold()
+    return (
+        "empty file" in text
+        or "truncated" in text
+        or "did not finish" in text
+        or "did not download" in text
+        or "policies are missing" in text
+        or "not a pdf" in text
+        or "not a list this pull can read" in text
+    )
 
 
 def read_report_from_page(page: Any, report_date: date) -> PendingCancelReport:
     tables = extract_tables(page)
     policy_tables = [table for table in tables if _header_indexes(table[0], kind="report")]
-    excel_bytes = None
-    pdf_bytes = None
-    if len(policy_tables) == 0:
-        excel_bytes = download_export(page, _EXCEL_EXPORTS)
-        if excel_bytes is None:
+    if len(policy_tables) > 1:
+        raise IntakeHold("Pending Cancel report table is missing or ambiguous")
+    if len(policy_tables) == 1:
+        text = str(page.locator("body").inner_text() or "")
+        return report_from_extracted(
+            tables=tables,
+            page_text=text,
+            excel_bytes=None,
+            pdf_bytes=None,
+            report_date=report_date,
+        )
+    pdf_hold: IntakeHold | None = None
+    if _matching_exports(page, _PDF_EXPORTS) is not None:
+        try:
             pdf_bytes = download_export(page, _PDF_EXPORTS)
-            if pdf_bytes is None:
-                pdf_bytes = _embedded_pdf(page)
+            if pdf_bytes:
+                return parse_pdf_report(pdf_bytes, report_date=report_date)
+        except IntakeHold as exc:
+            pdf_hold = exc
+    if _matching_exports(page, _EXCEL_EXPORTS) is not None and (
+        pdf_hold is None or _export_failure_can_try_the_other(pdf_hold)
+    ):
+        try:
+            excel_bytes = download_export(page, _EXCEL_EXPORTS)
+        except IntakeHold as exc:
+            if pdf_hold is not None:
+                raise IntakeHold(f"{pdf_hold} {exc}") from exc
+            raise
+        if excel_bytes:
+            return parse_xls_export(excel_bytes, report_date=report_date)
+    if pdf_hold is not None:
+        raise pdf_hold
+    pdf_bytes = _embedded_pdf(page)
     text = str(page.locator("body").inner_text() or "")
     return report_from_extracted(
         tables=tables,
         page_text=text,
-        excel_bytes=excel_bytes,
+        excel_bytes=None,
         pdf_bytes=pdf_bytes,
         report_date=report_date,
     )

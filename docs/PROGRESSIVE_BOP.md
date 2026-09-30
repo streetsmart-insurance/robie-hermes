@@ -24,16 +24,28 @@ tab and writes one QA pack for `--report-date`:
    or `Go to Businessowner/Contractor GL policy search`. Zero or two matches
    hold. A Communications / underwritinglegacy tab still opens Home first,
    then clicks Manage Policies and then `Businessowner/Contractor GL`.
-2. View Reports → Pending Cancel for Nonpayment. The live control is the
-   button `VIEW REPORTS`. `expect_popup` returns
+2. Pending Cancel report. `expect_popup` returns
    `sbr*.foragentsonly.com/.../HPLanding.aspx` (`Close this window`) as soon
    as that window opens. The pull then waits up to 20s for
    `https://bop.americanstrategic.com/` (or that application's frame) and
-   does not click View Reports on the landing page. It closes the landing
+   does not click report controls on the landing page. It closes the landing
    page when the application is a different page. A failed close does not
-   hold. HPLanding alone, after that wait, holds.
+   hold. HPLanding alone, after that wait, holds. On the BOP application the
+   pull waits until a known control is visible, or until the network is idle.
+   It does not sleep a fixed interval, and it does not look before that.
+   An older page still uses `View Reports` / `VIEW REPORTS`, then
+   `Pending Cancel for Nonpayment`. The reports page seen on hermes-test-01
+   on 2026-09-30 has no View Reports control. It has
+   `Export Pending Cancel for Non-Payment Pdf` and
+   `Export Pending Cancel for Non-Payment Xls`. Those buttons are already
+   the report. The click only downloads. It does not bind, cancel, or pay.
 3. Full-page PNG of that report, then read policies from the on-screen policy
-   table, or from one Excel export, or from one PDF export.
+   table, or from the PDF export, or from the Xls export. The PDF export is
+   preferred. A list PDF is read for insured, policy number, and cancel date,
+   the same fields the other Wave A pulls keep. Xls is read as xlsx (zip XML,
+   no extra package), an HTML table, or CSV. A classic BIFF `.xls` file holds
+   with a plain reason. An empty or truncated download holds. It is not an
+   empty report and it is not "no docs".
 4. For each policy, on the original FAO shell: search the policy → Documents →
    Policy → download the Notice of Non Payment whose date is the report date.
 5. Save `[Policy Number] - NOC - Non Payment.pdf`.
@@ -189,9 +201,26 @@ is a failed pull, not a partial success. This code has not been run on
 - Live accessible names: `Manage Policies`, `Businessowner/Contractor GL`,
   `Go to Businessowner/Contractor GL policy search` (shell Home only, one
   exact link or button), `View Reports`, `Pending Cancel for Nonpayment`,
+  `Export Pending Cancel for Non-Payment Pdf`,
+  `Export Pending Cancel for Non-Payment Xls`,
   the shell policy search, `Documents`, and the `Policy` document tab. A
   mismatch holds; do not widen these from Production.
 - Whether Businessowner/Contractor GL opens exactly one new window.
+- Whether the reports page is ready because the export button is visible, or
+  only after the network is idle. This change has not been run on
+  `hermes-test-01`. Do not deploy it while that host is in use.
+- Whether the PDF export is a policy list (insured, policy number, cancel
+  date) or a packet of per-policy notices. A list is parsed. The per-policy
+  Notice of Non Payment is still downloaded from FAO Documents. A cancel date
+  that is not the requested report date holds. Confirm that against a live
+  non-empty file.
+- Whether a finished export is still 0 bytes after the page is ready. That
+  result must stay a hold that says the file is empty. It must not become an
+  empty pack.
+- Whether the Xls export, once non-empty, is xlsx, an HTML table, CSV, or
+  classic BIFF `.xls`. xlsx, HTML, and CSV are read with the standard
+  library. BIFF holds until a real file shows that format. No Excel package
+  was added.
 - Whether the report is an HTML policy table, an Excel control, or a PDF
   control. An empty scan with no policy table, no export, and no no-records
   phrase holds, so a blank pack is not invented from a failed parse.

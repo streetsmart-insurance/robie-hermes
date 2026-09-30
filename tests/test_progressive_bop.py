@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -38,6 +39,9 @@ from robie_job_engine.progressive_bop import (
     parse_excel_report,
     parse_pdf_report,
     parse_report_rows,
+    parse_xls_export,
+    _PENDING_CANCEL_PDF_EXPORT,
+    _PENDING_CANCEL_XLS_EXPORT,
     policies_from_report_text,
     read_report_from_page,
     report_from_extracted,
@@ -1150,6 +1154,320 @@ class BopLivePageFixTests(unittest.TestCase):
         away = FakePage(set(), url="https://www.foragentsonly.com/home")
         ensure_manage_policies_landing(away)
         self.assertEqual(away.clicked, [("goto", "https://www.foragentsonly.com/landingpages/managepolicies/")])
+
+
+FIXTURES = Path(__file__).resolve().parents[0] / "fixtures" / "progressive_bop"
+
+
+def _fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def _button_labels(page_html: str) -> list[str]:
+    labels = re.findall(r"<button[^>]*>(.*?)</button>", page_html, flags=re.IGNORECASE | re.DOTALL)
+    return [_norm_space(label) for label in labels]
+
+
+def _norm_space(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+class _SilentContext:
+    def on(self, event, fn):
+        return None
+
+    def remove_listener(self, event, fn):
+        return None
+
+
+class _FinishedDownload:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.finished = False
+
+    def failure(self):
+        self.finished = True
+        return None
+
+    def save_as(self, path):
+        if not self.finished:
+            raise AssertionError("save_as ran before the download finished")
+        Path(path).write_bytes(self.payload)
+
+
+class _ExportPage(FakePage):
+    """BOP reports page whose export buttons download canned bytes."""
+
+    def __init__(self, files: dict[str, bytes], *, body: str = "Pending Cancel for Non-Payment"):
+        super().__init__(
+            {("button", name) for name in files},
+            body=body,
+            url="https://bop.americanstrategic.com/reports",
+        )
+        self.files = files
+        self.context = _SilentContext()
+
+    def expect_download(self, timeout=None):
+        page = self
+
+        class _Download:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                name = page.clicked[-1][1]
+                self.value = _FinishedDownload(page.files[name])
+                return False
+
+        return _Download()
+
+
+def _minimal_xlsx(rows: list[list[str]]) -> bytes:
+    shared: list[str] = []
+
+    def shared_index(value: str) -> int:
+        shared.append(value)
+        return len(shared) - 1
+
+    sheet_rows = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = []
+        for column_index, value in enumerate(row):
+            column = chr(ord("A") + column_index)
+            index = shared_index(value)
+            cells.append(f'<c r="{column}{row_index}" t="s"><v>{index}</v></c>')
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    shared_xml = "".join(f"<si><t>{item}</t></si>" for item in shared)
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<worksheet xmlns="{ns}"><sheetData>{"".join(sheet_rows)}</sheetData></worksheet>'
+    )
+    shared_part = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<sst xmlns="{ns}" count="{len(shared)}" uniqueCount="{len(shared)}">{shared_xml}</sst>'
+    )
+    buffer = io.BytesIO()
+    with __import__("zipfile").ZipFile(buffer, "w") as zipped:
+        zipped.writestr("[Content_Types].xml", "<Types></Types>")
+        zipped.writestr("xl/workbook.xml", f'<workbook xmlns="{ns}"></workbook>')
+        zipped.writestr("xl/worksheets/sheet1.xml", sheet)
+        zipped.writestr("xl/sharedStrings.xml", shared_part)
+    return buffer.getvalue()
+
+
+class PendingCancelExportTests(unittest.TestCase):
+    def test_fixture_page_has_export_buttons_and_no_view_reports(self):
+        html = _fixture("reports_page.html").decode("utf-8")
+        labels = _button_labels(html)
+        self.assertEqual(
+            labels,
+            [_PENDING_CANCEL_PDF_EXPORT, _PENDING_CANCEL_XLS_EXPORT],
+        )
+        self.assertNotIn("View Reports", html)
+        self.assertNotIn("VIEW REPORTS", html)
+
+    def test_export_page_does_not_click_view_reports(self):
+        html = _fixture("reports_page.html").decode("utf-8")
+        labels = _button_labels(html)
+        report = FakePage(
+            {("button", label) for label in labels},
+            url="https://bop.americanstrategic.com/reports",
+            body=html,
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.clicked, [])
+        self.assertNotIn(("link", "View Reports"), report.clicked)
+        self.assertNotIn(("button", "VIEW REPORTS"), report.clicked)
+
+    def test_network_idle_before_controls_and_no_fixed_sleep(self):
+        class _Late(FakePage):
+            def __init__(self):
+                super().__init__(set(), url="https://bop.americanstrategic.com/reports")
+                self.states: list[str] = []
+
+            def wait_for_load_state(self, state, timeout=None):
+                self.states.append(state)
+                if state == "networkidle":
+                    self.roles.update({
+                        ("button", _PENDING_CANCEL_PDF_EXPORT),
+                        ("button", _PENDING_CANCEL_XLS_EXPORT),
+                    })
+
+            def wait_for_timeout(self, _ms):
+                raise AssertionError("fixed sleep")
+
+        report = _Late()
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.states, ["networkidle"])
+        self.assertEqual(report.clicked, [])
+
+    def test_visible_export_button_is_enough_and_does_not_sleep(self):
+        class _Locator(FakeLocator):
+            def count(self):
+                if not self.page.ready:
+                    return 0
+                return FakeLocator.count(self)
+
+            def or_(self, _other):
+                return self
+
+            def wait_for(self, state="visible", timeout=None):
+                self.page.waits.append(state)
+                self.page.ready = True
+                self.page.roles.update({
+                    ("button", _PENDING_CANCEL_PDF_EXPORT),
+                    ("button", _PENDING_CANCEL_XLS_EXPORT),
+                })
+
+        class _Late(FakePage):
+            def __init__(self):
+                super().__init__(set(), url="https://bop.americanstrategic.com/reports")
+                self.ready = False
+                self.waits: list[str] = []
+
+            def get_by_role(self, role, name=None, exact=True):
+                return _Locator(self, role=role, name=name)
+
+            def wait_for_load_state(self, state, timeout=None):
+                raise AssertionError(state)
+
+            def wait_for_timeout(self, _ms):
+                raise AssertionError("fixed sleep")
+
+        report = _Late()
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.waits, ["visible"])
+        self.assertEqual(report.clicked, [])
+
+    def test_pdf_list_fixture_extracts_insured_policy_and_cancel_date(self):
+        text = _fixture("pending_cancel_list.txt").decode("utf-8")
+        page = _ExportPage({_PENDING_CANCEL_PDF_EXPORT: _text_pdf(text)})
+        report = read_report_from_page(page, DAY)
+        self.assertEqual(report.source, "pdf")
+        self.assertEqual(
+            [(row.policy_number, row.insured_name) for row in report.policies],
+            [("860521214", "3JR Contracting LLC"), ("879512352", "ALTI TRANSPORT LLC")],
+        )
+        self.assertTrue(all(row.report_date == DAY for row in report.policies))
+        self.assertEqual(page.clicked, [("button", _PENDING_CANCEL_PDF_EXPORT)])
+        with self.assertRaises(IntakeHold):
+            policies_from_report_text(
+                "860521214 3JR Contracting LLC 09/25/2026",
+                report_date=DAY,
+            )
+
+    def test_zero_byte_download_holds_and_is_not_an_empty_report(self):
+        empty = _fixture("empty_export.bin")
+        self.assertEqual(empty, b"")
+        page = _ExportPage(
+            {
+                _PENDING_CANCEL_PDF_EXPORT: empty,
+                _PENDING_CANCEL_XLS_EXPORT: empty,
+            },
+            body="Pending Cancel for Non-Payment. No records.",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("empty file (0 bytes)", reason)
+        self.assertIn("not a report with no policies", reason)
+        self.assertNotIn("No records", reason)
+        with self.assertRaises(IntakeHold) as extracted:
+            report_from_extracted(
+                tables=[],
+                page_text="Pending Cancel for Nonpayment. No records found.",
+                excel_bytes=None,
+                pdf_bytes=empty,
+                report_date=DAY,
+            )
+        self.assertIn("empty file (0 bytes)", str(extracted.exception))
+
+    def test_truncated_pdf_fixture_holds(self):
+        page = _ExportPage({_PENDING_CANCEL_PDF_EXPORT: _fixture("truncated_export.pdf")})
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("truncated", reason)
+        self.assertIn("not a report with no policies", reason)
+
+    def test_html_xls_fixture_is_a_list_when_the_pdf_is_empty(self):
+        page = _ExportPage({
+            _PENDING_CANCEL_PDF_EXPORT: _fixture("empty_export.bin"),
+            _PENDING_CANCEL_XLS_EXPORT: _fixture("pending_cancel_list.html"),
+        })
+        report = read_report_from_page(page, DAY)
+        self.assertEqual(report.source, "excel")
+        self.assertEqual(
+            [row.policy_number for row in report.policies],
+            ["860521214", "879512352"],
+        )
+        self.assertEqual(report.policies[0].insured_name, "3JR Contracting LLC")
+        direct = parse_xls_export(_fixture("pending_cancel_list.html"), report_date=DAY)
+        self.assertEqual(direct.policies[1].insured_name, "ALTI TRANSPORT LLC")
+
+    def test_xlsx_zip_parses_without_openpyxl(self):
+        blob = _minimal_xlsx([
+            ["Policy Number", "Named Insured", "Cancel Date"],
+            ["860521214", "3JR Contracting LLC", "09/26/2026"],
+        ])
+        with patch.dict(sys.modules, {"openpyxl": None}):
+            report = parse_excel_report(blob, report_date=DAY)
+        self.assertEqual(report.source, "excel")
+        self.assertEqual(report.policies[0].policy_number, "860521214")
+        self.assertEqual(report.policies[0].insured_name, "3JR Contracting LLC")
+        classic = b"\xd0\xcf\x11\xe0" + b"\x00" * 600
+        with self.assertRaises(IntakeHold) as caught:
+            parse_xls_export(classic, report_date=DAY)
+        self.assertIn("older Excel workbook", str(caught.exception))
+        self.assertIn("not treated as a report with no policies", str(caught.exception))
+        csv_report = parse_xls_export(
+            b"Policy Number,Named Insured,Cancel Date\n860521214,3JR Contracting LLC,09/26/2026\n",
+            report_date=DAY,
+        )
+        self.assertEqual(csv_report.policies[0].insured_name, "3JR Contracting LLC")
+
+    def test_a_failed_download_holds_before_the_file_is_read(self):
+        from robie_job_engine.progressive_bop import _finished_download_bytes
+
+        class _Failed:
+            def failure(self):
+                return "net::ERR_ABORTED"
+
+            def save_as(self, path):
+                raise AssertionError("save_as ran before the download finished")
+
+        with self.assertRaises(IntakeHold) as caught:
+            _finished_download_bytes(_Failed(), label=_PENDING_CANCEL_PDF_EXPORT)
+        self.assertIn("did not finish", str(caught.exception))
+        self.assertIn("not a report with no policies", str(caught.exception))
+
+    def test_complete_no_records_pdf_is_still_a_blank_report(self):
+        page = _ExportPage({
+            _PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records."),
+        })
+        report = read_report_from_page(page, DAY)
+        self.assertTrue(report.blank)
+        self.assertEqual(report.policies, ())
+        self.assertEqual(report.source, "pdf")
 
 
 if __name__ == "__main__":
