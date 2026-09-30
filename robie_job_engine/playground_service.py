@@ -1,0 +1,718 @@
+"""Playground turn handling for Chat and for robie@ email.
+
+A message in the configured space (or an email while the flag is on) is
+classified here. Writes wait for go. Blocked actions never call a writer.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+from .models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence
+from .playground_config import (
+    confirm_timeout_minutes,
+    email_guardrails_enabled,
+    message_in_playground,
+)
+from .playground_execute import (
+    ApplyResult,
+    compare_readback,
+    policy_change_discussion,
+    policy_change_note,
+    prepare_carrier_delivery,
+    refuse_if_not_allowlisted,
+)
+from .playground_guardrails import (
+    CARRIER_EMAIL,
+    NOTE,
+    SIMPLE_EDIT,
+    Decision,
+    Proposal,
+    classify_playground_request,
+)
+from .playground_reply import (
+    blocked_reply,
+    cancelled_reply,
+    clarify_reply,
+    confirmation_reply,
+    help_reply,
+    lookup_reply,
+    matched_reply,
+    mismatch_reply,
+    sop_reply,
+    working_reply,
+)
+from .playground_sop import retrieve_sop
+from .playground_undo import record_write
+from .store import JobStore, utc_now
+
+PLAYGROUND_ACTION = "playground.task"
+CONFIRM_KIND = "playground_confirmation"
+REPLY_KIND = "playground_reply"
+CANCEL_NO_GO = "Cancelled. I didn't get a go within 30 minutes, so I didn't change anything."
+STOPPED = "Stopped. That job is cancelled."
+
+ApplyFn = Callable[[Proposal], ApplyResult]
+ReadFn = Callable[[Proposal], str | None]
+DiscussFn = Callable[[Proposal], list[dict[str, Any]]]
+NoteFn = Callable[[Proposal, str, str], str]
+
+
+def handle_playground_chat(
+    db_path: str,
+    text: str,
+    *,
+    conversation_id: str | None,
+    thread_id: str | None = None,
+    message_id: str | None = None,
+    requested_by: str = "",
+    now: datetime | None = None,
+    apply: ApplyFn | None = None,
+    read: ReadFn | None = None,
+    discussions: DiscussFn | None = None,
+    file_note: NoteFn | None = None,
+    sop_docs: list[dict[str, Any]] | None = None,
+) -> list[str] | None:
+    """Replies for a Playground space message, or None when this is not that space."""
+    if not message_in_playground(conversation_id):
+        return None
+    return _dispatch(
+        db_path,
+        text,
+        conversation_id=str(conversation_id or ""),
+        thread_id=str(thread_id or ""),
+        message_id=str(message_id or ""),
+        requested_by=requested_by or "Google Chat user",
+        now=now,
+        apply=apply,
+        read=read,
+        discussions=discussions,
+        file_note=file_note,
+        sop_docs=sop_docs,
+    )
+
+
+def handle_playground_email(
+    db_path: str,
+    text: str,
+    *,
+    sender: str = "",
+    thread_id: str = "",
+    message_id: str = "",
+    now: datetime | None = None,
+    apply: ApplyFn | None = None,
+    read: ReadFn | None = None,
+    discussions: DiscussFn | None = None,
+    file_note: NoteFn | None = None,
+    sop_docs: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Same guardrails for robie@. None lets the existing email path run."""
+    if not email_guardrails_enabled():
+        return None
+    conversation = f"email:{thread_id or message_id or 'inbox'}"
+    replies = _dispatch(
+        db_path,
+        text,
+        conversation_id=conversation,
+        thread_id=thread_id or message_id,
+        message_id=message_id,
+        requested_by=sender or "email requester",
+        now=now,
+        apply=apply,
+        read=read,
+        discussions=discussions,
+        file_note=file_note,
+        sop_docs=sop_docs,
+    )
+    return "\n\n".join(replies)
+
+
+def expire_due_confirmations(
+    store: JobStore,
+    *,
+    now: datetime | None = None,
+    poster: Callable[..., Any] | None = None,
+) -> list[str]:
+    """Cancel Playground jobs that never got a go. Plain message, no write."""
+    moment = _aware(now)
+    expired: list[str] = []
+    for job in store.list_jobs_by_status({JobStatus.AWAITING_HUMAN_INPUT}):
+        if job.get("action_type") != PLAYGROUND_ACTION:
+            continue
+        note = store.get_checkpoint(job["id"], CONFIRM_KIND) or {}
+        deadline = _parse_time(str(note.get("expires_at") or ""))
+        if deadline is None or deadline > moment:
+            continue
+        reply = cancelled_reply(reason=CANCEL_NO_GO, job_id=job["id"])
+        store.transition(
+            job["id"],
+            JobStatus.FAILED,
+            expected={JobStatus.AWAITING_HUMAN_INPUT},
+            error=CANCEL_NO_GO,
+            release_lease=True,
+        )
+        store.checkpoint(job["id"], REPLY_KIND, {"text": reply, "reason": "timeout"})
+        expired.append(job["id"])
+        if poster is None:
+            continue
+        payload = dict(job.get("payload") or {})
+        space = str(payload.get("conversation_id") or "")
+        if not space.startswith("spaces/"):
+            continue
+        try:
+            poster(space, reply, thread_name=payload.get("thread_id") or None)
+        except Exception:
+            continue
+    return expired
+
+
+def _dispatch(
+    db_path: str,
+    text: str,
+    *,
+    conversation_id: str,
+    thread_id: str,
+    message_id: str,
+    requested_by: str,
+    now: datetime | None,
+    apply: ApplyFn | None,
+    read: ReadFn | None,
+    discussions: DiscussFn | None,
+    file_note: NoteFn | None,
+    sop_docs: list[dict[str, Any]] | None,
+) -> list[str]:
+    store = JobStore(db_path)
+    moment = _aware(now)
+    expire_due_confirmations(store, now=moment)
+    decision = classify_playground_request(text)
+    if decision.intent == "stop":
+        return [_stop(store, conversation_id, thread_id)]
+    if decision.intent == "go":
+        return _approve(
+            store,
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            now=moment,
+            apply=apply,
+            read=read,
+            discussions=discussions,
+            file_note=file_note,
+        )
+    _cancel_pending(store, conversation_id, thread_id, reason="Replaced by a new request.")
+    return [
+        _start(
+            store,
+            decision,
+            text=text,
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            message_id=message_id,
+            requested_by=requested_by,
+            now=moment,
+            read=read,
+            sop_docs=sop_docs,
+        )
+    ]
+
+
+def _start(
+    store: JobStore,
+    decision: Decision,
+    *,
+    text: str,
+    conversation_id: str,
+    thread_id: str,
+    message_id: str,
+    requested_by: str,
+    now: datetime,
+    read: ReadFn | None,
+    sop_docs: list[dict[str, Any]] | None,
+) -> str:
+    job = store.create_job(
+        PLAYGROUND_ACTION,
+        {
+            "playground": True,
+            "text": text,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "requested_by": requested_by,
+            "channel": "email" if conversation_id.startswith("email:") else "chat",
+        },
+        idempotency_key=f"playground:{message_id or text}:{conversation_id}"[:180],
+    )
+    job_id = job["id"]
+    if JobStatus(job["status"]) != JobStatus.PENDING:
+        saved = store.get_checkpoint(job_id, REPLY_KIND) or {}
+        return str(saved.get("text") or "I already have that message.")
+    if decision.intent == "help":
+        return _finish_reply(store, job_id, help_reply(job_id=job_id), terminal=JobStatus.COMPLETE, answer_only=True)
+    if decision.blocked:
+        reply = blocked_reply(reason=decision.reason, job_id=job_id)
+        return _fail(store, job_id, reply, error=decision.reason)
+    if decision.intent == "vague" or decision.question:
+        question = decision.question or "What should I do? Name the client and the task."
+        reply = clarify_reply(question=question, job_id=job_id)
+        store.checkpoint(job_id, "clarification", {"question": question})
+        store.transition(
+            job_id,
+            JobStatus.NEEDS_CLARIFICATION,
+            expected={JobStatus.PENDING},
+            error=question,
+            release_lease=True,
+        )
+        store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+        return reply
+    if decision.intent == "sop":
+        hits = retrieve_sop(text, sop_docs)
+        if hits:
+            hit = hits[0]
+            reply = sop_reply(answer=hit.excerpt, source=hit.citation, job_id=job_id)
+        else:
+            reply = sop_reply(answer="", source="", job_id=job_id)
+        return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
+    if decision.intent == "lookup":
+        found = ""
+        if read is not None and decision.proposal is not None:
+            found = str(read(decision.proposal) or "")
+        reply = lookup_reply(found=found, job_id=job_id)
+        return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
+    proposal = decision.proposal or Proposal(kind=decision.intent)
+    proposal.requested_by = requested_by
+    proposal.requested_at = now.isoformat()
+    if proposal.kind == CARRIER_EMAIL:
+        proposal = _present_carrier(proposal)
+    if proposal.kind == SIMPLE_EDIT and not proposal.old_value:
+        current = read(proposal) if read else None
+        if not current:
+            question = (
+                f"I don't have the current {proposal.field} for "
+                f"{proposal.client or 'that client'}. What is it now?"
+            )
+            reply = clarify_reply(question=question, job_id=job_id)
+            store.transition(
+                job_id,
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING},
+                error=question,
+                release_lease=True,
+            )
+            store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+            return reply
+        proposal.old_value = current
+    refusal = refuse_if_not_allowlisted(proposal)
+    if refusal:
+        reply = blocked_reply(reason=refusal, job_id=job_id)
+        return _fail(store, job_id, reply, error=refusal)
+    expires = now + timedelta(minutes=confirm_timeout_minutes())
+    store.checkpoint(
+        job_id,
+        CONFIRM_KIND,
+        {
+            "status": "awaiting_go",
+            "expires_at": expires.isoformat(),
+            "proposal": proposal.as_dict(),
+            "thread_id": thread_id,
+            "conversation_id": conversation_id,
+        },
+    )
+    store.update_payload(
+        job_id,
+        {
+            **dict(store.get_job(job_id).get("payload") or {}),
+            "applicant_id": proposal.applicant_id,
+            "playground_kind": proposal.kind,
+        },
+    )
+    reply = confirmation_reply(proposal, job_id=job_id)
+    store.transition(
+        job_id,
+        JobStatus.AWAITING_HUMAN_INPUT,
+        expected={JobStatus.PENDING},
+        release_lease=True,
+    )
+    store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+    return reply
+
+
+def _present_carrier(proposal: Proposal) -> Proposal:
+    prepared = prepare_carrier_delivery(proposal)
+    if prepared.extra.get("redirected"):
+        original = prepared.extra.get("original_to") or proposal.carrier_address
+        sink = prepared.new_value
+        prepared.extra["display_new"] = f"{sink} (practice; would have gone to {original})"
+        prepared.extra["delivered_to"] = sink
+    return prepared
+
+
+def _approve(
+    store: JobStore,
+    *,
+    conversation_id: str,
+    thread_id: str,
+    now: datetime,
+    apply: ApplyFn | None,
+    read: ReadFn | None,
+    discussions: DiscussFn | None,
+    file_note: NoteFn | None,
+) -> list[str]:
+    pending = _find(store, conversation_id, thread_id, {JobStatus.AWAITING_HUMAN_INPUT})
+    if pending is None:
+        latest = _find(
+            store,
+            conversation_id,
+            thread_id,
+            {JobStatus.FAILED, JobStatus.UNVERIFIED, JobStatus.COMPLETE},
+        )
+        if latest and CANCEL_NO_GO in str(latest.get("last_error") or ""):
+            saved = store.get_checkpoint(latest["id"], REPLY_KIND) or {}
+            return [str(saved.get("text") or cancelled_reply(reason=CANCEL_NO_GO, job_id=latest["id"]))]
+        opened = store.create_job(
+            PLAYGROUND_ACTION,
+            {
+                "playground": True,
+                "conversation_id": conversation_id,
+                "thread_id": thread_id,
+                "text": "go",
+            },
+            idempotency_key=f"playground-go-empty:{conversation_id}:{thread_id}:{now.isoformat()}",
+        )
+        reply = clarify_reply(
+            question="I don't have a change waiting. Tell me the client and what should change.",
+            job_id=opened["id"],
+        )
+        _fail(store, opened["id"], reply, error="No change was waiting.")
+        return [reply]
+    note = store.get_checkpoint(pending["id"], CONFIRM_KIND) or {}
+    deadline = _parse_time(str(note.get("expires_at") or ""))
+    if deadline is not None and deadline <= now:
+        expire_due_confirmations(store, now=now)
+        saved = store.get_checkpoint(pending["id"], REPLY_KIND) or {}
+        return [str(saved.get("text") or cancelled_reply(reason=CANCEL_NO_GO, job_id=pending["id"]))]
+    proposal = Proposal.from_dict(note.get("proposal"))
+    refusal = refuse_if_not_allowlisted(proposal)
+    if refusal:
+        reply = blocked_reply(reason=refusal, job_id=pending["id"])
+        _fail(store, pending["id"], reply, error=refusal)
+        return [reply]
+    progress = working_reply(proposal, job_id=pending["id"])
+    store.transition(
+        pending["id"],
+        JobStatus.RUNNING,
+        expected={JobStatus.AWAITING_HUMAN_INPUT},
+        release_lease=True,
+    )
+    try:
+        result = apply(proposal) if apply is not None else _default_apply(proposal)
+    except Exception as exc:
+        reply = mismatch_reply(proposal, observed="", job_id=pending["id"])
+        _fail(
+            store,
+            pending["id"],
+            reply,
+            error=f"The change did not finish ({type(exc).__name__}).",
+        )
+        return [progress, reply]
+    if not result.applied:
+        reply = mismatch_reply(
+            proposal,
+            observed=result.detail or "the change was not made",
+            job_id=pending["id"],
+        )
+        _fail(store, pending["id"], reply, error=result.detail or "not applied")
+        return [progress, reply]
+    observed = result.observed
+    if read is not None:
+        looked_up = read(proposal)
+        if looked_up is not None:
+            observed = looked_up
+    expected = proposal.new_value
+    if proposal.kind == CARRIER_EMAIL:
+        expected = str(proposal.extra.get("delivered_to") or proposal.new_value)
+    readback = compare_readback(expected=expected, observed=observed)
+    record_write(
+        store,
+        job_id=pending["id"],
+        requested_by=proposal.requested_by,
+        requested_at=proposal.requested_at,
+        client_name=proposal.client or proposal.applicant_id or "unknown client",
+        applicant_id=proposal.applicant_id,
+        field_name=proposal.field,
+        before_value=proposal.old_value,
+        after_value=proposal.new_value,
+        write_kind=proposal.kind,
+        readback_result=readback.result,
+        readback_detail=readback.detail,
+        created_at=now.isoformat(),
+    )
+    note_line = _maybe_file_note(
+        store,
+        proposal,
+        job_id=pending["id"],
+        observed=readback.observed or observed or "",
+        discussions=discussions,
+        file_note=file_note,
+        now=now,
+    )
+    if readback.matched:
+        reply = matched_reply(proposal, observed=readback.observed, job_id=pending["id"])
+        if note_line:
+            reply = reply.rstrip() + f"\n{note_line}\n"
+        _mark_confirmed(store, pending["id"], proposal, readback.observed, reply)
+        return [progress, reply]
+    reply = mismatch_reply(proposal, observed=readback.observed, job_id=pending["id"])
+    if note_line:
+        reply = reply.rstrip() + f"\n{note_line}\n"
+    store.transition(
+        pending["id"],
+        JobStatus.UNVERIFIED,
+        expected={JobStatus.RUNNING},
+        error=readback.detail,
+        release_lease=True,
+    )
+    store.checkpoint(pending["id"], REPLY_KIND, {"text": reply, "human_required": True})
+    return [progress, reply]
+
+
+def _maybe_file_note(
+    store: JobStore,
+    proposal: Proposal,
+    *,
+    job_id: str,
+    observed: str,
+    discussions: DiscussFn | None,
+    file_note: NoteFn | None,
+    now: datetime,
+) -> str:
+    if file_note is None or discussions is None:
+        return ""
+    if proposal.kind == NOTE:
+        return ""
+    found = policy_change_discussion(discussions(proposal))
+    if not found:
+        return ""
+    title = str(found.get("title") or found.get("Title") or "").strip()
+    if not title:
+        return ""
+    body = policy_change_note(proposal, observed=observed)
+    try:
+        note_id = file_note(proposal, title, body)
+    except Exception:
+        return "I found the Policy Change Request discussion, but the note did not file."
+    if not note_id:
+        return "I found the Policy Change Request discussion, but the note did not file."
+    record_write(
+        store,
+        job_id=job_id,
+        requested_by=proposal.requested_by,
+        requested_at=proposal.requested_at,
+        client_name=proposal.client or proposal.applicant_id or "unknown client",
+        applicant_id=proposal.applicant_id,
+        field_name="note",
+        before_value="none",
+        after_value=body,
+        write_kind="note",
+        readback_result="matched" if note_id else "mismatch",
+        readback_detail=f"note_id {note_id}",
+        created_at=now.isoformat(),
+    )
+    return f"I added a short note on {title}."
+
+
+def _default_apply(proposal: Proposal) -> ApplyResult:
+    from .playground_execute import default_apply
+
+    return default_apply(proposal)
+
+
+def _mark_confirmed(store: JobStore, job_id: str, proposal: Proposal, observed: str, reply: str) -> None:
+    locator = f"ezlynx:applicant:{proposal.applicant_id}"
+    expected = {
+        "applicant_id": proposal.applicant_id,
+        "status": "confirmed",
+        "outcome": observed,
+    }
+    store.checkpoint(
+        job_id,
+        "action",
+        {
+            "action": PLAYGROUND_ACTION,
+            "destination": {"applicant_id": proposal.applicant_id, "locator": locator},
+        },
+    )
+    store.update_payload(
+        job_id,
+        {
+            **dict(store.get_job(job_id).get("payload") or {}),
+            "applicant_id": proposal.applicant_id,
+            "locator": {"applicant_id": proposal.applicant_id, "locator": locator},
+        },
+    )
+    captured = utc_now()
+    store.add_evidence(
+        job_id,
+        True,
+        VerificationEvidence(
+            method="ezlynx-readback",
+            source="playground",
+            expected=expected,
+            observed=dict(expected),
+            authoritative=True,
+            captured_at=captured,
+            locator=locator,
+        ),
+    )
+    store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING}, release_lease=True)
+    try:
+        store.transition(
+            job_id,
+            JobStatus.COMPLETE,
+            expected={JobStatus.VERIFYING},
+            authority=VERIFIER_AUTHORITY,
+            release_lease=True,
+        )
+    except (PermissionError, RuntimeError):
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={JobStatus.VERIFYING},
+            error="Readback matched. The job ledger did not accept COMPLETE.",
+            release_lease=True,
+        )
+    store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+
+
+def _stop(store: JobStore, conversation_id: str, thread_id: str) -> str:
+    pending = _find(
+        store,
+        conversation_id,
+        thread_id,
+        {JobStatus.AWAITING_HUMAN_INPUT, JobStatus.RUNNING, JobStatus.PENDING, JobStatus.NEEDS_CLARIFICATION},
+    )
+    if pending is None:
+        opened = store.create_job(
+            PLAYGROUND_ACTION,
+            {"playground": True, "conversation_id": conversation_id, "thread_id": thread_id, "text": "stop"},
+            idempotency_key=f"playground-stop-empty:{conversation_id}:{thread_id}:{utc_now()}",
+        )
+        reply = cancelled_reply(
+            reason="Stopped. There isn't a running job in this thread.",
+            job_id=opened["id"],
+        )
+        _fail(store, opened["id"], reply, error="No running job.")
+        return reply
+    reply = cancelled_reply(reason=STOPPED, job_id=pending["id"])
+    status = JobStatus(pending["status"])
+    if status not in {JobStatus.FAILED, JobStatus.COMPLETE, JobStatus.UNVERIFIED}:
+        store.transition(
+            pending["id"],
+            JobStatus.FAILED,
+            expected={status},
+            error="Cancelled.",
+            release_lease=True,
+        )
+    store.checkpoint(pending["id"], "cancelled", {"by": "stop", "reason": "Cancelled."})
+    store.checkpoint(pending["id"], REPLY_KIND, {"text": reply})
+    return reply
+
+
+def _cancel_pending(store: JobStore, conversation_id: str, thread_id: str, *, reason: str) -> None:
+    pending = _find(store, conversation_id, thread_id, {JobStatus.AWAITING_HUMAN_INPUT})
+    if pending is None:
+        return
+    store.transition(
+        pending["id"],
+        JobStatus.FAILED,
+        expected={JobStatus.AWAITING_HUMAN_INPUT},
+        error=reason,
+        release_lease=True,
+    )
+
+
+def _find(
+    store: JobStore,
+    conversation_id: str,
+    thread_id: str,
+    statuses: set[JobStatus],
+) -> dict[str, Any] | None:
+    found: list[dict[str, Any]] = []
+    for job in store.list_jobs_by_status(statuses):
+        if job.get("action_type") != PLAYGROUND_ACTION:
+            continue
+        payload = dict(job.get("payload") or {})
+        if str(payload.get("conversation_id") or "") != conversation_id:
+            continue
+        job_thread = str(payload.get("thread_id") or "")
+        if thread_id and job_thread and job_thread != thread_id:
+            continue
+        found.append(job)
+    if not found:
+        return None
+    return found[-1]
+
+
+def _fail(
+    store: JobStore,
+    job_id: str,
+    reply: str,
+    *,
+    error: str,
+) -> str:
+    current = JobStatus(store.get_job(job_id)["status"])
+    if current not in {JobStatus.FAILED, JobStatus.COMPLETE, JobStatus.UNVERIFIED}:
+        store.transition(
+            job_id,
+            JobStatus.FAILED,
+            expected={current},
+            error=error,
+            release_lease=True,
+        )
+    store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+    return reply
+
+
+def _finish_reply(
+    store: JobStore,
+    job_id: str,
+    reply: str,
+    *,
+    terminal: JobStatus,
+    answer_only: bool,
+) -> str:
+    """A procedure or lookup has no EZLynx destination, so it is not COMPLETE.
+
+    The reply is the answer. The ledger stays UNVERIFIED rather than claiming
+    a write that did not happen.
+    """
+    del terminal, answer_only
+    store.transition(
+        job_id,
+        JobStatus.UNVERIFIED,
+        expected={JobStatus.PENDING},
+        error="Answered. No EZLynx write.",
+        release_lease=True,
+    )
+    store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+    return reply
+
+
+def _aware(now: datetime | None) -> datetime:
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def _parse_time(value: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
