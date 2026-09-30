@@ -74,6 +74,9 @@ def run_once(db_path: str) -> dict[str, int]:
         maybe_periodic_login_secret_check(db_path)
     except Exception:
         pass
+    from .playground_service import expire_due_confirmations
+    from .chat_app_post import post_as_chat_app
+    playground_expired = expire_due_confirmations(jobs, poster=lambda space, text, thread_name=None: post_as_chat_app(space, text, thread_name=thread_name))
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
     try:
         from .chat_job_controls import sweep_dead_running_jobs
