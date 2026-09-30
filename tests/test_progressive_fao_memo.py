@@ -3585,6 +3585,21 @@ class _RescueClient:
 
 
 class LivePageFixTests(unittest.TestCase):
+    def test_insured_cell_keeps_only_the_name(self):
+        from robie_job_engine.progressive_fao_memo import clean_insured_name
+
+        cases = {
+            "Groesbeck, Zachary 2 Round Hill Rd Jackson, Nj 08527 H:(732) 995-2407 Email": "Groesbeck, Zachary",
+            "Hsa Service Llc, 1730 New Brighton Blvd Ste #104 Minneapolis, Mn 55413 W:(612) 707-1477 Email": "Hsa Service Llc",
+            "Magana, Austreber M 70 Winding Wood Apt 8a Sayreville, Nj 08872 H:(732) 938-0502 Email": "Magana, Austreber M",
+            "Magana, Austreber M\n70 Winding Wood": "Magana, Austreber M",
+            "3JR Contracting LLC PO Box 12 Tampa": "3JR Contracting LLC",
+            "Yolanda Concepcion": "Yolanda Concepcion",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(clean_insured_name(raw), want)
+
     def test_listed_memos_are_matched_by_subject_words_only_when_unique(self):
         from robie_job_engine.progressive_fao_memo import match_memos_to_documents
 
