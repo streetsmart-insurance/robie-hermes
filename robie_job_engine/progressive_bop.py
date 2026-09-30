@@ -1537,6 +1537,32 @@ def _await_bop_surface(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[An
         _forget_pages(subscriptions)
 
 
+# Live 2026-09-30: HPLanding tries to open the Businessowner site on load,
+# Chrome blocks that window (no click), and the page asks for a click on
+# "Service Homeowners Policies" (the partner button, selected_partner=BOP).
+# One click is allowed. The page then signs on through
+# FieldInfoService.asmx/Authenticate and opens the partner window.
+_PARTNER_BUTTON = "Service Homeowners Policies"
+_POPUP_BLOCKER_TEXT = re.compile(r"pop-?up blocker", re.IGNORECASE)
+
+
+def _retry_partner_sign_on(popup: Any) -> bool:
+    try:
+        body = str(popup.locator("body").inner_text() or "")
+    except Exception:
+        return False
+    if not _POPUP_BLOCKER_TEXT.search(body):
+        return False
+    try:
+        button = popup.get_by_role("button", name=_PARTNER_BUTTON, exact=True)
+        if int(button.count()) != 1:
+            return False
+        button.click()
+    except Exception:
+        return False
+    return True
+
+
 def _attach_bop_application(shell: Any, popup: Any) -> Any:
     """Use the BOP application, not the dead HPLanding popup.
 
@@ -1551,6 +1577,8 @@ def _attach_bop_application(shell: Any, popup: Any) -> Any:
             raise IntakeHold("Businessowner/Contractor GL did not open a single new window")
         return popup
     pages, frames = _await_bop_surface(shell, popup)
+    if not pages and not frames and _retry_partner_sign_on(popup):
+        pages, frames = _await_bop_surface(shell, popup)
     if len(pages) + len(frames) > 1:
         raise IntakeHold("Businessowner/Contractor GL opened more than one BOP window")
     if len(pages) == 1:
@@ -1561,6 +1589,7 @@ def _attach_bop_application(shell: Any, popup: Any) -> Any:
         return _BopFrameSurface(frame, _owner)
     raise IntakeHold(
         "Businessowner/Contractor GL opened HPLanding instead of the BOP application"
+        " (Progressive's Businessowner site never opened after sign-on)"
     )
 
 
@@ -1587,28 +1616,48 @@ def _click_first_exact(
     raise IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
 
 
-def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
-    """Open Businessowner/Contractor GL in one new window.
+MANAGE_POLICIES_LANDING_URL = "https://www.foragentsonly.com/landingpages/managepolicies/"
+_MANAGE_POLICIES_LANDING_PATH = re.compile(r"^/landingpages/managepolicies(?:/home)?/?$", re.IGNORECASE)
 
-    ``on_shell_home`` is the URL gate from before ``ensure_fao_shell_home``.
-    A Communications tab that lands on Home still needs Manage Policies, then
-    the exact playbook name. Re-reading the URL here would skip that click
-    after the landing. When the caller omits the flag, the current URL is
-    the gate.
 
-    Already on shell Home skips Manage Policies. The header control is hidden
-    there and exact ``Manage Policies`` does not match. The popup click is
-    the one shell-Home GL name.
+def _on_manage_policies_landing(page: Any) -> bool:
+    parsed = urllib.parse.urlsplit(_safe_page_url(str(getattr(page, "url", "") or "")))
+    host = (parsed.hostname or "").casefold()
+    return (host == "foragentsonly.com" or host.endswith(".foragentsonly.com")) and bool(
+        _MANAGE_POLICIES_LANDING_PATH.match(parsed.path or "")
+    )
+
+
+def ensure_manage_policies_landing(page: Any) -> None:
+    """Open Manage Policies Home, where the Businessowner opener is visible.
+
+    Live 2026-09-30: on FAO /home/ both Businessowner/Contractor GL links sit
+    in the closed navigation drawer (no visible match), while
+    /landingpages/managepolicies/ shows one "Go to Businessowner/Contractor GL
+    policy search" link. The landing is opened by its fixed FAO address on the
+    same signed-in tab.
     """
-    on_home = _on_fao_shell_home(page) if on_shell_home is None else on_shell_home
-    if not on_home:
-        click_named(page, "Manage Policies", roles=("link", "button"))
+    if _on_manage_policies_landing(page):
+        return
+    try:
+        page.goto(MANAGE_POLICIES_LANDING_URL, wait_until="domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
+    except Exception as exc:
+        raise IntakeHold("Progressive Manage Policies page did not open") from exc
+    assert_authenticated(page)
+    if not _on_manage_policies_landing(page):
+        raise IntakeHold("Progressive Manage Policies page did not open")
+
+
+def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
+    """Open Businessowner/Contractor GL in one new window from Manage Policies Home.
+
+    ``on_shell_home`` is kept for callers; the opener is always clicked on the
+    Manage Policies landing, where exactly one visible GL link is expected.
+    """
+    ensure_manage_policies_landing(page)
     try:
         with page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup:
-            if on_home:
-                _click_shell_home_gl(page)
-            else:
-                click_named(page, "Businessowner/Contractor GL", roles=("link", "button"))
+            _click_shell_home_gl(page)
         opened = popup.value
     except IntakeHold:
         raise
@@ -1918,6 +1967,22 @@ def read_playwright_pdf_view(page: Any) -> PagePdfView:
     return PagePdfView(url=url, pdfs=tuple(candidates))
 
 
+_OWN_TAB_HOSTS = ("foragentsonly.com", "progressive.com", "progressivecommercial.com", "americanstrategic.com")
+
+
+def _is_own_tab(page: Any) -> bool:
+    """A tab this pull may read or close: Progressive (or blank/blob) only.
+
+    Another agent can open a tab (for example EZLynx) in the same browser
+    while a memo opens. That tab is never read or closed here.
+    """
+    url = str(getattr(page, "url", "") or "")
+    host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+    if not host:
+        return True
+    return any(host == own or host.endswith("." + own) for own in _OWN_TAB_HOSTS)
+
+
 def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int = DOWNLOAD_TIMEOUT_MS) -> PdfObservation:
     context = page.context
     opened: list[Any] = []
@@ -1952,7 +2017,7 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
             except Exception as exc:
                 if not _is_download_timeout(exc):
                     raise IntakeHold("Notice of Non Payment capture is missing or ambiguous") from exc
-        views = [read_playwright_pdf_view(item) for item in opened]
+        views = [read_playwright_pdf_view(item) for item in opened if _is_own_tab(item)]
         current_url = str(getattr(page, "url", "") or "")
         if current_url.startswith("blob:") or _url_looks_like_pdf(current_url):
             views.append(read_playwright_pdf_view(page))
@@ -1965,6 +2030,8 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
             except Exception:
                 pass
         for item in opened:
+            if not _is_own_tab(item):
+                continue
             closer = getattr(item, "close", None)
             if callable(closer):
                 try:

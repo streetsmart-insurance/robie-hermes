@@ -244,12 +244,16 @@ _SHELL_NAV_ROLES = ("link", "button")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN = ZoneInfo("America/New_York")
 
+# Live hermes-test-01 (2026-09-30) Communications table ``#underwritingTable``:
+# Primary Named Insured, Policy Number, Product, State, Agent Code, Producer,
+# Subject, Memo Date, Reply Due, Addressee, Policy Term. Subject holds the memo
+# name and the one Memo control; Memo Date is the processed day of that memo.
 _HEADER_FIELDS = (
     ("policy_number", frozenset({"policy number", "policy"})),
-    ("insured_name", frozenset({"insured", "insured name"})),
-    ("reason", frozenset({"reason", "fao reason"})),
+    ("insured_name", frozenset({"insured", "insured name", "primary named insured"})),
+    ("reason", frozenset({"reason", "fao reason", "subject"})),
     ("memo_type", frozenset({"type", "communication", "communications"})),
-    ("processed_date", frozenset({"processed date"})),
+    ("processed_date", frozenset({"processed date", "memo date"})),
 )
 
 _BLOB_JS = """async (url) => {
@@ -299,8 +303,16 @@ class MemoOpenObservation:
 
 
 def normalize_reason(reason: str) -> str:
+    """Memo subject as a filename piece.
+
+    A slash inside a live subject such as ``Mvr/Clue Memo`` becomes a dash
+    (``Mvr-Clue Memo``). Other path characters and ``..`` still hold.
+    """
     original = _norm(reason)
-    if any(char in original for char in '\\/:*?"<>|') or ".." in original:
+    if ".." in original:
+        raise IntakeHold("Memo reason is missing or ambiguous")
+    original = re.sub(r"\s*/\s*", "-", original)
+    if any(char in original for char in '\\:*?"<>|'):
         raise IntakeHold("Memo reason is missing or ambiguous")
     cleaned = original.rstrip(".").strip()
     if not cleaned or cleaned in {".", ".."} or len(cleaned) > 80:
@@ -465,14 +477,36 @@ def read_playwright_pdf_view(page: Any) -> PagePdfView:
     return PagePdfView(url=url, pdfs=tuple(candidates))
 
 
+_OWN_TAB_HOSTS = ("foragentsonly.com", "progressive.com", "progressivecommercial.com", "americanstrategic.com")
+
+
+def _is_own_tab(page: Any) -> bool:
+    """A tab this pull may read or close: Progressive (or blank/blob) only.
+
+    Another agent can open a tab (for example EZLynx) in the same browser
+    while a memo opens. That tab is never read or closed here.
+    """
+    url = str(getattr(page, "url", "") or "")
+    host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+    if not host:
+        return True
+    return any(host == own or host.endswith("." + own) for own in _OWN_TAB_HOSTS)
+
+
 def collect_memo_observation(
     page: Any,
     open_memo: Callable[[], None],
     *,
     read_page: Callable[[Any], PagePdfView] = read_playwright_pdf_view,
     timeout_ms: int = DOWNLOAD_TIMEOUT_MS,
+    follow: Callable[[Any], PagePdfView | None] | None = None,
 ) -> MemoOpenObservation:
-    """Click one Memo control and keep a unique PDF from the download or a new tab."""
+    """Click one Memo control and keep a unique PDF from the download or a new tab.
+
+    ``follow`` handles a new tab that is a documents list rather than the PDF
+    (the Commercial Auto memo opens the CL Express Document Summary). It is
+    asked only when that tab itself had no PDF, and may return ``None``.
+    """
     context = page.context
     opened: list[Any] = []
 
@@ -506,7 +540,16 @@ def collect_memo_observation(
             except Exception as exc:
                 if not _is_download_timeout(exc):
                     raise IntakeHold("Memo PDF capture is missing or ambiguous") from exc
-        views = [read_page(item) for item in opened]
+        views = []
+        for item in list(opened):
+            if not _is_own_tab(item):
+                continue
+            view = read_page(item)
+            if not view.pdfs and follow is not None:
+                followed = follow(item)
+                if followed is not None:
+                    view = followed
+            views.append(view)
         current_url = str(getattr(page, "url", "") or "")
         if current_url.startswith("blob:") or _url_looks_like_pdf(current_url):
             views.append(read_page(page))
@@ -519,12 +562,192 @@ def collect_memo_observation(
             except Exception:
                 pass
         for item in opened:
+            if not _is_own_tab(item):
+                continue
             closer = getattr(item, "close", None)
             if callable(closer):
                 try:
                     closer()
                 except Exception:
                     pass
+
+
+# Commercial Auto memo (viewPrintClick) opens the CL Express Document Summary
+# on clpolicy.foragentsonly.com. Its one table lists Document code / Date /
+# Delivery; the code (ACEMEMO live on 2026-09-30) is a role=button link that
+# opens /Express/PDFHandler.ashx in Chrome's PDF viewer.
+_CL_EXPRESS_DOCUMENTS_URL = re.compile(
+    r"^https://clpolicy\.foragentsonly\.com/express/default\.aspx\?", re.IGNORECASE
+)
+_CL_MEMO_CODES = frozenset({"ACEMEMO", "ACCMEMO", "ACC"})
+CL_MEMO_DOCUMENT_HOLD = "Commercial memo on the policy documents page is missing or ambiguous"
+
+
+def follow_cl_express_memo(item: Any, *, processed_on: date, timeout_ms: int = DOWNLOAD_TIMEOUT_MS) -> PagePdfView | None:
+    """Open the one memo row dated ``processed_on`` on a CL Express documents tab.
+
+    Any other tab returns ``None``. Zero or several memo rows for that day hold.
+    """
+    url = str(getattr(item, "url", "") or "")
+    if not _CL_EXPRESS_DOCUMENTS_URL.search(url):
+        return None
+    wait = getattr(item, "wait_for_load_state", None)
+    if callable(wait):
+        try:
+            wait("networkidle", timeout=15000)
+        except Exception:
+            pass
+    day = f"{processed_on.month}/{processed_on.day}/{processed_on.year}"
+    controls = []
+    for row in _each(item.locator("table tr")):
+        cells = [_norm(str(cell.inner_text() or "")) for cell in _each(row.locator("td"))]
+        if day not in cells:
+            continue
+        for code in cells:
+            if code.upper() not in _CL_MEMO_CODES:
+                continue
+            for role in ("button", "link"):
+                located = row.get_by_role(role, name=code, exact=True)
+                count = int(located.count())
+                if count == 1:
+                    controls.append(located)
+                elif count > 1:
+                    raise IntakeHold(CL_MEMO_DOCUMENT_HOLD)
+    if len(controls) != 1:
+        raise IntakeHold(CL_MEMO_DOCUMENT_HOLD)
+    observation = collect_memo_observation(item, controls[0].click, timeout_ms=timeout_ms)
+    return PagePdfView(url=url, pdfs=(pdf_bytes_from_observation(observation),))
+
+
+# Personal memos call getPolicyPDFDocuments, which POSTs /ManagePolicies/Policy/PDF.
+# One document opens ViewPDF in a new tab. Several documents come back with
+# ShowPDFList, and the legacy Communications page has no modal container for
+# that list, so nothing opens (live 2026-09-30, policy 50684742 with a
+# Mvr/Clue Memo row and a Driver Memo row on one day). The site's own list
+# would open /ManagePolicies/Policy/PDF/ViewPDF?polNum=..&contentId=.. per
+# document; we fetch the same URLs and match documents to rows by the memo
+# subject words found in each PDF's text. Anything short of one clear match
+# holds that row.
+MEMO_DOCUMENT_LIST_PATH = "/managepolicies/policy/pdf"
+MEMO_LIST_MATCH_HOLD = "Several memos were listed for this policy and day and they could not be told apart"
+_SUBJECT_STOP_WORDS = frozenset({"memo", "memos", "and", "or", "the", "of", "a"})
+
+
+def memo_subject_words(reason: str) -> frozenset[str]:
+    words = re.split(r"[^a-z0-9]+", str(reason or "").casefold())
+    return frozenset(word for word in words if word and word not in _SUBJECT_STOP_WORDS)
+
+
+def match_memos_to_documents(subjects: list[str], texts: list[str]) -> dict[int, int]:
+    """Return {row index: document index} when exactly one full matching exists.
+
+    A row may take a document when every subject word ("mvr"/"clue" count as
+    one group: any of them) appears in the document text. Rows and documents
+    must be the same count and the assignment must be unique; otherwise {}.
+    """
+    if not subjects or len(subjects) != len(texts):
+        return {}
+    folded = [str(text or "").casefold() for text in texts]
+
+    def fits(subject: str, text: str) -> bool:
+        words = memo_subject_words(subject)
+        if not words:
+            return True
+        return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
+
+    allowed = [[j for j, text in enumerate(folded) if fits(subject, text)] for subject in subjects]
+    found: list[dict[int, int]] = []
+
+    def walk(i: int, used: set[int], current: dict[int, int]) -> None:
+        if len(found) > 1:
+            return
+        if i == len(subjects):
+            found.append(dict(current))
+            return
+        for j in allowed[i]:
+            if j in used:
+                continue
+            current[i] = j
+            used.add(j)
+            walk(i + 1, used, current)
+            used.discard(j)
+            del current[i]
+
+    walk(0, set(), {})
+    return found[0] if len(found) == 1 else {}
+
+
+def memo_document_list(payload: Any, *, processed_on: date) -> list[dict[str, str]]:
+    """PolicyDocuments sent on ``processed_on`` from a ShowPDFList response."""
+    if not isinstance(payload, dict) or not payload.get("Success"):
+        return []
+    docs = payload.get("PolicyDocuments")
+    if not isinstance(docs, list):
+        return []
+    day = processed_on.strftime("%m/%d/%Y")
+    listed = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        content_id = str(doc.get("ContentId") or "").strip()
+        sent = str(doc.get("SentDate") or "").strip()
+        if content_id and sent == day:
+            listed.append({"content_id": content_id, "type": str(doc.get("DocumentTypeName") or "")})
+    return listed
+
+
+def memo_view_pdf_url(policy_number: str, content_id: str) -> str:
+    # ContentId arrives already URL-encoded, exactly as the site's
+    # openPolicyPDFFile() concatenates it.
+    return (
+        "https://www.foragentsonly.com/ManagePolicies/Policy/PDF/ViewPDF?polNum="
+        + urllib.parse.quote(str(policy_number).strip(), safe="")
+        + "&contentId="
+        + content_id
+    )
+
+
+def _pdf_text(blob: bytes) -> str:
+    try:
+        import io
+
+        from pypdf import PdfReader
+
+        return " ".join((page.extract_text() or "") for page in PdfReader(io.BytesIO(blob)).pages)
+    except Exception:
+        return ""
+
+
+def resolve_listed_memo(
+    page: Any,
+    payload: Any,
+    *,
+    row: "MemoRow",
+    siblings: list["MemoRow"],
+    fetch: Callable[[Any, str], bytes] | None = None,
+    text_of: Callable[[bytes], str] = _pdf_text,
+) -> bytes:
+    """Pick this row's PDF from a multi-document list, or hold."""
+    fetch = fetch or _http_get
+    listed = memo_document_list(payload, processed_on=row.processed_on)
+    group = [item for item in siblings if item.policy_number == row.policy_number and item.processed_on == row.processed_on]
+    if not listed or row not in group:
+        raise IntakeHold("Memo PDF capture is missing or ambiguous")
+    blobs = []
+    for doc in listed:
+        url = memo_view_pdf_url(row.policy_number, doc["content_id"])
+        if not _allowed_pdf_url(url):
+            raise IntakeHold("Memo PDF capture is missing or ambiguous")
+        blob = fetch(page, url)
+        if not _is_pdf(blob):
+            raise IntakeHold("Memo download is not a PDF")
+        blobs.append(blob)
+    if len(group) == 1 and len(blobs) == 1:
+        return blobs[0]
+    mapping = match_memos_to_documents([item.reason for item in group], [text_of(blob) for blob in blobs])
+    if not mapping:
+        raise IntakeHold(MEMO_LIST_MATCH_HOLD)
+    return blobs[mapping[group.index(row)]]
 
 
 def assert_authenticated(page: Any) -> None:
@@ -1883,7 +2106,53 @@ class PlaywrightFaoMemoBrowser:
         def open_memo() -> None:
             click_memo_control(target)
 
-        observation = collect_memo_observation(self.page, open_memo)
+        processed_on = matches[0].processed_on
+        listed: list[Any] = []
+
+        def on_response(response: Any) -> None:
+            try:
+                url = urllib.parse.urlsplit(str(response.url))
+                method = str(getattr(response.request, "method", "") or "").upper()
+                if url.netloc.casefold() == "www.foragentsonly.com" and url.path.rstrip("/").casefold() == MEMO_DOCUMENT_LIST_PATH and method == "POST":
+                    listed.append(response)
+            except Exception:
+                pass
+
+        page_on = getattr(self.page, "on", None)
+        if callable(page_on):
+            page_on("response", on_response)
+        try:
+            observation = collect_memo_observation(
+                self.page,
+                open_memo,
+                follow=lambda item: follow_cl_express_memo(item, processed_on=processed_on),
+            )
+        finally:
+            remover = getattr(self.page, "remove_listener", None)
+            if callable(remover):
+                try:
+                    remover("response", on_response)
+                except Exception:
+                    pass
+        has_pdf = bool(observation.downloads) or any(view.pdfs for view in observation.pages)
+        payloads = []
+        if not has_pdf:
+            for response in listed:
+                try:
+                    payloads.append(response.json())
+                except Exception:
+                    payloads.append(None)
+        if not has_pdf and len(payloads) == 1 and isinstance(payloads[0], dict) and payloads[0].get("ShowPDFList"):
+            blob = resolve_listed_memo(
+                self.page,
+                payloads[0],
+                row=matches[0],
+                siblings=list(parse_memo_grid(self._grid, agent_code=self.agent_code)),
+            )
+            observation = MemoOpenObservation(
+                downloads=(),
+                pages=(PagePdfView(url=memo_view_pdf_url(matches[0].policy_number, "listed"), pdfs=(blob,)),),
+            )
         if str(getattr(self.page, "url", "") or "") != self._list_url:
             go_back = getattr(self.page, "go_back", None)
             if callable(go_back):
@@ -2803,8 +3072,19 @@ def _push_pdf(candidates: list[bytes], blob: bytes) -> None:
     candidates.append(blob)
 
 
+# Live Memo control (hermes-test-01, 2026-09-30) opens a new tab on
+# /ManagePolicies/Policy/PDF/ViewPDF/?polNum=...&contentId=... that Chrome shows
+# in its PDF viewer. The URL has no .pdf suffix; the bytes are the memo PDF.
+_FAO_VIEW_PDF_PATH = re.compile(
+    r"/(?:managepolicies/policy/pdf/viewpdf/?|express/pdfhandler\.ashx)$", re.IGNORECASE
+)
+
+
 def _url_looks_like_pdf(url: str) -> bool:
-    path = urllib.parse.urlsplit(url).path.lower()
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path.lower()
+    if _FAO_VIEW_PDF_PATH.search(path) and _allowed_pdf_url(url):
+        return True
     return path.endswith(".pdf") or "application/pdf" in url.lower()
 
 

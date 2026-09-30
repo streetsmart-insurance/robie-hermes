@@ -3583,5 +3583,46 @@ class _RescueClient:
         return self.raw
 
 
+
+class LivePageFixTests(unittest.TestCase):
+    def test_listed_memos_are_matched_by_subject_words_only_when_unique(self):
+        from robie_job_engine.progressive_fao_memo import match_memos_to_documents
+
+        texts = ["Your household driver list changed", "We ordered an MVR and CLUE report"]
+        self.assertEqual(match_memos_to_documents(["Mvr-Clue Memo", "Driver Memo"], texts), {0: 1, 1: 0})
+        self.assertEqual(match_memos_to_documents(["Memo", "Memo"], texts), {})
+        self.assertEqual(match_memos_to_documents(["Driver Memo"], texts), {})
+
+    def test_document_list_keeps_only_the_memo_day(self):
+        from robie_job_engine.progressive_fao_memo import memo_document_list, memo_view_pdf_url
+
+        payload = {
+            "Success": True,
+            "ShowPDFList": True,
+            "PolicyDocuments": [
+                {"ContentId": "a%2Fb", "SentDate": "09/29/2026", "DocumentTypeName": "Memo"},
+                {"ContentId": "c", "SentDate": "09/28/2026", "DocumentTypeName": "Memo"},
+                {"ContentId": "", "SentDate": "09/29/2026"},
+            ],
+        }
+        listed = memo_document_list(payload, processed_on=date(2026, 9, 29))
+        self.assertEqual(listed, [{"content_id": "a%2Fb", "type": "Memo"}])
+        self.assertEqual(memo_document_list({"Success": False}, processed_on=date(2026, 9, 29)), [])
+        self.assertEqual(
+            memo_view_pdf_url("50684742", "a%2Fb"),
+            "https://www.foragentsonly.com/ManagePolicies/Policy/PDF/ViewPDF?polNum=50684742&contentId=a%2Fb",
+        )
+
+    def test_only_progressive_tabs_are_read_or_closed(self):
+        from types import SimpleNamespace
+
+        from robie_job_engine.progressive_fao_memo import _is_own_tab
+
+        self.assertTrue(_is_own_tab(SimpleNamespace(url="https://www.foragentsonly.com/x")))
+        self.assertTrue(_is_own_tab(SimpleNamespace(url="about:blank")))
+        self.assertTrue(_is_own_tab(SimpleNamespace(url="blob:https://www.foragentsonly.com/1")))
+        self.assertFalse(_is_own_tab(SimpleNamespace(url="https://app.ezlynx.com/web/account/26356199/activity")))
+
+
 if __name__ == "__main__":
     unittest.main()
