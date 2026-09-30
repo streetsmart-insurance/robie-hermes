@@ -40,10 +40,11 @@ from .playground_memory import (
     forget_matching,
     list_memories,
     memory_contains_secret,
+    plan_preference,
     recall_for_turn,
     record_job,
-    remember_preference,
     safe_text,
+    store_preference,
     team_discussion_title,
 )
 from .playground_reply import (
@@ -183,6 +184,7 @@ def expire_due_confirmations(
             client=str(payload.get("client") or ""),
             outcome="cancelled",
             now=moment,
+            applicant_id=str(payload.get("applicant_id") or ""),
         )
         expired.append(job["id"])
         if poster is None:
@@ -292,14 +294,18 @@ def _start(
         saved = store.get_checkpoint(job_id, REPLY_KIND) or {}
         return str(saved.get("text") or "I already have that message.")
     client = ""
+    applicant_id = ""
     if decision.proposal is not None:
         client = decision.proposal.client
+        applicant_id = decision.proposal.applicant_id
     client = client or mentioned_client(text)
     memories = recall_for_turn(
         store.path,
         requested_by=requested_by,
         text=stored,
         client=client,
+        applicant_id=applicant_id,
+        now=now,
     )
     decision = _with_standing_discussion(text, decision, memories)
     if decision.proposal is not None and decision.proposal.client:
@@ -323,6 +329,7 @@ def _start(
             client=client,
             outcome=outcome,
             now=now,
+            applicant_id=applicant_id,
         )
 
     if decision.intent == "help":
@@ -472,7 +479,7 @@ def _with_standing_discussion(text: str, decision: Decision, memories: list) -> 
 
 
 def _preference_lines(memories: list) -> list[str]:
-    return [item.body for item in memories if item.kind == "preference"][:3]
+    return [item.body for item in memories if item.kind in {"preference", "note"}][:3]
 
 
 def _checkpoint_prompt(
@@ -507,6 +514,7 @@ def _remember_job(
     client: str,
     outcome: str,
     now: datetime,
+    applicant_id: str = "",
 ) -> None:
     record_job(
         store.path,
@@ -516,6 +524,7 @@ def _remember_job(
         client_name="" if memory_contains_secret(text) else client,
         outcome=safe_text(outcome),
         now=now,
+        applicant_id="" if memory_contains_secret(text) else applicant_id,
     )
 
 
@@ -537,6 +546,7 @@ def _sync_job_outcome(
         client=client,
         outcome=outcome,
         now=now,
+        applicant_id=str(payload.get("applicant_id") or ""),
     )
 
 
@@ -544,7 +554,14 @@ def _format_memory(item: Any) -> str:
     if item.kind == "job":
         client = f" for {item.client_name}" if item.client_name else ""
         return f"Job {item.job_id}{client}: {item.outcome}. {item.body}"
-    who = "Team" if item.scope == "team" else item.owner
+    if item.scope == "team":
+        who = f"{item.team} team" if item.team else "Team"
+    elif item.scope == "agency":
+        who = "Agency"
+    elif item.scope == "client":
+        who = item.client_name or "Client"
+    else:
+        who = item.author
     return f"{who}: {item.body}"
 
 
@@ -577,11 +594,14 @@ def _memory_turn(
     if JobStatus(job["status"]) != JobStatus.PENDING:
         saved = store.get_checkpoint(job_id, REPLY_KIND) or {}
         return str(saved.get("text") or "I already have that message.")
+    proposal = decision.proposal or Proposal(kind=decision.intent)
     memories = recall_for_turn(
         store.path,
         requested_by=requested_by,
         text=stored,
-        client=mentioned_client(stored),
+        client=proposal.client or mentioned_client(stored),
+        applicant_id=proposal.applicant_id,
+        now=now,
     )
     _checkpoint_prompt(
         store,
@@ -591,17 +611,16 @@ def _memory_turn(
         text=stored,
         memories=memories,
     )
-    proposal = decision.proposal or Proposal(kind=decision.intent)
-
     def _note(outcome: str) -> None:
         _remember_job(
             store,
             job_id,
             requested_by=requested_by,
             text=stored,
-            client="",
+            client=proposal.client,
             outcome=outcome,
             now=now,
+            applicant_id=proposal.applicant_id,
         )
 
     if decision.question:
@@ -622,18 +641,47 @@ def _memory_turn(
             reply = memory_refused_reply(job_id=job_id)
             _note("refused")
             return _fail(store, job_id, reply, error="Not stored.")
-        saved = remember_preference(
-            store.path,
+        scope_hint = proposal.field if proposal.field in {"person", "team", "client", "agency"} else ""
+        planned = plan_preference(
+            fact,
             requested_by=requested_by,
-            fact=fact,
             now=now,
-            force_team=proposal.field == "team",
+            force_team=scope_hint == "team",
+            scope_hint=scope_hint,
+            team_hint=proposal.subject if scope_hint == "team" else "",
+            applicant_id=proposal.applicant_id,
+            client_name=proposal.client,
         )
-        if saved is None:
+        if planned is None:
             reply = memory_refused_reply(job_id=job_id)
             _note("refused")
             return _fail(store, job_id, reply, error="Not stored.")
-        reply = memory_saved_reply(fact=saved.body, scope=saved.scope, job_id=job_id)
+        if planned.question:
+            reply = clarify_reply(question=planned.question, job_id=job_id)
+            store.transition(
+                job_id,
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING},
+                error=planned.question,
+                release_lease=True,
+            )
+            store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+            _note("needs_clarification")
+            return reply
+        saved = store_preference(
+            store.path,
+            planned,
+            requested_by=requested_by,
+            now=now,
+            source_job_id=job_id,
+        )
+        reply = memory_saved_reply(
+            fact=saved.text,
+            scope=saved.scope,
+            job_id=job_id,
+            team=saved.team,
+            client=saved.client_name,
+        )
         _note("remembered")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
     if decision.intent == FORGET:

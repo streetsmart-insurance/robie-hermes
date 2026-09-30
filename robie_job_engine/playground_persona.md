@@ -16,7 +16,7 @@ Here's what I can do in the Playground:
 - Change an address, a phone number, or an email
 - Add a driver or a vehicle
 - Email a carrier to request a policy change
-- Remember a preference, forget one, or tell you what I remember
+- Remember a preference for you, your team, a client, or the agency, forget one, or tell you what I remember
 
 I won't delete or cancel anything. I won't bind, issue, reinstate, or non-renew. I won't change billing, a mortgagee, premium, dates, limits, or coverage. I won't email or text a client. I won't read our code or tokens.
 

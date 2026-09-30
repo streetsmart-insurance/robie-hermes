@@ -31,6 +31,9 @@ ROBIE_PLAYGROUND_LIVE_WRITES=0
 ROBIE_EZLYNX_WRITE_APPLICANT_IDS=26356199
 ROBIE_PLAYGROUND_CARRIER_EMAIL_SINK=carlo@streetsmart.insurance
 ROBIE_PLAYGROUND_SOP_INDEX=/opt/streetsmart-hermes-test/robie-job-engine/data/playground-sop-index.json
+ROBIE_PLAYGROUND_TEAM_MEMBERS=Commercial=Maria;Personal=;Trucking=
+ROBIE_PLAYGROUND_MEMORY_BUCKET=
+ROBIE_PLAYGROUND_MEMORY_BACKUP_KEEP_DAYS=14
 ```
 
 `26356199` is Buster Brown. Leave `ROBIE_EZLYNX_WRITE_SCOPE` empty on
@@ -148,26 +151,112 @@ plus the full id.
 ## Memory
 
 Preferences and past jobs are stored in `playground_memory.db` next to
-`jobs.db`. Nothing extra is installed. The file is created only when the
-Playground flag is on and someone uses the space or robie@. A password,
-token, or bank detail is refused and is not written. Memory does not
-override a block or the write allowlist.
+`jobs.db` on that server. Test and Production do not share the file.
+The gateway user owns it. The code sets mode `0640`. The file is created
+only when the Playground flag is on and someone uses the space or robie@.
+
+A row is one of four scopes: person, team, client, or agency. The team
+is Commercial, Personal, or Trucking, from `ROBIE_PLAYGROUND_TEAM_MEMBERS`.
+Put the exact Chat display name or email address, the same value Robie
+sees as the sender. A person preference is visible only to that person.
+A team preference is visible only to that team. Agency preferences are
+visible to everyone. Client notes and the last few jobs for a client are
+visible to the whole agency, and only when the request names that client.
+Lookup is exact. There is no vector search.
+
+A password, token, or bank detail is refused and is not written. Memory
+does not override a block or the write allowlist. If the team map does
+not name the sender, "remember for the team" asks which team instead of
+guessing.
 
 9. `remember that Maria wants certs cc'd to her`
-   Expect "I'll remember that." It is saved for the whole team. A later
-   certificate readback can mention it. It does not send the certificate.
+   With Maria and the sender both mapped to Commercial, expect
+   "I'll remember that." It is saved for the Commercial team. Someone on
+   Personal or Trucking does not see it. It does not send a certificate.
 
 10. `what do you remember about Maria`
-    Expect the Maria note, in plain English. It does not change a client.
+    From a Commercial teammate, expect the Maria note. From another
+    team, expect nothing for that note. It does not change a client.
 
 11. `forget that Maria wants certs cc'd to her`
-    Expect "I forgot that." Asking again shows nothing for Maria. The
-    change list of real writes is unchanged.
+    A Commercial teammate can forget it. Expect "I forgot that." Asking
+    again shows nothing for Maria. The change list of real writes is
+    unchanged. Someone on another team cannot forget it.
 
 12. `remember that the password is hunter2`
     Expect "I won't remember that." The password is not repeated and is
     not in the memory file.
 
-13. `Change the mailing address to 100 Test Rd.`
+13. `remember that I like short notes`
+    Expect it saved for you. A different person asking
+    `what do you remember` does not see it.
+
+14. `Change the mailing address to 100 Test Rd.`
     Expect one question asking which client, even if an earlier job in
     the space was for Buster Brown. Nothing is changed.
+
+## Memory backup
+
+This pull request does not install the timer and does not create a
+bucket. On Test the unit files are
+`deploy/systemd/robie-playground-memory-backup.service` and `.timer`.
+They run as `streetsmart-hermes-test` at 2:15 AM America/New_York.
+`ConditionHost` is `hermes-test-01` only.
+
+Leave `ROBIE_PLAYGROUND_MEMORY_BUCKET` empty until the private bucket
+exists. The timer then prints a skip line and uploads nothing.
+
+When the bucket is ready, set:
+
+```
+ROBIE_PLAYGROUND_MEMORY_BUCKET=<private test bucket name>
+ROBIE_PLAYGROUND_MEMORY_BACKUP_KEEP_DAYS=14
+ROBIE_PLAYGROUND_MEMORY_BACKUP_PREFIX=playground-memory
+```
+
+Auth is the VM's attached service account, with
+`roles/storage.objectAdmin` on that bucket only. Do not create a key
+file. Do not set `GOOGLE_APPLICATION_CREDENTIALS` for this timer.
+Do not give the account project-wide storage admin.
+
+The job writes a consistent snapshot with sqlite's backup API and
+uploads `playground-memory/<hostname>/<UTC stamp>.sqlite`. Snapshots
+older than the keep-days setting are deleted after a successful upload.
+
+Restore, on the same host, as the service user. This replaces the live
+memory file with that snapshot:
+
+```
+sudo -u streetsmart-hermes-test \
+  /opt/streetsmart-hermes-test/venv/bin/python \
+  -m robie_job_engine.playground_memory_backup \
+  --db /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db \
+  restore \
+  --object playground-memory/<hostname>/<stamp>.sqlite \
+  --confirm
+```
+
+List snapshot names with the same command and `list` instead of
+`restore`. Without `--confirm`, restore refuses and changes nothing.
+
+Production, later, not this pull request. Different server, different
+file, different bucket. Do not point Test at the Production bucket.
+
+```
+User=streetsmart-hermes
+Group=streetsmart-hermes
+ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+```
+
+The memory file is
+`/opt/streetsmart-hermes/robie-job-engine/data/playground_memory.db`,
+mode `0640`, owner `streetsmart-hermes`. The bucket setting is:
+
+```
+ROBIE_PLAYGROUND_MEMORY_BUCKET=<private production bucket name>
+ROBIE_PLAYGROUND_MEMORY_BACKUP_KEEP_DAYS=14
+```
+
+Same attached-service-account rule, bucket-scoped only, no key file.
+Restore uses the Production venv, user, and db path, and
+`--confirm`. Do not install that timer from this pull request.
