@@ -3,10 +3,12 @@
 The Playground stays off unless ``ROBIE_PLAYGROUND`` is on. The Chat space
 comes from ``ROBIE_PLAYGROUND_SPACE_ID``. Neither value is hard-coded.
 
-Real clients stay closed until ``ROBIE_PLAYGROUND_REAL_CLIENTS`` is turned
-on. While that switch is off, or the write allowlist is only the practice
-applicant (Buster Brown, 26356199), every Playground reply is tagged
-Practice mode and carrier mail is redirected.
+Real clients stay closed until ``ROBIE_EZLYNX_WRITE_SCOPE=all``. That
+switch is honored only while the Playground hard blocks, the go step,
+and the undo log are active. Practice-mode tags and carrier redirects
+follow the client: Buster Brown and the other test ids still redirect.
+A real client is emailed at the carrier only after go, and only in
+all-clients mode.
 """
 
 from __future__ import annotations
@@ -87,8 +89,63 @@ def email_guardrails_enabled() -> bool:
 
 
 def real_clients_open() -> bool:
-    """Explicit switch. Default closed. The allowlist alone does not open them."""
+    """Older switch. All-clients is ``ROBIE_EZLYNX_WRITE_SCOPE=all`` now."""
     return _on(REAL_CLIENTS_ENV)
+
+
+def hard_blocks_enforced() -> bool:
+    """The Playground block list refuses the actions Carlo named."""
+    from .playground_guardrails import classify_playground_request
+
+    required = (
+        ("delete the policy", "delete_or_cancel"),
+        ("cancel the client", "delete_or_cancel"),
+        ("bind the policy", "bind_issue_reinstate_nonrenew"),
+        ("issue the policy", "bind_issue_reinstate_nonrenew"),
+        ("reinstate the policy", "bind_issue_reinstate_nonrenew"),
+        ("non-renew this policy", "bind_issue_reinstate_nonrenew"),
+        ("change the billing to monthly", "payment_billing_mortgagee"),
+        ("change the mortgagee to Wells Fargo", "payment_billing_mortgagee"),
+        ("change the premium to 100", "premium_effective_limit_coverage"),
+        ("change the effective date to 10/1", "premium_effective_limit_coverage"),
+        ("change the limit to 1000000", "premium_effective_limit_coverage"),
+        ("update the coverage to full", "premium_effective_limit_coverage"),
+        ("email the client about the change", "client_email_or_text"),
+        ("text the insured", "client_email_or_text"),
+    )
+    for text, code in required:
+        decision = classify_playground_request(text)
+        if not decision.blocked or decision.code != code:
+            return False
+    return True
+
+
+def confirmation_gate_enforced() -> bool:
+    """A write is not a go-word, and go is a whole message."""
+    from .playground_guardrails import is_go
+    from .playground_service import CONFIRM_KIND, PLAYGROUND_ACTION
+
+    return bool(
+        CONFIRM_KIND
+        and PLAYGROUND_ACTION
+        and is_go("go")
+        and is_go("yes")
+        and not is_go("go ahead and delete the policy")
+    )
+
+
+def undo_log_enforced() -> bool:
+    from .playground_undo import APPEND_ONLY_TRIGGERS
+
+    required = {"playground_undo_log_no_delete", "playground_undo_log_no_update"}
+    return required <= set(APPEND_ONLY_TRIGGERS)
+
+
+def playground_guardrails_active() -> bool:
+    """Hard blocks, read-back-then-go, and the undo log, and the flag is on."""
+    if not playground_enabled():
+        return False
+    return hard_blocks_enforced() and confirmation_gate_enforced() and undo_log_enforced()
 
 
 def practice_applicant_ids() -> frozenset[str]:
@@ -108,14 +165,33 @@ def current_write_allowlist() -> frozenset[str] | None:
     return ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
 
 
-def buster_brown_only_mode() -> bool:
-    """Practice mode. Default closed until real clients are explicitly opened."""
-    if not real_clients_open():
+def is_practice_subject(applicant_id: str = "", client_name: str = "") -> bool:
+    """Buster Brown and the other test applicant ids. Not the allowlist."""
+    applicant = str(applicant_id or "").strip()
+    if applicant:
+        return applicant in practice_applicant_ids()
+    name = " ".join(str(client_name or "").casefold().split())
+    return name == "buster brown"
+
+
+def should_tag_practice(applicant_id: str = "", client_name: str = "") -> bool:
+    """Practice mode is about the client, not how wide the allowlist is.
+
+    While all-clients is closed, every Playground reply is practice.
+    While it is open, only a test client is tagged.
+    """
+    from .ezlynx_write_scope import all_clients_scope_honored
+
+    if is_practice_subject(applicant_id, client_name):
         return True
-    allowed = current_write_allowlist()
-    if not allowed:
-        return True
-    return allowed <= practice_applicant_ids()
+    if str(applicant_id or "").strip() or str(client_name or "").strip():
+        return False
+    return not all_clients_scope_honored()
+
+
+def buster_brown_only_mode(applicant_id: str = "", client_name: str = "") -> bool:
+    """Whether this reply should say Practice mode."""
+    return should_tag_practice(applicant_id, client_name)
 
 
 def carrier_sink_address() -> str:
@@ -142,11 +218,18 @@ def live_writes_enabled() -> bool:
 
 
 def carrier_must_redirect(applicant_id: str) -> bool:
-    """Practice clients, and anyone who is not a real allowlisted client, redirect."""
+    """Real carrier mail only for a real client in honored all-clients mode.
+
+    Test clients always go to the sink. A real client also goes to the sink
+    until write scope is all and the Playground guardrails are active.
+    The send itself still waits for go.
+    """
     applicant = str(applicant_id or "").strip()
     if not applicant or applicant in practice_applicant_ids():
         return True
-    if not real_clients_open():
+    from .ezlynx_write_scope import all_clients_scope_honored
+
+    if not all_clients_scope_honored():
         return True
     if not write_allowed(applicant):
         return True

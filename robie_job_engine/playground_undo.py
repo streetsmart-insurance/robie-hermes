@@ -12,6 +12,13 @@ from typing import Any
 
 from .store import JobStore, utc_now
 
+# Names of the triggers that refuse UPDATE and DELETE. All-clients mode
+# checks this tuple, so emptying it turns all-clients back into the id list.
+APPEND_ONLY_TRIGGERS = (
+    "playground_undo_log_no_delete",
+    "playground_undo_log_no_update",
+)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS playground_undo_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,14 +53,14 @@ def _ensure_append_only(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='playground_undo_log'"
         ).fetchall()
     }
-    if "playground_undo_log_no_delete" not in existing:
+    if "playground_undo_log_no_delete" in APPEND_ONLY_TRIGGERS and "playground_undo_log_no_delete" not in existing:
         conn.execute(
             """CREATE TRIGGER playground_undo_log_no_delete
                BEFORE DELETE ON playground_undo_log BEGIN
                SELECT RAISE(ABORT, 'playground undo log is append-only');
                END"""
         )
-    if "playground_undo_log_no_update" not in existing:
+    if "playground_undo_log_no_update" in APPEND_ONLY_TRIGGERS and "playground_undo_log_no_update" not in existing:
         conn.execute(
             """CREATE TRIGGER playground_undo_log_no_update
                BEFORE UPDATE ON playground_undo_log BEGIN

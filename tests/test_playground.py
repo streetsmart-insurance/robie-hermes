@@ -513,14 +513,16 @@ class CarrierAndPracticeTests(unittest.TestCase):
             subject="Policy change request",
             new_value="changes@progressive.com",
         )
-        with mock.patch.dict(os.environ, _env(ROBIE_PLAYGROUND_REAL_CLIENTS="1"), clear=False), mock.patch(
-            "robie_job_engine.playground_config.write_allowed",
-            return_value=True,
-        ):
+        with mock.patch.dict(os.environ, _env(ROBIE_EZLYNX_WRITE_SCOPE="all"), clear=False):
             self.assertFalse(carrier_must_redirect("999000111"))
             prepared = prepare_carrier_delivery(proposal)
         self.assertFalse(prepared.extra.get("redirected"))
-        self.assertEqual(prepared.carrier_address, "changes@progressive.com")
+        self.assertEqual(prepared.new_value, "changes@progressive.com")
+        with mock.patch.dict(os.environ, _env(), clear=False), mock.patch(
+            "robie_job_engine.playground_config.write_allowed",
+            return_value=True,
+        ):
+            self.assertTrue(carrier_must_redirect("999000111"))
 
     def test_non_allowlisted_client_still_redirects_when_the_switch_is_on(self):
         with mock.patch.dict(os.environ, _env(ROBIE_PLAYGROUND_REAL_CLIENTS="1"), clear=False), mock.patch(
@@ -548,12 +550,13 @@ class CarrierAndPracticeTests(unittest.TestCase):
             self.assertTrue(tagged[0].startswith("Practice mode"))
             self.assertIn("Here's what I can", tagged[0])
             with mock.patch.dict(
-                os.environ, _env(ROBIE_PLAYGROUND_REAL_CLIENTS="1"), clear=False
+                os.environ, _env(ROBIE_EZLYNX_WRITE_SCOPE="all"), clear=False
             ), mock.patch(
                 "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
                 frozenset({"999000111"}),
             ):
                 self.assertFalse(buster_brown_only_mode())
+                self.assertTrue(buster_brown_only_mode("26356199"))
                 plain = handle_playground_chat(
                     db,
                     "what can you do",
