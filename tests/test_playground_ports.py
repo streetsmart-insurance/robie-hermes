@@ -117,3 +117,18 @@ def test_lookup_exception_does_not_crash_chat_or_claim_success():
   from pathlib import Path
   replies=handle_playground_chat(str(Path(tmp)/'jobs.db'),'Find documents for Buster Brown applicant 26356199',conversation_id='spaces/fixture',thread_id='fixture',message_id='fixture',requested_by='Fixture user',requester_user_id='fixture',read=Mock(side_effect=RuntimeError('unavailable')))
  assert replies and "couldn't" in replies[0].lower()
+
+@pytest.mark.parametrize('selector,expected',[('',None),('live','PRODUCTION')])
+def test_read_and_discussion_source_selection_agree_without_env_change(selector,expected):
+ from robie_job_engine.playground_ports import PlaygroundPorts
+ with patch.dict(os.environ,{'ROBIE_ENV':'TEST','ROBIE_EZLYNX_DISCUSSION_API':selector}), patch('robie_job_engine.ezlynx_api.load_ezlynx_api_config') as config, patch('robie_job_engine.ezlynx_api.EzlynxApiClient') as client:
+  port=PlaygroundPorts()._read_port()
+  config.assert_called_once_with(environment=expected)
+  client.assert_called_once_with(config.return_value)
+  assert os.environ['ROBIE_ENV']=='TEST'
+
+
+def test_bad_source_selector_fails_before_credentials_or_network():
+ with patch.dict(os.environ,{'ROBIE_EZLYNX_DISCUSSION_API':'production-guess'}), patch('robie_job_engine.ezlynx_api.load_ezlynx_api_config') as config:
+  with pytest.raises(RuntimeError):PlaygroundPorts()._read_port()
+  config.assert_not_called()
