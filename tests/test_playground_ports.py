@@ -15,11 +15,11 @@ class Discussions:
 def test_documents_use_explicit_applicant_and_never_write():
  r=Reader();p=PlaygroundPorts(r)
  x=p.read(Proposal(kind='lookup',applicant_id='26356199',body='find documents'))
- assert 'Declarations.pdf' in x and 'not compared' in x
+ assert 'Declarations.pdf' in x and 'not read or compared' in x and 'document ID 10' in x
  assert r.calls==['26356199']
 
 def test_unresolved_name_has_no_network_request():
- r=Reader();assert PlaygroundPorts(r).read(Proposal(kind='lookup',client='Example LLC',body='find loss runs')) is None
+ r=Reader();assert 'applicant ID or policy number' in PlaygroundPorts(r).read(Proposal(kind='lookup',client='Example LLC',body='find loss runs'))
  assert not r.calls
 
 def test_policy_number_is_read_not_coverage_claim():
@@ -171,3 +171,27 @@ def test_pinned_writer_cannot_redirect_or_rewrite():
  with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):
   assert PlaygroundPorts(discussion_client=d,note_writer=writer).file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')=='20'
  d.append_note.assert_called_once_with('12','Exact note',note_type='Note')
+
+def test_declarations_names_are_candidates_not_verified_policy_docs():
+ r=Mock();r.documents_for_applicant.return_value=[{'id':'1','name':'Declarations Page.pdf'},{'id':'2','name':'NOC.pdf'}]
+ answer=PlaygroundPorts(r).read(Proposal(kind='lookup',applicant_id='26356199',body='need the dec page'))
+ assert 'Name-matched candidates' in answer and 'document ID 1' in answer and 'NOC.pdf' not in answer
+ assert 'not read or compared' in answer
+
+
+def test_no_matching_document_is_not_a_claim_of_absence():
+ r=Mock();r.documents_for_applicant.return_value=[{'id':'1','name':'NOC.pdf'}]
+ answer=PlaygroundPorts(r).read(Proposal(kind='lookup',applicant_id='26356199',body='find loss runs'))
+ assert "doesn't prove the document is absent" in answer and 'Which policy' in answer
+
+
+def test_document_list_exposes_truncation_and_ignores_missing_ids():
+ r=Mock();r.documents_for_applicant.return_value=[{'id':str(n),'name':f'Doc {n}.pdf'} for n in range(1,8)]+[{'name':'No ID.pdf'}]
+ answer=PlaygroundPorts(r).read(Proposal(kind='lookup',applicant_id='26356199',body='find documents'))
+ assert 'Showing 5 of 7' in answer and 'No ID.pdf' not in answer and 'document ID 6' not in answer
+
+
+def test_loss_run_name_filter_does_not_claim_coverage_read():
+ r=Mock();r.documents_for_applicant.return_value=[{'id':'7','name':'Loss-Runs.pdf'},{'id':'8','name':'Loss notice.pdf'}]
+ answer=PlaygroundPorts(r).read(Proposal(kind='lookup',applicant_id='26356199',body='find loss runs'))
+ assert 'document ID 7' in answer and 'Loss notice' not in answer and 'Name-matched candidates' in answer
