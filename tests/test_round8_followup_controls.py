@@ -157,18 +157,14 @@ class DuplicateNoteTests(unittest.TestCase):
         try:
             with patch(
                 "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-                return_value={
-                    "status": "filed",
-                    "note_id": "n1",
-                    "discussion_id": "d1",
-                    "read_back": True,
-                },
+                side_effect=AssertionError("no job must not touch EZLynx"),
             ) as mocked:
                 result = module.ezlynx_discussion_note_handler(
                     {"applicant_id": "26356199", "note_text": "Hello"}
                 )
-            self.assertTrue(result["ok"])
-            mocked.assert_called_once()
+            self.assertFalse(result["ok"])
+            self.assertIn("no active job", result["error"])
+            mocked.assert_not_called()
         finally:
             _restore_modules(previous)
 

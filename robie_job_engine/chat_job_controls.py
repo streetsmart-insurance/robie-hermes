@@ -610,8 +610,12 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         return False
     from .chat_guard import _looks_in_progress
     from .store import JobStore
+    from .write_verification_loop import is_plan_refusal_text
 
     text = str(content or "")
+    # The validator is talking to the model. The job stays open so it can re-plan.
+    if is_plan_refusal_text(text):
+        return False
     if outbound_is_clarify(text):
         store = JobStore(db_path)
         if mark_job_waiting_for_user(store, job_id, text):
@@ -636,6 +640,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
 
             if close_confirmed_note_job(store, job_id):
                 stop_recordings_for_jobs(db_path, [job_id], JobStatus.COMPLETE.value)
+                _stop_model_for_finished_turn(job_id)
                 return True
         except Exception:
             pass
@@ -647,6 +652,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
             release_lease=True,
         )
         stop_recordings_for_jobs(db_path, [job_id], JobStatus.UNVERIFIED.value)
+        _stop_model_for_finished_turn(job_id)
         return True
     if status in {
         JobStatus.COMPLETE,
@@ -657,5 +663,16 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         JobStatus.AWAITING_HUMAN_INPUT,
     }:
         stop_recordings_for_jobs(db_path, [job_id], status.value)
+        _stop_model_for_finished_turn(job_id)
         return True
     return False
+
+
+def _stop_model_for_finished_turn(job_id: str) -> None:
+    """The turn is over. The model must not keep calling tools."""
+    try:
+        from .chat_turn_control import request_agent_stop
+
+        request_agent_stop(job_id)
+    except Exception:
+        return

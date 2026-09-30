@@ -321,6 +321,15 @@ class JobEngine:
             and contract.recording_policy == "REQUIRED"
             and (self.enforce_recording_policy or self.recordings.enabled)
         )
+        question_only = False
+        try:
+            from .chat_guard import question_only_skips_recording
+
+            question_only = question_only_skips_recording(self.store, job, "")
+        except Exception:
+            question_only = False
+        if question_only:
+            recording_required = False
         recording_started = False
         recording_finalized = False
         if recording_required:
@@ -337,6 +346,10 @@ class JobEngine:
                 )
                 runs.terminate(run["id"], "FAILED")
                 return failed
+        elif question_only:
+            # A resume must not replace the question-only exemption with
+            # "not an executable Skill" and then start a recorder.
+            pass
         else:
             if job["action_type"] == "drive.skill_sync":
                 reason = (

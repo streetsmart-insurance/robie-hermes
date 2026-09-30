@@ -6,7 +6,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
@@ -46,6 +46,16 @@ from .store import JobStore
 
 
 logger = logging.getLogger(__name__)
+
+# The live Chat adapter installs this so a note tool can post on the job
+# thread before the model speaks. Tests pass a poster instead.
+_OUTCOME_POSTER: Callable[..., Any] | None = None
+
+
+def install_chat_outcome_poster(poster: Callable[..., Any] | None) -> None:
+    """Register the process-wide Chat poster for note outcomes."""
+    global _OUTCOME_POSTER
+    _OUTCOME_POSTER = poster
 
 _BOUND_POLICY_TERMS = re.compile(
     r"(?:\b(?:renew|endorse|cancel|reassign)\b|"
@@ -163,6 +173,13 @@ def question_only_skips_recording(store: Any, job: dict[str, Any] | None, inboun
     """
     if not job:
         return False
+    job_id = str(job.get("id") or "")
+    if job_id and store is not None:
+        try:
+            if store.get_checkpoint(job_id, "question_only"):
+                return True
+        except Exception:
+            pass
     from .answer_only import is_answer_only_job, is_informational_ask
 
     if is_answer_only_job(job) or is_informational_ask(inbound_text):
@@ -213,6 +230,7 @@ def reopen_resumed_generic_chat_job(
         return job
     resumed_text = str((job.get("payload") or {}).get("text") or "")
     if question_only_skips_recording(store, job, resumed_text):
+        store.checkpoint(job_id, "question_only", {"reason": "question only"})
         store.checkpoint(
             job_id,
             "recording_exemption",
@@ -1334,6 +1352,8 @@ def open_chat_job(
             combined = f"{original}\n\nUser reply: {reply}".strip()
         payload = dict(active_for_turn.get("payload") or {})
         payload["text"] = combined
+        if not str(payload.get("original_text") or "").strip() and original:
+            payload["original_text"] = original
         payload["clarification_reply"] = reply
         store.update_payload(active_for_turn["id"], payload)
         store.checkpoint(
@@ -1493,6 +1513,7 @@ def open_chat_job(
                     "worker": classification.worker,
                     **server_payload,
                     "request_text": text,
+                    "original_text": text,
                     "answer_only": bool(getattr(classification, "answer_only", False)),
                 }
             ),
@@ -1761,6 +1782,11 @@ def open_chat_job(
             store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
         else:
             if question_only_skips_recording(store, current, text):
+                store.checkpoint(
+                    job["id"],
+                    "question_only",
+                    {"reason": "question only"},
+                )
                 store.checkpoint(
                     job["id"],
                     "recording_exemption",
@@ -2477,6 +2503,72 @@ def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
         release_lease=True,
     )
     return True
+
+
+def publish_discussion_note_outcome(
+    db_path: str,
+    job_id: str,
+    poster: Callable[..., Any] | None = None,
+) -> str | None:
+    """Post the ledger question or the readback line on the stored thread.
+
+    The model does not send this line. A later model send has nothing to add.
+    """
+    if not db_path or not job_id:
+        return None
+    store = JobStore(db_path)
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return None
+    status = str(note.get("status") or "")
+    line = ""
+    if status == "already_posted":
+        line = " ".join(str(note.get("reason") or "").split())
+        if not line:
+            return None
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, line)
+    elif status == "filed":
+        from .post_job_audit import api_readback_confirms_write
+
+        if not api_readback_confirms_write(store, job_id):
+            return None
+        if not close_confirmed_note_job(store, job_id):
+            return None
+        line = _discussion_note_user_reply(store, store.get_job(job_id))
+    else:
+        return None
+    line = " ".join(str(line or "").split()).strip()
+    if not line:
+        return None
+    from .user_reply import format_user_reply
+
+    line = format_user_reply(line)
+    prior = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
+    if " ".join(str(prior.get("text") or "").split()) == line:
+        from .chat_turn_control import request_agent_stop
+
+        request_agent_stop(job_id)
+        return line
+    from .chat_thread import read_job_chat_thread
+
+    thread = read_job_chat_thread(store, job_id)
+    job = store.get_job(job_id)
+    space = str((job.get("payload") or {}).get("conversation_id") or "").strip()
+    send = poster if poster is not None else _OUTCOME_POSTER
+    if send is not None and space:
+        send(space, line, thread, job_id)
+    store.checkpoint(
+        job_id,
+        "chat_outcome_sent",
+        {"text": line, "thread": thread or "", "space": space},
+    )
+    from .chat_turn_control import request_agent_stop
+
+    request_agent_stop(job_id)
+    return line
 
 
 def enforce_note_reply_wording(db_path: str, job_id: str | None, text: str) -> str:

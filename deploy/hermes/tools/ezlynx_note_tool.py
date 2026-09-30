@@ -46,10 +46,40 @@ DISCUSSION_NOTE_SCHEMA = {
             "plan": {
                 "type": "object",
                 "description": (
-                    "The plan stated before the write: write, target, and values. "
-                    "Required when this job has no locked plan. The note is not "
-                    "posted until that plan is locked."
+                    "The plan stated before the write. Required when this job "
+                    "has no locked plan. write is a string, target is an object, "
+                    "and values is an object. For a note, write is "
+                    "\"discussion note\", target.discussion is the existing "
+                    "title, and values.note_text is the exact sentence. "
+                    "Do not send write as an object or values as a string. "
+                    "The note is not posted until that plan is locked."
                 ),
+                "properties": {
+                    "write": {
+                        "type": "string",
+                        "description": "What will be written. Use \"discussion note\".",
+                    },
+                    "target": {
+                        "type": "object",
+                        "properties": {
+                            "applicant_id": {"type": "string"},
+                            "policy_number": {"type": "string"},
+                            "discussion": {
+                                "type": "string",
+                                "description": "Existing discussion title, for example follw up 1.",
+                            },
+                            "discussion_title": {"type": "string"},
+                        },
+                    },
+                    "values": {
+                        "type": "object",
+                        "description": "Fields that will be written. note_text is the exact note.",
+                        "properties": {
+                            "note_text": {"type": "string"},
+                        },
+                    },
+                },
+                "required": ["write", "target", "values"],
             },
         },
         "required": ["applicant_id", "note_text"],
@@ -258,7 +288,35 @@ def ezlynx_discussion_note_handler(args: dict, **kwargs):
     remembered["request_note"] = str((args or {}).get("note_text") or "")
     remembered["step_args"] = dict(args or {})
     _remember_discussion_note(remembered, report)
+    _publish_note_outcome(remembered)
     return tool_result(report)
+
+
+def _publish_note_outcome(kwargs: dict) -> None:
+    """The gateway, not the model, posts the question or the one-line result."""
+    import os
+
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    if not job_id or not db_path:
+        return
+    try:
+        from robie_job_engine.chat_guard import publish_discussion_note_outcome
+
+        publish_discussion_note_outcome(
+            db_path,
+            job_id,
+            poster=(kwargs or {}).get("outcome_poster"),
+        )
+    except Exception:
+        return
 
 
 def _available() -> bool:

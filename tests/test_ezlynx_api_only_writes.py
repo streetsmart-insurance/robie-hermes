@@ -410,23 +410,33 @@ class NoteToolTests(unittest.TestCase):
     def test_handler_uses_add_note_to_discussion(self):
         tool, previous = self._load()
         try:
-            with patch(
-                "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-                return_value={
-                    "status": "filed",
-                    "note_id": "n7",
-                    "discussion_id": "d1",
-                    "discussion_title": "PCR",
-                    "read_back": True,
-                },
-            ) as mocked:
-                result = tool.ezlynx_discussion_note_handler(
-                    {
-                        "applicant_id": ALLOWED_APPLICANT,
-                        "note_text": "Hello\n\nRobie was here",
-                        "title_hint": "PCR",
-                    }
+            from durable_temp import durable_temporary_directory
+            from robie_job_engine.store import JobStore
+
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                job = JobStore(db).create_job(
+                    "hermes.plain_english", {"text": "hello"}
                 )
+                with patch(
+                    "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                    return_value={
+                        "status": "filed",
+                        "note_id": "n7",
+                        "discussion_id": "d1",
+                        "discussion_title": "PCR",
+                        "read_back": True,
+                    },
+                ) as mocked:
+                    result = tool.ezlynx_discussion_note_handler(
+                        {
+                            "applicant_id": ALLOWED_APPLICANT,
+                            "note_text": "Hello\n\nRobie was here",
+                            "title_hint": "PCR",
+                        },
+                        job_id=job["id"],
+                        db_path=db,
+                    )
             self.assertTrue(result["ok"])
             self.assertEqual(result["note_id"], "n7")
             self.assertIn("Robie was here", result["note_text"])
@@ -476,13 +486,23 @@ class NoteToolTests(unittest.TestCase):
     def test_handler_fails_closed_without_note_id(self):
         tool, previous = self._load()
         try:
-            with patch(
-                "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-                return_value={"status": "pending", "reason": "no titled discussion"},
-            ):
-                result = tool.ezlynx_discussion_note_handler(
-                    {"applicant_id": ALLOWED_APPLICANT, "note_text": "x"}
+            from durable_temp import durable_temporary_directory
+            from robie_job_engine.store import JobStore
+
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                job = JobStore(db).create_job(
+                    "hermes.plain_english", {"text": "hello"}
                 )
+                with patch(
+                    "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                    return_value={"status": "pending", "reason": "no titled discussion"},
+                ):
+                    result = tool.ezlynx_discussion_note_handler(
+                        {"applicant_id": ALLOWED_APPLICANT, "note_text": "x"},
+                        job_id=job["id"],
+                        db_path=db,
+                    )
             self.assertFalse(result["ok"])
             self.assertIn("error", result)
         finally:

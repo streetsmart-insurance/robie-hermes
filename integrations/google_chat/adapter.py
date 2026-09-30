@@ -1052,6 +1052,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Job currently handling this space, so thinking/clarify/status
         # sends can find the job when the gateway omits robie_job_id.
         self._active_chat_job: Dict[str, str] = {}
+        # Question-only jobs stay here after the lock drops so the answer
+        # can use the stored thread. A note job is not recorded here.
+        self._question_job_by_chat: Dict[str, str] = {}
         # Inbound message name → thread.name when the user replied inside
         # a thread that already had messages (not a brand-new top-level).
         self._reply_in_existing_thread: Dict[str, str] = {}
@@ -1481,7 +1484,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         hitl_text,
                         reply_to=event.message_id,
                         metadata={
-                            "thread_id": getattr(event.source, "thread_id", None)
+                            "thread_id": getattr(event.source, "thread_id", None),
+                            "robie_job_id": job_id,
                         },
                     )
                 return
@@ -1524,7 +1528,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             event.source.chat_id,
             f"{CLARIFICATION_QUESTION}\n\nRef: job {job_id}",
             reply_to=event.message_id,
-            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+            metadata={
+                "thread_id": getattr(event.source, "thread_id", None),
+                "robie_job_id": job_id,
+            },
         )
 
     async def _fail_jobs_abandoned_by_restart(self) -> None:
@@ -1579,6 +1586,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
         source = event.source
+        try:
+            from robie_job_engine.chat_guard import install_chat_outcome_poster
+
+            install_chat_outcome_poster(self.post_outcome_sync)
+        except Exception:
+            logger.debug("[GoogleChat] outcome poster was not installed", exc_info=True)
         key = turn_key(
             getattr(source, "chat_id", None),
             getattr(source, "thread_id", None),
@@ -1871,7 +1884,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         payload["conversation_id"],
                         interaction["prompt"],
                         reply_to=payload.get("message_id"),
-                        metadata={"thread_id": payload.get("thread_id")},
+                        metadata={
+                            "thread_id": payload.get("thread_id"),
+                            "robie_job_id": job_id,
+                        },
                     )
                     if not sent.success:
                         raise RuntimeError(
@@ -1901,7 +1917,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     payload["conversation_id"],
                     terminal_message,
                     reply_to=reply_to,
-                    metadata={"thread_id": payload.get("thread_id")},
+                    metadata={
+                        "thread_id": payload.get("thread_id"),
+                        "robie_job_id": job_id,
+                    },
                 )
                 if not sent.success:
                     raise RuntimeError(
@@ -2904,7 +2923,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     event.source.chat_id,
                     admin_response,
                     reply_to=event.message_id,
-                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                    metadata={
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "robie_delivery_kind": "notice",
+                    },
                 )
                 return
             if text.startswith("/setup-files") and event.source is not None:
@@ -2935,7 +2957,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     conversation_id,
                     "The active ROBIE job context was cleared. Your next executable request will start a new job.",
                     reply_to=event.message_id,
-                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                    metadata={
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "robie_delivery_kind": "notice",
+                    },
                 )
                 return
 
@@ -2992,7 +3017,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             prompt,
                             reply_to=message_id,
                             metadata={
-                                "thread_id": getattr(event.source, "thread_id", None)
+                                "thread_id": getattr(event.source, "thread_id", None),
+                                "robie_job_id": (context or {}).get("job_id"),
+                                "robie_delivery_kind": "notice",
                             },
                         )
                         return
@@ -3032,7 +3059,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             f"Input received for ROBIE Job {context['job_id']}. Resuming from the saved checkpoint.",
                             reply_to=message_id,
                             metadata={
-                                "thread_id": getattr(event.source, "thread_id", None)
+                                "thread_id": getattr(event.source, "thread_id", None),
+                                "robie_job_id": context["job_id"],
+                                "robie_delivery_kind": "notice",
                             },
                         )
                         if resumed.get("state") != "DIRECT_RESUME":
@@ -3076,7 +3105,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     event.source.chat_id,
                     text_decision_response(result),
                     reply_to=event.message_id,
-                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                    metadata={
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "robie_delivery_kind": "notice",
+                    },
                 )
                 return
 
@@ -3123,7 +3155,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             reply_text,
                             reply_to=event.message_id,
                             metadata={
-                                "thread_id": getattr(event.source, "thread_id", None)
+                                "thread_id": getattr(event.source, "thread_id", None),
+                                "robie_delivery_kind": "notice",
                             },
                         )
                     return
@@ -3869,7 +3902,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             chat_id,
             format_action_gate_chat_note(job),
             reply_to=None,
-            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+            metadata={
+                "thread_id": getattr(event.source, "thread_id", None),
+                "robie_job_id": job_id,
+                "robie_delivery_kind": "notice",
+            },
         )
         return True
 
@@ -3900,7 +3937,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             chat_id,
             note,
             reply_to=None,
-            metadata={"thread_id": thread_id},
+            metadata={
+                "thread_id": thread_id,
+                "robie_job_id": job_id,
+                "robie_delivery_kind": "notice",
+            },
         )
         return True
 
@@ -3925,7 +3966,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             chat_id,
             drive_chip_download_failed_message(identity),
             reply_to=None,
-            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+            metadata={
+                "thread_id": getattr(event.source, "thread_id", None),
+                "robie_job_id": job_id,
+                "robie_delivery_kind": "notice",
+            },
         )
         return True
 
@@ -4149,6 +4194,77 @@ class GoogleChatAdapter(BasePlatformAdapter):
     def _remember_active_chat_job(self, chat_id: str | None, job_id: str | None) -> None:
         if chat_id and job_id:
             self._active_chat_job[str(chat_id)] = str(job_id)
+            try:
+                from robie_job_engine.answer_only import is_answer_only_job
+
+                job = JobStore(ROBIE_JOB_DB).get_job(str(job_id))
+                if is_answer_only_job(job):
+                    self._question_job_by_chat[str(chat_id)] = str(job_id)
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] could not remember question job=%s", job_id, exc_info=True
+                )
+
+    def _active_turn_job_id(self, chat_id: str | None) -> str | None:
+        """The job this turn is still running. A released lock is not active."""
+        if not chat_id:
+            return None
+        mapped = str((getattr(self, "_active_chat_job", None) or {}).get(chat_id) or "").strip()
+        if mapped:
+            return mapped
+        turns = getattr(self, "_gateway_turns", None)
+        if isinstance(turns, dict):
+            for key, record in turns.items():
+                if not isinstance(key, tuple) or str(key[0]) != str(chat_id):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                found = str(record.get("job_id") or "").strip()
+                if found:
+                    return found
+        return None
+
+    def _question_only_job_id(self, chat_id: str | None) -> str | None:
+        """The instant question answer may send without an active turn."""
+        if not chat_id:
+            return None
+        mapped = getattr(self, "_question_job_by_chat", None)
+        job_id = str((mapped or {}).get(chat_id) or "").strip() if isinstance(mapped, dict) else ""
+        if not job_id:
+            return None
+        try:
+            from robie_job_engine.answer_only import is_answer_only_job
+
+            job = JobStore(ROBIE_JOB_DB).get_job(job_id)
+        except Exception:
+            return None
+        if is_answer_only_job(job):
+            return job_id
+        return None
+
+    def post_outcome_sync(
+        self,
+        space: str,
+        text: str,
+        thread_name: str | None,
+        job_id: str | None,
+    ) -> bool:
+        """Post the gateway's one line. Does not run the model's send path."""
+        api = getattr(self, "_chat_api", None)
+        if api is None or not space or not text:
+            return False
+        from robie_job_engine.user_reply import format_user_reply
+
+        body: Dict[str, Any] = {"text": format_user_reply(text)}
+        if thread_name:
+            body["thread"] = {"name": thread_name}
+        kwargs: Dict[str, Any] = {"parent": space, "body": body}
+        if thread_name:
+            kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        api.spaces().messages().create(**kwargs).execute(http=self._new_authed_http())
+        self._mark_sole_reply_sent(job_id)
+        self._remember_reply_job(space, job_id)
+        return True
 
     def _live_chat_job_id(self, chat_id: str | None) -> str | None:
         """The job this Chat turn is running, when the gateway omits it.
@@ -4367,10 +4483,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "notice",
         } and not (metadata or {}).get("robie_stop_notice")
         if agent_reply and not job_id:
-            job_id = self._live_chat_job_id(chat_id)
+            job_id = self._active_turn_job_id(chat_id)
+        if agent_reply and not job_id:
+            question_job = self._question_only_job_id(chat_id)
+            if question_job:
+                job_id = question_job
+            else:
+                # The model's final text with no live job used to post at
+                # the top level. Drop it. Question-only answers and /stop
+                # are not agent replies of this kind.
+                logger.info("[GoogleChat] dropping send with no active job chat=%s", chat_id)
+                return SendResult(success=True, message_id=None)
         if agent_reply and job_id:
             self._remember_reply_job(chat_id, job_id)
         if agent_reply and job_id and self._sole_reply_already_sent(job_id):
+            return SendResult(success=True, message_id=None)
+        from robie_job_engine.write_verification_loop import is_plan_refusal_text
+
+        if agent_reply and is_plan_refusal_text(str(content or "")):
+            # Returned to the model already. Posting it would end the job.
             return SendResult(success=True, message_id=None)
         # Thread routing uses the same job. A stored thread wins over the
         # inbound message's thread field, including a top-level auto thread.
@@ -4829,6 +4960,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         if not message_id:
             return SendResult(success=False, error="missing message_id")
+        from robie_job_engine.write_verification_loop import is_plan_refusal_text
+
+        if is_plan_refusal_text(content):
+            return SendResult(success=True, message_id=message_id)
         live_job = self._live_chat_job_id(chat_id)
         if live_job and self._agent_reply_is_replaced(live_job):
             # Streaming the model's final text would post it in whatever

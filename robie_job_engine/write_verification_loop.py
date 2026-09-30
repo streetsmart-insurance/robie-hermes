@@ -54,10 +54,19 @@ _PLAN_RESPONSE_SCHEMA = {
                 "discussion_title": {"type": "STRING"},
             },
         },
-        "values": {"type": "OBJECT"},
+        "values": {
+            "type": "OBJECT",
+            "properties": {
+                "note_text": {"type": "STRING"},
+            },
+        },
     },
     "required": ["write", "target", "values"],
 }
+
+
+NO_ACTIVE_JOB_WRITE = "The write was not sent. There is no active job."
+TERMINAL_JOB_WRITE = "The write was not sent. This job is already finished."
 
 
 def plan_refusal(field: str) -> str:
@@ -76,6 +85,20 @@ def plan_stop_refusal(field: str) -> str:
         "Stop. Do not call this tool again. "
         f"Nothing was changed or noted. The plan field {name} is wrong."
     )
+
+
+def is_plan_refusal_text(text: str) -> bool:
+    """True when this outbound text is the plan validator talking to the model.
+
+    That sentence goes back to the model so it can re-plan. It is not a
+    user reply, and posting it must not end the job.
+    """
+    body = " ".join(str(text or "").split())
+    if body.startswith("The plan field ") and " is wrong" in body:
+        return True
+    if body.startswith("Stop. Do not call this tool again.") and "plan field" in body:
+        return True
+    return False
 
 
 PLAN_REQUIRED = plan_refusal("plan")
@@ -121,6 +144,10 @@ def plan_prompt_for_job(job: dict[str, Any]) -> str:
         '{"write":"<what will be written>","target":{"applicant_id":"","policy_number":"",'
         '"discussion":""},"values":{"<field>":"<exact value>"}}\n'
         "Include only values the request states. Do not invent a value. "
+        "write is a string, not an object. "
+        "values is an object, not a string. "
+        "For a discussion note, write is \"discussion note\", "
+        "target.discussion is the existing title, and values.note_text is the exact note. "
         "target must name the account, policy, or discussion. "
         "values must list each field that will change.\n"
         "Request:\n"
@@ -203,7 +230,8 @@ def _normalize_target(target_raw: Any) -> dict[str, str]:
             return {}
         if text.isdigit():
             return {"applicant_id": text}
-        if re.search(r"[A-Za-z]", text) and re.search(r"\d", text):
+        # A policy number is one token. "follw up 1" is a discussion title.
+        if " " not in text and re.search(r"[A-Za-z]", text) and re.search(r"\d", text):
             return {"policy_number": text}
         return {"discussion": text}
     if not isinstance(target_raw, Mapping):
@@ -265,6 +293,69 @@ def _statement_if_complete(raw: str | Mapping[str, Any] | None) -> dict[str, Any
         return _validated_statement(data)
     except ValueError:
         return None
+
+
+def _coerce_write(write: Any) -> str:
+    """A string write. An object write contributes its kind, not a dump."""
+    if isinstance(write, str):
+        return " ".join(write.split()).strip()
+    if isinstance(write, Mapping):
+        for key in ("write", "kind", "action", "type", "name"):
+            picked = " ".join(str(write.get(key) or "").split()).strip()
+            if picked:
+                return picked
+        return ""
+    if write is None:
+        return ""
+    return " ".join(str(write).split()).strip()
+
+
+def _coerce_values_field(values_raw: Any, args: Mapping[str, Any]) -> Any:
+    """values is an object. A string is the note the model already stated."""
+    if isinstance(values_raw, str):
+        text = " ".join(values_raw.split()).strip()
+        if text:
+            return {"note_text": text}
+        values_raw = {}
+    if isinstance(values_raw, Mapping):
+        cleaned = _clean_values(values_raw)
+        if cleaned:
+            return cleaned
+    note = " ".join(str(args.get("note_text") or "").split()).strip()
+    if note and (values_raw is None or isinstance(values_raw, (str, Mapping))):
+        return {"note_text": note}
+    return values_raw
+
+
+def coerce_tool_plan(statement: Any, args: Mapping[str, Any] | None = None) -> Any:
+    """Make a stated note plan match the validator. Do not invent a note.
+
+    The tool schema used to leave ``plan`` as an untyped object, so the
+    model sent a blank ``write`` or a string ``values``. A plain note
+    ("add a note to Buster Brown on follw up 1 saying X") states the
+    discussion on the target or title_hint and the sentence on values
+    or note_text. Those are the same facts, not new ones. A missing
+    plan is still missing.
+    """
+    if not isinstance(statement, Mapping):
+        return statement
+    tool_args = dict(args or {})
+    data = dict(statement)
+    data["write"] = _coerce_write(data.get("write"))
+    if "values" in data or tool_args.get("note_text"):
+        data["values"] = _coerce_values_field(data.get("values"), tool_args)
+    if not _normalize_target(data.get("target")):
+        title = " ".join(str(tool_args.get("title_hint") or "").split()).strip()
+        if title:
+            target = {"discussion": title}
+            applicant = " ".join(str(tool_args.get("applicant_id") or "").split()).strip()
+            if applicant:
+                target["applicant_id"] = applicant
+            data["target"] = target
+    if not str(data.get("write") or "").strip():
+        if _normalize_target(data.get("target")) and _clean_values(data.get("values")):
+            data["write"] = "discussion note"
+    return data
 
 
 def plan_field_problem(statement: Any) -> str | None:
@@ -858,8 +949,9 @@ def unwritten_write_reason(store: Any, job: Mapping[str, Any]) -> str:
 def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] | None) -> str | None:
     """Block an EZLynx write until the model has locked a plan.
 
-    No job context means a unit call with no job, and the write is unchanged.
-    A stated ``plan`` on the call is locked before the write proceeds.
+    A missing job, or a job that is already finished, is refused before
+    any EZLynx call. A wrong plan is returned to the model. It does not
+    end the job.
     """
     import os as _os
 
@@ -873,14 +965,27 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     ).strip()
     db_path = str(kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
     if not job_id or not db_path:
-        return None
+        return NO_ACTIVE_JOB_WRITE
     from .store import JobStore
 
     try:
         store = JobStore(db_path)
         job = store.get_job(job_id)
     except Exception:
-        return None
+        return NO_ACTIVE_JOB_WRITE
+    from .models import JobStatus
+
+    status = str((job or {}).get("status") or "")
+    if status in {
+        JobStatus.COMPLETE.value,
+        JobStatus.UNVERIFIED.value,
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+    }:
+        from .chat_turn_control import request_agent_stop
+
+        request_agent_stop(job_id)
+        return TERMINAL_JOB_WRITE
     from .chat_job_controls import hard_block_reply
 
     blocked = hard_block_reply(_job_text(job))
@@ -890,7 +995,7 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         return None
     if plan_is_locked(store, job_id):
         return None
-    statement = args.get("plan")
+    statement = coerce_tool_plan(args.get("plan"), args)
     problem = plan_field_problem(statement)
     if problem is None:
         parsed = parse_model_plan(statement if isinstance(statement, (str, Mapping)) else None)
