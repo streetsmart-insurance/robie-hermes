@@ -325,6 +325,63 @@ class JobStore:
                 )
         return job_ids
 
+    def fail_dead_running_jobs(
+        self,
+        *,
+        older_than_seconds: int = 600,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Fail RUNNING jobs that have no live lease and no fresh heartbeat.
+
+        A ``gateway_progress`` row newer than the cutoff means a worker is
+        still alive. Those jobs stay RUNNING.
+        """
+        if older_than_seconds < 1:
+            raise ValueError("dead-running timeout must be positive")
+        at = now or datetime.now(timezone.utc)
+        cutoff = (at - timedelta(seconds=older_than_seconds)).isoformat()
+        stamp = at.isoformat()
+        reason = (
+            "The job was still running with no live worker. "
+            f"It was stopped after {older_than_seconds} seconds."
+        )
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=?
+                     AND updated_at<=?
+                     AND NOT (
+                       lease_owner IS NOT NULL AND TRIM(lease_owner)!=''
+                       AND lease_expires_at IS NOT NULL AND lease_expires_at>?
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM checkpoints
+                       WHERE checkpoints.job_id=jobs.id
+                         AND checkpoints.kind='gateway_progress'
+                         AND checkpoints.created_at>?
+                     )""",
+                (JobStatus.RUNNING.value, cutoff, stamp, cutoff),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'dead_running', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason, "cutoff": cutoff}),
+                        stamp,
+                    ),
+                )
+        return job_ids
+
     def fail_gateway_restart_orphans(
         self,
         *,

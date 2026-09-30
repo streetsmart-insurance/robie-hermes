@@ -429,7 +429,13 @@ def job_was_stopped_or_ceiling(store: Any, job: dict | None) -> bool:
     job_id = str(job.get("id") or "")
     if not job_id:
         return False
-    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+    for kind in (
+        "agent_abort",
+        "cancelled",
+        "gateway_turn_timeout",
+        "hard_block",
+        "waiting_expired",
+    ):
         try:
             if store.get_checkpoint(job_id, kind):
                 return True

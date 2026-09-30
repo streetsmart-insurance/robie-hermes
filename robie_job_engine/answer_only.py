@@ -89,6 +89,16 @@ POLICY_CHANGE_ROUTE = (
     "Do not read Robie's source, jobs.db, or token files."
 )
 
+DISCUSSION_NOTE_ROUTE = (
+    "Route: discussion note. This is an EZLynx write. "
+    "Use ezlynx_discussion_note once, on the existing discussion named in "
+    "the request. Do not create a discussion. Do not post the note twice. "
+    "If the tool says the note was posted or is verifying, stop. "
+    "Do not use Playwright Add Note or Save Note. "
+    "Do not bind, take payment, or email the client. "
+    "Do not read Robie's source, jobs.db, or token files."
+)
+
 _VERIFIER_NOISE = re.compile(r"file-mutation verifier", re.IGNORECASE)
 
 _ADDRESS_COMPLETION_CLAIMS = (
@@ -286,7 +296,9 @@ def scrub_user_reply(text: str) -> str:
     raw = str(text or "").translate(_ZERO_WIDTH_CHARS)
     if FIXTURE_POLICY_MARKER in raw:
         return LIVE_LOOKUP_FAILED
-    return strip_internal_user_markers(raw)
+    from .chat_job_controls import plain_missing_field_question
+
+    return plain_missing_field_question(strip_internal_user_markers(raw))
 
 
 def _normalized(text: str) -> str:
@@ -350,14 +362,20 @@ def is_certificate_or_policy_change(text: str) -> bool:
 
 
 def purpose_built_instructions(text: str) -> str:
-    """Name the existing tool. Empty when this is not a cert or policy change."""
+    """Name the existing tool. Empty when this is not a cert, note, or policy change."""
     normalized = _normalized(_ask_body(text))
-    from .request_routing import _is_certificate_request, _is_policy_change_request
+    from .request_routing import (
+        _is_certificate_request,
+        _is_discussion_note_request,
+        _is_policy_change_request,
+    )
 
     if _is_certificate_request(normalized):
         return CERT_ROUTE
     if _is_policy_change_request(normalized) or "mailing address" in normalized:
         return POLICY_CHANGE_ROUTE
+    if _is_discussion_note_request(normalized):
+        return DISCUSSION_NOTE_ROUTE
     return ""
 
 

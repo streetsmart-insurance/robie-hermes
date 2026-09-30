@@ -98,8 +98,10 @@ def _file_note(args: dict) -> dict:
         )
     if status == "filed" and not filed.get("note_id") and not filed.get("read_back"):
         raise RuntimeError("DiscussionApi filed without note_id; refusing success")
+    posted = status in {"filed", "posted, verifying"}
     return {
-        "ok": status == "filed" and bool(filed.get("read_back") or filed.get("note_id")),
+        "ok": status == "filed" and bool(filed.get("read_back") or filed.get("note_id"))
+        or status == "posted, verifying",
         "status": status,
         "note_id": filed.get("note_id"),
         "discussion_id": filed.get("discussion_id"),
@@ -109,6 +111,12 @@ def _file_note(args: dict) -> dict:
         "read_back": bool(filed.get("read_back")),
         "verified_by": filed.get("verified_by"),
         "reason": filed.get("reason"),
+        "do_not_repost": posted,
+        "instruction": (
+            "Posted. Do not post this note again."
+            if status == "posted, verifying"
+            else ""
+        ),
     }
 
 
@@ -152,6 +160,8 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
     try:
         from robie_job_engine.store import JobStore
 
+        from robie_job_engine.chat_job_controls import discussion_note_step_id
+
         JobStore(db_path).checkpoint(
             job_id,
             "discussion_note",
@@ -161,6 +171,10 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
                 "discussion_id": report.get("discussion_id"),
                 "applicant_id": report.get("applicant_id"),
                 "note_text": report.get("note_text"),
+                "request_note": str((kwargs or {}).get("request_note") or ""),
+                "step_id": discussion_note_step_id(
+                    JobStore(db_path), job_id, kwargs.get("step_args") or {}
+                ),
                 "note_id": report.get("note_id"),
                 "read_back": bool(report.get("read_back")),
                 "verified_by": report.get("verified_by"),
@@ -182,6 +196,11 @@ def ezlynx_discussion_note_handler(args: dict, **kwargs):
     refused = refuse_tool_write(args, kwargs)
     if refused:
         return tool_error(refused)
+    from robie_job_engine.chat_job_controls import refuse_repeat_note_post
+
+    repeat = refuse_repeat_note_post(args, kwargs)
+    if repeat:
+        return tool_error(repeat)
     try:
         report = _file_note(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
@@ -191,7 +210,10 @@ def ezlynx_discussion_note_handler(args: dict, **kwargs):
             message
             + " STOP. Do not drive EZLynx screens by hand. Report this error and stop."
         )
-    _remember_discussion_note(kwargs, report)
+    remembered = dict(kwargs or {})
+    remembered["request_note"] = str((args or {}).get("note_text") or "")
+    remembered["step_args"] = dict(args or {})
+    _remember_discussion_note(remembered, report)
     return tool_result(report)
 
 

@@ -35,6 +35,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.policy_change": "hermes-cua",
     "ezlynx.policy_setup": "hermes-cua",
     "ezlynx.certificate": "hermes-cua",
+    "ezlynx.discussion_note": "hermes-cua",
     "manual_renewal_verification": "manual-renewal",
     "audit_verification": "audit-verification",
     "mortgagee_verification": "mortgagee-verification",
@@ -191,6 +192,9 @@ _ADDRESS_CHANGE_RE = re.compile(
 _CERTIFICATE_RE = re.compile(
     r"\b(?:certificate of insurance|certificate request|cert request|certificates?|coi)\b"
 )
+_DISCUSSION_NOTE_RE = re.compile(
+    r"\b(?:add|file|post|leave)\s+(?:a\s+)?note\b"
+)
 
 
 def _normalized(text: str) -> str:
@@ -280,6 +284,11 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
     playground_route = _classify_playground_ezlynx(normalized)
     if playground_route is not None:
         return playground_route
+    if _is_discussion_note_request(normalized):
+        return RequestClassification(
+            "ezlynx.discussion_note",
+            WORKER_FOR_ACTION["ezlynx.discussion_note"],
+        )
     if _is_plain_english(normalized, attachment_count):
         return RequestClassification("hermes.plain_english", WORKER_FOR_ACTION["hermes.plain_english"])
     return RequestClassification(
@@ -342,6 +351,20 @@ def _is_policy_change_request(text: str) -> bool:
 
 def _is_certificate_request(text: str) -> bool:
     return _CERTIFICATE_RE.search(text) is not None
+
+
+def _is_discussion_note_request(text: str) -> bool:
+    """A plain 'add a note' is a discussion write, not a freeform chat task.
+
+    Certificate and policy-change routes already file their own note.
+    """
+    if not _DISCUSSION_NOTE_RE.search(text or ""):
+        return False
+    if _is_address_change(text) or _is_policy_change_request(text):
+        return False
+    if _is_certificate_request(text):
+        return False
+    return True
 
 
 def is_skill_sync_command(text: str) -> bool:
@@ -441,6 +464,7 @@ _API_ROUTE_ACTIONS = frozenset(
         "ezlynx.policy_change",
         "ezlynx.certificate",
         "ezlynx.reassign",
+        "ezlynx.discussion_note",
     }
 )
 _GENERAL_CHAT_ACTIONS = frozenset(

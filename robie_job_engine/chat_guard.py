@@ -422,8 +422,15 @@ def _retarget_bounded_correction(
     )
 
 
+_IN_PROGRESS_MAX_CHARS = 280
+
+
 def _looks_in_progress(content: str) -> bool:
     text = str(content or "")
+    # A finished essay can contain the word "working". Only a short status
+    # line keeps the job and the recording open.
+    if len(" ".join(text.split())) > _IN_PROGRESS_MAX_CHARS:
+        return False
     # FAIL_CLOSED_MESSAGE contains the substring "playwright_exec". Job
     # c282de98 stored that exact fail-closed line and Chat rendered
     # "still working" because this helper treated it as in-progress.
@@ -1154,10 +1161,25 @@ def open_chat_job(
     drive_port: object | None = None,
     artifact_root: str | None = None,
     action_payload: dict[str, Any] | None = None,
+    inbound_thread_id: str | None = None,
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
-    store.fail_orphaned_chat_jobs()
+    orphaned = store.fail_orphaned_chat_jobs()
+    from .chat_job_controls import stop_recordings_for_jobs, sweep_dead_running_jobs
+
+    dead = sweep_dead_running_jobs(store)
+    stop_recordings_for_jobs(
+        db_path,
+        list(dict.fromkeys([*orphaned, *dead])),
+        JobStatus.FAILED.value,
+    )
+    try:
+        from .chat_job_controls import expire_stale_waiting_jobs
+
+        expire_stale_waiting_jobs(store)
+    except Exception:
+        logger.exception("stale waiting-job expire failed; continuing")
     try:
         from .hitl_ladder import expire_unanswered_hitl_jobs
 
@@ -1231,11 +1253,15 @@ def open_chat_job(
             active_for_turn = store.get_job(active_for_turn_id)
         except KeyError:
             active_for_turn = None
+    from .chat_job_controls import waiting_job_to_bind
+
+    bind_target = waiting_job_to_bind(store, text, inbound_thread_id)
     continue_clarification = bool(
-        active_for_turn
-        and JobStatus(active_for_turn["status"]) == JobStatus.NEEDS_CLARIFICATION
-        and not conversation_must_start_fresh(store, active_for_turn)
+        bind_target is not None
+        and not conversation_must_start_fresh(store, bind_target)
     )
+    if continue_clarification:
+        active_for_turn = bind_target
     if active_for_turn and conversation_must_start_fresh(store, active_for_turn):
         # The stopped, timed-out, or finished job must not swallow the next message.
         queue.deactivate_conversation(context_key)
@@ -1456,6 +1482,25 @@ def open_chat_job(
             "destination_verification",
             {"verified": False, "reason": "ASCEND_UNAVAILABLE"},
         )
+        return job["id"]
+    from .chat_job_controls import hard_block_reply
+
+    blocked_line = None if continued_job is not None else hard_block_reply(text)
+    if blocked_line:
+        current = store.get_job(job["id"])
+        if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.NEEDS_CLARIFICATION,
+                },
+                error=blocked_line,
+                release_lease=True,
+            )
+        store.checkpoint(job["id"], "hard_block", {"reply": blocked_line})
         return job["id"]
     pre_execution_hold = pre_execution_hold_reason(text, server_payload)
     if pre_execution_hold:

@@ -48,9 +48,11 @@ def is_chat_coverage_hitl_resume_reply(
     """RETRY or stated A–F amounts on a coverage HITL. Not a new Chat job."""
     from .engine import is_retry_text
 
+    if not is_chat_coverage_hitl_job(store, job):
+        return False
     if is_coverage_amount_reply(text):
         return True
-    return is_retry_text(text) and is_chat_coverage_hitl_job(store, job)
+    return is_retry_text(text)
 
 
 def find_parked_chat_hitl_job(

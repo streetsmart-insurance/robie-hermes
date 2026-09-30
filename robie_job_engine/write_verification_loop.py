@@ -30,6 +30,7 @@ WRITE_ACTIONS = frozenset(
         "ezlynx.reassign",
         "ezlynx.move_document",
         "ezlynx.apply_label",
+        "ezlynx.discussion_note",
     }
 )
 
@@ -83,6 +84,10 @@ PLAN_REQUIRED = plan_refusal("plan")
 def is_ezlynx_write_job(job: dict[str, Any] | None) -> bool:
     """True for an EZLynx mutation. A question is not a write."""
     if not job:
+        return False
+    from .chat_job_controls import job_is_hard_blocked
+
+    if job_is_hard_blocked(None, job):
         return False
     from .answer_only import is_answer_only_job
 
@@ -341,6 +346,10 @@ def prepare_write_plan(
     model_fn: Callable[[str], str],
 ) -> dict[str, Any]:
     """Ask the model for the plan and lock it before any write."""
+    from .chat_job_controls import job_is_hard_blocked
+
+    if job_is_hard_blocked(store, job):
+        return {"skipped": True, "reason": "hard blocked"}
     if not is_ezlynx_write_job(job):
         return {"skipped": True, "reason": "not a write job"}
     existing = get_locked_plan(store, str(job.get("id") or ""))
@@ -812,6 +821,11 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         job = store.get_job(job_id)
     except Exception:
         return None
+    from .chat_job_controls import hard_block_reply
+
+    blocked = hard_block_reply(_job_text(job))
+    if blocked:
+        return blocked
     if not is_ezlynx_write_job(job):
         return None
     if plan_is_locked(store, job_id):

@@ -1678,6 +1678,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
             record, session_busy=session_is_busy(self, event)
         )
         if idle_reply:
+            from robie_job_engine.chat_job_controls import waiting_job_to_cancel
+
+            waiting_id = waiting_job_to_cancel(ROBIE_JOB_DB, source.chat_id)
+            if waiting_id:
+                job_id = waiting_id
+                idle_reply = None
+        if idle_reply:
             await self.send(
                 source.chat_id,
                 idle_reply,
@@ -3142,6 +3149,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """Open one job and run it. Caller has already decided this turn may start."""
         message_id = event.message_id or f"unidentified:{id(event)}"
         text = redact_text(text)
+        await self._announce_expired_questions(event)
         attachment_kwargs = self._chat_job_attachment_kwargs(event)
         attachment_count = attachment_kwargs["expected_attachment_count"]
         job_id = await asyncio.to_thread(
@@ -3159,6 +3167,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 expected_attachment_count=attachment_count,
                 attachment_refs=attachment_kwargs["attachment_refs"],
                 drive_port=attachment_kwargs["drive_port"],
+                inbound_thread_id=(
+                    getattr(event.source, "thread_id", None) if event.source else None
+                ),
         )
         await self._bind_inbound_job_thread(event, job_id)
         related_only = chat_message_is_related_only(
@@ -3194,6 +3205,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         ):
             return
         if job_id and await self._halt_action_gate_refuse(event, job_id):
+            return
+        if job_id and await self._halt_hard_block_refuse(event, job_id):
             return
         if await self._halt_retry_refusal(event, job_id, text):
             return
@@ -3682,6 +3695,61 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "drive_port": self._drive_file_port(sender_email) if drive_refs else None,
         }
 
+    async def _announce_expired_questions(self, event: MessageEvent) -> None:
+        """One line when a clarify job passed the 10-minute limit."""
+        source = event.source
+        if source is None:
+            return
+        from robie_job_engine.chat_job_controls import expire_stale_waiting_jobs
+
+        try:
+            expired = await asyncio.to_thread(
+                expire_stale_waiting_jobs, JobStore(ROBIE_JOB_DB)
+            )
+        except Exception:
+            logger.exception("[GoogleChat] could not expire stale questions")
+            return
+        for item in expired:
+            chat_id = str(item.get("conversation_id") or "")
+            if not chat_id.startswith("spaces/"):
+                chat_id = source.chat_id
+            await self.send(
+                chat_id,
+                str(item.get("reply") or ""),
+                reply_to=None,
+                metadata={
+                    "thread_id": item.get("thread_id") or None,
+                    "robie_delivery_kind": "notice",
+                },
+            )
+
+    async def _halt_hard_block_refuse(
+        self, event: MessageEvent, job_id: Optional[str]
+    ) -> bool:
+        """Send the one-line cancel refusal and do not start Hermes."""
+        if not job_id:
+            return False
+        note = await asyncio.to_thread(
+            JobStore(ROBIE_JOB_DB).get_checkpoint, job_id, "hard_block"
+        )
+        reply = str((note or {}).get("reply") or "").strip()
+        if not reply:
+            return False
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if not chat_id:
+            return True
+        await self.send(
+            chat_id,
+            reply,
+            reply_to=None,
+            metadata={
+                "thread_id": getattr(event.source, "thread_id", None),
+                "robie_delivery_kind": "hard_block",
+                "robie_job_id": job_id,
+            },
+        )
+        return True
+
     async def _halt_action_gate_refuse(
         self, event: MessageEvent, job_id: Optional[str]
     ) -> bool:
@@ -4143,6 +4211,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if blocked:
                 logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
                 return SendResult(success=False, error=blocked)
+        outbound_raw = str(content or "")
         content = redact_text(content)
         if delivery_kind == "idle_stop":
             from robie_job_engine.chat_turn_control import NOTHING_RUNNING_REPLY
@@ -4154,17 +4223,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
             content = str(content or "").strip()
         elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "stop":
             from robie_job_engine.chat_guard import guard_chat_notice
-            from robie_job_engine.chat_turn_control import stop_reply_line
+            from robie_job_engine.chat_turn_control import (
+                NOTHING_RUNNING_REPLY,
+                stop_reply_line,
+            )
 
             # One fixed line. The post-job audit, including any tool-mismatch
-            # note, stays in the ledger and is not sent.
-            if job_id:
+            # note, stays in the ledger and is not sent. A job that already
+            # finished keeps Nothing is running right now.
+            if job_id and str(content or "").strip() != NOTHING_RUNNING_REPLY:
                 content = stop_reply_line(job_id)
             content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
         elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "ceiling":
             from robie_job_engine.chat_guard import guard_chat_notice
 
             content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
+        elif delivery_kind in {"hard_block", "notice"}:
+            from robie_job_engine.answer_only import scrub_user_reply
+
+            content = scrub_user_reply(content)
         else:
             content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
         thread_spec = self._thread_spec_for_outbound(
@@ -4295,6 +4372,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         "[GoogleChat] could not record stop delivery job=%s",
                         job_id,
                     )
+            if getattr(last_result, "success", False):
+                await self._finish_sent_reply(
+                    chat_id,
+                    job_id,
+                    thread_job_id,
+                    job_owns_thread,
+                    delivery_kind,
+                    outbound_raw,
+                    content,
+                    metadata,
+                )
             return last_result
         finally:
             self.resume_typing_for_chat(chat_id)
@@ -4346,6 +4434,61 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 retryable=_is_retryable_error(exc),
             )
 
+    def _mark_clarify_waiting(self, chat_id: str, question: str) -> None:
+        """An outbound question parks the job so the answer is not the busy reply."""
+        job_id = self._active_chat_job.get(chat_id)
+        if not job_id:
+            return
+        try:
+            from robie_job_engine.chat_job_controls import (
+                mark_job_waiting_for_user,
+                stop_recordings_for_jobs,
+            )
+
+            if mark_job_waiting_for_user(JobStore(ROBIE_JOB_DB), job_id, question):
+                status = str(
+                    JobStore(ROBIE_JOB_DB).get_job(job_id).get("status") or ""
+                )
+                stop_recordings_for_jobs(ROBIE_JOB_DB, [job_id], status)
+        except Exception:
+            logger.exception("[GoogleChat] could not mark job waiting job=%s", job_id)
+
+    async def _finish_sent_reply(
+        self,
+        chat_id: str,
+        job_id: Optional[str],
+        thread_job_id: Optional[str],
+        job_owns_thread: bool,
+        delivery_kind: str,
+        outbound_raw: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Park a clarify, or close a running job once its reply is out."""
+        if delivery_kind in {"idle_stop", "busy", "stop", "ceiling", "hard_block", "notice"}:
+            return
+        if (metadata or {}).get("robie_stop_notice"):
+            return
+        from robie_job_engine.chat_job_controls import (
+            outbound_is_clarify,
+            settle_job_when_reply_sent,
+        )
+
+        clarify = outbound_is_clarify(outbound_raw, content)
+        target = job_id
+        if not target and job_owns_thread and (clarify or len(str(content or "")) > 280):
+            target = thread_job_id
+        if not target:
+            return
+        if clarify:
+            self._mark_clarify_waiting(chat_id, content)
+        try:
+            await asyncio.to_thread(
+                settle_job_when_reply_sent, ROBIE_JOB_DB, target, content
+            )
+        except Exception:
+            logger.exception("[GoogleChat] could not finish job after reply job=%s", target)
+
     async def send_clarify(
         self,
         chat_id: str,
@@ -4355,6 +4498,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        self._mark_clarify_waiting(chat_id, question)
         if not choices:
             return await super().send_clarify(
                 chat_id, question, choices, clarify_id, session_key, metadata
