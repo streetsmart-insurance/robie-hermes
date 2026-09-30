@@ -119,3 +119,30 @@ plus the full id.
 8. `How do we insure a truck?`
    After ingest, expect an answer that names the source document. If the
    index is empty, expect "I don't have that in the procedures I can read."
+
+## Memory
+
+Preferences and past jobs are stored in `playground_memory.db` next to
+`jobs.db`. Nothing extra is installed. The file is created only when the
+Playground flag is on and someone uses the space or robie@. A password,
+token, or bank detail is refused and is not written. Memory does not
+override a block or the write allowlist.
+
+9. `remember that Maria wants certs cc'd to her`
+   Expect "I'll remember that." It is saved for the whole team. A later
+   certificate readback can mention it. It does not send the certificate.
+
+10. `what do you remember about Maria`
+    Expect the Maria note, in plain English. It does not change a client.
+
+11. `forget that Maria wants certs cc'd to her`
+    Expect "I forgot that." Asking again shows nothing for Maria. The
+    change list of real writes is unchanged.
+
+12. `remember that the password is hunter2`
+    Expect "I won't remember that." The password is not repeated and is
+    not in the memory file.
+
+13. `Change the mailing address to 100 Test Rd.`
+    Expect one question asking which client, even if an earlier job in
+    the space was for Buster Brown. Nothing is changed.
