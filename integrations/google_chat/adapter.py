@@ -3076,6 +3076,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         or getattr(event.source, "user_id", None)
                         or "Google Chat user"
                     ),
+                    requester_user_id=str(
+                        getattr(event.source, "user_id", None) or ""
+                    ).strip(),
                 )
                 if playground_replies is not None:
                     for reply_text in playground_replies:
@@ -4270,9 +4273,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             content = str(content or "")
         else:
             content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
-        from robie_job_engine.answer_only import scrub_user_reply
+        from robie_job_engine.user_reply import format_user_reply
 
-        content = scrub_user_reply(content)
+        content = format_user_reply(content)
         thread_spec = self._thread_spec_for_outbound(
             chat_id,
             metadata,
@@ -4532,9 +4535,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        from robie_job_engine.answer_only import scrub_user_reply
+        from robie_job_engine.user_reply import format_user_reply
 
-        question = scrub_user_reply(question)
+        question = format_user_reply(question)
         self._mark_clarify_waiting(chat_id, question)
         if not choices:
             return await super().send_clarify(
@@ -4666,9 +4669,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         if not message_id:
             return SendResult(success=False, error="missing message_id")
-        from robie_job_engine.answer_only import scrub_user_reply
+        from robie_job_engine.user_reply import format_user_reply
 
-        content = scrub_user_reply(content)
+        content = format_user_reply(content)
         # Google Chat caps message text at 4096; we use 4000 elsewhere.
         if len(content) > _MAX_TEXT_LENGTH:
             content = content[: _MAX_TEXT_LENGTH - 1] + "…"
@@ -4728,11 +4731,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self, message_name: str, body: Dict[str, Any]
     ) -> SendResult:
         """Update a message's text (and optionally cards) in-place."""
-        from robie_job_engine.answer_only import scrub_user_reply
+        from robie_job_engine.user_reply import format_user_reply
 
         if isinstance(body.get("text"), str):
             body = dict(body)
-            body["text"] = scrub_user_reply(body["text"])
+            body["text"] = format_user_reply(body["text"], collapse=False)
         update_mask_fields = []
         if "text" in body:
             update_mask_fields.append("text")
@@ -4991,11 +4994,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         See https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create
         """
-        from robie_job_engine.answer_only import scrub_user_reply
+        from robie_job_engine.user_reply import format_user_reply
 
         if isinstance(body.get("text"), str):
             body = dict(body)
-            body["text"] = scrub_user_reply(body["text"])
+            body["text"] = format_user_reply(body["text"], collapse=False)
         kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
         thread_meta = body.get("thread") or {}
         if thread_meta.get("name") or thread_meta.get("threadKey"):

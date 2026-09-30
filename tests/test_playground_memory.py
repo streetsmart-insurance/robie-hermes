@@ -71,7 +71,7 @@ class MemoryTests(unittest.TestCase):
                 mode = Path(memory_db_path(db)).stat().st_mode & 0o777
                 self.assertEqual(mode, 0o640)
                 self.assertIn("Practice mode", saved[0])
-                self.assertIn("Ref: job ", saved[0])
+                self.assertNotIn("Ref: job", saved[0])
                 listed = handle_playground_chat(
                     db,
                     "what do you remember about Maria",
@@ -145,7 +145,7 @@ class MemoryTests(unittest.TestCase):
                     requested_by="Casey",
                     now=WHEN + timedelta(minutes=2),
                 )
-                help_job = _latest(store, "UNVERIFIED")
+                help_job = _latest(store, "COMPLETE")
                 help_prompt = _prompt(store, help_job["id"])
                 self.assertIn("You are Robie", help_prompt)
                 self.assertNotIn(job_id, help_prompt)
@@ -160,7 +160,7 @@ class MemoryTests(unittest.TestCase):
                     now=WHEN + timedelta(minutes=3),
                     read=reader,
                 )
-                lookup_job = _latest(store, "UNVERIFIED")
+                lookup_job = _latest(store, "COMPLETE")
                 prompt = _prompt(store, lookup_job["id"])
                 self.assertIn(job_id, prompt)
                 self.assertIn("Buster Brown", prompt)
@@ -173,7 +173,7 @@ class MemoryTests(unittest.TestCase):
                     message_id="mail-1",
                     now=WHEN + timedelta(minutes=4),
                 )
-            mail_job = _latest(store, "UNVERIFIED")
+            mail_job = _latest(store, "COMPLETE")
             mail_prompt = _prompt(store, mail_job["id"])
             self.assertIn(persona_text().splitlines()[0], mail_prompt)
             self.assertNotIn(job_id, mail_prompt)
@@ -277,7 +277,8 @@ class MemoryTests(unittest.TestCase):
                 self.assertTrue(write_allowed("26356199"))
             self.assertIn("I can't", blocked[0])
             self.assertNotIn("Nothing is changed yet", blocked[0])
-            self.assertIn("I can't", refused[0])
+            self.assertIn("not open for Playground writes", refused[0])
+            self.assertNotIn("Nothing is changed yet", refused[0])
             self.assertEqual(writer.calls, [])
 
     def test_a_past_client_does_not_answer_an_ambiguous_change(self):

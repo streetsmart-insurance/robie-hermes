@@ -140,6 +140,55 @@ def refuse_if_not_allowlisted(proposal: Proposal) -> str | None:
     return None
 
 
+# Kinds default_apply actually calls. Address, phone, email, driver, and
+# vehicle edits are not in this set: the code refuses them.
+ENABLED_WRITERS = frozenset({"note", "carrier_email", "cert_draft"})
+DISCONNECTED_WRITER_KINDS = frozenset({"simple_edit", "add_driver", "add_vehicle"})
+
+WRITER_MENU_CLAIMS = {
+    "note": "Add a note on a discussion that already has a title",
+    "carrier_email": "Email a carrier to request a policy change",
+    "cert_draft": "Draft a certificate (I create it; I don't send it)",
+}
+
+NON_WRITER_CAPABILITIES = (
+    "Answer a procedure question and name the document it came from",
+    "Remember a preference for you, your team, a client, or the agency, forget one, or tell you what I remember",
+)
+
+STAFF_STILL_HANDLES = (
+    "Address, phone, email, driver and vehicle changes: "
+    "I can't make these yet - staff still handles them."
+)
+
+_BLOCKS = (
+    "I won't delete or cancel anything. I won't bind, issue, reinstate, or non-renew. "
+    "I won't change billing, a mortgagee, premium, dates, limits, or coverage. "
+    "I won't email or text a client. I won't read our code or tokens."
+)
+
+
+def enabled_writer_names() -> frozenset[str]:
+    """Writers default_apply will call. Disconnected field writers are absent."""
+    return ENABLED_WRITERS
+
+
+def capability_menu() -> str:
+    """Help text. A claim is included only when that writer is enabled."""
+    lines = ["Here's what I can do in the Playground:", ""]
+    for item in NON_WRITER_CAPABILITIES:
+        lines.append(f"- {item}")
+    for name in ("note", "cert_draft", "carrier_email"):
+        if name in enabled_writer_names() and name in WRITER_MENU_CLAIMS:
+            lines.append(f"- {WRITER_MENU_CLAIMS[name]}")
+    lines.extend(["", STAFF_STILL_HANDLES, "", _BLOCKS, ""])
+    lines.append(
+        "Before I change anything, I tell you the client, the field, the old value, "
+        "and the new value, and I wait for you to say go."
+    )
+    return "\n".join(lines)
+
+
 def default_apply(proposal: Proposal) -> ApplyResult:
     """Live apply. Off unless ROBIE_PLAYGROUND_LIVE_WRITES is set.
 

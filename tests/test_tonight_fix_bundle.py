@@ -169,9 +169,13 @@ class QuestionPathTests(unittest.TestCase):
             self.assertIn("Travelers and Hanover", reply)
             self.assertNotIn("google_token", reply)
             self.assertNotIn("did not finish", reply.casefold())
-            self.assertIn("Details", reply)
-            self.assertIn("No EZLynx destination check", reply)
-            self.assertIn(f"Ref: job {job['id']}", reply)
+            self.assertNotIn("Ref: job", reply)
+            self.assertNotIn("Jev", reply)
+            self.assertNotIn("UNVERIFIED", reply)
+            self.assertNotIn("not verified", reply.casefold())
+            audit = store.get_checkpoint(job["id"], "end_state_report") or {}
+            self.assertIn("No EZLynx destination check", str(audit.get("text") or ""))
+            self.assertIn(f"Ref: job {job['id']}", str(audit.get("text") or ""))
             self.assertIn("Judge the answer only", scorer.questions["satisfied"]["instructions"])
             self.assertIn("no EZLynx destination", scorer.questions["satisfied"]["instructions"])
 
@@ -597,11 +601,15 @@ class ProveFollowUpTests(unittest.TestCase):
                 )
             job = JobStore(db).get_job(job_id)
         self.assertTrue(job["payload"]["answer_only"])
+        self.assertTrue(job["payload"]["answered"])
         self.assertEqual(job["action_type"], "hermes.plain_english")
-        self.assertEqual(job["status"], "UNVERIFIED")
-        self.assertEqual(job["last_error"], "answer only; no EZLynx destination readback")
+        self.assertEqual(job["status"], "COMPLETE")
+        self.assertFalse(job.get("last_error"))
         self.assertIn("Travelers and Hanover", reply)
         self.assertNotIn("no structured destination", reply)
+        self.assertNotIn("UNVERIFIED", reply)
+        self.assertNotIn("not verified", reply.casefold())
+        self.assertNotIn(job_id, reply)
 
     def test_address_change_routes_to_policy_change(self):
         text = "Change the mailing address for Buster Brown to 100 Test Mailing Rd"

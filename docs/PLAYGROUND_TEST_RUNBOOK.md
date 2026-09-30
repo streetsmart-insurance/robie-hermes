@@ -7,9 +7,9 @@ Depends on the fix bundle in PR 670. Do not promote this to Production.
 
 ## What Carlo has to do first
 
-1. In Google Chat, create a space named **Robie Playground** and add the
-   Robie Chat app plus the CSR team.
-2. Copy the space id (it looks like `spaces/AAAA...`).
+1. Use Carlo's existing Google Chat space named **Roby**. Do not create a
+   new space. Add the Robie Chat app there if it is not already a member.
+2. Copy that space id (it looks like `spaces/AAAA...`).
 3. Give the Test service account read access to the five SOP folders
    listed below. It does not get HR, finance, payroll, carrier logins,
    or API-key files. Those are excluded in code even if a folder share

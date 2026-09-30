@@ -6,9 +6,15 @@ classified here. Writes wait for go. Blocked actions never call a writer.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+ONLY_REQUESTER = "Only the person who asked can approve this."
+MISSING_THREAD = "I can't approve that without the original thread."
 
 from .models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence
 from .playground_config import (
@@ -63,7 +69,6 @@ from .playground_reply import (
     memory_ssn_refused_reply,
     mismatch_reply,
     sop_reply,
-    working_reply,
 )
 from .playground_voice import render_turn_prompt
 from .playground_sop import retrieve_sop
@@ -91,6 +96,7 @@ def handle_playground_chat(
     thread_id: str | None = None,
     message_id: str | None = None,
     requested_by: str = "",
+    requester_user_id: str | None = None,
     now: datetime | None = None,
     apply: ApplyFn | None = None,
     read: ReadFn | None = None,
@@ -105,9 +111,10 @@ def handle_playground_chat(
         db_path,
         text,
         conversation_id=str(conversation_id or ""),
-        thread_id=str(thread_id or ""),
+        thread_id=thread_id,
         message_id=str(message_id or ""),
         requested_by=requested_by or "Google Chat user",
+        requester_user_id=requester_user_id,
         now=now,
         apply=apply,
         read=read,
@@ -139,9 +146,10 @@ def handle_playground_email(
         db_path,
         text,
         conversation_id=conversation,
-        thread_id=thread_id or message_id,
+        thread_id=thread_id or message_id or None,
         message_id=message_id,
         requested_by=sender or "email requester",
+        requester_user_id=str(sender or "").strip(),
         now=now,
         apply=apply,
         read=read,
@@ -202,14 +210,32 @@ def expire_due_confirmations(
     return expired
 
 
+def _approval_identity(requester_user_id: str | None, requested_by: str) -> str:
+    """Chat user id when the caller passed one. Otherwise the legacy name.
+
+    An explicit empty id fails closed. It does not fall back to a display name.
+    """
+    if requester_user_id is not None:
+        return str(requester_user_id).strip()
+    return str(requested_by or "").strip()
+
+
+def _thread_matches(incoming: str | None, stored: str | None) -> bool:
+    """Exact, non-empty thread names only. Missing or blank never matches."""
+    left = str(incoming).strip() if incoming is not None else ""
+    right = str(stored).strip() if stored is not None else ""
+    return bool(left) and left == right
+
+
 def _dispatch(
     db_path: str,
     text: str,
     *,
     conversation_id: str,
-    thread_id: str,
+    thread_id: str | None,
     message_id: str,
     requested_by: str,
+    requester_user_id: str | None,
     now: datetime | None,
     apply: ApplyFn | None,
     read: ReadFn | None,
@@ -222,12 +248,13 @@ def _dispatch(
     expire_due_confirmations(store, now=moment)
     decision = classify_playground_request(text)
     if decision.intent == "stop":
-        return [_stop(store, conversation_id, thread_id, requested_by=requested_by, now=moment)]
+        return [_stop(store, conversation_id, str(thread_id or ""), requested_by=requested_by, now=moment)]
     if decision.intent == "go":
         return _approve(
             store,
             conversation_id=conversation_id,
             thread_id=thread_id,
+            approver_user_id=_approval_identity(requester_user_id, requested_by),
             now=moment,
             apply=apply,
             read=read,
@@ -244,10 +271,11 @@ def _dispatch(
                 thread_id=thread_id,
                 message_id=message_id,
                 requested_by=requested_by,
+                requester_user_id=requester_user_id,
                 now=moment,
             )
         ]
-    _cancel_pending(store, conversation_id, thread_id, reason="Replaced by a new request.")
+    _cancel_pending(store, conversation_id, str(thread_id or ""), reason="Replaced by a new request.")
     return [
         _start(
             store,
@@ -257,6 +285,7 @@ def _dispatch(
             thread_id=thread_id,
             message_id=message_id,
             requested_by=requested_by,
+            requester_user_id=requester_user_id,
             now=moment,
             read=read,
             sop_docs=sop_docs,
@@ -270,23 +299,26 @@ def _start(
     *,
     text: str,
     conversation_id: str,
-    thread_id: str,
+    thread_id: str | None,
     message_id: str,
     requested_by: str,
+    requester_user_id: str | None,
     now: datetime,
     read: ReadFn | None,
     sop_docs: list[dict[str, Any]] | None,
 ) -> str:
     stored = safe_text(text)
     channel = "email" if conversation_id.startswith("email:") else "chat"
+    stored_thread = str(thread_id).strip() if thread_id is not None else ""
     job = store.create_job(
         PLAYGROUND_ACTION,
         {
             "playground": True,
             "text": stored,
             "conversation_id": conversation_id,
-            "thread_id": thread_id,
+            "thread_id": stored_thread,
             "requested_by": requested_by,
+            "requester_user_id": _approval_identity(requester_user_id, requested_by),
             "channel": channel,
         },
         idempotency_key=f"playground:{message_id or stored}:{conversation_id}"[:180],
@@ -439,7 +471,7 @@ def _start(
             "status": "awaiting_go",
             "expires_at": expires.isoformat(),
             "proposal": proposal.as_dict(),
-            "thread_id": thread_id,
+            "thread_id": str(thread_id).strip() if thread_id is not None else "",
             "conversation_id": conversation_id,
         },
     )
@@ -570,7 +602,7 @@ def _tax_note(prepared: Any) -> str:
 def _format_memory(item: Any) -> str:
     if item.kind == "job":
         client = f" for {item.client_name}" if item.client_name else ""
-        return f"Job {item.job_id}{client}: {item.outcome}. {item.body}"
+        return f"Past job{client}: {item.outcome}. {item.body}"
     if item.scope == "team":
         who = f"{item.team} team" if item.team else "Team"
     elif item.scope == "agency":
@@ -588,9 +620,10 @@ def _memory_turn(
     *,
     text: str,
     conversation_id: str,
-    thread_id: str,
+    thread_id: str | None,
     message_id: str,
     requested_by: str,
+    requester_user_id: str | None = None,
     now: datetime,
 ) -> str:
     stored = safe_text(text)
@@ -601,8 +634,9 @@ def _memory_turn(
             "playground": True,
             "text": stored,
             "conversation_id": conversation_id,
-            "thread_id": thread_id,
+            "thread_id": str(thread_id).strip() if thread_id is not None else "",
             "requested_by": requested_by,
+            "requester_user_id": _approval_identity(requester_user_id, requested_by),
             "channel": channel,
         },
         idempotency_key=f"playground:{message_id or stored}:{conversation_id}"[:180],
@@ -765,16 +799,30 @@ def _approve(
     store: JobStore,
     *,
     conversation_id: str,
-    thread_id: str,
+    thread_id: str | None,
+    approver_user_id: str,
     now: datetime,
     apply: ApplyFn | None,
     read: ReadFn | None,
     discussions: DiscussFn | None,
     file_note: NoteFn | None,
 ) -> list[str]:
-    pending = _find(store, conversation_id, thread_id, {JobStatus.AWAITING_HUMAN_INPUT})
+    if not str(thread_id or "").strip():
+        logger.info("playground go refused: missing thread conversation=%s", conversation_id)
+        return [MISSING_THREAD]
+    pending = _find_exact(store, conversation_id, thread_id, {JobStatus.AWAITING_HUMAN_INPUT})
+    if pending is not None:
+        payload = dict(pending.get("payload") or {})
+        stored_user = str(payload.get("requester_user_id") or "").strip()
+        approver = str(approver_user_id or "").strip()
+        if not stored_user or stored_user != approver:
+            logger.info(
+                "playground go refused: requester mismatch job=%s",
+                pending["id"],
+            )
+            return [ONLY_REQUESTER]
     if pending is None:
-        latest = _find(
+        latest = _find_exact(
             store,
             conversation_id,
             thread_id,
@@ -822,7 +870,7 @@ def _approve(
         _fail(store, pending["id"], reply, error=refusal)
         _sync_job_outcome(store, pending["id"], outcome="blocked", client=proposal.client, now=now)
         return [reply]
-    progress = working_reply(proposal, job_id=pending["id"])
+    logger.info("playground applying job=%s kind=%s", pending["id"], proposal.kind)
     store.transition(
         pending["id"],
         JobStatus.RUNNING,
@@ -840,7 +888,8 @@ def _approve(
             error=f"The change did not finish ({type(exc).__name__}).",
         )
         _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
-        return [progress, reply]
+        logger.info("playground apply failed job=%s", pending["id"])
+        return [reply]
     if not result.applied:
         reply = mismatch_reply(
             proposal,
@@ -849,7 +898,7 @@ def _approve(
         )
         _fail(store, pending["id"], reply, error=result.detail or "not applied")
         _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
-        return [progress, reply]
+        return [reply]
     observed = result.observed
     if read is not None:
         looked_up = read(proposal)
@@ -883,16 +932,23 @@ def _approve(
         file_note=file_note,
         now=now,
     )
+    logger.info(
+        "playground readback job=%s matched=%s detail=%s",
+        pending["id"],
+        readback.matched,
+        readback.detail,
+    )
     if readback.matched:
-        reply = matched_reply(proposal, observed=readback.observed, job_id=pending["id"])
-        if note_line:
-            reply = reply.rstrip() + f"\n{note_line}\n"
+        reply = matched_reply(
+            proposal,
+            observed=readback.observed,
+            job_id=pending["id"],
+            note=note_line,
+        )
         _mark_confirmed(store, pending["id"], proposal, readback.observed, reply)
         _sync_job_outcome(store, pending["id"], outcome="confirmed", client=proposal.client, now=now)
-        return [progress, reply]
+        return [reply]
     reply = mismatch_reply(proposal, observed=readback.observed, job_id=pending["id"])
-    if note_line:
-        reply = reply.rstrip() + f"\n{note_line}\n"
     store.transition(
         pending["id"],
         JobStatus.UNVERIFIED,
@@ -902,7 +958,7 @@ def _approve(
     )
     store.checkpoint(pending["id"], REPLY_KIND, {"text": reply, "human_required": True})
     _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
-    return [progress, reply]
+    return [reply]
 
 
 def _maybe_file_note(
@@ -1075,6 +1131,31 @@ def _cancel_pending(store: JobStore, conversation_id: str, thread_id: str, *, re
     )
 
 
+def _find_exact(
+    store: JobStore,
+    conversation_id: str,
+    thread_id: str | None,
+    statuses: set[JobStatus],
+) -> dict[str, Any] | None:
+    """Match one job only when both thread names are non-empty and equal."""
+    incoming = str(thread_id or "").strip()
+    if not incoming:
+        return None
+    found: list[dict[str, Any]] = []
+    for job in store.list_jobs_by_status(statuses):
+        if job.get("action_type") != PLAYGROUND_ACTION:
+            continue
+        payload = dict(job.get("payload") or {})
+        if str(payload.get("conversation_id") or "") != conversation_id:
+            continue
+        if not _thread_matches(incoming, payload.get("thread_id")):
+            continue
+        found.append(job)
+    if not found:
+        return None
+    return found[-1]
+
+
 def _find(
     store: JobStore,
     conversation_id: str,
@@ -1125,19 +1206,12 @@ def _finish_reply(
     terminal: JobStatus,
     answer_only: bool,
 ) -> str:
-    """A procedure or lookup has no EZLynx destination, so it is not COMPLETE.
+    """A question or lookup did not write. Count it as answered, not unverified."""
+    del terminal
+    if answer_only:
+        from .answer_only import mark_answered_question
 
-    The reply is the answer. The ledger stays UNVERIFIED rather than claiming
-    a write that did not happen.
-    """
-    del terminal, answer_only
-    store.transition(
-        job_id,
-        JobStatus.UNVERIFIED,
-        expected={JobStatus.PENDING},
-        error="Answered. No EZLynx write.",
-        release_lease=True,
-    )
+        mark_answered_question(store, job_id, reply)
     store.checkpoint(job_id, REPLY_KIND, {"text": reply})
     return reply
 

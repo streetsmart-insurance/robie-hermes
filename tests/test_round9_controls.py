@@ -326,10 +326,13 @@ class ChatSendSanitizerTests(unittest.TestCase):
                     continue
                 segment = ast.get_source_segment(source, node) or ""
                 posts = "messages().create" in segment or "messages().patch" in segment
-                if (posts or node.name in send_names) and "scrub_user_reply" not in segment:
+                if (posts or node.name in send_names) and "format_user_reply" not in segment:
                     missing.append(f"{path.name}:{node.name}")
         self.assertEqual(missing, [])
         adapter = (ROOT / "integrations" / "google_chat" / "adapter.py").read_text(encoding="utf-8")
         send = adapter.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
         self.assertLess(send.index("create_on_job_thread"), send.index("_patch_message"))
-        self.assertIn("scrub_user_reply", send)
+        self.assertIn("format_user_reply", send)
+        self.assertNotIn("scrub_user_reply", send)
+        formatter = (ROOT / "robie_job_engine" / "user_reply.py").read_text(encoding="utf-8")
+        self.assertIn("scrub_user_reply", formatter)

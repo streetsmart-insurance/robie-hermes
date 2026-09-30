@@ -311,10 +311,10 @@ def post_as_chat_app(
     """POST spaces.messages.create as the Chat APP. Fail-closed on auth errors."""
     if not space_name.startswith("spaces/"):
         raise ValueError("Chat APP posts stay in an existing space")
-    from .answer_only import scrub_user_reply
     from .hitl import sanitize_hitl_chat_text
+    from .user_reply import format_user_reply
 
-    text = scrub_user_reply(sanitize_hitl_chat_text(text))
+    text = format_user_reply(sanitize_hitl_chat_text(text))
     client = chat if chat is not None else _chat_app_client()
     body: dict[str, Any] = {"text": text}
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}
@@ -347,9 +347,11 @@ def post_card_as_chat_app(
         raise ValueError("Chat APP posts stay in an existing space")
     if not isinstance(cards_v2, list) or not cards_v2:
         raise ValueError("cardsV2 must be a non-empty list")
-    from .answer_only import scrub_user_reply
+    from .user_reply import format_user_reply
 
-    cards_v2 = _scrub_card_text(cards_v2, scrub_user_reply)
+    cards_v2 = _scrub_card_text(
+        cards_v2, lambda value: format_user_reply(value, collapse=False)
+    )
     client = chat if chat is not None else _chat_app_client()
     body: dict[str, Any] = {"cardsV2": list(cards_v2)}
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}

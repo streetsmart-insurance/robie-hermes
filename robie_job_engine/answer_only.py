@@ -417,6 +417,90 @@ def is_informational_ask(text: str) -> bool:
     return asks
 
 
+ANSWER_LOCATOR = "answer:question"
+
+
+def is_answered_without_write(job: dict[str, Any] | None) -> bool:
+    """A question that never tried an EZLynx write."""
+    payload = dict((job or {}).get("payload") or {})
+    if str((job or {}).get("action_type") or "").startswith("ezlynx."):
+        return False
+    if payload.get("answered") or payload.get("answer_only"):
+        return True
+    text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
+    return is_informational_ask(str(text))
+
+
+def mark_answered_question(store: Any, job_id: str, answer: str) -> dict[str, Any]:
+    """Close a question as answered. This is not an EZLynx write receipt.
+
+    The ledger is COMPLETE so health counts do not call it UNVERIFIED.
+    The answer text stays on the reply. The evidence only records that a
+    question was answered and nothing was written.
+    """
+    from .models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence
+    from .store import utc_now
+
+    job = store.get_job(job_id)
+    payload = dict(job.get("payload") or {})
+    payload["answer_only"] = True
+    payload["answered"] = True
+    payload["locator"] = {"locator": ANSWER_LOCATOR}
+    store.update_payload(job_id, payload)
+    store.checkpoint(
+        job_id,
+        "action",
+        {
+            "action": "answer",
+            "destination": {"locator": ANSWER_LOCATOR},
+        },
+    )
+    store.checkpoint(
+        job_id,
+        "answer_only_close",
+        {"reason": "answered", "wrote": False},
+    )
+    expected = {
+        "status": "answered",
+        "outcome": "answered",
+        "locator": ANSWER_LOCATOR,
+        "content": "answered",
+    }
+    captured = utc_now()
+    store.add_evidence(
+        job_id,
+        True,
+        VerificationEvidence(
+            method="answer_text",
+            source="question",
+            expected=expected,
+            observed=dict(expected),
+            authoritative=True,
+            captured_at=captured,
+            locator=ANSWER_LOCATOR,
+        ),
+    )
+    current = JobStatus(store.get_job(job_id)["status"])
+    if current == JobStatus.COMPLETE:
+        return store.get_job(job_id)
+    if current != JobStatus.VERIFYING:
+        store.transition(
+            job_id,
+            JobStatus.VERIFYING,
+            expected={current},
+            release_lease=True,
+        )
+    store.transition(
+        job_id,
+        JobStatus.COMPLETE,
+        expected={JobStatus.VERIFYING},
+        authority=VERIFIER_AUTHORITY,
+        release_lease=True,
+    )
+    del answer
+    return store.get_job(job_id)
+
+
 def is_answer_only_job(job: dict[str, Any] | None) -> bool:
     payload = dict((job or {}).get("payload") or {})
     if payload.get("answer_only"):

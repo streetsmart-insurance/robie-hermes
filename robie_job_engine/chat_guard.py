@@ -1999,10 +1999,15 @@ def _render_chat_terminal(
         _post_job_audit_note(str(store.path), job["id"], recordings)
         return note_reply if note_reply.endswith("\n") else note_reply + "\n"
     # A question is answered in the reply. EZLynx is not the destination.
-    if is_answer_only_job(job):
-        return render_job_end_state(
-            store, job, content, recordings=recordings, channel="chat"
-        )
+    if is_answer_only_job(job) or dict(job.get("payload") or {}).get("answered"):
+        from .user_reply import format_user_reply
+
+        _post_job_audit_note(str(store.path), job["id"], recordings)
+        answer = str(content or "").strip() or "Answered."
+        if not answer.lower().startswith("answered"):
+            answer = f"Answered. {answer}"
+        text = format_user_reply(answer)
+        return text if text.endswith("\n") else text + "\n"
     from .runtime_env import playground_enabled
     from .write_verification_loop import (
         is_ezlynx_write_job,
@@ -2513,18 +2518,14 @@ def _guard_chat_response_impl(
         store.checkpoint(
             job_id,
             "answer_only_close",
-            {"reason": "answer only; no EZLynx destination readback"},
+            {"reason": "answered", "wrote": False},
         )
         current = store.get_job(job_id)
         if JobStatus(current["status"]) in {JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING}:
-            store.transition(
-                job_id,
-                JobStatus.UNVERIFIED,
-                expected={JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING},
-                error="answer only; no EZLynx destination readback",
-                release_lease=True,
-            )
-        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+            from .answer_only import mark_answered_question
+
+            mark_answered_question(store, job_id, content)
+        recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
         final = store.get_job(job_id)
         if JobStatus(final["status"]) in TERMINAL_STATUSES:
             maybe_snapshot_and_bind(db_path, job_id, phase="end")
@@ -2605,7 +2606,12 @@ def _guard_chat_response_impl(
                 )
             recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
             return interaction["prompt"]
-        if decision.status == JobStatus.FAILED.value:
+        if decision.reason == "answered question":
+            from .answer_only import mark_answered_question
+
+            mark_answered_question(store, job_id, content)
+            recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
+        elif decision.status == JobStatus.FAILED.value:
             store.transition(
                 job_id,
                 JobStatus.FAILED,

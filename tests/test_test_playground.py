@@ -164,13 +164,15 @@ class PlaygroundAnswerTests(unittest.TestCase):
                     action=None,
                     action_type="hermes.plain_english",
                 )
-            self.assertEqual(decision.reason, "playground informational answer")
-            self.assertEqual(decision.status, "UNVERIFIED")
+            self.assertEqual(decision.reason, "answered question")
+            self.assertEqual(decision.status, "COMPLETE")
             self.assertTrue(reply.startswith("Answered."))
-            self.assertIn(ANSWER, reply.split("\nDetails")[0])
+            self.assertIn(ANSWER, reply)
             self.assertNotIn("Not verified.", reply)
-            self.assertIn("no structured destination action checkpoint", reply)
-            self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
+            self.assertNotIn("UNVERIFIED", reply)
+            self.assertNotIn("no structured destination action checkpoint", reply)
+            self.assertNotIn(job_id, reply)
+            self.assertEqual(JobStore(db).get_job(job_id)["status"], "COMPLETE")
 
     def test_flag_off_plain_question_stays_not_verified(self):
         with durable_temporary_directory() as tmp:
