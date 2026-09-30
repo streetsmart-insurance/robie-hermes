@@ -212,12 +212,16 @@ def notify_terminal_chat_job(
         db_path, job_id, job.get("last_error") or "job ended"
     )
     from .chat_app_post import conversation_target, post_as_chat_app
+    from .chat_thread import read_job_chat_thread
 
     target = conversation_target(job)
+    stored_thread = read_job_chat_thread(store, job_id)
     posted = False
     if target is not None:
         send = poster or post_as_chat_app
         space, thread = target
+        if stored_thread:
+            thread = stored_thread
         try:
             try:
                 if thread:
@@ -1262,6 +1266,17 @@ def open_chat_job(
     )
     if continue_clarification:
         active_for_turn = bind_target
+    elif (
+        active_for_turn
+        and str(active_for_turn.get("status") or "") == JobStatus.NEEDS_CLARIFICATION.value
+    ):
+        # Only a reply inside the waiting job's thread answers it.
+        # A top-level message starts a new job.
+        related_only = False
+        explicit_continuation = False
+        queue.deactivate_conversation(context_key)
+        resume_context = None
+        active_for_turn = None
     if active_for_turn and conversation_must_start_fresh(store, active_for_turn):
         # The stopped, timed-out, or finished job must not swallow the next message.
         queue.deactivate_conversation(context_key)
@@ -1290,6 +1305,9 @@ def open_chat_job(
             "clarification_reply",
             {"message_id": message_id, "text": reply, "combined": combined},
         )
+        from .chat_job_controls import note_repost_confirmed_by_reply
+
+        note_repost_confirmed_by_reply(store, active_for_turn["id"], reply)
         store.checkpoint(
             active_for_turn["id"],
             "keep_chat_context",
@@ -2294,6 +2312,52 @@ def _release_chat_recording(
     manager.safe_stop(job_id, status)
 
 
+_VERIFIED_CLAIM = re.compile(
+    r"posted\s*&\s*verified|posted and verified|(?<![\w])verified\b|(?<![\w])done\b",
+    re.IGNORECASE,
+)
+_EXECUTION_SUMMARY = re.compile(r"execution summary", re.IGNORECASE)
+
+
+def enforce_note_reply_wording(db_path: str, job_id: str | None, text: str) -> str:
+    """Done or verified only when the deterministic read-back passed.
+
+    The model's words are not proof. A multi-line Execution Summary is
+    replaced with the one-line result.
+    """
+    if not job_id or not db_path:
+        return text
+    try:
+        store = JobStore(db_path)
+        job = store.get_job(job_id)
+    except Exception:
+        return text
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    if str(note.get("status") or "") == "already_posted":
+        question = " ".join(str(note.get("reason") or "").split())
+        if question:
+            return question if question.endswith("\n") else question + "\n"
+    from .post_job_audit import api_readback_confirms_write
+
+    confirmed = api_readback_confirms_write(store, job_id)
+    line = _discussion_note_user_reply(store, job)
+    body = str(text or "")
+    if _EXECUTION_SUMMARY.search(body):
+        if line:
+            return line if line.endswith("\n") else line + "\n"
+        from . import status_format
+
+        sentence = _EXECUTION_SUMMARY.split(body, maxsplit=1)[0]
+        sentence = " ".join(sentence.split()).strip() or "Couldn't finish."
+        ref = status_format.short_job_ref(job_id)
+        collapsed = sentence if not ref else f"{sentence}\n{ref}"
+        return collapsed if collapsed.endswith("\n") else collapsed + "\n"
+    if note and _VERIFIED_CLAIM.search(body) and not confirmed:
+        if line:
+            return line if line.endswith("\n") else line + "\n"
+    return text
+
+
 def guard_chat_response(
     db_path: str,
     job_id: str | None,
@@ -2306,15 +2370,15 @@ def guard_chat_response(
     from .answer_only import scrub_user_reply
 
     try:
-        return scrub_user_reply(
-            _guard_chat_response_impl(
-                db_path,
-                job_id,
-                content,
-                verifiers=verifiers,
-                recordings=recordings,
-            )
+        body = _guard_chat_response_impl(
+            db_path,
+            job_id,
+            content,
+            verifiers=verifiers,
+            recordings=recordings,
         )
+        body = enforce_note_reply_wording(db_path, job_id, body)
+        return scrub_user_reply(body)
     finally:
         _release_chat_recording(db_path, job_id, recordings)
 

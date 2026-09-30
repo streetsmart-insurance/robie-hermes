@@ -15,10 +15,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 LEDGER_VERSION = 1
@@ -43,12 +46,54 @@ class DiscussionNoteLedgerError(RuntimeError):
     """The local ledger could not be read. Nothing was sent."""
 
 
+NOTE_REPEAT_HOURS = 24
+_PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+_EASTERN = ZoneInfo("America/New_York")
+
+
 def note_fingerprint(note_text: str, document_id: str = "") -> str:
     """Hash of the note text and document id. The raw note is not stored."""
 
     text = " ".join(str(note_text or "").split())
     document = str(document_id or "").strip()
     return hashlib.sha256(f"{text}\n{document}".encode("utf-8")).hexdigest()
+
+
+def normalize_note_text(note_text: str) -> str:
+    """Casefold, collapse whitespace, and strip punctuation."""
+
+    folded = str(note_text or "").casefold()
+    stripped = _PUNCT_RE.sub(" ", folded)
+    return " ".join(stripped.split())
+
+
+def note_norm_fingerprint(note_text: str) -> str:
+    """Hash of the normalized note text. Empty when the note has no words."""
+
+    text = normalize_note_text(note_text)
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def format_posted_at_et(value: Any) -> str:
+    """Clock time in Eastern, for the 'already added' question."""
+
+    stamp = _parse_stamp(value)
+    if stamp is None:
+        return "earlier"
+    eastern = stamp.astimezone(_EASTERN)
+    hour = eastern.strftime("%I").lstrip("0") or "12"
+    return f"{hour}:{eastern.strftime('%M %p')} ET"
+
+
+def already_added_question(posted_at: Any) -> str:
+    """The one line Chat sends instead of posting the same note again."""
+
+    return (
+        f"I already added that note at {format_posted_at_et(posted_at)}. "
+        "Want me to add it again?"
+    )
 
 
 def known_posted_notes() -> list[dict[str, Any]]:
@@ -112,6 +157,48 @@ def find_posted_note(
     return _match(applicant, discussion, document, fingerprint, _rows(ledger_path))
 
 
+def find_recent_same_text(
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    *,
+    within_hours: int = NOTE_REPEAT_HOURS,
+    ledger_path: Path | str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """A note Robie posted on this discussion with the same text in the window.
+
+    Document-id rows with no text hash are not a text match. Those stay on
+    the document download path.
+    """
+
+    applicant = str(applicant_id or "").strip()
+    discussion = str(discussion_id or "").strip()
+    norm = note_norm_fingerprint(note_text)
+    legacy = note_fingerprint(note_text, "") if str(note_text or "").strip() else ""
+    if not applicant or not discussion or not norm:
+        return None
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    window = timedelta(hours=within_hours)
+    for row in _rows(ledger_path):
+        if str(row.get("applicant_id") or "") != applicant:
+            continue
+        if str(row.get("discussion_id") or "") != discussion:
+            continue
+        stored_norm = str(row.get("note_norm_sha256") or "").strip()
+        stored_legacy = str(row.get("note_text_sha256") or "").strip()
+        if stored_norm != norm and not (legacy and stored_legacy == legacy and not stored_norm):
+            continue
+        posted = _parse_stamp(row.get("posted_at"))
+        if posted is None:
+            continue
+        if timedelta(0) <= (clock - posted) <= window:
+            return dict(row)
+    return None
+
+
 def record_posted_note(
     applicant_id: str,
     discussion_id: str,
@@ -121,6 +208,7 @@ def record_posted_note(
     note_id: str = "",
     source: str = "recorded_without_post",
     ledger_path: Path | str | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Remember a note that was already accepted. Does not call EZLynx."""
 
@@ -136,15 +224,27 @@ def record_posted_note(
     payload = _read_file(path)
     notes = [item for item in payload.get("notes") or [] if isinstance(item, dict)]
     fingerprint = note_fingerprint(text, document) if text.strip() else ""
+    norm = note_norm_fingerprint(text) if text.strip() else ""
+    stamp = _utc_now()
     existing = _match(applicant, discussion, document, fingerprint, notes)
+    if existing is None and norm:
+        existing = _match_norm(applicant, discussion, norm, notes)
     if existing is not None:
+        if refresh:
+            _touch_posted(notes, existing, stamp, str(note_id or "").strip(), norm)
+            payload["notes"] = notes
+            _write_file(path, payload)
+            touched = _match(applicant, discussion, document, fingerprint, notes)
+            return touched or existing
         return existing
     row = {
         "applicant_id": applicant,
         "discussion_id": discussion,
         "document_id": document,
-        "note_text_sha256": note_fingerprint(text, document) if text.strip() else "",
+        "note_text_sha256": fingerprint,
+        "note_norm_sha256": norm,
         "note_id": str(note_id or "").strip(),
+        "posted_at": stamp,
         "source": str(source or "recorded_without_post"),
     }
     notes.append(row)
@@ -169,6 +269,70 @@ def record_known_posted_notes(ledger_path: Path | str | None = None) -> list[dic
             )
         )
     return recorded
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def _match_norm(
+    applicant: str,
+    discussion: str,
+    norm: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for row in rows:
+        if str(row.get("applicant_id") or "") != applicant:
+            continue
+        if str(row.get("discussion_id") or "") != discussion:
+            continue
+        if str(row.get("note_norm_sha256") or "").strip() == norm:
+            return dict(row)
+    return None
+
+
+def _touch_posted(
+    notes: list[dict[str, Any]],
+    existing: dict[str, Any],
+    stamp: str,
+    note_id: str,
+    norm: str,
+) -> None:
+    for row in notes:
+        if str(row.get("applicant_id") or "") != str(existing.get("applicant_id") or ""):
+            continue
+        if str(row.get("discussion_id") or "") != str(existing.get("discussion_id") or ""):
+            continue
+        same_doc = (
+            str(row.get("document_id") or "").strip()
+            and str(row.get("document_id") or "").strip() == str(existing.get("document_id") or "").strip()
+        )
+        same_hash = (
+            str(row.get("note_text_sha256") or "").strip()
+            and str(row.get("note_text_sha256") or "") == str(existing.get("note_text_sha256") or "")
+        )
+        same_norm = norm and str(row.get("note_norm_sha256") or "") == norm
+        if not (same_doc or same_hash or same_norm):
+            continue
+        row["posted_at"] = stamp
+        if note_id:
+            row["note_id"] = note_id
+        if norm:
+            row["note_norm_sha256"] = norm
+        return
 
 
 def _match(

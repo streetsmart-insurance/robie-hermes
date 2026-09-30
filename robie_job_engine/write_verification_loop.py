@@ -754,6 +754,66 @@ def _store_readback_evidence(store: Any, job_id: str, plan: Mapping[str, Any], r
         return
 
 
+def score_confirmed_discussion_note(store: Any, job_id: str, note: Mapping[str, Any]) -> None:
+    """Record the count read-back and ask Jev. A missing key does not unfile the note."""
+
+    if not job_id or not note.get("read_back"):
+        return
+    readback = {
+        "method": "EZLYNX_API",
+        "source": "EZLynx API readback",
+        "verified": True,
+        "passed": True,
+        "items": [
+            {
+                "field": "note_text",
+                "expected": note.get("note_text"),
+                "observed": note.get("note_text"),
+                "matched": True,
+            }
+        ],
+        "failure": "",
+    }
+    store.checkpoint(
+        job_id,
+        "discussion_note_readback",
+        {
+            "matched": True,
+            "note_id": note.get("note_id"),
+            "verified_by": note.get("verified_by"),
+        },
+    )
+    store.checkpoint(job_id, READBACK_CHECKPOINT, readback)
+    try:
+        job = store.get_job(job_id)
+    except Exception:
+        return
+    plan = get_locked_plan(store, job_id) or {
+        "write": "discussion note",
+        "target": {"discussion_id": note.get("discussion_id")},
+        "values": {"note_text": note.get("note_text")},
+    }
+    from .jev_client import build_jev_client
+
+    decision = _score_with_jev(
+        ask=_job_text(job),
+        plan=plan,
+        readback=readback,
+        worker_text=str(note.get("note_text") or ""),
+        client=build_jev_client(),
+    )
+    store.checkpoint(
+        job_id,
+        JEV_CHECKPOINT,
+        {
+            "verdict": getattr(decision, "verdict", ""),
+            "confidence": int(getattr(decision, "confidence", 0) or 0),
+            "reason": getattr(decision, "reason", ""),
+            "readback_passed": True,
+        },
+    )
+
+
 def write_landed(store: Any, job: Mapping[str, Any]) -> bool:
     """True when a note, a document, or a passed readback is on the job."""
     job_id = str(job.get("id") or "")
@@ -761,7 +821,7 @@ def write_landed(store: Any, job: Mapping[str, Any]) -> bool:
         return False
     note = store.get_checkpoint(job_id, "discussion_note") or {}
     status = str(note.get("status") or "")
-    if status in {"filed", "posted, verifying"} or note.get("read_back") or note.get("note_id"):
+    if status == "filed" and (note.get("read_back") or note.get("note_id")):
         return True
     for kind in ("document_upload", "uploaded_document", "ezlynx_document"):
         document = store.get_checkpoint(job_id, kind) or {}

@@ -495,6 +495,7 @@ def add_note_to_discussion(
     dry_run: bool = False,
     document_id: str | None = None,
     ledger_path: Any = None,
+    allow_repost: bool = False,
 ) -> dict[str, Any]:
     """File a note on an existing titled discussion and read it back.
 
@@ -521,6 +522,7 @@ def add_note_to_discussion(
         dry_run=dry_run,
         document_id=document_id,
         ledger_path=ledger_path,
+        allow_repost=allow_repost,
     )
     if filed.get("status") != "filed":
         return filed

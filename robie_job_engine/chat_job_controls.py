@@ -124,7 +124,12 @@ def mark_job_waiting_for_user(store: Any, job_id: str, question: str = "") -> bo
     except Exception:
         return False
     status = JobStatus(job["status"])
-    if status in {JobStatus.COMPLETE, JobStatus.UNVERIFIED, JobStatus.FAILED}:
+    if status in {
+        JobStatus.COMPLETE,
+        JobStatus.UNVERIFIED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    }:
         return False
     prompt = str(question or "").strip()[:500]
     if status in {JobStatus.NEEDS_CLARIFICATION, JobStatus.AWAITING_HUMAN_INPUT}:
@@ -205,6 +210,33 @@ def plausibly_answers_waiting_question(text: str) -> bool:
     return len(body.split()) <= 12
 
 
+_EXPLICIT_YES = re.compile(
+    r"^(?:yes|yeah|yep|yup|yes please|add it again|yes[, ]+add it again|"
+    r"please add it again)\.?$",
+    re.IGNORECASE,
+)
+
+
+def explicit_note_repost(text: str) -> bool:
+    """True only for a direct yes to posting the same note again."""
+    body = " ".join(str(text or "").split())
+    return bool(body) and _EXPLICIT_YES.match(body) is not None
+
+
+def note_repost_confirmed_by_reply(store: Any, job_id: str, text: str) -> bool:
+    """Remember an explicit yes so the next note post is allowed once."""
+    if not job_id or store is None or not explicit_note_repost(text):
+        return False
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return False
+    if str(note.get("status") or "") != "already_posted":
+        return False
+    store.checkpoint(job_id, "note_repost_confirmed", {"text": " ".join(str(text).split())})
+    return True
+
+
 def should_bind_waiting_reply(
     store: Any,
     job: dict[str, Any] | None,
@@ -213,24 +245,24 @@ def should_bind_waiting_reply(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Bind only a thread reply, or the one fresh job this text can answer."""
+    """Bind only a reply inside this job's thread.
+
+    A top-level message never answers a waiting job. It starts a new job.
+    """
     if not job or str(job.get("status") or "") != JobStatus.NEEDS_CLARIFICATION.value:
         return False
     if hard_block_reply(text):
         return False
-    clock = now or datetime.now(timezone.utc)
     from .chat_thread import read_job_chat_thread, thread_resource_name
 
-    stored = read_job_chat_thread(store, str(job.get("id") or ""))
     inbound = thread_resource_name(inbound_thread_id)
-    if stored and inbound and stored == inbound:
-        return job_age_seconds(job, clock) <= WAITING_EXPIRE_SECONDS
-    waiting = list_jobs_in_status(store, {JobStatus.NEEDS_CLARIFICATION.value})
-    if len(waiting) != 1 or str(waiting[0].get("id") or "") != str(job.get("id") or ""):
+    if not inbound:
         return False
-    if job_age_seconds(job, clock) > WAITING_BIND_MAX_SECONDS:
+    stored = read_job_chat_thread(store, str(job.get("id") or ""))
+    if not stored or stored != inbound:
         return False
-    return plausibly_answers_waiting_question(text)
+    clock = now or datetime.now(timezone.utc)
+    return job_age_seconds(job, clock) <= WAITING_EXPIRE_SECONDS
 
 
 def waiting_job_to_bind(
@@ -240,24 +272,19 @@ def waiting_job_to_bind(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """The clarify job this message answers, if the bind rules allow it."""
-    waiting = list_jobs_in_status(store, {JobStatus.NEEDS_CLARIFICATION.value})
-    if not waiting:
-        return None
+    """The clarify job this in-thread reply answers, if the bind rules allow it."""
     from .chat_thread import read_job_chat_thread, thread_resource_name
 
     inbound = thread_resource_name(inbound_thread_id)
-    if inbound:
-        for job in waiting:
-            stored = read_job_chat_thread(store, str(job.get("id") or ""))
-            if stored and stored == inbound and should_bind_waiting_reply(
-                store, job, text, inbound_thread_id, now=now
-            ):
-                return job
-    if len(waiting) == 1 and should_bind_waiting_reply(
-        store, waiting[0], text, inbound_thread_id, now=now
-    ):
-        return waiting[0]
+    if not inbound:
+        return None
+    waiting = list_jobs_in_status(store, {JobStatus.NEEDS_CLARIFICATION.value})
+    for job in waiting:
+        stored = read_job_chat_thread(store, str(job.get("id") or ""))
+        if stored and stored == inbound and should_bind_waiting_reply(
+            store, job, text, inbound_thread_id, now=now
+        ):
+            return job
     return None
 
 
@@ -430,6 +457,13 @@ def sweep_dead_running_jobs(
     )
     path = str(getattr(store, "path", "") or "")
     stop_recordings_for_jobs(path, failed, JobStatus.FAILED.value)
+    if path:
+        try:
+            from .recording import RecordingManager
+
+            RecordingManager(path).sweep_stale_recordings()
+        except Exception:
+            pass
     return failed
 
 
@@ -475,6 +509,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> None:
         JobStatus.COMPLETE,
         JobStatus.FAILED,
         JobStatus.UNVERIFIED,
+        JobStatus.CANCELLED,
         JobStatus.NEEDS_CLARIFICATION,
         JobStatus.AWAITING_HUMAN_INPUT,
     }:

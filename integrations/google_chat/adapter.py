@@ -4239,11 +4239,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
         elif delivery_kind in {"hard_block", "notice"}:
-            from robie_job_engine.answer_only import scrub_user_reply
-
-            content = scrub_user_reply(content)
+            content = str(content or "")
         else:
             content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
+        from robie_job_engine.answer_only import scrub_user_reply
+
+        content = scrub_user_reply(content)
         thread_spec = self._thread_spec_for_outbound(
             chat_id,
             metadata,
@@ -4265,6 +4266,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             typing_msg_name = self._typing_messages.pop(chat_id, None)
             # Treat any earlier sentinel as "no real card to patch" — defensive.
             if typing_msg_name == _TYPING_CONSUMED_SENTINEL:
+                typing_msg_name = None
+            # Patching the typing card leaves the result in that card's
+            # thread. The final result has to use the job's stored thread.
+            create_on_job_thread = bool(thread_spec) and delivery_kind != "busy"
+            if create_on_job_thread:
                 typing_msg_name = None
             patched_typing = False
 
@@ -4498,6 +4504,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        from robie_job_engine.answer_only import scrub_user_reply
+
+        question = scrub_user_reply(question)
         self._mark_clarify_waiting(chat_id, question)
         if not choices:
             return await super().send_clarify(
@@ -4629,6 +4638,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         if not message_id:
             return SendResult(success=False, error="missing message_id")
+        from robie_job_engine.answer_only import scrub_user_reply
+
+        content = scrub_user_reply(content)
         # Google Chat caps message text at 4096; we use 4000 elsewhere.
         if len(content) > _MAX_TEXT_LENGTH:
             content = content[: _MAX_TEXT_LENGTH - 1] + "…"
@@ -4688,6 +4700,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self, message_name: str, body: Dict[str, Any]
     ) -> SendResult:
         """Update a message's text (and optionally cards) in-place."""
+        from robie_job_engine.answer_only import scrub_user_reply
+
+        if isinstance(body.get("text"), str):
+            body = dict(body)
+            body["text"] = scrub_user_reply(body["text"])
         update_mask_fields = []
         if "text" in body:
             update_mask_fields.append("text")
@@ -4946,6 +4963,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         See https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create
         """
+        from robie_job_engine.answer_only import scrub_user_reply
+
+        if isinstance(body.get("text"), str):
+            body = dict(body)
+            body["text"] = scrub_user_reply(body["text"])
         kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
         thread_meta = body.get("thread") or {}
         if thread_meta.get("name") or thread_meta.get("threadKey"):

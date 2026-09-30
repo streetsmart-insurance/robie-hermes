@@ -266,7 +266,13 @@ class WaitingJobTests(unittest.TestCase):
                 conversation_id="spaces/only",
             )
             job = store.get_job(waiting)
-            self.assertTrue(should_bind_waiting_reply(store, job, "3"))
+            self.assertFalse(should_bind_waiting_reply(store, job, "3"))
+            bind_job_chat_thread(store, waiting, THREAD)
+            self.assertTrue(
+                should_bind_waiting_reply(
+                    store, job, "3", inbound_thread_id=THREAD
+                )
+            )
             _backdate(db, waiting, 16 * 60)
             aged = store.get_job(waiting)
             self.assertFalse(should_bind_waiting_reply(store, aged, "3"))
@@ -297,7 +303,7 @@ class WaitingJobTests(unittest.TestCase):
             self.assertEqual(waiting_job_to_cancel(db, "spaces/stop"), waiting)
             reply = fail_cancelled_chat_job(store, waiting)
             self.assertEqual(reply, stop_reply_line(waiting))
-            self.assertEqual(store.get_job(waiting)["status"], JobStatus.FAILED.value)
+            self.assertEqual(store.get_job(waiting)["status"], JobStatus.CANCELLED.value)
             finished = store.create_job(
                 "hermes.google_chat_task",
                 {"text": "done already"},

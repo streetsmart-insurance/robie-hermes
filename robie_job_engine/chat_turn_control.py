@@ -424,6 +424,8 @@ def job_was_stopped_or_ceiling(store: Any, job: dict | None) -> bool:
     if not job or store is None:
         return False
     status = str(job.get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return True
     if status not in {JobStatus.FAILED.value, "FAILED"}:
         return False
     job_id = str(job.get("id") or "")
@@ -808,6 +810,8 @@ def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
     except Exception:
         return None
     status = str((job or {}).get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return STOPPED_OUTPUT
     if status not in {JobStatus.FAILED.value, "FAILED"}:
         return None
     for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
@@ -1273,7 +1277,7 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
     reply = stop_reply_line(job_id)
     store.transition(
         job_id,
-        JobStatus.FAILED,
+        JobStatus.CANCELLED,
         expected={status},
         error="Cancelled.",
         release_lease=True,

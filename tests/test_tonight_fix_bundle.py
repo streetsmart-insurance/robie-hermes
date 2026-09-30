@@ -299,7 +299,7 @@ class StopCommandTests(unittest.TestCase):
             cancelled = store.get_checkpoint(job["id"], "cancelled")
         self.assertEqual(count, 1)
         self.assertEqual(before["id"], saved["id"])
-        self.assertEqual(saved["status"], "FAILED")
+        self.assertEqual(saved["status"], "CANCELLED")
         self.assertEqual(saved["last_error"], "Cancelled.")
         self.assertIn("cancelled", reply.casefold())
         self.assertIn(f"Ref: job {job['id']}", reply)
@@ -2357,14 +2357,26 @@ class Round6ConversationTests(unittest.TestCase):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             store = JobStore(db)
+            from robie_job_engine.chat_thread import bind_job_chat_thread
+
+            thread = "spaces/clarify/threads/book"
             first = open_chat_job(db, "m-vague", ask, conversation_id="spaces/clarify")
             self.assertEqual(store.get_job(first)["status"], JobStatus.NEEDS_CLARIFICATION.value)
+            bind_job_chat_thread(store, first, thread)
+            top_level = open_chat_job(
+                db, "m-top", reply, conversation_id="spaces/clarify"
+            )
+            self.assertNotEqual(top_level, first)
             continued = open_chat_job(
-                db, "m-reply", reply, conversation_id="spaces/clarify"
+                db,
+                "m-reply",
+                reply,
+                conversation_id="spaces/clarify",
+                inbound_thread_id=thread,
             )
             self.assertEqual(continued, first)
             with sqlite3.connect(db) as conn:
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
             payload = store.get_job(first)["payload"]
             self.assertIn(ask, payload["text"])
             self.assertIn(reply, payload["text"])
@@ -2425,8 +2437,9 @@ class Round6ConversationTests(unittest.TestCase):
             second = file_note_to_existing_discussion(
                 client, "220250093", body, title_hint=title, ledger_path=ledger
             )
-        self.assertEqual(second["status"], "filed")
-        self.assertTrue(second.get("idempotent"))
+        self.assertEqual(second["status"], "already_posted")
+        self.assertFalse(second.get("read_back"))
+        self.assertIn("Want me to add it again?", second["reason"])
         self.assertEqual(client.appended, 1)
 
     def test_holder_note_and_field_reply_say_what_was_and_was_not_done(self):

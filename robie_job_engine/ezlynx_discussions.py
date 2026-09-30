@@ -543,6 +543,29 @@ def iter_discussion_notes(record: Any):
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 
+def _payload_has_note_bodies(record: Any) -> bool:
+    for row in iter_discussion_notes(record):
+        if str(_note_body(row) or "").strip():
+            return True
+    return False
+
+
+def _posted_text_matches(record: Any, note_body: str) -> bool:
+    """True when a note body matches, ignoring case and extra whitespace."""
+
+    def _norm(value: str) -> str:
+        cleaned = _ZERO_WIDTH_RE.sub("", str(value or ""))
+        return " ".join(cleaned.casefold().split())
+
+    want = _norm(note_body)
+    if not want:
+        return False
+    for row in iter_discussion_notes(record):
+        if _norm(_note_body(row)) == want:
+            return True
+    return False
+
+
 def _same_note_text(left: str, right: str) -> bool:
     def _norm(value: str) -> str:
         cleaned = _ZERO_WIDTH_RE.sub("", str(value or ""))
@@ -644,6 +667,7 @@ def file_note_to_existing_discussion(
     dry_run: bool = False,
     document_id: str | None = None,
     ledger_path: Any = None,
+    allow_repost: bool = False,
 ) -> dict[str, Any]:
     """Append ``note_body`` to the applicant's existing discussion.
 
@@ -701,7 +725,12 @@ def file_note_to_existing_discussion(
             "discussion_title": title,
             "note_id": None,
         }
-    from .discussion_note_ledger import DiscussionNoteLedgerError, find_posted_note
+    from .discussion_note_ledger import (
+        DiscussionNoteLedgerError,
+        already_added_question,
+        find_posted_note,
+        find_recent_same_text,
+    )
 
     doc_id = str(document_id or "").strip()
     try:
@@ -712,6 +741,12 @@ def file_note_to_existing_discussion(
             document_id=doc_id,
             ledger_path=ledger_path,
         )
+        recent = find_recent_same_text(
+            applicant,
+            discussion_id,
+            text,
+            ledger_path=ledger_path,
+        )
     except DiscussionNoteLedgerError as exc:
         return _note_result(
             "held",
@@ -720,7 +755,9 @@ def file_note_to_existing_discussion(
             discussion_id=discussion_id,
             title=title,
         )
-    if already is not None:
+    # The same downloaded document is not posted again. A repeated note
+    # ask in the last day asks before posting, and does not count as done.
+    if already is not None and doc_id and str(already.get("document_id") or "").strip() == doc_id:
         remembered = str(already.get("note_id") or "").strip()
         return _note_result(
             "filed",
@@ -732,6 +769,17 @@ def file_note_to_existing_discussion(
             read_back=True,
             verified_by="ledger",
             idempotent=True,
+        )
+    if recent is not None and not allow_repost:
+        return _note_result(
+            "already_posted",
+            reason=already_added_question(recent.get("posted_at")),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+            note_id=str(recent.get("note_id") or "").strip() or None,
+            read_back=False,
+            verified_by=None,
         )
     getter = getattr(client, "get_discussion", None)
     if not callable(getter):
@@ -774,6 +822,18 @@ def file_note_to_existing_discussion(
             return _note_result(
                 "held",
                 reason=reason,
+                applicant=applicant,
+                discussion_id=discussion_id,
+                title=title,
+                response=created,
+            )
+        if _payload_has_note_bodies(after_record) and not _posted_text_matches(after_record, text):
+            return _note_result(
+                "held",
+                reason=(
+                    "The note was sent, but the new text did not match. "
+                    "It was not sent again."
+                ),
                 applicant=applicant,
                 discussion_id=discussion_id,
                 title=title,
@@ -892,6 +952,7 @@ def _remember_posted_note(
             note_id=note_id,
             source=source,
             ledger_path=ledger_path,
+            refresh=True,
         )
     except Exception:
         return

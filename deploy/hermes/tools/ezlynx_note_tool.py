@@ -57,6 +57,29 @@ DISCUSSION_NOTE_SCHEMA = {
 }
 
 
+def _repost_allowed(args: dict) -> bool:
+    import os
+
+    job_id = str(
+        (args or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (args or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        from robie_job_engine.store import JobStore
+
+        row = JobStore(db_path).get_checkpoint(job_id, "note_repost_confirmed") or {}
+    except Exception:
+        return False
+    return bool(row)
+
+
 def _file_note(args: dict) -> dict:
     from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
 
@@ -90,8 +113,24 @@ def _file_note(args: dict) -> dict:
         note_text,
         title_hint=title_hint,
         discussion_title=title_hint,
+        allow_repost=_repost_allowed(args),
     )
     status = str(filed.get("status") or "")
+    if status == "already_posted":
+        return {
+            "ok": False,
+            "status": "already_posted",
+            "note_id": filed.get("note_id"),
+            "discussion_id": filed.get("discussion_id"),
+            "discussion_title": filed.get("discussion_title"),
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "read_back": False,
+            "verified_by": None,
+            "reason": filed.get("reason"),
+            "do_not_repost": False,
+            "instruction": "Do not post again unless the user explicitly says yes.",
+        }
     if status not in {"filed", "posted, verifying"}:
         reason = str(filed.get("reason") or "").strip()
         raise RuntimeError(reason or "The note was not sent.")
@@ -112,8 +151,8 @@ def _file_note(args: dict) -> dict:
         "reason": filed.get("reason"),
         "do_not_repost": posted,
         "instruction": (
-            "Posted. Do not post this note again."
-            if status == "posted, verifying"
+            "Do not post this note again."
+            if posted and not confirmed
             else ""
         ),
     }
@@ -180,6 +219,12 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
                 "reason": report.get("reason"),
             },
         )
+        if report.get("read_back") and report.get("note_id"):
+            from robie_job_engine.write_verification_loop import (
+                score_confirmed_discussion_note,
+            )
+
+            score_confirmed_discussion_note(JobStore(db_path), job_id, report)
     except Exception:
         return
 
@@ -201,7 +246,7 @@ def ezlynx_discussion_note_handler(args: dict, **kwargs):
     if repeat:
         return tool_error(repeat)
     try:
-        report = _file_note(args or {})
+        report = _file_note({**(args or {}), **(kwargs or {})})
     except Exception as exc:  # noqa: BLE001 - tool boundary
         message = f"{type(exc).__name__}: {exc}"
         _remember_note_tool_failure(kwargs, message)

@@ -27,6 +27,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _safe(value: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in value)[:120]
 
@@ -337,6 +347,33 @@ class RecordingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def sweep_stale_recordings(self) -> list[str]:
+        """Fail RECORDING rows whose capture process is gone.
+
+        A live pid is left alone. Rows with no pid, or a pid that is not
+        running, are not still recording.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, capture_pid, status FROM job_recordings"
+            ).fetchall()
+        swept: list[str] = []
+        for row in rows:
+            if str(row["status"] or "").casefold() != "recording":
+                continue
+            pid = int(row["capture_pid"] or 0)
+            if pid and _pid_alive(pid):
+                continue
+            self.update(
+                row["id"],
+                status="FAILED",
+                failure="no capture process",
+                failure_stage="SWEEP",
+                stopped_at=_now(),
+            )
+            swept.append(str(row["id"]))
+        return swept
+
     def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
         """Return every recording segment for a Job, oldest segment first."""
         with self._connect() as conn:
@@ -518,6 +555,12 @@ class RecordingManager:
             self.start(job_id)
         except Exception:
             pass
+
+    def sweep_stale_recordings(self) -> list[str]:
+        try:
+            return self.store.sweep_stale_recordings()
+        except Exception:
+            return []
 
     def safe_stop(self, job_id: str, final_job_status: str) -> None:
         try:
