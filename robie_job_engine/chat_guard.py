@@ -185,7 +185,17 @@ def reopen_resumed_generic_chat_job(
         job = store.get_job(job_id)
     if job["status"] != JobStatus.RUNNING.value:
         return job
-    RecordingManager(db_path).safe_start(job_id)
+    from .answer_only import is_answer_only_job, is_informational_ask
+
+    resumed_text = str((job.get("payload") or {}).get("text") or "")
+    if is_informational_ask(resumed_text) or is_answer_only_job(job):
+        store.checkpoint(
+            job_id,
+            "recording_exemption",
+            {"reason": "question only; no browser recording"},
+        )
+    else:
+        RecordingManager(db_path).safe_start(job_id)
     return start_generic_chat_job_heartbeat(db_path, job_id, now=now)
 
 
@@ -208,8 +218,10 @@ def notify_terminal_chat_job(
         return None
     if JobStatus(job["status"]) not in TERMINAL_STATUSES:
         return None
-    message = guard_chat_response(
-        db_path, job_id, job.get("last_error") or "job ended"
+    from .user_reply import format_user_reply
+
+    message = format_user_reply(
+        guard_chat_response(db_path, job_id, job.get("last_error") or "job ended")
     )
     from .chat_app_post import conversation_target, post_as_chat_app
     from .chat_thread import read_job_chat_thread
@@ -1305,8 +1317,13 @@ def open_chat_job(
             "clarification_reply",
             {"message_id": message_id, "text": reply, "combined": combined},
         )
-        from .chat_job_controls import note_repost_confirmed_by_reply
+        from .chat_job_controls import (
+            close_declined_note_repost,
+            note_repost_confirmed_by_reply,
+        )
 
+        if close_declined_note_repost(store, active_for_turn["id"], reply):
+            return active_for_turn["id"]
         note_repost_confirmed_by_reply(store, active_for_turn["id"], reply)
         store.checkpoint(
             active_for_turn["id"],
@@ -1719,7 +1736,16 @@ def open_chat_job(
             )
             store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
         else:
-            RecordingManager(db_path).safe_start(job["id"])
+            from .answer_only import is_answer_only_job, is_informational_ask
+
+            if is_informational_ask(text) or is_answer_only_job(current):
+                store.checkpoint(
+                    job["id"],
+                    "recording_exemption",
+                    {"reason": "question only; no browser recording"},
+                )
+            else:
+                RecordingManager(db_path).safe_start(job["id"])
     current = store.get_job(job["id"])
     if current["status"] not in {JobStatus.COMPLETE.value, JobStatus.FAILED.value}:
         try:
@@ -2187,30 +2213,20 @@ def _is_address_or_holder_job(job: dict[str, Any]) -> bool:
 
 
 def _discussion_note_user_reply(store: JobStore, job: dict[str, Any]) -> str:
-    """Two lines for a discussion-note job. The audit stays off this reply."""
+    """One line from the readback. The audit stays off this reply."""
     note = store.get_checkpoint(job["id"], "discussion_note") or {}
     discussion_id = str(note.get("discussion_id") or "").strip()
     if not discussion_id or _is_address_or_holder_job(job):
         return ""
-    from . import status_format
     from .post_job_audit import api_readback_confirms_write
 
     name = _account_display_name(job)
     title = " ".join(str(note.get("discussion_title") or "").split()).strip() or "the discussion"
-    text = " ".join(str(note.get("note_text") or "").split()).strip()
     if api_readback_confirms_write(store, job["id"]):
-        sentence = (
-            f'Done. Added a note to {name} on "{title}": "{text}". '
-            "I re-checked EZLynx and it's there."
-        )
+        sentence = f'Added the note to {name} on "{title}".'
     else:
-        sentence = (
-            f'I tried to add the note to {name} on "{title}" but couldn\'t confirm it landed. '
-            "Please check before counting it done."
-        )
-    ref = status_format.short_job_ref(job["id"])
-    body = sentence if not ref else f"{sentence}\n{ref}"
-    return body.strip()
+        sentence = "I couldn't confirm that landed, please check."
+    return sentence
 
 
 def _merge_discussion_note_destination(store: JobStore, job_id: str) -> None:
@@ -2346,6 +2362,8 @@ def enforce_note_reply_wording(db_path: str, job_id: str | None, text: str) -> s
 
     confirmed = api_readback_confirms_write(store, job_id)
     line = _discussion_note_user_reply(store, job)
+    if line:
+        return line if line.endswith("\n") else line + "\n"
     body = str(text or "")
     if _EXECUTION_SUMMARY.search(body):
         if line:
@@ -2416,6 +2434,15 @@ def _guard_chat_response_impl(
     if forced:
         content = forced
     recordings = recordings or RecordingManager(db_path)
+    repeat = store.get_checkpoint(job_id, "discussion_note") or {}
+    if str(repeat.get("status") or "") == "already_posted":
+        question = " ".join(str(repeat.get("reason") or "").split())
+        if question:
+            from .chat_job_controls import mark_job_waiting_for_user
+
+            mark_job_waiting_for_user(store, job_id, question)
+            recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+            return question if question.endswith("\n") else question + "\n"
     from .policy_setup_dispatch import is_policy_setup_honest_hitl
 
     if is_policy_setup_honest_hitl(content) and JobStatus(job["status"]) in {

@@ -333,7 +333,7 @@ class WaitingJobTests(unittest.TestCase):
             "async def _stop_chat_queue_heartbeat", 1
         )[0]
         self.assertNotIn("active_conversation_job", stop)
-        self.assertIn("waiting_job_to_cancel", stop)
+        self.assertIn("waiting_jobs_for_requester", stop)
         send = adapter.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
         branch = send.split('delivery_kind == "stop"', 1)[1].split("elif", 1)[0]
         self.assertIn("NOTHING_RUNNING_REPLY", branch)

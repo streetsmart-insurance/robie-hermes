@@ -427,10 +427,8 @@ class ChatGuardTests(unittest.TestCase):
             self.assertEqual(len(posted), 1)
             self.assertEqual(posted[0][0], "spaces/silent-orphan")
             self.assertIn("Couldn't finish.", posted[0][1])
-            self.assertIn(
-                "the generic Google Chat Job was not claimed within 300 seconds",
-                posted[0][1],
-            )
+            self.assertNotIn("300 seconds", posted[0][1])
+            self.assertNotIn("ROBIE_BLOCKED", posted[0][1])
             self.assertNotIn("Resuming from the saved checkpoint", posted[0][1])
 
     def test_notify_terminal_chat_job_posts_failed_status(self):
@@ -461,8 +459,9 @@ class ChatGuardTests(unittest.TestCase):
             )
             self.assertTrue(result["posted"])
             self.assertEqual(posted[0][0], "spaces/notify-fail")
-            self.assertIn("Couldn't finish.", posted[0][1])
-            self.assertIn("not claimed within 300 seconds", posted[0][1])
+            self.assertEqual(posted[0][1], "Couldn't finish.")
+            self.assertNotIn("300 seconds", posted[0][1])
+            self.assertNotIn(job_id, posted[0][1])
 
     def test_free_form_blocker_prose_does_not_solicit_human_input(self):
         with durable_temporary_directory() as tmp:

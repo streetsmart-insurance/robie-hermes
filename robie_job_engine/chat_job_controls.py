@@ -61,6 +61,13 @@ def hard_block_reply(text: str) -> str | None:
         return None
     if _HARD_CANCEL.search(raw) and _POLICY_WORD.search(raw):
         return CANCEL_POLICY_REFUSAL
+    if _DEDUCTIBLE_CHANGE.search(raw):
+        if _HOLDER_ADD.search(raw):
+            return (
+                "I can't change the deductible. I can't add the certificate "
+                "holder yet either, so staff still has to do that."
+            )
+        return "I can't change the deductible. Staff still has to do that."
     return None
 
 
@@ -215,12 +222,116 @@ _EXPLICIT_YES = re.compile(
     r"please add it again)\.?$",
     re.IGNORECASE,
 )
+_EXPLICIT_NO = re.compile(
+    r"^(?:no|nope|nah|no thanks|leave it|don't|do not)\.?$",
+    re.IGNORECASE,
+)
+LEFT_AS_IS = "OK, I left it as is."
+_DEDUCTIBLE_CHANGE = re.compile(
+    r"\b(?:change|update|set|raise|lower)\b.{0,40}\bdeductibles?\b"
+    r"|\bdeductibles?\b.{0,24}\b(?:to|of)\b",
+    re.IGNORECASE,
+)
+_HOLDER_ADD = re.compile(
+    r"\b(?:add|put)\b.{0,24}\bholders?\b|\bcertificate holder\b",
+    re.IGNORECASE,
+)
 
 
 def explicit_note_repost(text: str) -> bool:
     """True only for a direct yes to posting the same note again."""
     body = " ".join(str(text or "").split())
     return bool(body) and _EXPLICIT_YES.match(body) is not None
+
+
+def explicit_note_decline(text: str) -> bool:
+    """True only for a direct no to posting the same note again."""
+    body = " ".join(str(text or "").split())
+    return bool(body) and _EXPLICIT_NO.match(body) is not None
+
+
+def close_declined_note_repost(store: Any, job_id: str, text: str) -> str | None:
+    """Close a repeat-note question with one line. Does not post the note."""
+    if not job_id or store is None or not explicit_note_decline(text):
+        return None
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return None
+    if str(note.get("status") or "") != "already_posted":
+        return None
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status not in {
+        JobStatus.COMPLETE,
+        JobStatus.FAILED,
+        JobStatus.UNVERIFIED,
+        JobStatus.CANCELLED,
+    }:
+        store.transition(
+            job_id,
+            JobStatus.CANCELLED,
+            expected={status},
+            error=LEFT_AS_IS,
+            release_lease=True,
+        )
+    store.checkpoint(job_id, "note_left_as_is", {"reply": LEFT_AS_IS})
+    return LEFT_AS_IS
+
+
+def waiting_jobs_for_requester(
+    db_path: str,
+    conversation_id: str,
+    requester: str | None = None,
+) -> list[str]:
+    """Waiting jobs in this space that belong to the person who said stop."""
+    if not db_path or not conversation_id:
+        return []
+    from .chat_turn_control import job_is_waiting_on_user
+    from .store import JobStore
+
+    who = " ".join(str(requester or "").casefold().split())
+    store = JobStore(db_path)
+    found: list[str] = []
+    for job in store.list_jobs_by_status(
+        {JobStatus.NEEDS_CLARIFICATION, JobStatus.AWAITING_HUMAN_INPUT}
+    ):
+        if not job_is_waiting_on_user(job):
+            continue
+        payload = dict(job.get("payload") or {})
+        space = str(payload.get("conversation_id") or "")
+        if space and space != conversation_id:
+            continue
+        owner = " ".join(
+            str(payload.get("requested_by") or payload.get("requester_user_id") or "")
+            .casefold()
+            .split()
+        )
+        if who and owner and who not in owner and owner not in who:
+            continue
+        job_id = str(job.get("id") or "")
+        if job_id:
+            found.append(job_id)
+    return found
+
+
+def consume_note_repost_allowance(store: Any, job_id: str) -> bool:
+    """Allow one post after an explicit yes. The next call is blocked again."""
+    if not job_id or store is None:
+        return False
+    try:
+        row = store.get_checkpoint(job_id, "note_repost_confirmed") or {}
+    except Exception:
+        return False
+    if not row or row.get("used"):
+        return False
+    used = dict(row)
+    used["used"] = True
+    try:
+        store.checkpoint(job_id, "note_repost_confirmed", used)
+    except Exception:
+        return False
+    return True
 
 
 def note_repost_confirmed_by_reply(store: Any, job_id: str, text: str) -> bool:
@@ -333,6 +444,28 @@ def expire_stale_waiting_jobs(
             }
         )
     return expired
+
+
+def inbound_answers_waiting_job(db_path: str, event: Any) -> bool:
+    """True when this message is inside a waiting job's stored thread."""
+    source = getattr(event, "source", None)
+    thread_id = str(getattr(source, "thread_id", "") or "").strip()
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
+    if not db_path or not thread_id:
+        return False
+    from .chat_thread import read_job_chat_thread
+    from .store import JobStore
+
+    store = JobStore(db_path)
+    for job_id in waiting_jobs_for_requester(db_path, chat_id, None):
+        stored = read_job_chat_thread(store, job_id) or ""
+        try:
+            payload = dict(store.get_job(job_id).get("payload") or {})
+        except Exception:
+            payload = {}
+        if thread_id in {stored, str(payload.get("thread_id") or "").strip()}:
+            return True
+    return False
 
 
 def waiting_job_to_cancel(db_path: str, conversation_id: str) -> str | None:
@@ -467,13 +600,14 @@ def sweep_dead_running_jobs(
     return failed
 
 
-def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> None:
+def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
     """The reply is out. Leave RUNNING and stop the recording.
 
     A short in-progress line stays open. A clarify parks the job instead.
+    True means the job is no longer working, so the chat lock can drop.
     """
     if not db_path or not job_id:
-        return
+        return False
     from .chat_guard import _looks_in_progress
     from .store import JobStore
 
@@ -486,14 +620,15 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> None:
             except Exception:
                 status = JobStatus.NEEDS_CLARIFICATION.value
             stop_recordings_for_jobs(db_path, [job_id], status)
-        return
+            return True
+        return False
     if _looks_in_progress(text):
-        return
+        return False
     store = JobStore(db_path)
     try:
         job = store.get_job(job_id)
     except Exception:
-        return
+        return False
     status = JobStatus(job["status"])
     if status in {JobStatus.RUNNING, JobStatus.VERIFYING}:
         store.transition(
@@ -504,7 +639,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> None:
             release_lease=True,
         )
         stop_recordings_for_jobs(db_path, [job_id], JobStatus.UNVERIFIED.value)
-        return
+        return True
     if status in {
         JobStatus.COMPLETE,
         JobStatus.FAILED,
@@ -514,3 +649,5 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> None:
         JobStatus.AWAITING_HUMAN_INPUT,
     }:
         stop_recordings_for_jobs(db_path, [job_id], status.value)
+        return True
+    return False

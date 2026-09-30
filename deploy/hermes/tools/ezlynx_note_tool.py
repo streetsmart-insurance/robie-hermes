@@ -72,12 +72,12 @@ def _repost_allowed(args: dict) -> bool:
     if not job_id or not db_path:
         return False
     try:
+        from robie_job_engine.chat_job_controls import consume_note_repost_allowance
         from robie_job_engine.store import JobStore
 
-        row = JobStore(db_path).get_checkpoint(job_id, "note_repost_confirmed") or {}
+        return consume_note_repost_allowance(JobStore(db_path), job_id)
     except Exception:
         return False
-    return bool(row)
 
 
 def _file_note(args: dict) -> dict:

@@ -514,12 +514,9 @@ class ChatNoteStatusTests(unittest.TestCase):
             lines = [line for line in response.strip().splitlines() if line.strip()]
             self.assertEqual(
                 lines,
-                [
-                    'Done. Added a note to Buster Brown on "follw up 1": '
-                    f'"{NOTE}". I re-checked EZLynx and it\'s there.',
-                    f"Ref: job {job_id}",
-                ],
+                ['Added the note to Buster Brown on "follw up 1".'],
             )
+            self.assertNotIn(job_id, response)
             self.assertNotIn("\u200b", response)
             for banned in (
                 "Details",
@@ -583,12 +580,9 @@ class ChatNoteStatusTests(unittest.TestCase):
             lines = [line for line in response.strip().splitlines() if line.strip()]
             self.assertEqual(
                 lines,
-                [
-                    'I tried to add the note to Buster Brown on "follw up 1" '
-                    "but couldn't confirm it landed. Please check before counting it done.",
-                    f"Ref: job {job_id}",
-                ],
+                ["I couldn't confirm that landed, please check."],
             )
+            self.assertNotIn(job_id, response)
             self.assertNotIn("I re-checked EZLynx", response)
             self.assertNotIn("Details", response)
             self.assertNotIn("ROBIE post-job audit", response)

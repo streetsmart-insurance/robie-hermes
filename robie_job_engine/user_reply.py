@@ -25,6 +25,12 @@ _LABEL_LINE = re.compile(
     re.IGNORECASE,
 )
 _MENU_START = "Here's what I can"
+_HITL_KEEP = (
+    "Reply in this Chat thread",
+    "I got stuck",
+    "I need a quick hand",
+    "I will not guess",
+)
 
 
 def format_user_reply(text: str, *, collapse: bool = True) -> str:
@@ -38,10 +44,12 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
     """
     from .answer_only import scrub_user_reply
 
-    raw = scrub_user_reply(text).replace("\r\n", "\n").strip()
+    raw = _strip_markers(scrub_user_reply(text).replace("\r\n", "\n"))
     if not raw or not collapse:
         return raw
     if raw.startswith(_MENU_START) or "I can't make these yet" in raw:
+        return _clean_menu(raw)
+    if any(marker in raw for marker in _HITL_KEEP):
         return _clean_menu(raw)
     kept: list[str] = []
     for line in raw.splitlines():
@@ -75,17 +83,21 @@ def _clean_menu(raw: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _strip_markers(text: str) -> str:
+    """Drop job ids and verifier words. Keep the sentence around them."""
+    cleaned = _JOB_REF.sub("", str(text or ""))
+    cleaned = _UUID.sub("", cleaned)
+    cleaned = _BANNED.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip(" \n-:")
+
+
 def _clean_line(line: str) -> str:
-    stripped = line.strip()
+    stripped = _strip_markers(line)
     if not stripped:
-        return ""
-    if _JOB_REF.search(stripped):
-        return ""
-    if _BANNED.search(stripped):
         return ""
     if _LABEL_LINE.match(stripped):
         return ""
-    cleaned = _UUID.sub("", stripped)
-    cleaned = _BANNED.sub("", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" -:")
-    return cleaned
+    return stripped.strip(" -:")

@@ -140,8 +140,9 @@ class VerifiedClaimTests(unittest.TestCase):
                 {"matched": True, "note_id": "new-note"},
             )
             reply = guard_chat_response(db, job["id"], "Posted & verified")
-            self.assertIn("Done.", reply)
-            self.assertIn("it's there", reply)
+            self.assertIn('Added the note to Buster Brown on "follw up 1".', reply)
+            self.assertNotIn("Execution Summary", reply)
+            self.assertNotIn("Done.", reply)
 
 
 class NoteReadbackTests(unittest.TestCase):

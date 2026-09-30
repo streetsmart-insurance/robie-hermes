@@ -481,14 +481,70 @@ def job_is_waiting_on_user(job: dict | None) -> bool:
     return str(job.get("status") or "") in _WAITING_ON_USER
 
 
+def release_chat_lock(adapter: Any, chat_id: str, job_id: str | None) -> None:
+    """Drop the in-memory chat hold as soon as the reply is out.
+
+    A finished or parked job must not keep the space busy until the
+    10-minute stop. Another job still running in this space keeps its
+    own session. The job row's lease is released by the status change.
+    """
+    turns = getattr(adapter, "_gateway_turns", None)
+    if isinstance(turns, dict) and job_id:
+        for key, record in list(turns.items()):
+            if isinstance(record, dict) and str(record.get("job_id") or "") == str(job_id):
+                turns.pop(key, None)
+    active = getattr(adapter, "_active_chat_job", None)
+    if isinstance(active, dict) and job_id and active.get(str(chat_id)) == str(job_id):
+        active.pop(str(chat_id), None)
+    if not chat_id:
+        return
+    if isinstance(turns, dict):
+        for key, record in turns.items():
+            if not isinstance(key, tuple) or str(key[0]) != str(chat_id):
+                continue
+            if _turn_record_running(record):
+                return
+    for key in list(_iter_live_session_keys(adapter)):
+        if chat_id not in str(key):
+            continue
+        _release_session_guard(adapter, str(key))
+        _drop_runner_session(adapter, str(key))
+
+
+def _drop_runner_session(adapter: Any, key: str) -> None:
+    """Forget a finished turn so the next message is not stuck behind it."""
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None or not key:
+        return
+    for name in ("_running_agents", "_sessions", "_active_session_leases"):
+        mapping = getattr(runner, name, None)
+        if isinstance(mapping, dict):
+            mapping.pop(key, None)
+    for method in ("_drop_turn_slot", "_release_running_agent_state"):
+        drop = getattr(runner, method, None)
+        if not callable(drop):
+            continue
+        try:
+            drop(key)
+        except Exception:
+            continue
+
+
 def busy_session_should_defer(adapter: Any, event: Any, *, db_path: str = "") -> bool:
     """True when a second message must wait.
 
-    A session looks busy while its turn record is still up. If that job
-    is waiting on the user, the next message answers it. The sender id
-    is not read.
+    A session looks busy while its turn record is still up. A reply in
+    the thread of a job that is waiting is never the busy reply, even
+    when another job in the space is still running.
     """
+    if db_path:
+        from .chat_job_controls import inbound_answers_waiting_job
+
+        if inbound_answers_waiting_job(db_path, event):
+            return False
     if not session_is_busy(adapter, event):
+        return False
+    if db_path and _only_questions_are_running(db_path, adapter, event):
         return False
     job_id = running_chat_job_id(adapter, event)
     if not job_id or not db_path:
@@ -502,6 +558,39 @@ def busy_session_should_defer(adapter: Any, event: Any, *, db_path: str = "") ->
     if job_is_waiting_on_user(job):
         return False
     return True
+
+
+def _job_is_question_only(db_path: str, job_id: str) -> bool:
+    try:
+        from .answer_only import is_answer_only_job, is_informational_ask
+        from .store import JobStore
+
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return False
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or payload.get("request_text") or "")
+    return is_answer_only_job(job) or is_informational_ask(text)
+
+
+def _only_questions_are_running(db_path: str, adapter: Any, event: Any) -> bool:
+    """A question-only turn does not hold the space for the next message."""
+    chat_id, _thread_id = _event_chat_thread(event)
+    turns = getattr(adapter, "_gateway_turns", None)
+    if not isinstance(turns, dict) or not chat_id:
+        return False
+    live: list[str] = []
+    for key, record in turns.items():
+        if not isinstance(key, tuple) or str(key[0]) != chat_id:
+            continue
+        if not isinstance(record, dict) or not _turn_record_running(record):
+            continue
+        job_id = str(record.get("job_id") or "")
+        if job_id:
+            live.append(job_id)
+    if not live:
+        return False
+    return all(_job_is_question_only(db_path, job_id) for job_id in live)
 
 
 def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:

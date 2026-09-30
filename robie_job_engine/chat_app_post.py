@@ -411,6 +411,9 @@ def post_hitl_to_originating_thread(
     if target is None:
         return False
     space, thread = target
+    from .user_reply import format_user_reply
+
+    message = format_user_reply(str(message or ""))
     send = poster if poster is not None else post_as_chat_app
     try:
         try:

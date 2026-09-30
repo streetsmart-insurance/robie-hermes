@@ -1624,12 +1624,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 seconds=limit,
             )
             if source is not None:
+                from robie_job_engine.chat_thread import read_job_chat_thread
+
+                stored_thread = await asyncio.to_thread(
+                    read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+                )
                 await self.send(
                     source.chat_id,
                     reply,
                     reply_to=event.message_id,
                     metadata={
-                        "thread_id": getattr(source, "thread_id", None),
+                        "thread_id": stored_thread or getattr(source, "thread_id", None),
                         "robie_stop_notice": True,
                         "robie_delivery_kind": "ceiling",
                         "robie_job_id": job_id,
@@ -1677,13 +1682,34 @@ class GoogleChatAdapter(BasePlatformAdapter):
         job_id, idle_reply = resolve_stop_target(
             record, session_busy=session_is_busy(self, event)
         )
-        if idle_reply:
-            from robie_job_engine.chat_job_controls import waiting_job_to_cancel
+        from robie_job_engine.chat_job_controls import waiting_jobs_for_requester
+        from robie_job_engine.chat_thread import read_job_chat_thread
 
-            waiting_id = waiting_job_to_cancel(ROBIE_JOB_DB, source.chat_id)
-            if waiting_id:
-                job_id = waiting_id
-                idle_reply = None
+        requester = (
+            getattr(source, "user_name", None)
+            or getattr(source, "user_id", None)
+            or ""
+        )
+        thread_id = getattr(source, "thread_id", None)
+        waiting_ids = await asyncio.to_thread(
+            waiting_jobs_for_requester, ROBIE_JOB_DB, source.chat_id, requester
+        )
+        store = JobStore(ROBIE_JOB_DB)
+        in_this_thread = []
+        for waiting_id in waiting_ids:
+            stored = await asyncio.to_thread(read_job_chat_thread, store, waiting_id)
+            if thread_id and stored == thread_id:
+                in_this_thread.append(waiting_id)
+        # Top-level /stop cancels every waiting job for this person in the
+        # space. A /stop inside one thread cancels that thread's job.
+        cancel_ids = in_this_thread if thread_id and in_this_thread else waiting_ids
+        if not thread_id:
+            cancel_ids = waiting_ids
+        for waiting_id in cancel_ids:
+            await asyncio.to_thread(fail_cancelled_chat_job, store, waiting_id)
+        if cancel_ids:
+            job_id = job_id or cancel_ids[0]
+            idle_reply = None
         if idle_reply:
             await self.send(
                 source.chat_id,
@@ -1709,18 +1735,28 @@ class GoogleChatAdapter(BasePlatformAdapter):
             and not getattr(watchdog, "done", lambda: True)()
         ):
             watchdog.cancel()
-        if job_id:
+        if job_id and job_id not in cancel_ids:
             reply = await asyncio.to_thread(
                 fail_cancelled_chat_job, JobStore(ROBIE_JOB_DB), job_id
             )
+        elif cancel_ids:
+            from robie_job_engine.chat_turn_control import stop_reply_line
+
+            reply = stop_reply_line(cancel_ids[0])
         else:
             reply = NOTHING_RUNNING_REPLY
+        stop_thread = getattr(source, "thread_id", None)
+        if cancel_ids:
+            stop_thread = (
+                await asyncio.to_thread(read_job_chat_thread, store, cancel_ids[0])
+                or stop_thread
+            )
         await self.send(
             source.chat_id,
             reply,
             reply_to=event.message_id,
             metadata={
-                "thread_id": getattr(source, "thread_id", None),
+                "thread_id": stop_thread,
                 "robie_stop_notice": True,
                 "robie_delivery_kind": "stop",
                 "robie_job_id": job_id,
@@ -3231,6 +3267,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     message_id,
                     exc,
                 )
+        if job_id and await self._halt_note_left_as_is(event, job_id):
+            return
         if job_id and await self._halt_failed_drive_ingestion(
             event, job_id, attachment_kwargs["attachment_refs"]
         ):
@@ -3753,6 +3791,40 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     "robie_delivery_kind": "notice",
                 },
             )
+
+    async def _halt_note_left_as_is(
+        self, event: MessageEvent, job_id: Optional[str]
+    ) -> bool:
+        """The user said no to a repeat note. One line, then stop."""
+        if not job_id:
+            return False
+        note = await asyncio.to_thread(
+            JobStore(ROBIE_JOB_DB).get_checkpoint, job_id, "note_left_as_is"
+        )
+        reply = str((note or {}).get("reply") or "").strip()
+        if not reply:
+            return False
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if not chat_id:
+            return True
+        from robie_job_engine.chat_thread import read_job_chat_thread
+        from robie_job_engine.chat_turn_control import release_chat_lock
+
+        stored = await asyncio.to_thread(
+            read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+        )
+        await self.send(
+            chat_id,
+            reply,
+            reply_to=event.message_id,
+            metadata={
+                "thread_id": stored or getattr(event.source, "thread_id", None),
+                "robie_job_id": job_id,
+                "robie_delivery_kind": "notice",
+            },
+        )
+        release_chat_lock(self, chat_id, job_id)
+        return True
 
     async def _halt_hard_block_refuse(
         self, event: MessageEvent, job_id: Optional[str]
@@ -4519,12 +4591,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return
         if clarify:
             self._mark_clarify_waiting(chat_id, content)
+        settled = False
         try:
-            await asyncio.to_thread(
-                settle_job_when_reply_sent, ROBIE_JOB_DB, target, content
+            settled = bool(
+                await asyncio.to_thread(
+                    settle_job_when_reply_sent, ROBIE_JOB_DB, target, content
+                )
             )
         except Exception:
             logger.exception("[GoogleChat] could not finish job after reply job=%s", target)
+        if settled:
+            from robie_job_engine.chat_turn_control import release_chat_lock
+
+            release_chat_lock(self, chat_id, target)
 
     async def send_clarify(
         self,
