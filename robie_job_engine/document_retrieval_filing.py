@@ -617,6 +617,45 @@ def _read_back_document_id(uploaded: Mapping[str, Any] | None) -> str:
     return document_id
 
 
+_NOTE_REASON_FIELD = re.compile(
+    r"note_?id|notecount|mostrecentnoteid|discussionapi|document_id|read[-_ ]?back",
+    re.IGNORECASE,
+)
+
+
+def _post_discussion_note(
+    deps: FilingDeps,
+    applicant_id: str,
+    note_text: str,
+    discussion_title: str,
+    document_id: str,
+) -> dict[str, Any]:
+    return deps.add_note(
+        applicant_id,
+        note_text,
+        discussion_title=discussion_title,
+        document_id=document_id,
+    )
+
+
+def _note_is_confirmed(noted: Mapping[str, Any] | None) -> bool:
+    return (
+        isinstance(noted, Mapping)
+        and noted.get("status") == "filed"
+        and bool(str(noted.get("note_id") or "").strip())
+        and bool(noted.get("read_back"))
+    )
+
+
+def _unconfirmed_note_reason(noted: Mapping[str, Any] | None) -> str:
+    """People see this sentence. It must not name API fields."""
+
+    reason = " ".join(str((noted or {}).get("reason") or "").split())
+    if reason and _NOTE_REASON_FIELD.search(reason) is None:
+        return reason
+    return "The note was sent, but it could not be confirmed. It was not sent again."
+
+
 def _write_status_comment(
     deps: FilingDeps,
     *,
@@ -705,7 +744,9 @@ def _file_one(
     if mode == "note":
         try:
             note_text = filing_note(rule, processed_on)
-            noted = deps.add_note(applicant_id, note_text, discussion_title=rule.workflow_title)
+            noted = _post_discussion_note(
+                deps, applicant_id, note_text, rule.workflow_title, document_id
+            )
         except Exception as exc:
             return _item_result(
                 "document_filed_note_held",
@@ -715,13 +756,13 @@ def _file_one(
                 reason=f"note failed after upload ({type(exc).__name__})",
             )
         note_id = str((noted or {}).get("note_id") or "").strip()
-        if (noted or {}).get("status") != "filed" or not note_id or not (noted or {}).get("read_back"):
+        if not _note_is_confirmed(noted):
             return _item_result(
                 "document_filed_note_held",
                 item,
                 applicant_id=applicant_id,
                 document_id=document_id,
-                reason="DiscussionApi did not return a read-back note_id",
+                reason=_unconfirmed_note_reason(noted),
             )
         comment = nicole_status_comment(rule)
         discussion_id = str((noted or {}).get("discussion_id") or "") or discussion_id_of(matched or {})
@@ -989,7 +1030,7 @@ def _file_one_test_account(
     except Exception as exc:
         return _item_result("held", item, reason=f"document upload failed ({type(exc).__name__})", **base)
     try:
-        noted = deps.add_note(applicant_id, note_text, discussion_title=title)
+        noted = _post_discussion_note(deps, applicant_id, note_text, title, document_id)
     except Exception as exc:
         return _item_result(
             "document_filed_note_held", item, document_id=document_id,
@@ -997,10 +1038,10 @@ def _file_one_test_account(
         )
     note_id = str((noted or {}).get("note_id") or "").strip()
     discussion_id = str((noted or {}).get("discussion_id") or "") or discussion_id_of(dict(discussion))
-    if (noted or {}).get("status") != "filed" or not note_id or not (noted or {}).get("read_back"):
+    if not _note_is_confirmed(noted):
         return _item_result(
             "document_filed_note_held", item, document_id=document_id, discussion_id=discussion_id,
-            reason="DiscussionApi did not return a read-back note_id", **base,
+            reason=_unconfirmed_note_reason(noted), **base,
         )
     return _item_result(
         "filed", item, document_id=document_id, note_id=note_id, discussion_id=discussion_id,
@@ -1190,13 +1231,19 @@ def build_live_deps(*, test_account: bool = False) -> FilingDeps:
             file_content_type="application/pdf",
         )
 
-    def add_note(applicant_id: str, note_text: str, discussion_title: str) -> dict:
+    def add_note(
+        applicant_id: str,
+        note_text: str,
+        discussion_title: str,
+        document_id: str | None = None,
+    ) -> dict:
         return add_note_to_discussion(
             applicant_id,
             note_text,
             discussion_title=discussion_title,
             title_hint=discussion_title,
             discussion_client=discussions,
+            document_id=document_id,
         )
 
     def fire(payload: dict, *, dry_run: bool = False) -> dict:
