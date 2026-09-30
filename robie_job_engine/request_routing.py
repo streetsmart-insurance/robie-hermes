@@ -429,6 +429,79 @@ def _is_skill_update(text: str) -> bool:
     return has_target and any(word in text for word in ("update", "edit", "write", "create"))
 
 
+_UI_DRIVING_ACTIONS = frozenset(
+    {
+        "browser.read",
+        "ezlynx.commercial_auto",
+        "ezlynx.policy_setup",
+        "ezlynx.quote",
+        "ezlynx.submission_audit",
+        "ezlynx.overdue_submission_reports",
+        "ezlynx.session_refresh",
+        "ezlynx.move_document",
+        "ezlynx.apply_label",
+    }
+)
+_API_ROUTE_ACTIONS = frozenset(
+    {
+        "ezlynx.policy_change",
+        "ezlynx.certificate",
+        "ezlynx.reassign",
+    }
+)
+_GENERAL_CHAT_ACTIONS = frozenset(
+    {"hermes.google_chat_task", "hermes.plain_english"}
+)
+_UI_MARKERS = (
+    "ezlynx",
+    "playwright",
+    "commercial auto",
+    "form entry",
+    "formentry",
+    "app.ezlynx",
+    "useascend.com",
+)
+_API_TEXT_MARKERS = (
+    "mailing address",
+    "certificate of insurance",
+    "discussion note",
+    "ezlynx_discussion_note",
+)
+_NEGATED_UI = re.compile(
+    r"\b(?:no|not|without|never|don't|do not)\b(?:\s+\w+){0,5}\s+"
+    r"\b(?:ezlynx|browser|playwright|chrome)\b"
+)
+
+
+def chat_turn_expects_ui(
+    text: str,
+    action_type: str,
+    *,
+    answer_only: bool = False,
+) -> bool:
+    """Whether this routed turn should drive a browser.
+
+    Called when the job is opened. The Playwright audit reads the stored
+    flag and does not look at the request text again.
+    """
+    if answer_only:
+        return False
+    action = str(action_type or "")
+    if action in _API_ROUTE_ACTIONS:
+        return False
+    if action in _UI_DRIVING_ACTIONS:
+        return True
+    if action not in _GENERAL_CHAT_ACTIONS:
+        return False
+    folded = _normalized(text)
+    if _NEGATED_UI.search(folded):
+        return False
+    if any(marker in folded for marker in _API_TEXT_MARKERS):
+        return False
+    positive = _positive_request_text(folded)
+    return any(marker in positive for marker in _UI_MARKERS)
+
+
 def _is_plain_english(text: str, attachment_count: int) -> bool:
     if not text or attachment_count:
         return False

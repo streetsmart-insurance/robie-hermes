@@ -50,10 +50,14 @@ from robie_job_engine.chat_turn_control import (
     STOPPED_OUTPUT,
     _abandon_timed_out_gateway_turn,
     agent_output_blocked,
+    NOTHING_RUNNING_REPLY,
     fail_cancelled_chat_job,
+    fresh_turn_history,
     gateway_max_turn_seconds,
     incoming_message_action,
     is_stop_command,
+    messages_for_chat_turn,
+    resolve_stop_target,
     kill_agent_processes,
     kill_job_recordings,
     record_busy_reply,
@@ -1579,6 +1583,235 @@ class ProveSessionReleaseTests(unittest.TestCase):
                 "run",
             )
 
+    def test_stop_ends_a_parked_wait_without_another_message(self):
+        """A clarify/question wait is not an asyncio cancel point.
+
+        The lease must stop renewing, and the session task must be done(),
+        without putting a follow-up message on the queue.
+        """
+        import asyncio
+
+        real = "agent:main:google_chat:dm:spaces/AAQAZbLJO78"
+
+        async def scenario(store, job_id):
+            parked = threading.Event()
+            queue: asyncio.Queue = asyncio.Queue()
+            renewals = {"n": 0}
+
+            class Lease:
+                def __init__(self):
+                    self._stop = threading.Event()
+                    self.released = False
+
+                def run(self):
+                    while not self._stop.is_set():
+                        renewals["n"] += 1
+                        if parked.wait(0.05):
+                            break
+
+                def release(self):
+                    self.released = True
+                    self._stop.set()
+
+            lease = Lease()
+            lease_thread = threading.Thread(target=lease.run, daemon=True)
+            lease_thread.start()
+
+            async def parked_turn():
+                await asyncio.to_thread(parked.wait, 30)
+
+            task = asyncio.create_task(parked_turn())
+            await asyncio.sleep(0.08)
+            self.assertFalse(task.done())
+
+            class Runner:
+                def __init__(self):
+                    self._parked_waits = {real: parked}
+                    self._active_session_leases = {real: lease}
+                    self._session_history = {
+                        real: [
+                            {"role": "user", "content": "what does COI stand for?"},
+                            {"role": "assistant", "content": "ACORD 25"},
+                        ]
+                    }
+                    self._sessions = {}
+
+                async def _interrupt_and_clear_session(self, key, source, **kwargs):
+                    return None
+
+            class Adapter:
+                def __init__(self):
+                    self._active_sessions = {real: asyncio.Event()}
+                    self._session_tasks = {real: task}
+                    self._pending_messages = {}
+                    self.gateway_runner = Runner()
+
+                def _event_session_key(self, event):
+                    return "chat:spaces/AAQAZbLJO78"
+
+            class Source:
+                chat_id = "spaces/AAQAZbLJO78"
+                thread_id = ""
+
+            class Event:
+                source = Source()
+
+            adapter = Adapter()
+            await terminate_gateway_agent(
+                adapter, Event(), job_id, reason="/stop", store=store
+            )
+            after = renewals["n"]
+            await asyncio.sleep(0.35)
+            return adapter, task, queue, lease, lease_thread, after, renewals["n"]
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job("hermes.google_chat_task", {"text": "long job"})
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            try:
+                adapter, task, queue, lease, lease_thread, after, later = asyncio.run(
+                    scenario(store, job["id"])
+                )
+            finally:
+                _clear_agent_stop(job["id"])
+            lease_thread.join(timeout=1)
+            self.assertTrue(task.done())
+            self.assertTrue(lease.released)
+            self.assertFalse(lease_thread.is_alive())
+            self.assertEqual(later, after)
+            self.assertTrue(queue.empty())
+            self.assertEqual(adapter.gateway_runner._session_history[real], [])
+
+    def test_stop_closes_history_so_the_next_message_stands_alone(self):
+        import asyncio
+
+        real = "agent:main:google_chat:dm:spaces/AAQAZbLJO78"
+
+        async def scenario():
+            class Entry:
+                def __init__(self, session_id):
+                    self.session_id = session_id
+
+            class SessionStore:
+                def __init__(self):
+                    self.session_id = "old-session"
+                    self._entries = {real: Entry("old-session")}
+
+                def reset_session(self, key):
+                    self.session_id = "fresh-session"
+                    entry = Entry(self.session_id)
+                    self._entries[key] = entry
+                    return entry
+
+            class Runner:
+                def __init__(self):
+                    self.session_store = SessionStore()
+                    self._session_history = {
+                        real: [
+                            {"role": "assistant", "content": "ACORD 25"},
+                            {"role": "assistant", "content": "Operation interrupted."},
+                        ]
+                    }
+                    self._sessions = {}
+
+            class Adapter:
+                def __init__(self):
+                    self._active_sessions = {real: object()}
+                    self._session_tasks = {}
+                    self._pending_messages = {}
+                    self.gateway_runner = Runner()
+
+                def _event_session_key(self, event):
+                    return "chat:spaces/AAQAZbLJO78"
+
+            class Source:
+                chat_id = "spaces/AAQAZbLJO78"
+                thread_id = ""
+
+            class Event:
+                source = Source()
+
+            adapter = Adapter()
+            event = Event()
+            await terminate_gateway_agent(
+                adapter, event, None, reason="gateway_max_turn_seconds", store=None
+            )
+            self.assertEqual(adapter.gateway_runner._session_history[real], [])
+            self.assertEqual(adapter.gateway_runner.session_store.session_id, "fresh-session")
+            adapter.gateway_runner._session_history[real] = [
+                {"role": "assistant", "content": "Operation interrupted."},
+                {"role": "assistant", "content": "ACORD 25"},
+            ]
+            adapter.gateway_runner.session_store.session_id = "old-session"
+            fresh_turn_history(adapter, event)
+            prior = adapter.gateway_runner._session_history[real]
+            turn = messages_for_chat_turn(prior, "what does COI stand for?")
+            return turn, adapter.gateway_runner.session_store.session_id, prior
+
+        turn, session_id, prior = asyncio.run(scenario())
+        self.assertEqual(prior, [])
+        self.assertEqual(session_id, "fresh-session")
+        self.assertEqual(turn, [{"role": "user", "content": "what does COI stand for?"}])
+        blob = " ".join(item["content"] for item in turn)
+        self.assertNotIn("ACORD 25", blob)
+        self.assertNotIn("Operation interrupted.", blob)
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        ceiling = adapter.split("async def _run_gateway_turn_with_ceiling", 1)[1]
+        ceiling = ceiling.split("async def _begin_fresh_chat_turn", 1)[0]
+        self.assertLess(
+            ceiling.index("_begin_fresh_chat_turn"),
+            ceiling.index("self.handle_message"),
+        )
+
+    def test_idle_stop_does_not_touch_a_finished_job(self):
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job(
+                "hermes.google_chat_task",
+                {"text": "what does COI stand for?"},
+            )
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.RUNNING},
+                error="done",
+                release_lease=True,
+            )
+            store.checkpoint(
+                job["id"],
+                "worker_response",
+                {"response_text": "ACORD 25\n\nRef: job " + job["id"]},
+            )
+            self.assertEqual(resolve_stop_target(None, session_busy=False)[1], NOTHING_RUNNING_REPLY)
+            self.assertIsNone(resolve_stop_target(None, session_busy=False)[0])
+            reply = fail_cancelled_chat_job(store, job["id"])
+            self.assertEqual(reply, NOTHING_RUNNING_REPLY)
+            self.assertEqual(store.get_job(job["id"])["status"], JobStatus.FAILED.value)
+            self.assertIsNone(store.get_checkpoint(job["id"], "cancelled"))
+            self.assertIsNone(store.get_checkpoint(job["id"], "agent_abort"))
+            self.assertIn(
+                "ACORD 25",
+                store.get_checkpoint(job["id"], "worker_response")["response_text"],
+            )
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        stop = adapter.split("async def _apply_chat_stop", 1)[1].split(
+            "async def _stop_chat_queue_heartbeat", 1
+        )[0]
+        self.assertNotIn("active_conversation_job", stop)
+        self.assertIn("resolve_stop_target", stop)
+        self.assertIn("NOTHING_RUNNING_REPLY", stop)
+        self.assertIn("idle_stop", stop)
+        self.assertIn(
+            NOTHING_RUNNING_REPLY,
+            (ROOT / "robie_job_engine/chat_turn_control.py").read_text(encoding="utf-8"),
+        )
+        send = adapter.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
+        idle = send.split('delivery_kind == "idle_stop"', 1)[1].split("elif", 1)[0]
+        self.assertNotIn("guard_chat_response", idle)
+        self.assertNotIn("conversation_job_for_event", idle)
+
     def test_stop_kills_the_recording_process_group(self):
         proc = subprocess.Popen(
             ["bash", "-c", "sleep 60 & sleep 60 & wait"],
@@ -1962,7 +2195,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
                     note["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
                 )
                 note_job = store.get_job(note["id"])
-                self.assertTrue(job_requires_playwright(note_job))
+                self.assertFalse(job_requires_playwright(note_job))
                 self.assertFalse(job_expected_to_drive_ui(note_job))
                 kept_note = fail_closed_zero_playwright_rows(store, note_job)
                 self.assertNotEqual(kept_note["status"], JobStatus.FAILED.value)
@@ -1988,6 +2221,56 @@ class ProveSessionReleaseTests(unittest.TestCase):
                 failed = fail_closed_zero_playwright_rows(store, store.get_job(silent))
                 self.assertEqual(failed["status"], JobStatus.FAILED.value)
                 self.assertIn("PLAYWRIGHT_SILENT", failed["last_error"])
+
+                declined = open_chat_job(
+                    db,
+                    "spaces/p/messages/5",
+                    "Summarize the meeting notes. no EZLynx, no browser.",
+                )
+                opened.append(declined)
+                declined_job = store.get_job(declined)
+                self.assertFalse(declined_job["payload"]["expected_ui"])
+                self.assertFalse(job_requires_playwright(declined_job))
+                self.assertFalse(job_expected_to_drive_ui(declined_job))
+                kept_declined = fail_closed_zero_playwright_rows(store, declined_job)
+                self.assertNotEqual(kept_declined["status"], JobStatus.FAILED.value)
+                self.assertNotIn(
+                    "PLAYWRIGHT_SILENT", str(kept_declined.get("last_error") or "")
+                )
+
+                worded = store.create_job(
+                    "hermes.google_chat_task",
+                    {
+                        "text": "finish the commercial auto in EZLynx, no browser",
+                        "expected_ui": False,
+                    },
+                )
+                store.transition(
+                    worded["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+                )
+                self.assertIn("ezlynx", store.get_job(worded["id"])["payload"]["text"].casefold())
+                self.assertFalse(job_requires_playwright(store.get_job(worded["id"])))
+                kept_worded = fail_closed_zero_playwright_rows(
+                    store, store.get_job(worded["id"])
+                )
+                self.assertNotEqual(kept_worded["status"], JobStatus.FAILED.value)
+                self.assertNotIn(
+                    "PLAYWRIGHT_SILENT", str(kept_worded.get("last_error") or "")
+                )
+
+                flagged = store.create_job(
+                    "hermes.google_chat_task",
+                    {"text": "hello", "expected_ui": True},
+                )
+                store.transition(
+                    flagged["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+                )
+                self.assertTrue(job_requires_playwright(store.get_job(flagged["id"])))
+                failed_flag = fail_closed_zero_playwright_rows(
+                    store, store.get_job(flagged["id"])
+                )
+                self.assertEqual(failed_flag["status"], JobStatus.FAILED.value)
+                self.assertIn("PLAYWRIGHT_SILENT", failed_flag["last_error"])
             finally:
                 for job_id in opened:
                     if job_id:

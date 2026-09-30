@@ -149,18 +149,26 @@ def job_text(job: dict[str, Any]) -> str:
     )
 
 
-_API_NOT_UI_MARKERS = (
-    "mailing address",
-    "certificate of insurance",
-    "discussion note",
-    "ezlynx_discussion_note",
-)
-
 _API_NOT_UI_ACTIONS = frozenset(
     {
         "ezlynx.policy_change",
         "ezlynx.certificate",
         "ezlynx.reassign",
+    }
+)
+# Routed types that drive a browser. The silent-gap audit reads this set
+# or payload["expected_ui"]. It does not scan the request text.
+_UI_DRIVING_ACTIONS = frozenset(
+    {
+        "browser.read",
+        "ezlynx.commercial_auto",
+        "ezlynx.policy_setup",
+        "ezlynx.quote",
+        "ezlynx.submission_audit",
+        "ezlynx.overdue_submission_reports",
+        "ezlynx.session_refresh",
+        "ezlynx.move_document",
+        "ezlynx.apply_label",
     }
 )
 
@@ -200,37 +208,44 @@ def deterministic_path_succeeded(store: JobStore, job: dict[str, Any] | None) ->
     return False
 
 
+def _payload_expected_ui(job: dict[str, Any] | None) -> bool | None:
+    payload = dict((job or {}).get("payload") or {})
+    if "expected_ui" not in payload:
+        return None
+    return bool(payload.get("expected_ui"))
+
+
+def job_requires_playwright(job: dict[str, Any] | None) -> bool:
+    """True when the route or expected-UI flag says this job drives a screen.
+
+    Request wording is not consulted. ``no EZLynx, no browser`` does not
+    fail a job whose route did not expect a browser.
+    """
+    if not job:
+        return False
+    action = str(job.get("action_type") or "")
+    if action in _API_NOT_UI_ACTIONS:
+        return False
+    flagged = _payload_expected_ui(job)
+    if flagged is not None:
+        return flagged
+    return action in _UI_DRIVING_ACTIONS
+
+
 def job_expected_to_drive_ui(job: dict[str, Any] | None) -> bool:
     """True only when this job was supposed to drive a browser screen.
 
     Notes, certificates, mailing-address changes, and answers use the API
     or a plain reply. A missing Playwright row is not a failure for those.
+    The decision is the routed type or ``expected_ui`` flag set when the
+    job was opened, never a keyword in the request text.
     """
-    if not job_requires_playwright(job):
-        return False
-    action = str((job or {}).get("action_type") or "")
-    if action in _API_NOT_UI_ACTIONS:
-        return False
-    payload = dict((job or {}).get("payload") or {})
-    if payload.get("answer_only"):
-        return False
-    text = job_text(job or {}).casefold()
-    if any(marker in text for marker in _API_NOT_UI_MARKERS):
-        return False
-    return True
-
-
-def job_requires_playwright(job: dict[str, Any] | None) -> bool:
-    """True when a Chat job asked for EZLynx / Playwright browser work."""
     if not job:
         return False
-    action = str(job.get("action_type") or "")
-    if action not in CHAT_PLAYWRIGHT_ACTIONS:
+    payload = dict(job.get("payload") or {})
+    if payload.get("answer_only"):
         return False
-    text = " ".join(job_text(job).casefold().split())
-    if any(text.startswith(marker) or marker == text for marker in CONVERSATION_ONLY_MARKERS):
-        return False
-    return any(marker in text for marker in PLAYWRIGHT_REQUEST_MARKERS)
+    return job_requires_playwright(job)
 
 
 def sanitize_tab_url(url: str) -> str:

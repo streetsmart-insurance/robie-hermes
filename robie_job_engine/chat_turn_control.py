@@ -411,6 +411,7 @@ STOPPED_OUTPUT = (
 )
 
 BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
+NOTHING_RUNNING_REPLY = "Nothing is running right now."
 
 
 def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:
@@ -822,6 +823,195 @@ def _hard_stop_agent(agent: Any) -> None:
             pass
 
 
+def resolve_stop_target(
+    turn_record: Any,
+    *,
+    session_busy: bool,
+) -> tuple[str | None, str | None]:
+    """Return ``(job_id, idle_reply)``.
+
+    ``/stop`` with nothing running must not look up a finished conversation
+    link. ``idle_reply`` is set only in that case.
+    """
+    job_id = None
+    if isinstance(turn_record, dict) and turn_record.get("job_id"):
+        job_id = str(turn_record["job_id"])
+    if job_id or session_busy:
+        return job_id, None
+    return None, NOTHING_RUNNING_REPLY
+
+
+def _signal_wait(waiter: Any) -> None:
+    """Unblock a parked future or threading event. Does not enqueue a message."""
+    if waiter is None:
+        return
+    setter = getattr(waiter, "set", None)
+    if callable(setter):
+        try:
+            setter()
+        except Exception:
+            pass
+    cancel = getattr(waiter, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:
+            pass
+
+
+def _unblock_parked_waits(adapter: Any, agent: Any, keys: list[str]) -> None:
+    """End a clarify or model wait the asyncio cancel does not reach.
+
+    The agent thread blocks on ``tools.clarify_gateway.wait_for_response``
+    (a threading.Event polled once a second). Task.cancel() does not set
+    that event, so the session lease keeps renewing until the next Chat
+    message wakes the old agent.
+    """
+    abort = getattr(agent, "_active_request_abort", None)
+    if callable(abort):
+        try:
+            abort("stopped")
+        except Exception:
+            pass
+    for name in (
+        "_clarify_event",
+        "clarify_event",
+        "_pending_future",
+        "pending_future",
+    ):
+        _signal_wait(getattr(agent, name, None))
+    runner = getattr(adapter, "gateway_runner", None)
+    for owner in (runner, adapter):
+        if owner is None:
+            continue
+        parked = getattr(owner, "_parked_waits", None)
+        if not isinstance(parked, dict):
+            continue
+        for key in keys:
+            _signal_wait(parked.get(key))
+    hook = getattr(adapter, "clear_pending_clarify", None)
+    if callable(hook):
+        for key in keys:
+            try:
+                hook(key)
+            except Exception:
+                pass
+    try:
+        from tools.clarify_gateway import clear_session as clear_clarify
+    except Exception:
+        clear_clarify = None
+    if clear_clarify is None:
+        return
+    for key in keys:
+        if not key:
+            continue
+        try:
+            clear_clarify(key)
+        except Exception:
+            logger.debug("clarify clear failed for %s", key, exc_info=True)
+
+
+def _release_session_leases(adapter: Any, keys: list[str]) -> None:
+    """Drop the turn lease now. Do not wait for the parked thread to notice."""
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None:
+        return
+    mapping = getattr(runner, "_active_session_leases", None)
+    if isinstance(mapping, dict):
+        for key in keys:
+            lease = mapping.pop(key, None)
+            release = getattr(lease, "release", None)
+            if callable(release):
+                try:
+                    release()
+                except Exception:
+                    logger.debug("session lease release failed", exc_info=True)
+    for name in ("_turn_lease_registry", "turn_leases"):
+        registry = getattr(runner, name, None)
+        release_fn = getattr(registry, "release_session", None)
+        if not callable(release_fn):
+            continue
+        for key in keys:
+            try:
+                release_fn(key)
+            except Exception:
+                logger.debug("turn lease release failed", exc_info=True)
+
+
+def _close_session_history(
+    adapter: Any,
+    keys: list[str],
+    *,
+    chat_id: str = "",
+    thread_id: str = "",
+) -> None:
+    """Close this Chat session's transcript so the next message stands alone.
+
+    Chat DM turns share one Hermes session. After /stop or the ceiling the
+    dying turn writes ``Operation interrupted.`` into that transcript, and
+    the next question is answered from the old conversation. A new session
+    id (or an emptied transcript) is the boundary.
+    """
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None:
+        return
+    history = getattr(runner, "_session_history", None)
+    if isinstance(history, dict):
+        for key in list(history):
+            if key in keys or _key_matches_chat(key, chat_id, thread_id):
+                history[key] = []
+    store = getattr(runner, "session_store", None)
+    reset = getattr(store, "reset_session", None) if store is not None else None
+    if callable(reset):
+        reset_keys = list(keys)
+        entries = getattr(store, "_entries", None)
+        if isinstance(entries, dict):
+            for key in entries:
+                if key not in reset_keys and _key_matches_chat(key, chat_id, thread_id):
+                    reset_keys.append(key)
+        for key in reset_keys:
+            if not key:
+                continue
+            try:
+                reset(key)
+            except Exception:
+                logger.debug("session reset failed for %s", key, exc_info=True)
+    for key in keys:
+        agent = _running_agent_for_key(adapter, key)
+        messages = getattr(agent, "messages", None)
+        if isinstance(messages, list):
+            messages.clear()
+        clear = getattr(agent, "clear_history", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
+
+
+def fresh_turn_history(adapter: Any, event: Any) -> None:
+    """A new Chat message is answered on its own, without prior Q&A."""
+    resolved, derived = resolve_running_session_key(adapter, event)
+    chat_id, thread_id = _event_chat_thread(event)
+    keys: list[str] = []
+    for key in (resolved, derived):
+        if key and key not in keys:
+            keys.append(key)
+    exact = f"agent:main:google_chat:dm:{chat_id}" if chat_id else ""
+    if exact and exact not in keys:
+        keys.append(exact)
+    _close_session_history(adapter, keys, chat_id=chat_id, thread_id=thread_id)
+
+
+def messages_for_chat_turn(prior: Any, text: str) -> list[dict[str, str]]:
+    """Prior Q&A is not part of a Chat DM turn. ``prior`` is ignored on purpose."""
+    del prior
+    body = str(text or "").strip()
+    if not body:
+        return []
+    return [{"role": "user", "content": body}]
+
+
 def _tasks_for_keys(adapter: Any, keys: list[str]) -> list[Any]:
     tasks = []
     mapping = getattr(adapter, "_session_tasks", None)
@@ -900,7 +1090,12 @@ async def terminate_gateway_agent(
     captured = _capture_session_task(adapter, event, resolved)
     if captured is not None and captured not in tasks:
         tasks.append(captured)
-    _hard_stop_agent(_running_agent_for_key(adapter, resolved))
+    agent = _running_agent_for_key(adapter, resolved)
+    _hard_stop_agent(agent)
+    # The clarify/question wait lives on a worker thread. Cancel the
+    # awaiting event now, and drop the lease before that thread notices.
+    _unblock_parked_waits(adapter, agent, keys)
+    _release_session_leases(adapter, keys)
     runner = getattr(adapter, "gateway_runner", None)
     clear = getattr(runner, "_interrupt_and_clear_session", None) if runner is not None else None
     if callable(clear):
@@ -970,25 +1165,31 @@ async def terminate_gateway_agent(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
+    _close_session_history(adapter, keys, chat_id=chat_id, thread_id=_thread_id)
     for key in keys:
         _release_session_guard(adapter, key)
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
-    """Mark the linked job FAILED/cancelled. Does not open a new job."""
+    """Mark the linked running job FAILED/cancelled. Does not open a new job.
+
+    A job that is already finished is left untouched. /stop with nothing
+    running must not add a cancelled checkpoint or replay that job's answer.
+    """
     if not job_id:
-        return "Stopped. There isn't a running job in this thread."
+        return NOTHING_RUNNING_REPLY
     job = store.get_job(job_id)
-    reply = f"Stopped. That job is cancelled.\n\nRef: job {job_id}"
     status = JobStatus(job["status"])
-    if status not in TERMINAL_STATUSES:
-        store.transition(
-            job_id,
-            JobStatus.FAILED,
-            expected={status},
-            error="Cancelled.",
-            release_lease=True,
-        )
+    if status in TERMINAL_STATUSES:
+        return NOTHING_RUNNING_REPLY
+    reply = f"Stopped. That job is cancelled.\n\nRef: job {job_id}"
+    store.transition(
+        job_id,
+        JobStatus.FAILED,
+        expected={status},
+        error="Cancelled.",
+        release_lease=True,
+    )
     store.checkpoint(
         job_id,
         "cancelled",

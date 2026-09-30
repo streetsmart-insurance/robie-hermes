@@ -32,13 +32,20 @@ fires, or someone sends `/stop`, the adapter looks up the session key the
 runner is actually holding (`agent:main:google_chat:dm:spaces/...`) and
 calls `_interrupt_and_clear_session` on that key. A derived
 `chat:spaces/...` key is logged beside it and is not the key that is
-cancelled. That stops the agent loop and releases the turn lease. The adapter then cancels the
-session task, drops the session guard, and SIGKILLs the browser and
+cancelled. That stops the agent loop. A clarify or model wait is a
+threading event the asyncio cancel does not reach; stop sets that event
+and releases the session lease immediately, without waiting for the next
+message. The adapter then cancels the session task, awaits it for a
+couple of seconds, drops the session guard, and SIGKILLs the browser and
 recording process group (the capture process, ffmpeg, and the Playwright
-node). A stopped job cannot post another message or start another tool
+node). The session transcript is closed (a new session id) so the next
+message is answered on its own and `Operation interrupted.` is not
+replayed. Chat DM turns do not carry prior Q&A into the next message.
+A stopped job cannot post another message or start another tool
 call. The thread gets "I stopped after 10 minutes." or the cancelled
 reply, and that post is stored as a `chat_delivery` checkpoint when
-Google returns a message id.
+Google returns a message id. `/stop` with nothing running does not touch
+a job record and replies only "Nothing is running right now."
 
 A new message in a busy session does not cancel the running job. Only
 `/stop` and the ceiling cancel. The new message gets "I'm finishing

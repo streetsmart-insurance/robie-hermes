@@ -1476,6 +1476,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             await self._send_clarification_if_needed(job_id, event)
             return
         if not job_id:
+            await self._begin_fresh_chat_turn(event)
             await self.handle_message(event)
             return
         try:
@@ -1571,6 +1572,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         }
         limit = gateway_max_turn_seconds()
         try:
+            await self._begin_fresh_chat_turn(event)
             await self.handle_message(event)
         except Exception:
             current = self._gateway_turns.get(key)
@@ -1624,9 +1626,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         current["watchdog"] = watchdog
 
+    async def _begin_fresh_chat_turn(self, event: MessageEvent) -> None:
+        """Drop prior Q&A so this message is answered on its own."""
+        from robie_job_engine.chat_turn_control import fresh_turn_history
+
+        try:
+            fresh_turn_history(self, event)
+        except Exception:
+            logger.exception("[GoogleChat] could not close session history")
+
     async def _apply_chat_stop(self, event: MessageEvent) -> None:
         """Skip job creation, stop the running agent, fail the linked job."""
-        from robie_job_engine.chat_turn_control import fail_cancelled_chat_job, turn_key
+        from robie_job_engine.chat_turn_control import (
+            NOTHING_RUNNING_REPLY,
+            fail_cancelled_chat_job,
+            resolve_stop_target,
+            session_is_busy,
+            turn_key,
+        )
 
         source = event.source
         if source is None:
@@ -1635,13 +1652,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
         record = self._gateway_turns.pop(key, None)
         if record is None:
             record = self._gateway_turns.pop((source.chat_id, ""), None)
-        job_id = (record or {}).get("job_id")
-        if not job_id:
-            queue = await asyncio.to_thread(self._durable_chat_queue)
-            context = await asyncio.to_thread(
-                queue.active_conversation_job, source.chat_id
+        job_id, idle_reply = resolve_stop_target(
+            record, session_busy=session_is_busy(self, event)
+        )
+        if idle_reply:
+            await self.send(
+                source.chat_id,
+                idle_reply,
+                reply_to=event.message_id,
+                metadata={
+                    "thread_id": getattr(source, "thread_id", None),
+                    "robie_stop_notice": True,
+                    "robie_delivery_kind": "idle_stop",
+                },
             )
-            job_id = (context or {}).get("job_id")
+            return
         await self._terminate_running_agent(event, job_id, reason="/stop")
         task = (record or {}).get("task")
         if task is not None and task is not asyncio.current_task():
@@ -1660,7 +1685,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 fail_cancelled_chat_job, JobStore(ROBIE_JOB_DB), job_id
             )
         else:
-            reply = "Stopped. There isn't a running job in this thread."
+            reply = NOTHING_RUNNING_REPLY
         await self.send(
             source.chat_id,
             reply,
@@ -3164,6 +3189,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
             ):
                 return
+            await self._begin_fresh_chat_turn(event)
             await self.handle_message(event)
             return
         # Test AND Production: operational bounded work goes through
@@ -3942,8 +3968,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         If ``content`` exceeds MAX_MESSAGE_LENGTH, the first chunk patches
         the typing card (if any), subsequent chunks are new messages.
         """
+        delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
         job_id = str((metadata or {}).get("robie_job_id") or "").strip() or None
-        if reply_to and not job_id:
+        if delivery_kind == "idle_stop":
+            # Nothing is running. Do not attach this reply to a finished job.
+            job_id = None
+        elif reply_to and not job_id:
             try:
                 queue = await asyncio.to_thread(self._durable_chat_queue)
                 link = await asyncio.to_thread(
@@ -3970,8 +4000,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
                 return SendResult(success=False, error=blocked)
         content = redact_text(content)
-        delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
-        if delivery_kind == "busy":
+        if delivery_kind == "idle_stop":
+            from robie_job_engine.chat_turn_control import NOTHING_RUNNING_REPLY
+
+            content = NOTHING_RUNNING_REPLY
+        elif delivery_kind == "busy":
             # The running job is still open. Do not run the post-job guard,
             # which would rewrite this ack and replace the job's real reply.
             content = str(content or "").strip()

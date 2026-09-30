@@ -1272,12 +1272,17 @@ def open_chat_job(
         server_payload.update(_submission_audit_payload())
     if classification.action_type == "ezlynx.overdue_submission_reports":
         server_payload.update(_overdue_submission_report_payload())
-    from .request_routing import PLAYGROUND_TASK_FRAMING
+    from .request_routing import PLAYGROUND_TASK_FRAMING, chat_turn_expects_ui
 
     framing = PLAYGROUND_TASK_FRAMING.get(classification.action_type)
     if framing:
         server_payload["task_framing"] = framing
     server_payload.update(dict(action_payload or {}))
+    server_payload["expected_ui"] = chat_turn_expects_ui(
+        text,
+        classification.action_type,
+        answer_only=bool(getattr(classification, "answer_only", False)),
+    )
     if continued_job is None:
         if is_retry_text(text):
             parked = resume_context or queue.active_conversation_job(context_key)
