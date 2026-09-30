@@ -48,7 +48,11 @@ class MemoryTests(unittest.TestCase):
             db = str(Path(tmp) / "jobs.db")
             self.assertEqual(Path(memory_db_path(db)).name, "playground_memory.db")
             self.assertEqual(Path(memory_db_path(db)).parent, Path(db).parent)
-            with mock.patch.dict(os.environ, _env(), clear=False):
+            with mock.patch.dict(
+                os.environ,
+                _env(ROBIE_PLAYGROUND_TEAM_MEMBERS="Commercial=Casey,Alex,Maria"),
+                clear=False,
+            ):
                 saved = handle_playground_chat(
                     db,
                     "remember that Maria wants certs cc'd to her",
@@ -60,7 +64,9 @@ class MemoryTests(unittest.TestCase):
                 )
                 self.assertIn("I'll remember that", saved[0])
                 self.assertIn("Maria wants certs cc'd to her", saved[0])
-                self.assertIn("whole team", saved[0])
+                self.assertIn("Commercial team", saved[0])
+                mode = Path(memory_db_path(db)).stat().st_mode & 0o777
+                self.assertEqual(mode, 0o640)
                 self.assertIn("Practice mode", saved[0])
                 self.assertIn("Ref: job ", saved[0])
                 listed = handle_playground_chat(
@@ -137,8 +143,22 @@ class MemoryTests(unittest.TestCase):
                     now=WHEN + timedelta(minutes=2),
                 )
                 help_job = _latest(store, "UNVERIFIED")
-                prompt = _prompt(store, help_job["id"])
-                self.assertIn("You are Robie", prompt)
+                help_prompt = _prompt(store, help_job["id"])
+                self.assertIn("You are Robie", help_prompt)
+                self.assertNotIn(job_id, help_prompt)
+                self.assertNotIn("Buster Brown", help_prompt)
+                handle_playground_chat(
+                    db,
+                    "What's Buster Brown's phone number?",
+                    conversation_id=SPACE,
+                    thread_id="job-4",
+                    message_id="job-4",
+                    requested_by="Casey",
+                    now=WHEN + timedelta(minutes=3),
+                    read=reader,
+                )
+                lookup_job = _latest(store, "UNVERIFIED")
+                prompt = _prompt(store, lookup_job["id"])
                 self.assertIn(job_id, prompt)
                 self.assertIn("Buster Brown", prompt)
                 self.assertIn(persona_text().splitlines()[0], prompt)
@@ -148,7 +168,7 @@ class MemoryTests(unittest.TestCase):
                     sender="Alex",
                     thread_id="mail-1",
                     message_id="mail-1",
-                    now=WHEN + timedelta(minutes=3),
+                    now=WHEN + timedelta(minutes=4),
                 )
             mail_job = _latest(store, "UNVERIFIED")
             mail_prompt = _prompt(store, mail_job["id"])
@@ -308,7 +328,7 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(replies[0].split("Which client", 1)[0].count("?"), 0)
             self.assertNotIn("Nothing is changed yet", replies[0])
             self.assertNotIn("Buster Brown", replies[0])
-            self.assertIn("Buster Brown", _prompt(store, waiting["id"]))
+            self.assertNotIn("Buster Brown", _prompt(store, waiting["id"]))
             self.assertEqual(len(writer.calls), 1)
 
     def test_team_discussion_preference_still_waits_for_go(self):
@@ -395,7 +415,7 @@ class MemoryTests(unittest.TestCase):
             self.assertIn("short notes", casey[0])
 
     def test_voice_file_is_the_menu_and_the_flag_keeps_memory_off(self):
-        self.assertIn("Remember a preference", line("help_menu"))
+        self.assertIn("Remember a preference for you, your team", line("help_menu"))
         self.assertIn("I won't delete", line("help_menu"))
         self.assertTrue(persona_text().startswith("You are Robie"))
         with durable_temporary_directory() as tmp:
@@ -432,3 +452,142 @@ class MemoryTests(unittest.TestCase):
             store = JobStore(db)
             raw = json.dumps(store.list_jobs_by_status({"FAILED"}))
             self.assertNotIn("hunter2", raw)
+
+    def test_person_and_team_scopes_stay_isolated(self):
+        teams = "Commercial=Casey,Maria;Personal=Alex;Trucking=Jordan"
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            with mock.patch.dict(
+                os.environ,
+                _env(ROBIE_PLAYGROUND_TEAM_MEMBERS=teams),
+                clear=False,
+            ):
+                handle_playground_chat(
+                    db,
+                    "remember that I like short notes",
+                    conversation_id=SPACE,
+                    thread_id="iso-1",
+                    message_id="iso-1",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                handle_playground_chat(
+                    db,
+                    "remember for the team that send certs from the Commercial desk",
+                    conversation_id=SPACE,
+                    thread_id="iso-2",
+                    message_id="iso-2",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                handle_playground_chat(
+                    db,
+                    "remember for the agency that always use the Policy Change Request discussion",
+                    conversation_id=SPACE,
+                    thread_id="iso-3",
+                    message_id="iso-3",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                handle_playground_chat(
+                    db,
+                    "remember for Buster Brown applicant 26356199 that he prefers morning calls",
+                    conversation_id=SPACE,
+                    thread_id="iso-4",
+                    message_id="iso-4",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                casey = recall_for_turn(db, requested_by="Casey", text="help", now=WHEN)
+                alex = recall_for_turn(db, requested_by="Alex", text="help", now=WHEN)
+                jordan = recall_for_turn(db, requested_by="Jordan", text="help", now=WHEN)
+                client = recall_for_turn(
+                    db,
+                    requested_by="Jordan",
+                    text="Call Buster Brown",
+                    client="Buster Brown",
+                    applicant_id="26356199",
+                    now=WHEN,
+                )
+                alex_list = handle_playground_chat(
+                    db,
+                    "what do you remember",
+                    conversation_id=SPACE,
+                    thread_id="iso-5",
+                    message_id="iso-5",
+                    requested_by="Alex",
+                    now=WHEN,
+                )
+                jordan_forget = handle_playground_chat(
+                    db,
+                    "forget that send certs from the Commercial desk",
+                    conversation_id=SPACE,
+                    thread_id="iso-6",
+                    message_id="iso-6",
+                    requested_by="Jordan",
+                    now=WHEN,
+                )
+                still_there = recall_for_turn(db, requested_by="Casey", text="help", now=WHEN)
+            self.assertTrue(any("short notes" in item.text for item in casey))
+            self.assertFalse(any("short notes" in item.text for item in alex))
+            self.assertFalse(any("short notes" in item.text for item in jordan))
+            self.assertTrue(any("Commercial desk" in item.text for item in casey))
+            self.assertFalse(any("Commercial desk" in item.text for item in alex))
+            self.assertFalse(any("Commercial desk" in item.text for item in jordan))
+            self.assertTrue(any(item.scope == "agency" for item in alex))
+            self.assertTrue(any(item.scope == "agency" for item in jordan))
+            self.assertTrue(any("morning calls" in item.text for item in client))
+            self.assertFalse(any("short notes" in item.text for item in client))
+            self.assertFalse(any("Commercial desk" in item.text for item in client))
+            self.assertNotIn("short notes", alex_list[0])
+            self.assertNotIn("Commercial desk", alex_list[0])
+            self.assertIn("Nothing stored matched", jordan_forget[0])
+            self.assertTrue(any("Commercial desk" in item.text for item in still_there))
+
+    def test_unmapped_team_asks_instead_of_guessing(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            with mock.patch.dict(os.environ, _env(), clear=False):
+                os.environ.pop("ROBIE_PLAYGROUND_TEAM_MEMBERS", None)
+                replies = handle_playground_chat(
+                    db,
+                    "remember for the team that we file notes on Fridays",
+                    conversation_id=SPACE,
+                    thread_id="team-ask",
+                    message_id="team-ask",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                listed = handle_playground_chat(
+                    db,
+                    "what do you remember",
+                    conversation_id=SPACE,
+                    thread_id="team-ask-2",
+                    message_id="team-ask-2",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+            self.assertIn("Which team", replies[0])
+            self.assertNotIn("I'll remember that", replies[0])
+            self.assertNotIn("file notes on Fridays", listed[0])
+
+    def test_expired_preference_is_not_recalled(self):
+        from robie_job_engine.playground_memory import remember_preference
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            saved = remember_preference(
+                db,
+                requested_by="Casey",
+                fact="I like short notes for 2 days",
+                now=WHEN,
+            )
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved.scope, "person")
+            self.assertTrue(saved.expires_at)
+            fresh = recall_for_turn(db, requested_by="Casey", text="notes", now=WHEN + timedelta(days=1))
+            stale = recall_for_turn(db, requested_by="Casey", text="notes", now=WHEN + timedelta(days=2))
+            other = recall_for_turn(db, requested_by="Alex", text="notes", now=WHEN + timedelta(days=1))
+            self.assertTrue(any("short notes" in item.text for item in fresh))
+            self.assertFalse(any("short notes" in item.text for item in stale))
+            self.assertFalse(any("short notes" in item.text for item in other))

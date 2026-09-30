@@ -223,8 +223,22 @@ def sop_reply(*, answer: str, source: str, job_id: str) -> str:
     )
 
 
-def memory_saved_reply(*, fact: str, scope: str, job_id: str) -> str:
-    who = "the whole team" if scope == "team" else "you"
+def memory_saved_reply(
+    *,
+    fact: str,
+    scope: str,
+    job_id: str,
+    team: str = "",
+    client: str = "",
+) -> str:
+    if scope == "team":
+        who = f"the {team} team" if team else "that team"
+    elif scope == "agency":
+        who = "the whole agency"
+    elif scope == "client":
+        who = f"{client or 'that client'}, for the whole agency"
+    else:
+        who = "you"
     return status_reply(
         headline=line("memory_saved_headline"),
         what_happened=f"I saved this for {who}.",

@@ -155,9 +155,20 @@ _HOLDER = re.compile(
     re.IGNORECASE,
 )
 _REMEMBER = re.compile(
-    r"^(?:please\s+)?remember(?:\s+for\s+the\s+team)?\s+that\s+(.+)$",
+    r"^(?:please\s+)?remember(?:\s+(?P<target>for\s+.+?))?\s+that\s+(?P<fact>.+)$",
     re.IGNORECASE | re.DOTALL,
 )
+_REMEMBER_TEAM = re.compile(r"for the team", re.IGNORECASE)
+_REMEMBER_AGENCY = re.compile(r"for the agency|for everyone", re.IGNORECASE)
+_REMEMBER_NAMED_TEAM = re.compile(
+    r"for the (Commercial|Personal|Trucking) team",
+    re.IGNORECASE,
+)
+_REMEMBER_CLIENT = re.compile(
+    r"for (.+?) applicant (\d{5,})",
+    re.IGNORECASE,
+)
+_REMEMBER_CLIENT_NAME = re.compile(r"for ([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)$")
 _FORGET = re.compile(
     r"^(?:please\s+)?forget(?:\s+that\s+)(.+)$",
     re.IGNORECASE | re.DOTALL,
@@ -279,6 +290,33 @@ def _command_text(original: str) -> str:
     return " ".join(body.split())
 
 
+def _apply_remember_target(target: str, proposal: Proposal) -> None:
+    target = " ".join(str(target or "").split())
+    if not target:
+        return
+    named_team = _REMEMBER_NAMED_TEAM.fullmatch(target)
+    if named_team:
+        proposal.field = "team"
+        proposal.subject = named_team.group(1).title()
+        return
+    if _REMEMBER_TEAM.fullmatch(target):
+        proposal.field = "team"
+        return
+    if _REMEMBER_AGENCY.fullmatch(target):
+        proposal.field = "agency"
+        return
+    client = _REMEMBER_CLIENT.fullmatch(target)
+    if client:
+        proposal.field = "client"
+        proposal.client = " ".join(client.group(1).split())
+        proposal.applicant_id = client.group(2)
+        return
+    named = _REMEMBER_CLIENT_NAME.fullmatch(target)
+    if named:
+        proposal.field = "client"
+        proposal.client = named.group(1)
+
+
 def _memory_command(original: str) -> Decision | None:
     text = _command_text(original)
     if _REMEMBER_BARE.match(text):
@@ -287,10 +325,9 @@ def _memory_command(original: str) -> Decision | None:
         return Decision(FORGET, question="What should I forget?")
     remember = _REMEMBER.match(text)
     if remember:
-        fact = " ".join(remember.group(1).split()).strip()
+        fact = " ".join((remember.group("fact") or "").split()).strip()
         proposal = Proposal(kind=REMEMBER, body=fact)
-        if re.search(r"\bfor the team\b", text, re.IGNORECASE):
-            proposal.field = "team"
+        _apply_remember_target(remember.group("target") or "", proposal)
         return Decision(REMEMBER, proposal=proposal)
     forget = _FORGET.match(text)
     if forget:

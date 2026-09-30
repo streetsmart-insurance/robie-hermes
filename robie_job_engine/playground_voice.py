@@ -82,11 +82,13 @@ def render_turn_prompt(
     else:
         for item in memories:
             parts.append(
-                "- ({scope} {kind}) {body} | client: {client} | outcome: {outcome} | job: {job}".format(
+                "- ({scope} {kind}) {body} | team: {team} | client: {client} | applicant: {applicant} | outcome: {outcome} | job: {job}".format(
                     scope=item.scope,
                     kind=item.kind,
                     body=item.body,
+                    team=getattr(item, "team", "") or "",
                     client=item.client_name or "",
+                    applicant=getattr(item, "applicant_id", "") or "",
                     outcome=item.outcome or "",
                     job=item.job_id or "",
                 )
