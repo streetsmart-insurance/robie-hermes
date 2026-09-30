@@ -231,17 +231,11 @@ def _live_note(proposal: Proposal) -> ApplyResult:
     title = proposal.discussion_title.strip()
     if not title:
         return ApplyResult(applied=False, detail="That discussion has no title, so I didn't file a note.")
-    from .ezlynx_api_only_writes import add_note_to_discussion
+    from .playground_ports import runtime_ports
 
     with with_ezlynx_lock(proposal.new_value or title):
-        filed = add_note_to_discussion(
-            proposal.applicant_id,
-            proposal.body,
-            discussion_title=title,
-        )
-    note_id = str((filed or {}).get("note_id") or (filed or {}).get("ezlynx_note_id") or "")
-    status = str((filed or {}).get("status") or "")
-    if status != "filed" or not note_id or (filed or {}).get("read_back") is not True:
+        note_id = runtime_ports().file_note(proposal, title, proposal.body)
+    if not note_id:
         return ApplyResult(applied=False, detail="The note was not filed.")
     return ApplyResult(applied=True, detail="filed", observed=proposal.new_value, note_id=note_id)
 
