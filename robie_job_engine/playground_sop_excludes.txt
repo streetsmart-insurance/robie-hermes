@@ -1,0 +1,75 @@
+# Playground procedure exclude list
+# Carlo can edit this file. One rule per line.
+# A file is left out when any rule matches its name, its type, or its text.
+# Blank lines and lines starting with # are ignored.
+#
+# name: the file name contains this text
+# all: every word must appear in the file name
+# ext: the file name ends with this
+# type: the Drive file type contains this
+# text: the file name or the procedure text contains this
+# pattern: the file name matches this pattern
+# drive: a shared drive id that is never read
+#
+# Delete a line only after that file has been reviewed and is safe to cite.
+
+# Shared drives
+drive: 0ANbwd0py5G63Uk9PVA
+drive: 0AKIUMpLpYux4Uk9PVA
+
+# Secrets, logins, and scans
+all: ezlynx api key
+all: carrier login
+all: carrier password
+all: carrier website
+name: carrier logins
+text: LOGIN_SECRETS
+name: adobe
+name: mail client scan
+name: mail-client
+name: book of business
+name: book-of-business
+name: lawsuit
+name: legal
+
+# Book of business, referrals, and broker trackers
+name: broker of record
+name: bor tracker
+all: progressive bor
+all: progressive quality
+name: policy_master
+name: policy master
+name: referrals report
+
+# Payroll, performance, and finance
+name: payroll
+name: performance/quality
+name: quality & incentives
+name: quality and incentives
+name: ascend finance
+name: quickbooks
+name: applied pay
+name: tenantcloud
+
+# Licenses and call recordings
+name: agency license
+name: licensing & document management
+name: licensing and document management
+all: guard recording
+all: guard call
+
+# Code archives
+ext: .tgz
+ext: .zip
+ext: .tar.gz
+ext: .tar
+type: application/zip
+type: application/gzip
+type: application/x-gzip
+type: application/x-tar
+type: application/x-compressed-tar
+name: robie-job-engine-operations
+
+# Left out until someone reviews them
+pattern: zap-0\d+
+name: tech stack handbook

@@ -45,13 +45,8 @@ DEFAULT_SOP_FOLDERS = (
     ("employee_hub", "1Bg3NcpIZD0bp7S8TZgdzPw7a1PSLThyb"),
 )
 
-# Hard excludes. Not configurable, so an env file cannot open them.
-EXCLUDED_SHARED_DRIVES = frozenset(
-    {
-        "0ANbwd0py5G63Uk9PVA",  # HR
-        "0AKIUMpLpYux4Uk9PVA",  # finance
-    }
-)
+# Procedure excludes live in playground_sop_excludes.txt. An env file
+# cannot turn a rule off. Edit that file to change the list.
 
 _ON = frozenset({"1", "true", "yes", "on"})
 

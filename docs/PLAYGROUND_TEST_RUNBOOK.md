@@ -93,6 +93,17 @@ Default folders (override with `ROBIE_PLAYGROUND_SOP_FOLDERS` if an id changes):
 - trucking `1orog25WUu6KzW4DFJ88vK_kId2ZDmYvC`
 - employee hub `1Bg3NcpIZD0bp7S8TZgdzPw7a1PSLThyb` (payroll is dropped)
 
+Files that must not be cited are listed in
+`robie_job_engine/playground_sop_excludes.txt`. That is the one list.
+Carlo can edit it later. It already leaves out broker-of-record
+trackers, Policy_Master, referrals, payroll, performance pay, finance
+drafts, licenses, Guard recordings, `.tgz` and `.zip` archives,
+LOGIN_SECRETS, carrier logins, and the Zapier and Tech Stack notes
+until those are reviewed. An answer cites the newest copy when Drive
+has a "Copy of" file or two files with the same title. If that file
+was last changed 12 months ago or more, the answer adds a note such as
+"(guide last updated 2024 — double-check)".
+
 ## Daily change list
 
 Units (not installed by this PR):
