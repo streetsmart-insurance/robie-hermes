@@ -4150,6 +4150,68 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if chat_id and job_id:
             self._active_chat_job[str(chat_id)] = str(job_id)
 
+    def _live_chat_job_id(self, chat_id: str | None) -> str | None:
+        """The job this Chat turn is running, when the gateway omits it.
+
+        Releasing the chat lock drops the active map. The reply job stays
+        so a later send in the same turn cannot post the model's text.
+        """
+        if not chat_id:
+            return None
+        mapped = str((getattr(self, "_active_chat_job", None) or {}).get(chat_id) or "").strip()
+        if mapped:
+            return mapped
+        turns = getattr(self, "_gateway_turns", None)
+        if isinstance(turns, dict):
+            for key, record in turns.items():
+                if not isinstance(key, tuple) or str(key[0]) != str(chat_id):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                found = str(record.get("job_id") or "").strip()
+                if found:
+                    return found
+        sticky = getattr(self, "_reply_job_by_chat", None)
+        if isinstance(sticky, dict):
+            found = str(sticky.get(chat_id) or "").strip()
+            if found:
+                return found
+        return None
+
+    def _remember_reply_job(self, chat_id: str | None, job_id: str | None) -> None:
+        if not chat_id or not job_id:
+            return
+        sticky = getattr(self, "_reply_job_by_chat", None)
+        if not isinstance(sticky, dict):
+            sticky = {}
+            self._reply_job_by_chat = sticky
+        sticky[str(chat_id)] = str(job_id)
+
+    def _sole_reply_already_sent(self, job_id: str | None) -> bool:
+        sent = getattr(self, "_sole_outbound_sent", None)
+        return bool(job_id and isinstance(sent, set) and str(job_id) in sent)
+
+    def _mark_sole_reply_sent(self, job_id: str | None) -> None:
+        if not job_id:
+            return
+        sent = getattr(self, "_sole_outbound_sent", None)
+        if not isinstance(sent, set):
+            sent = set()
+            self._sole_outbound_sent = sent
+        sent.add(str(job_id))
+
+    def _agent_reply_is_replaced(self, job_id: str | None) -> bool:
+        if not job_id:
+            return False
+        try:
+            from robie_job_engine.chat_guard import agent_reply_is_replaced
+            from robie_job_engine.store import JobStore
+
+            return agent_reply_is_replaced(JobStore(ROBIE_JOB_DB), job_id)
+        except Exception:
+            logger.debug("[GoogleChat] could not tell if the model text is replaced", exc_info=True)
+            return False
+
     async def _bind_inbound_job_thread(self, event: MessageEvent, job_id: str | None) -> None:
         """When the user replied inside a thread, keep that thread on the job."""
         if not job_id or event is None:
@@ -4281,20 +4343,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 job_id = link.get("job_id") if link else None
             except Exception:
-                # Fail closed: a transient durable-ledger error must not cause
-                # an unguarded completion claim. A stop notice already carries
-                # the cancelled job id and does not depend on this lookup.
+                # Fail closed when this send cannot be tied to a job. A live
+                # turn still has a job, and that job's guard replaces the text.
                 logger.exception(
                     "[GoogleChat] durable reply-to-Job lookup failed reply=%s",
                     reply_to,
                 )
-                return SendResult(
-                    success=False,
-                    error="durable reply-to-Job lookup failed",
-                )
-        # Thread routing is separate from the guard's job id. The active
-        # map and a cron job_id choose the thread only. They must not make
-        # an unrelated send look like the job's guarded reply.
+                if not self._live_chat_job_id(chat_id):
+                    return SendResult(
+                        success=False,
+                        error="durable reply-to-Job lookup failed",
+                    )
+                job_id = None
+        # The agent's final text often arrives with no robie_job_id. This
+        # turn's job is still the one whose reply this is. Busy, stop, and
+        # notice sends keep the id they were given.
+        agent_reply = delivery_kind not in {
+            "idle_stop",
+            "busy",
+            "stop",
+            "ceiling",
+            "hard_block",
+            "notice",
+        } and not (metadata or {}).get("robie_stop_notice")
+        if agent_reply and not job_id:
+            job_id = self._live_chat_job_id(chat_id)
+        if agent_reply and job_id:
+            self._remember_reply_job(chat_id, job_id)
+        if agent_reply and job_id and self._sole_reply_already_sent(job_id):
+            return SendResult(success=True, message_id=None)
+        # Thread routing uses the same job. A stored thread wins over the
+        # inbound message's thread field, including a top-level auto thread.
         thread_job_id = job_id
         job_owns_thread = bool(job_id) and delivery_kind != "idle_stop"
         if delivery_kind != "idle_stop" and not thread_job_id:
@@ -4482,6 +4561,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         job_id,
                     )
             if getattr(last_result, "success", False):
+                if agent_reply and job_id and self._agent_reply_is_replaced(job_id):
+                    self._mark_sole_reply_sent(job_id)
                 await self._finish_sent_reply(
                     chat_id,
                     job_id,
@@ -4748,6 +4829,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         if not message_id:
             return SendResult(success=False, error="missing message_id")
+        live_job = self._live_chat_job_id(chat_id)
+        if live_job and self._agent_reply_is_replaced(live_job):
+            # Streaming the model's final text would post it in whatever
+            # thread the bubble was opened in. The one allowed line goes
+            # out through send(), on the job's stored thread.
+            if self._sole_reply_already_sent(live_job):
+                return SendResult(success=True, message_id=message_id)
+            return await self.send(chat_id, content)
         from robie_job_engine.user_reply import format_user_reply
 
         content = format_user_reply(content)

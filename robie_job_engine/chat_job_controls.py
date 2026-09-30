@@ -631,6 +631,14 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         return False
     status = JobStatus(job["status"])
     if status in {JobStatus.RUNNING, JobStatus.VERIFYING}:
+        try:
+            from .chat_guard import close_confirmed_note_job
+
+            if close_confirmed_note_job(store, job_id):
+                stop_recordings_for_jobs(db_path, [job_id], JobStatus.COMPLETE.value)
+                return True
+        except Exception:
+            pass
         store.transition(
             job_id,
             JobStatus.UNVERIFIED,

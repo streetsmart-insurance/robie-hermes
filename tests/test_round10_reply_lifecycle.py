@@ -738,6 +738,200 @@ class LedgerStopAndBlockTests(unittest.TestCase):
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+class LiveNoteReplyTests(unittest.TestCase):
+    """Gateway omits robie_job_id. The agent send is still the job's reply."""
+
+    LLM = (
+        "The note has been posted to the follw up 1 discussion.\n"
+        "Status: Verified posted in EZLynx.\n"
+        "I checked the discussion and the note is there."
+    )
+
+    def _running_note_job(self, store: JobStore) -> str:
+        job_id = open_chat_job(
+            store.path,
+            "spaces/ROBY/messages/note",
+            "Add a note on Buster Brown follw up 1",
+            conversation_id=SPACE,
+        )
+        payload = dict(store.get_job(job_id)["payload"])
+        payload["account_name"] = "Buster Brown"
+        store.update_payload(job_id, payload)
+        bind_job_chat_thread(store, job_id, THREAD)
+        return job_id
+
+    def _arm(self, chat, job_id: str) -> None:
+        chat._active_chat_job[SPACE] = job_id
+        chat._gateway_turns[(SPACE, THREAD)] = {
+            "job_id": job_id,
+            "task": _Live(),
+            "watchdog": _Live(),
+        }
+        chat._typing_messages[SPACE] = "spaces/ROBY/messages/typing"
+
+    def test_ledger_park_sends_only_the_question_on_the_stored_thread(self):
+        adapter = _adapter_module()
+        question = "I already added that note at 2:25 PM ET. Want me to add it again?"
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = self._running_note_job(store)
+            store.checkpoint(
+                job_id,
+                "discussion_note",
+                {
+                    "status": "already_posted",
+                    "discussion_id": "disc-1",
+                    "discussion_title": "follw up 1",
+                    "reason": question,
+                    "note_text": "Robie was here",
+                },
+            )
+            chat = _chat(db)
+            self._arm(chat, job_id)
+            inbound = "spaces/ROBY/threads/top-level-auto"
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                first = asyncio.run(
+                    chat.send(
+                        SPACE,
+                        self.LLM,
+                        metadata={"thread_id": inbound},
+                    )
+                )
+                second = asyncio.run(
+                    chat.send(
+                        SPACE,
+                        self.LLM + "\nPosted again.",
+                        metadata={"thread_id": inbound},
+                    )
+                )
+            self.assertTrue(first.success)
+            self.assertTrue(second.success)
+            calls = chat._chat_api.messages.calls
+            self.assertEqual(len(calls), 1)
+            body = calls[0]["body"]
+            self.assertEqual(body["text"], question)
+            self.assertEqual(body["thread"]["name"], THREAD)
+            self.assertNotIn(inbound, str(body))
+            self.assertNotIn("Verified posted", body["text"])
+            self.assertNotIn("The note has been posted", body["text"])
+            self.assertEqual(
+                store.get_job(job_id)["status"],
+                JobStatus.NEEDS_CLARIFICATION.value,
+            )
+
+    def test_confirmed_note_sends_one_line_on_the_stored_thread_and_is_verified(self):
+        adapter = _adapter_module()
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = self._running_note_job(store)
+            store.checkpoint(
+                job_id,
+                "discussion_note",
+                {
+                    "status": "filed",
+                    "discussion_id": "disc-1",
+                    "discussion_title": "follw up 1",
+                    "applicant_id": "220250093",
+                    "note_text": "Follow up. Robie was here",
+                    "note_id": "note-99",
+                    "read_back": True,
+                },
+            )
+            store.checkpoint(
+                job_id,
+                "discussion_note_readback",
+                {"matched": True, "note_id": "note-99"},
+            )
+            chat = _chat(db)
+            self._arm(chat, job_id)
+            inbound = "spaces/ROBY/threads/top-level-auto"
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                result = asyncio.run(
+                    chat.send(SPACE, self.LLM, metadata={"thread_id": inbound})
+                )
+                again = asyncio.run(
+                    chat.edit_message(
+                        SPACE,
+                        "spaces/ROBY/messages/typing",
+                        self.LLM,
+                    )
+                )
+            self.assertTrue(result.success)
+            self.assertTrue(again.success)
+            calls = chat._chat_api.messages.calls
+            self.assertEqual(len(calls), 1)
+            body = calls[0]["body"]
+            self.assertEqual(
+                body["text"],
+                'Added the note to Buster Brown on "follw up 1".',
+            )
+            self.assertEqual(body["thread"]["name"], THREAD)
+            self.assertNotIn("\n", body["text"])
+            self.assertNotIn("Verified posted", body["text"])
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE.value)
+
+    def test_question_only_resume_does_not_start_a_recording(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            with patch.object(
+                RecordingManager, "safe_start", side_effect=AssertionError("recording")
+            ):
+                job_id = open_chat_job(
+                    db,
+                    "spaces/ROBY/messages/q",
+                    "which carriers do we quote for auto?",
+                    conversation_id=SPACE,
+                )
+                store.transition(
+                    job_id,
+                    JobStatus.NEEDS_CLARIFICATION,
+                    expected={JobStatus.RUNNING},
+                    resume_status=JobStatus.RUNNING,
+                    release_lease=True,
+                )
+                bind_job_chat_thread(store, job_id, THREAD)
+                payload = dict(store.get_job(job_id)["payload"])
+                payload["answer_only"] = False
+                payload["text"] = "Travelers"
+                payload["request_text"] = "Travelers"
+                store.update_payload(job_id, payload)
+                resumed = open_chat_job(
+                    db,
+                    "spaces/ROBY/messages/q2",
+                    "Travelers",
+                    conversation_id=SPACE,
+                    inbound_thread_id=THREAD,
+                )
+                from robie_job_engine.chat_guard import reopen_resumed_generic_chat_job
+
+                task = store.create_job(
+                    "hermes.google_chat_task",
+                    {
+                        "text": "Travelers",
+                        "request_text": "Travelers",
+                        "answer_only": False,
+                        "conversation_id": SPACE,
+                    },
+                )
+                store.transition(
+                    task["id"],
+                    JobStatus.RUNNING,
+                    expected={JobStatus.PENDING},
+                )
+                store.checkpoint(
+                    task["id"],
+                    "recording_exemption",
+                    {"reason": "question only; no browser recording"},
+                )
+                reopen_resumed_generic_chat_job(db, task["id"])
+            self.assertEqual(resumed, job_id)
+            reason = store.get_checkpoint(job_id, "recording_exemption")["reason"]
+            self.assertIn("question only", reason)
+
+
 class EzlynxBlankLoginTests(unittest.TestCase):
     def test_state_opens_the_app_page_before_calling_it_logged_out(self):
         session = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
