@@ -134,9 +134,15 @@ class HermesChatEzlynxDestinationVerifier:
             "policy_number": policy_number,
             "document_names": expected_documents,
             "discussion_title": discussion_title,
-            "note_id": note_id,
-            "discussion_id": discussion_id,
         }
+        # Only include note_id/discussion_id when actually claimed. An empty
+        # key would trigger the "note write claimed" detector in
+        # ezlynx_api_only_writes (which checks key presence) and cause
+        # postcondition_mismatch (expected '' vs observed None).
+        if note_id:
+            expected["note_id"] = note_id
+        if discussion_id:
+            expected["discussion_id"] = discussion_id
 
         bound_applicant = str(payload.get("applicant_id") or "").strip()
         claim_applicant = str(claimed.get("applicant_id") or "").strip()
