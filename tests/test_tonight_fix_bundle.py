@@ -2380,7 +2380,7 @@ class Round6ConversationTests(unittest.TestCase):
             ceiling.index("self.handle_message"),
         )
 
-    def test_note_without_id_is_confirmed_by_text_and_not_posted_twice(self):
+    def test_note_without_id_is_confirmed_by_count_and_not_posted_twice(self):
         from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
 
         title = "Policy Change Request Checkup - Mailing Address update"
@@ -2389,28 +2389,42 @@ class Round6ConversationTests(unittest.TestCase):
         class Client:
             def __init__(self):
                 self.appended = 0
-                self.notes: list[dict] = []
+                self.note_count = 4
+                self.latest = "old-note"
 
             def get_discussions(self, applicant_id):
                 return [{"discussionId": "d-mail", "title": title}]
 
             def get_discussion(self, discussion_id):
-                return {"discussionId": discussion_id, "title": title, "notes": list(self.notes)}
+                return {
+                    "discussionId": discussion_id,
+                    "title": title,
+                    "noteCount": self.note_count,
+                    "mostRecentNoteId": self.latest,
+                }
 
             def append_note(self, discussion_id, text, note_type="Note"):
                 self.appended += 1
-                self.notes.append({"body": text})
+                self.note_count += 1
+                self.latest = "new-note"
                 return {}
 
         client = Client()
-        first = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
-        self.assertEqual(first["status"], "filed")
-        self.assertTrue(first["read_back"])
-        self.assertEqual(first["verified_by"], "text")
-        self.assertEqual(first["discussion_title"], title)
-        self.assertEqual(client.appended, 1)
-        self.assertNotIn("no note_id", str(first.get("reason") or ""))
-        second = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
+        with durable_temporary_directory() as tmp:
+            ledger = str(Path(tmp) / "notes.json")
+            first = file_note_to_existing_discussion(
+                client, "220250093", body, title_hint=title, ledger_path=ledger
+            )
+            self.assertEqual(first["status"], "filed")
+            self.assertTrue(first["read_back"])
+            self.assertEqual(first["verified_by"], "discussion")
+            self.assertEqual(first["note_id"], "new-note")
+            self.assertEqual(first["discussion_title"], title)
+            self.assertEqual(client.appended, 1)
+            self.assertNotIn("note_id", str(first.get("reason") or ""))
+            second = file_note_to_existing_discussion(
+                client, "220250093", body, title_hint=title, ledger_path=ledger
+            )
         self.assertEqual(second["status"], "filed")
         self.assertTrue(second.get("idempotent"))
         self.assertEqual(client.appended, 1)

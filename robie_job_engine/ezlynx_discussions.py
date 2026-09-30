@@ -552,7 +552,11 @@ def _same_note_text(left: str, right: str) -> bool:
 
 
 def find_identical_note(record: Any, note_body: str) -> dict[str, Any] | None:
-    """The note already on this discussion whose text matches, if any."""
+    """The note already on this discussion whose text matches, if the payload has bodies.
+
+    Live discussion reads do not include note text, so filing does not use
+    this as a duplicate guard. Accepted notes are remembered in the local ledger.
+    """
     want = str(note_body or "").strip()
     if not want:
         return None
@@ -560,6 +564,74 @@ def find_identical_note(record: Any, note_body: str) -> dict[str, Any] | None:
         if _same_note_text(_note_body(row), want):
             return row
     return None
+
+
+def discussion_note_snapshot(record: Any) -> dict[str, Any]:
+    """Title, note count, and latest note id from a discussion metadata read.
+
+    Live ``GET v8/discussions/{id}`` returns those fields and no note bodies.
+    """
+
+    if not isinstance(record, dict):
+        return {"title": "", "note_count": None, "most_recent_note_id": ""}
+    raw_count = record.get("noteCount", record.get("NoteCount"))
+    count: int | None
+    if isinstance(raw_count, bool) or raw_count is None:
+        count = None
+    elif isinstance(raw_count, int):
+        count = raw_count
+    elif isinstance(raw_count, str) and raw_count.strip().isdigit():
+        count = int(raw_count.strip())
+    else:
+        count = None
+    recent = str(record.get("mostRecentNoteId", record.get("MostRecentNoteId", "")) or "").strip()
+    return {
+        "title": discussion_title_of(record),
+        "note_count": count,
+        "most_recent_note_id": recent,
+    }
+
+
+def _metadata_note_confirmation(
+    before: dict[str, Any], after: dict[str, Any]
+) -> tuple[bool, str]:
+    """True only when the discussion gained exactly one note and a new latest id.
+
+    The wording stays plain English. Callers show ``reason`` to people.
+    """
+
+    before_count = before.get("note_count")
+    after_count = after.get("note_count")
+    if not isinstance(before_count, int) or not isinstance(after_count, int):
+        return False, (
+            "The note was sent, but the discussion could not be confirmed. "
+            "It was not sent again."
+        )
+    gained_one = after_count == before_count + 1
+    latest = str(after.get("most_recent_note_id") or "")
+    latest_changed = bool(latest) and latest != str(before.get("most_recent_note_id") or "")
+    title = str(after.get("title") or "")
+    title_same = bool(title) and title == str(before.get("title") or "")
+    if gained_one and latest_changed and title_same:
+        return True, "The note was added to the discussion."
+    if after_count == before_count:
+        return False, (
+            "The note was sent, but the discussion still has the same notes. "
+            "It was not sent again."
+        )
+    if not gained_one:
+        return False, (
+            "The note was sent, but the discussion did not show exactly one new note. "
+            "It was not sent again."
+        )
+    if not latest_changed:
+        return False, (
+            "The note was sent, but the latest note did not change. "
+            "It was not sent again."
+        )
+    return False, (
+        "The note was sent, but the discussion title changed. It was not sent again."
+    )
 
 
 def file_note_to_existing_discussion(
@@ -570,6 +642,8 @@ def file_note_to_existing_discussion(
     title_hint: str | None = None,
     note_type: str = "Note",
     dry_run: bool = False,
+    document_id: str | None = None,
+    ledger_path: Any = None,
 ) -> dict[str, Any]:
     """Append ``note_body`` to the applicant's existing discussion.
 
@@ -577,9 +651,17 @@ def file_note_to_existing_discussion(
     existing discussion can be chosen the result is ``status="pending"`` and
     nothing is written. A discussion is never created and nothing is deleted.
 
+    Confirmation reads the discussion before the post and once after it. The
+    note is filed only when the count went up by exactly one and the latest
+    note id changed. That new id is the note id. Anything else stays held.
+    The post is never repeated automatically.
+
+    A local ledger remembers accepted notes so a rerun does not post them
+    again. Text matching is not used: the discussion read has no note bodies.
+
     Returns a result dict with ``status`` one of ``filed`` / ``pending`` /
-    ``dry_run``, plus ``applicant_id``, ``discussion_id``, ``note_id`` and a
-    human-readable ``reason``.
+    ``held`` / ``dry_run``, plus ``applicant_id``, ``discussion_id``,
+    ``note_id`` and a human-readable ``reason``.
     """
     applicant = require_allowed_ezlynx_write_applicant(applicant_id)
     text = reject_phone_numbers(note_body).strip()
@@ -619,89 +701,200 @@ def file_note_to_existing_discussion(
             "discussion_title": title,
             "note_id": None,
         }
-    # A retry must not post the same words again. EZLynx often accepts the
-    # first write and omits the note id, which used to look like a failure.
-    already = None
-    getter = getattr(client, "get_discussion", None)
-    if callable(getter):
-        try:
-            already = find_identical_note(getter(discussion_id), text)
-        except Exception:
-            already = None
+    from .discussion_note_ledger import DiscussionNoteLedgerError, find_posted_note
+
+    doc_id = str(document_id or "").strip()
+    try:
+        already = find_posted_note(
+            applicant,
+            discussion_id,
+            text,
+            document_id=doc_id,
+            ledger_path=ledger_path,
+        )
+    except DiscussionNoteLedgerError as exc:
+        return _note_result(
+            "held",
+            reason=str(exc),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
     if already is not None:
-        existing_id = _note_id_of(already)
-        return {
-            "status": "filed",
-            "reason_code": None,
-            "reason": "identical note already on the discussion; not posted again",
-            "applicant_id": applicant,
-            "discussion_id": discussion_id,
-            "discussion_title": title,
-            "note_id": existing_id or None,
-            "read_back": True,
-            "verified_by": "text",
-            "idempotent": True,
-            "response": already,
-        }
+        remembered = str(already.get("note_id") or "").strip()
+        return _note_result(
+            "filed",
+            reason="This note was already sent, so it was not sent again.",
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+            note_id=remembered or None,
+            read_back=True,
+            verified_by="ledger",
+            idempotent=True,
+        )
+    getter = getattr(client, "get_discussion", None)
+    if not callable(getter):
+        return _note_result(
+            "held",
+            reason="The discussion could not be read, so the note was not sent.",
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
+    try:
+        before = discussion_note_snapshot(getter(discussion_id))
+    except Exception:
+        return _note_result(
+            "held",
+            reason="The discussion could not be read, so the note was not sent.",
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
     created = client.append_note(discussion_id, text, note_type=note_type)
-    note_id = ""
-    if isinstance(created, dict):
-        note_id = _note_id_of(created)
+    try:
+        after_record = getter(discussion_id)
+    except Exception:
+        return _note_result(
+            "held",
+            reason=(
+                "The note was sent, but the discussion could not be read afterward. "
+                "It was not sent again."
+            ),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+            response=created,
+        )
+    after = discussion_note_snapshot(after_record)
+    if before["note_count"] is not None or after["note_count"] is not None:
+        confirmed, reason = _metadata_note_confirmation(before, after)
+        if not confirmed:
+            return _note_result(
+                "held",
+                reason=reason,
+                applicant=applicant,
+                discussion_id=discussion_id,
+                title=title,
+                response=created,
+            )
+        note_id = after["most_recent_note_id"]
+        _remember_posted_note(
+            applicant,
+            discussion_id,
+            text,
+            document_id=doc_id,
+            note_id=note_id,
+            ledger_path=ledger_path,
+            source="discussion_count",
+        )
+        return _note_result(
+            "filed",
+            reason=reason,
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+            note_id=note_id,
+            read_back=True,
+            verified_by="discussion",
+            response=created,
+        )
+    # Older payloads omit the count. Accept only an id that a fresh read shows.
+    note_id = _note_id_of(created) if isinstance(created, dict) else ""
+    if not note_id:
+        return _note_result(
+            "held",
+            reason=(
+                "The note was sent, but it could not be confirmed. It was not sent again."
+            ),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+            response=created,
+        )
     from .ezlynx_api_only_writes import confirm_discussion_note
 
-    if note_id:
-        # Fresh GET before success. Playwright/DOM is never this proof.
-        confirm_discussion_note(client, discussion_id, note_id)
-        return {
-            "status": "filed",
-            "reason_code": None,
-            "reason": "note appended to existing discussion",
-            "applicant_id": applicant,
-            "discussion_id": discussion_id,
-            "discussion_title": title,
-            "note_id": note_id,
-            "read_back": True,
-            "verified_by": "note_id",
-            "response": created,
-        }
-    # 2xx with no id is not a failure. Read the notes back and match the text.
-    matched = None
-    if callable(getter):
-        try:
-            matched = find_identical_note(getter(discussion_id), text)
-        except Exception:
-            matched = None
-    if matched is None:
-        return {
-            "status": "posted, verifying",
-            "reason_code": None,
-            "reason": (
-                "DiscussionApi accepted the note without a note_id; "
-                "the text was not on the discussion yet"
-            ),
-            "applicant_id": applicant,
-            "discussion_id": discussion_id,
-            "discussion_title": title,
-            "note_id": None,
-            "read_back": False,
-            "verified_by": None,
-            "response": created,
-        }
-    matched_id = _note_id_of(matched)
-    if matched_id:
-        confirm_discussion_note(client, discussion_id, matched_id)
-    return {
-        "status": "filed",
+    confirm_discussion_note(client, discussion_id, note_id)
+    _remember_posted_note(
+        applicant,
+        discussion_id,
+        text,
+        document_id=doc_id,
+        note_id=note_id,
+        ledger_path=ledger_path,
+        source="returned_note_id",
+    )
+    return _note_result(
+        "filed",
+        reason="The note was added to the discussion.",
+        applicant=applicant,
+        discussion_id=discussion_id,
+        title=title,
+        note_id=note_id,
+        read_back=True,
+        verified_by="note_id",
+        response=created,
+    )
+
+
+def _note_result(
+    status: str,
+    *,
+    reason: str,
+    applicant: str,
+    discussion_id: str | None,
+    title: str,
+    note_id: str | None = None,
+    read_back: bool = False,
+    verified_by: str | None = None,
+    idempotent: bool = False,
+    response: Any = None,
+) -> dict[str, Any]:
+    result = {
+        "status": status,
         "reason_code": None,
-        "reason": "note posted and confirmed by matching the discussion text",
+        "reason": reason,
         "applicant_id": applicant,
         "discussion_id": discussion_id,
         "discussion_title": title,
-        "note_id": matched_id or None,
-        "read_back": True,
-        "verified_by": "text",
-        "response": created,
+        "note_id": note_id,
+        "read_back": read_back,
+        "verified_by": verified_by,
     }
+    if idempotent:
+        result["idempotent"] = True
+    if response is not None:
+        result["response"] = response
+    return result
+
+
+def _remember_posted_note(
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    *,
+    document_id: str,
+    note_id: str,
+    ledger_path: Any,
+    source: str,
+) -> None:
+    """Best-effort local memory. A full disk must not hide a confirmed note."""
+
+    from .discussion_note_ledger import record_posted_note
+
+    try:
+        record_posted_note(
+            applicant_id,
+            discussion_id,
+            note_text=note_text,
+            document_id=document_id,
+            note_id=note_id,
+            source=source,
+            ledger_path=ledger_path,
+        )
+    except Exception:
+        return
 
 
 # ---------------------------------------------------------------------------

@@ -93,15 +93,14 @@ def _file_note(args: dict) -> dict:
     )
     status = str(filed.get("status") or "")
     if status not in {"filed", "posted, verifying"}:
-        raise RuntimeError(
-            f"DiscussionApi did not file the note: {filed.get('reason') or status}"
-        )
+        reason = str(filed.get("reason") or "").strip()
+        raise RuntimeError(reason or "The note was not sent.")
     if status == "filed" and not filed.get("note_id") and not filed.get("read_back"):
-        raise RuntimeError("DiscussionApi filed without note_id; refusing success")
+        raise RuntimeError("The note was not confirmed, so it is not marked done.")
+    confirmed = status == "filed" and bool(filed.get("read_back") or filed.get("note_id"))
     posted = status in {"filed", "posted, verifying"}
     return {
-        "ok": status == "filed" and bool(filed.get("read_back") or filed.get("note_id"))
-        or status == "posted, verifying",
+        "ok": confirmed,
         "status": status,
         "note_id": filed.get("note_id"),
         "discussion_id": filed.get("discussion_id"),

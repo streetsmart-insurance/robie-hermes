@@ -124,8 +124,13 @@ class FakeDeps:
         self.uploads.append({"applicant_id": applicant_id, "filename": filename, "bytes": file_bytes})
         return {"document_id": "501", "read_back": True}
 
-    def add_note(self, applicant_id, note_text, discussion_title=None):
-        self.notes.append({"applicant_id": applicant_id, "text": note_text, "title": discussion_title})
+    def add_note(self, applicant_id, note_text, discussion_title=None, document_id=None):
+        self.notes.append({
+            "applicant_id": applicant_id,
+            "text": note_text,
+            "title": discussion_title,
+            "document_id": document_id,
+        })
         return {
             "status": "filed",
             "note_id": "77",
@@ -455,7 +460,40 @@ class FilingGateTests(unittest.TestCase):
         self.assertTrue(any(row[0] == "Progressive BOP/CGL" for row in deps.sheets.rows))
         self.assertEqual(result["results"][0]["document_id"], "501")
         self.assertEqual(result["results"][0]["note_id"], "77")
+        self.assertEqual(deps.notes[0]["document_id"], "501")
         self.assertEqual(result["results"][0]["folder_field"], "not_in_proven_document_upload")
+
+    def test_unconfirmed_note_stays_held_in_plain_english(self):
+        deps = FakeDeps()
+
+        def add_note(applicant_id, note_text, discussion_title=None, document_id=None):
+            deps.notes.append(
+                {
+                    "applicant_id": applicant_id,
+                    "text": note_text,
+                    "title": discussion_title,
+                    "document_id": document_id,
+                }
+            )
+            return {
+                "status": "held",
+                "note_id": None,
+                "read_back": False,
+                "reason": (
+                    "The note was sent, but the discussion did not show exactly one new note. "
+                    "It was not sent again."
+                ),
+            }
+
+        deps.add_note = add_note
+        result = file_with(deps, [memo_item()])
+        reason = result["results"][0]["reason"]
+        self.assertEqual(result["results"][0]["status"], "document_filed_note_held")
+        self.assertIn("not sent again", reason)
+        self.assertNotIn("note_id", reason)
+        self.assertNotIn("DiscussionApi", reason)
+        self.assertEqual(deps.notes[0]["document_id"], "501")
+        self.assertEqual(deps.sheets.writes, [])
 
     def test_upload_without_read_back_does_not_claim_success(self):
         deps = FakeDeps()
