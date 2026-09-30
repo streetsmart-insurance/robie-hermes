@@ -56,14 +56,25 @@ class PlaygroundPorts:
             returned = number
             return f'Found policy {returned} in EZLynx. Coverage details still need the policy document.'
         if not proposal.applicant_id:
-            return None
-        if not re.search(r'\b(?:documents?|dec page|loss runs)\b', body, re.I):
+            return "Which EZLynx applicant ID or policy number should I use? I can't safely match a client by name yet."
+        if not re.search(r'\b(?:documents?|dec page|declarations|loss runs)\b', body, re.I):
             return None
         docs = self._read_port().documents_for_applicant(proposal.applicant_id)
-        safe = [str(row.get('name') or '').strip() for row in docs if isinstance(row, dict) and str(row.get('id') or '').strip() and row.get('name')]
+        safe = [(str(row.get('id') or '').strip(), str(row.get('name') or '').strip())
+                for row in docs if isinstance(row, dict) and str(row.get('id') or '').strip()
+                and str(row.get('name') or '').strip()]
+        requested = 'declarations' if re.search(r'\b(?:dec page|declarations)\b', body, re.I) else 'loss runs' if re.search(r'\bloss runs\b', body, re.I) else ''
+        if requested:
+            pattern = r'\b(?:declarations?|dec[ _-]*page)\b' if requested == 'declarations' else r'\bloss[ _-]*runs?\b'
+            safe = [(doc_id, name) for doc_id, name in safe if re.search(pattern, name, re.I)]
         if not safe:
+            if requested:
+                return f"I found no document names matching {requested} for applicant {proposal.applicant_id} in EZLynx DocumentApi. That doesn't prove the document is absent. Which policy or exact document name should I check?"
             return None
-        return 'EZLynx documents for applicant ' + proposal.applicant_id + ': ' + '; '.join(safe[:5]) + '. I have not compared their contents.'
+        shown = '; '.join(f'{name} [document ID {doc_id}]' for doc_id, name in safe[:5])
+        suffix = f' Showing {min(5, len(safe))} of {len(safe)}.' if len(safe) > 5 else ''
+        candidate = 'Name-matched candidates' if requested else 'Documents'
+        return f'{candidate} for applicant {proposal.applicant_id} from EZLynx DocumentApi: {shown}.{suffix} I have not read or compared their contents.'
 
     def discussions(self, proposal: Proposal) -> list[dict[str, Any]]:
         if not proposal.applicant_id:
