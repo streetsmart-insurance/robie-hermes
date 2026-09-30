@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .playground_config import (
+    BUSTER_BROWN_APPLICANT_ID,
     carrier_must_redirect,
     carrier_sink_address,
     live_writes_enabled,
@@ -223,6 +224,10 @@ def with_ezlynx_lock(text: str, session_for: SessionFactory | None = None):
 
 
 def _live_note(proposal: Proposal) -> ApplyResult:
+    if proposal.applicant_id != BUSTER_BROWN_APPLICANT_ID:
+        return ApplyResult(applied=False, detail="Only Buster Brown note tests are enabled.")
+    if not proposal.body.strip():
+        return ApplyResult(applied=False, detail="Exact note text is required.")
     title = proposal.discussion_title.strip()
     if not title:
         return ApplyResult(applied=False, detail="That discussion has no title, so I didn't file a note.")
@@ -231,12 +236,12 @@ def _live_note(proposal: Proposal) -> ApplyResult:
     with with_ezlynx_lock(proposal.new_value or title):
         filed = add_note_to_discussion(
             proposal.applicant_id,
-            proposal.new_value or proposal.body or "Playground note",
+            proposal.body,
             discussion_title=title,
         )
     note_id = str((filed or {}).get("note_id") or (filed or {}).get("ezlynx_note_id") or "")
     status = str((filed or {}).get("status") or "")
-    if status != "filed" or not note_id:
+    if status != "filed" or not note_id or (filed or {}).get("read_back") is not True:
         return ApplyResult(applied=False, detail="The note was not filed.")
     return ApplyResult(applied=True, detail="filed", observed=proposal.new_value, note_id=note_id)
 
