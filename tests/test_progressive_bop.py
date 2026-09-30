@@ -40,6 +40,7 @@ from robie_job_engine.progressive_bop import (
     parse_pdf_report,
     parse_report_rows,
     parse_xls_export,
+    apply_bop_report_dates,
     _PENDING_CANCEL_PDF_EXPORT,
     _PENDING_CANCEL_XLS_EXPORT,
     policies_from_report_text,
@@ -1195,10 +1196,121 @@ class _FinishedDownload:
         Path(path).write_bytes(self.payload)
 
 
-class _ExportPage(FakePage):
-    """BOP reports page whose export buttons download canned bytes."""
+class _DateOption:
+    def __init__(self, text: str, value: str):
+        self.text = text
+        self.value = value
 
-    def __init__(self, files: dict[str, bytes], *, body: str = "Pending Cancel for Non-Payment"):
+    def inner_text(self):
+        return self.text
+
+    def get_attribute(self, name):
+        if name == "value":
+            return self.value
+        if name == "label":
+            return self.text
+        return None
+
+
+class _OptionList:
+    def __init__(self, options: list[_DateOption]):
+        self.options = options
+
+    def all(self):
+        return list(self.options)
+
+    def count(self):
+        return len(self.options)
+
+
+class _DateField:
+    def __init__(self, page: "_ExportPage", label: str):
+        self.page = page
+        self.label = label
+        self.value = ""
+        self.visible = False
+
+    def count(self):
+        return 1 if self.visible else 0
+
+    def is_visible(self):
+        return self.visible
+
+    def wait_for(self, state="visible", timeout=None):
+        if state == "visible" and self.visible:
+            return None
+        raise TimeoutError("Timeout 20000ms exceeded")
+
+    def fill(self, value):
+        if not self.visible:
+            raise RuntimeError("hidden")
+        if not self.page.dates_stick:
+            self.value = ""
+        else:
+            self.value = value
+        self.page.date_values[self.label] = self.value
+
+    def input_value(self):
+        return self.value
+
+
+class _ReportDates:
+    def __init__(self, page: "_ExportPage", options: list[_DateOption]):
+        self.page = page
+        self.options = options
+        self.selected = options[0]
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return True
+
+    def locator(self, selector):
+        if selector == "option":
+            return _OptionList(self.options)
+        return FakeLocator(self.page, selector)
+
+    def select_option(self, value=None, label=None):
+        chosen = [item for item in self.options if item.text == label or item.value == value]
+        if len(chosen) != 1:
+            raise RuntimeError("option")
+        self.selected = chosen[0]
+        self.page.selected_ranges.append(chosen[0].text)
+        if chosen[0].text.casefold() == "select date range":
+            for field in self.page.date_fields.values():
+                field.visible = True
+
+    def input_value(self):
+        return self.selected.value
+
+    def evaluate(self, _script):
+        return self.selected.text
+
+
+class _MissingControl:
+    def count(self):
+        return 0
+
+    def is_visible(self):
+        return False
+
+
+class _ExportPage(FakePage):
+    """BOP reports page whose export buttons download canned bytes.
+
+    ``dates`` is ``custom`` (Select Date Range reveals Start/End), ``presets``,
+    ``unknown``, ``missing``, or ``reject`` (the date inputs do not keep a value).
+    """
+
+    def __init__(
+        self,
+        files: dict[str, bytes],
+        *,
+        body: str = "Pending Cancel for Non-Payment",
+        dates: str = "custom",
+        refresh: str | None = None,
+    ):
         super().__init__(
             {("button", name) for name in files},
             body=body,
@@ -1206,6 +1318,59 @@ class _ExportPage(FakePage):
         )
         self.files = files
         self.context = _SilentContext()
+        self.dates = dates
+        self.refresh = refresh
+        self.dates_stick = dates != "reject"
+        self.date_values: dict[str, str] = {}
+        self.selected_ranges: list[str] = []
+        self.states: list[str] = []
+        self.exported = False
+        self.date_fields = {
+            "Start Date": _DateField(self, "Start Date"),
+            "End Date": _DateField(self, "End Date"),
+        }
+        if dates == "missing":
+            self.report_dates = None
+        elif dates == "presets":
+            self.report_dates = _ReportDates(self, [
+                _DateOption("Today", "today"),
+                _DateOption("Yesterday", "yesterday"),
+                _DateOption("Last 7 Days", "last7"),
+                _DateOption("Last 30 Days", "last30"),
+            ])
+        elif dates == "unknown":
+            self.report_dates = _ReportDates(self, [
+                _DateOption("Yesterday", "yesterday"),
+                _DateOption("Fiscal Week", "fiscal"),
+            ])
+        elif dates == "tie":
+            self.report_dates = _ReportDates(self, [
+                _DateOption("Today", "today"),
+                _DateOption("Current Day", "current"),
+            ])
+        else:
+            self.report_dates = _ReportDates(self, [
+                _DateOption("Select Date Range", ""),
+                _DateOption("Yesterday", "yesterday"),
+                _DateOption("Last 7 Days", "last7"),
+                _DateOption("Last 30 Days", "last30"),
+            ])
+        if refresh is not None:
+            def wait_for_load_state(state, timeout=None, page=self):
+                page.states.append(state)
+                if page.refresh == "timeout":
+                    raise TimeoutError("Timeout 20000ms exceeded")
+
+            self.wait_for_load_state = wait_for_load_state
+
+    def get_by_role(self, role, name=None, exact=True):
+        if role == "combobox" and name == "Report Dates":
+            if self.report_dates is None:
+                return _MissingControl()
+            return self.report_dates
+        if role == "textbox" and name in self.date_fields and self.dates not in {"presets", "unknown", "tie"}:
+            return self.date_fields[name]
+        return super().get_by_role(role, name=name, exact=exact)
 
     def expect_download(self, timeout=None):
         page = self
@@ -1215,6 +1380,7 @@ class _ExportPage(FakePage):
                 return self
 
             def __exit__(self, exc_type, exc, tb):
+                page.exported = True
                 name = page.clicked[-1][1]
                 self.value = _FinishedDownload(page.files[name])
                 return False
@@ -1266,6 +1432,11 @@ class PendingCancelExportTests(unittest.TestCase):
         )
         self.assertNotIn("View Reports", html)
         self.assertNotIn("VIEW REPORTS", html)
+        self.assertIn("<select id=\"report-dates\">", html)
+        self.assertIn(">Select Date Range</option>", html)
+        self.assertIn("Report Dates", html)
+        self.assertIn("type=\"date\"", html)
+        self.assertLess(html.index("<select id=\"report-dates\">"), html.index("<button"))
 
     def test_export_page_does_not_click_view_reports(self):
         html = _fixture("reports_page.html").decode("utf-8")
@@ -1369,6 +1540,11 @@ class PendingCancelExportTests(unittest.TestCase):
         )
         self.assertTrue(all(row.report_date == DAY for row in report.policies))
         self.assertEqual(page.clicked, [("button", _PENDING_CANCEL_PDF_EXPORT)])
+        self.assertEqual(page.selected_ranges, ["Select Date Range"])
+        self.assertEqual(
+            page.date_values,
+            {"Start Date": DAY.isoformat(), "End Date": DAY.isoformat()},
+        )
         with self.assertRaises(IntakeHold):
             policies_from_report_text(
                 "860521214 3JR Contracting LLC 09/25/2026",
@@ -1468,6 +1644,97 @@ class PendingCancelExportTests(unittest.TestCase):
         self.assertTrue(report.blank)
         self.assertEqual(report.policies, ())
         self.assertEqual(report.source, "pdf")
+        self.assertEqual(page.date_values["Start Date"], DAY.isoformat())
+        self.assertEqual(page.date_values["End Date"], DAY.isoformat())
+
+    def test_missing_report_dates_holds_before_export(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="missing",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("Report Dates control is missing or ambiguous", reason)
+        self.assertIn("export was not downloaded", reason)
+        self.assertFalse(page.exported)
+        self.assertEqual(page.clicked, [])
+
+    def test_rejected_date_holds_before_export(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="reject",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        self.assertIn("Start Date did not accept", str(caught.exception))
+        self.assertIn("export was not downloaded", str(caught.exception))
+        self.assertFalse(page.exported)
+
+    def test_smallest_preset_covers_the_process_date(self):
+        today = date(2026, 9, 30)
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="presets",
+        )
+        with patch("robie_job_engine.progressive_bop._eastern_today", return_value=today):
+            yesterday = apply_bop_report_dates(page, date(2026, 9, 29))
+            self.assertEqual(yesterday.kind, "preset")
+            self.assertEqual(yesterday.label, "Yesterday")
+            self.assertEqual(yesterday.start, date(2026, 9, 29))
+            page.selected_ranges.clear()
+            today_choice = apply_bop_report_dates(page, today)
+            self.assertEqual(today_choice.label, "Today")
+            page.selected_ranges.clear()
+            week = apply_bop_report_dates(page, date(2026, 9, 24))
+            self.assertEqual(week.label, "Last 7 Days")
+            self.assertEqual(week.start, date(2026, 9, 24))
+            self.assertEqual(week.end, today)
+            page.selected_ranges.clear()
+            with self.assertRaises(IntakeHold) as uncovered:
+                apply_bop_report_dates(page, date(2026, 8, 1))
+        self.assertIn("no preset that covers 2026-08-01", str(uncovered.exception))
+        self.assertIn("export was not downloaded", str(uncovered.exception))
+        self.assertFalse(page.exported)
+
+    def test_unknown_preset_holds_instead_of_guessing(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="unknown",
+        )
+        with patch("robie_job_engine.progressive_bop._eastern_today", return_value=date(2026, 9, 30)):
+            with self.assertRaises(IntakeHold) as caught:
+                read_report_from_page(page, date(2026, 9, 29))
+        self.assertIn("Fiscal Week", str(caught.exception))
+        self.assertIn("does not understand", str(caught.exception))
+        self.assertFalse(page.exported)
+
+    def test_tied_presets_hold(self):
+        page = _ExportPage({_PENDING_CANCEL_PDF_EXPORT: b"%PDF"}, dates="tie")
+        with patch("robie_job_engine.progressive_bop._eastern_today", return_value=date(2026, 9, 30)):
+            with self.assertRaises(IntakeHold) as caught:
+                apply_bop_report_dates(page, date(2026, 9, 30))
+        self.assertIn("ambiguous", str(caught.exception))
+        self.assertIn("Today", str(caught.exception))
+        self.assertIn("Current Day", str(caught.exception))
+
+    def test_page_must_finish_loading_after_the_date_is_accepted(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            refresh="idle",
+        )
+        report = read_report_from_page(page, DAY)
+        self.assertTrue(report.blank)
+        self.assertEqual(page.states, ["networkidle"])
+        self.assertTrue(page.exported)
+        stalled = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            refresh="timeout",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(stalled, DAY)
+        self.assertIn("did not finish loading after Report Dates was set", str(caught.exception))
+        self.assertFalse(stalled.exported)
 
 
 if __name__ == "__main__":

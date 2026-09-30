@@ -38,7 +38,17 @@ tab and writes one QA pack for `--report-date`:
    on 2026-09-30 has no View Reports control. It has
    `Export Pending Cancel for Non-Payment Pdf` and
    `Export Pending Cancel for Non-Payment Xls`. Those buttons are already
-   the report. The click only downloads. It does not bind, cancel, or pay.
+   the report. On 2026-09-30 both downloads were 0 bytes while Report Dates
+   still showed `Select Date Range`. Before either export, the pull sets
+   that field. `Select Date Range` is the custom option: the same phrase as
+   the FAO preset `<select>`, not a filled date picker. The pull chooses it,
+   waits until Start Date and End Date are visible, and sets both to the
+   process date. If that option is not offered, it chooses the smallest
+   preset that covers the process date. It reads the value back and, when
+   the page supports it, waits for the network to go idle. Then it exports.
+   A missing control, a value that does not stick, an unknown preset, or a
+   page that does not finish loading holds. The export is not downloaded.
+   The click only downloads. It does not bind, cancel, or pay.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from the PDF export, or from the Xls export. The PDF export is
    preferred. A list PDF is read for insured, policy number, and cancel date,
@@ -203,20 +213,31 @@ is a failed pull, not a partial success. This code has not been run on
   exact link or button), `View Reports`, `Pending Cancel for Nonpayment`,
   `Export Pending Cancel for Non-Payment Pdf`,
   `Export Pending Cancel for Non-Payment Xls`,
+  `Report Dates`, `Start Date`, `End Date`,
   the shell policy search, `Documents`, and the `Policy` document tab. A
   mismatch holds; do not widen these from Production.
 - Whether Businessowner/Contractor GL opens exactly one new window.
-- Whether the reports page is ready because the export button is visible, or
-  only after the network is idle. This change has not been run on
-  `hermes-test-01`. Do not deploy it while that host is in use.
+- Page-ready wait, reported from hermes-test-01 on 2026-09-30: the reports
+  page showed the Pending Cancel for Non-Payment row and its pdf and xls
+  icons. Both exports were 0 bytes, and the hold named the empty file.
+  Report Dates was still `Select Date Range` because that build did not set
+  it. This date-range change has not been run there. Do not deploy it while
+  that host is in use.
+- Report Dates is modeled as a preset `<select>` (Playwright combobox)
+  because the live field displayed an option phrase, and FAO uses that same
+  `Select Date Range` text on `select#PDDateRange`. The BOP element id is
+  not known. Start Date and End Date are the FAO date-input names, not a
+  label seen on the BOP page. A live check has to confirm the accessible
+  name is exactly `Report Dates`, that choosing `Select Date Range` shows
+  those two date inputs, and what the preset labels are if it does not.
+- Whether a finished export is non-empty after the process date is accepted
+  for 9/29 and 9/30. A 0-byte file must still hold and must not become an
+  empty pack.
 - Whether the PDF export is a policy list (insured, policy number, cancel
   date) or a packet of per-policy notices. A list is parsed. The per-policy
   Notice of Non Payment is still downloaded from FAO Documents. A cancel date
   that is not the requested report date holds. Confirm that against a live
   non-empty file.
-- Whether a finished export is still 0 bytes after the page is ready. That
-  result must stay a hold that says the file is empty. It must not become an
-  empty pack.
 - Whether the Xls export, once non-empty, is xlsx, an HTML table, CSV, or
   classic BIFF `.xls`. xlsx, HTML, and CSV are read with the standard
   library. BIFF holds until a real file shows that format. No Excel package

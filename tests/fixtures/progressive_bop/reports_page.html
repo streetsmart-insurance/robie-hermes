@@ -3,6 +3,25 @@
 <body>
   <h1>Pending Cancel for Non-Payment</h1>
   <p>The reports page exposes the export buttons.</p>
+  <!--
+    Live 2026-09-30: the field labeled Report Dates still showed
+    "Select Date Range". That phrase is the custom option on Progressive's
+    FAO preset select, not a filled date. The BOP element id is not known.
+    This fixture models Report Dates as that select. Start Date and End Date
+    are separate date inputs, hidden until the custom option is chosen.
+  -->
+  <label for="report-dates">Report Dates</label>
+  <select id="report-dates">
+    <option value="" selected>Select Date Range</option>
+    <option value="today">Today</option>
+    <option value="yesterday">Yesterday</option>
+    <option value="last7">Last 7 Days</option>
+    <option value="last30">Last 30 Days</option>
+  </select>
+  <label for="report-start">Start Date</label>
+  <input id="report-start" type="date">
+  <label for="report-end">End Date</label>
+  <input id="report-end" type="date">
   <button type="button">Export Pending Cancel for Non-Payment Pdf</button>
   <button type="button">Export Pending Cancel for Non-Payment Xls</button>
 </body>

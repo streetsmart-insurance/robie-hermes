@@ -46,10 +46,17 @@ uses ``View Reports`` / ``VIEW REPORTS`` and then ``Pending Cancel for
 Nonpayment``. The reports page seen on hermes-test-01 on 2026-09-30 has no
 View Reports control. It has ``Export Pending Cancel for Non-Payment Pdf``
 and ``Export Pending Cancel for Non-Payment Xls``. The PDF export is tried
-first. A list PDF yields insured, policy number, and cancel date. An empty
-or truncated download is a hold, not an empty report. This click only
-downloads a report. It does not bind, cancel, or move money. This module
-never files to EZLynx.
+first. Before that download, Report Dates is set. On 2026-09-30 the field
+still showed ``Select Date Range``, the same phrase as the FAO preset
+select's custom option, and both exports were 0 bytes. The pull chooses
+that custom option, waits until Start Date and End Date are visible, and
+sets both to the process date. If the field has no custom option, it
+chooses the smallest preset that covers the process date. A missing
+control or a value that does not stick holds, and the export is not
+downloaded. A list PDF yields insured, policy number, and cancel date. An
+empty or truncated download is a hold, not an empty report. This click
+only downloads a report. It does not bind, cancel, or move money. This
+module never files to EZLynx.
 
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
@@ -70,7 +77,7 @@ import urllib.parse
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from html.parser import HTMLParser
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -2297,6 +2304,349 @@ def _download_one_export(page: Any, click: Callable[[], None], *, label: str) ->
                     pass
 
 
+@dataclass(frozen=True)
+class ReportDateChoice:
+    """Range the reports page accepted before an export."""
+
+    kind: str
+    label: str
+    start: date
+    end: date
+
+
+_REPORT_DATES_LABEL = "Report Dates"
+_CUSTOM_RANGE_LABELS = frozenset({
+    "select date range",
+    "custom",
+    "custom range",
+    "custom date range",
+})
+_DATE_PAIRS = (
+    ("Start Date", "End Date"),
+    ("Report Start Date", "Report End Date"),
+    ("From", "To"),
+)
+_REPORT_DATES_MISSING = (
+    "Progressive BOP Report Dates control is missing or ambiguous. "
+    "The export was not downloaded."
+)
+
+
+def _eastern_today() -> date:
+    return datetime.now(_EASTERN).date()
+
+
+def _export_not_downloaded(detail: str) -> IntakeHold:
+    return IntakeHold(f"{detail} The export was not downloaded.")
+
+
+def _is_visible(locator: Any) -> bool:
+    if _locator_count(locator) != 1:
+        return False
+    check = getattr(locator, "is_visible", None)
+    if not callable(check):
+        return True
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def _wait_visible(locator: Any) -> bool:
+    if _is_visible(locator):
+        return True
+    wait = getattr(locator, "wait_for", None)
+    if not callable(wait):
+        return False
+    try:
+        wait(state="visible", timeout=BOP_REPORTS_READY_TIMEOUT_MS)
+    except Exception as exc:
+        if not _is_download_timeout(exc):
+            raise _export_not_downloaded(
+                "Progressive BOP Report Dates could not be set."
+            ) from exc
+        return False
+    return _is_visible(locator)
+
+
+def _same_day(observed: str, day: date) -> bool:
+    if _norm(observed) == day.isoformat():
+        return True
+    try:
+        return parse_report_date(observed) == day
+    except IntakeHold:
+        return False
+
+
+def _report_dates_select(page: Any) -> Any | None:
+    locator = page.get_by_role("combobox", name=_REPORT_DATES_LABEL, exact=True)
+    count = _locator_count(locator)
+    if count < 0 or count > 1:
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    if count == 0:
+        return None
+    return locator
+
+
+def _date_pair(page: Any, *, wait: bool) -> tuple[Any, Any, str, str] | None:
+    found = []
+    for start_name, end_name in _DATE_PAIRS:
+        start = page.get_by_role("textbox", name=start_name, exact=True)
+        end = page.get_by_role("textbox", name=end_name, exact=True)
+        start_count = _locator_count(start)
+        end_count = _locator_count(end)
+        if start_count > 1 or end_count > 1:
+            raise IntakeHold(_REPORT_DATES_MISSING)
+        if start_count < 1 or end_count < 1:
+            continue
+        visible = (_wait_visible(start) and _wait_visible(end)) if wait else (
+            _is_visible(start) and _is_visible(end)
+        )
+        if not visible:
+            continue
+        found.append((start, end, start_name, end_name))
+    if len(found) > 1:
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    if not found:
+        return None
+    return found[0]
+
+
+def _option_labels(control: Any) -> list[tuple[str, str]]:
+    try:
+        options = control.locator("option").all()
+    except Exception as exc:
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates could not be read."
+        ) from exc
+    found: list[tuple[str, str]] = []
+    for option in options:
+        text = _norm(getattr(option, "inner_text", lambda: "")())
+        if not text:
+            text = _norm(str(option.get_attribute("label") or ""))
+        value = _norm(str(option.get_attribute("value") or ""))
+        if text:
+            found.append((text, value))
+    folded = [text.casefold() for text, _value in found]
+    if len(folded) != len(set(folded)):
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    return found
+
+
+def _select_choice(control: Any, label: str) -> None:
+    try:
+        control.select_option(label=label)
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _export_not_downloaded(
+            f"Progressive BOP Report Dates could not be set to {label}."
+        ) from exc
+
+
+def _selected_option_text(control: Any) -> str:
+    evaluate = getattr(control, "evaluate", None)
+    if callable(evaluate):
+        try:
+            text = evaluate(
+                "el => { const option = el.selectedOptions && el.selectedOptions[0];"
+                " return option ? (option.label || option.textContent || '') : ''; }"
+            )
+            cleaned = _norm(str(text or ""))
+            if cleaned:
+                return cleaned
+        except Exception:
+            pass
+    try:
+        value = _norm(str(control.input_value() or ""))
+    except Exception as exc:
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates could not be read after it was set."
+        ) from exc
+    matched = [text for text, option_value in _option_labels(control) if _norm(option_value) == value]
+    if len(matched) == 1:
+        return matched[0]
+    raise _export_not_downloaded(
+        "Progressive BOP Report Dates could not be read after it was set."
+    )
+
+
+def _fill_exact_range(
+    start: Any,
+    end: Any,
+    start_name: str,
+    end_name: str,
+    day: date,
+) -> ReportDateChoice:
+    for locator, label in ((start, start_name), (end, end_name)):
+        try:
+            locator.fill(day.isoformat())
+            observed = _norm(str(locator.input_value() or ""))
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            raise _export_not_downloaded(
+                f"Progressive BOP {label} did not accept {day.isoformat()}."
+            ) from exc
+        if not _same_day(observed, day):
+            raise _export_not_downloaded(
+                f"Progressive BOP {label} did not accept {day.isoformat()}."
+            )
+    return ReportDateChoice(
+        kind="exact",
+        label=f"{day.isoformat()} to {day.isoformat()}",
+        start=day,
+        end=day,
+    )
+
+
+def _preset_window(label: str, today: date) -> tuple[date, date] | None:
+    text = _norm(label).casefold()
+    if text in _CUSTOM_RANGE_LABELS:
+        return None
+    if text in {"today", "current day"}:
+        return today, today
+    if text == "yesterday":
+        yesterday = today - timedelta(days=1)
+        return yesterday, yesterday
+    match = re.fullmatch(r"last (\d+) days?", text)
+    if match:
+        count = int(match.group(1))
+        if count < 1:
+            return None
+        return today - timedelta(days=count - 1), today
+    if text in {"this month", "month to date"}:
+        return today.replace(day=1), today
+    if text == "last month":
+        first = today.replace(day=1)
+        end = first - timedelta(days=1)
+        return end.replace(day=1), end
+    if text in {"this year", "year to date"}:
+        return date(today.year, 1, 1), today
+    if text in {"this week", "week to date"}:
+        start = today - timedelta(days=today.weekday())
+        return start, today
+    if text == "last week":
+        this_monday = today - timedelta(days=today.weekday())
+        start = this_monday - timedelta(days=7)
+        return start, this_monday - timedelta(days=1)
+    return None
+
+
+def _choose_preset(
+    options: list[tuple[str, str]],
+    report_date: date,
+    today: date,
+) -> ReportDateChoice:
+    unknown: list[str] = []
+    covering: list[tuple[int, int, str, date, date]] = []
+    for text, _value in options:
+        if text.casefold() in _CUSTOM_RANGE_LABELS:
+            continue
+        window = _preset_window(text, today)
+        if window is None:
+            unknown.append(text)
+            continue
+        start, end = window
+        if start <= report_date <= end:
+            covering.append(((end - start).days, start.toordinal(), text, start, end))
+    if unknown:
+        names = ", ".join(unknown)
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates has a choice this pull does not understand "
+            f"({names})."
+        )
+    if not covering:
+        names = ", ".join(text for text, _value in options) or "(none)"
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates has no preset that covers "
+            f"{report_date.isoformat()}. The choices were {names}."
+        )
+    covering.sort()
+    best = covering[0]
+    tied = [item for item in covering if item[0] == best[0] and item[1] == best[1]]
+    if len(tied) != 1:
+        names = ", ".join(item[2] for item in tied)
+        raise _export_not_downloaded(
+            "Progressive BOP Report Dates presets that cover "
+            f"{report_date.isoformat()} are ambiguous ({names})."
+        )
+    _span, _ordinal, label, start, end = best
+    return ReportDateChoice(kind="preset", label=label, start=start, end=end)
+
+
+def _wait_for_report_refresh(page: Any) -> None:
+    """Let the report query finish after the date is accepted. Not a sleep."""
+    idle = getattr(page, "wait_for_load_state", None)
+    if not callable(idle):
+        return
+    try:
+        idle("networkidle", timeout=BOP_REPORTS_READY_TIMEOUT_MS)
+    except Exception as exc:
+        raise _export_not_downloaded(
+            "Progressive BOP reports page did not finish loading after Report Dates was set."
+        ) from exc
+
+
+def apply_bop_report_dates(
+    page: Any,
+    report_date: date,
+    *,
+    today: date | None = None,
+) -> ReportDateChoice:
+    """Set Report Dates to a window that covers ``report_date``.
+
+    Exact process-date to process-date is first. ``Select Date Range`` on the
+    Report Dates combobox is that custom option: the same phrase FAO uses on
+    its preset ``<select>``. Start Date and End Date are filled only after
+    they are visible. A select that has no custom option uses the smallest
+    preset whose window covers the process date. The value is read back
+    before the caller exports.
+    """
+    today = today or _eastern_today()
+    control = _report_dates_select(page)
+    pair = _date_pair(page, wait=False)
+    if pair is not None:
+        choice = _fill_exact_range(*pair, report_date)
+        _wait_for_report_refresh(page)
+        return choice
+    if control is None:
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    if not _wait_visible(control):
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    options = _option_labels(control)
+    custom = [text for text, _value in options if text.casefold() in _CUSTOM_RANGE_LABELS]
+    if len(custom) > 1:
+        raise IntakeHold(_REPORT_DATES_MISSING)
+    if len(custom) == 1:
+        _select_choice(control, custom[0])
+        pair = _date_pair(page, wait=True)
+        if pair is None:
+            raise _export_not_downloaded(
+                "Progressive BOP Report Dates is still on Select Date Range, "
+                "and Start Date and End Date were not on the page."
+            )
+        choice = _fill_exact_range(*pair, report_date)
+        _wait_for_report_refresh(page)
+        return choice
+    choice = _choose_preset(options, report_date, today)
+    _select_choice(control, choice.label)
+    observed = _selected_option_text(control)
+    if observed.casefold() != choice.label.casefold():
+        raise _export_not_downloaded(
+            f"Progressive BOP Report Dates did not accept {choice.label}."
+        )
+    _wait_for_report_refresh(page)
+    return choice
+
+
+def _page_offers_export(page: Any) -> bool:
+    return (
+        _matching_exports(page, _PDF_EXPORTS) is not None
+        or _matching_exports(page, _EXCEL_EXPORTS) is not None
+    )
+
+
 def download_export(page: Any, names: tuple[str, ...]) -> bytes | None:
     found = _matching_exports(page, names)
     if found is None:
@@ -2336,6 +2686,8 @@ def read_report_from_page(page: Any, report_date: date) -> PendingCancelReport:
             pdf_bytes=None,
             report_date=report_date,
         )
+    if _page_offers_export(page):
+        apply_bop_report_dates(page, report_date)
     pdf_hold: IntakeHold | None = None
     if _matching_exports(page, _PDF_EXPORTS) is not None:
         try:
