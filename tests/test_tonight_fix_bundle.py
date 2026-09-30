@@ -14,6 +14,7 @@ import ast
 import os
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -35,16 +36,24 @@ from robie_job_engine.answer_only import (
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
     chat_hermes_should_run,
+    guard_chat_response,
     open_chat_job,
 )
 from robie_job_engine.chat_turn_control import (
     DEFAULT_GATEWAY_MAX_TURN_SECONDS,
+    HAND_DRIVEN_EZLYNX_STOP,
     STOPPED_AFTER_TEN_MINUTES,
     _abandon_timed_out_gateway_turn,
     fail_cancelled_chat_job,
     gateway_max_turn_seconds,
     is_stop_command,
+    kill_agent_processes,
+    record_note_tool_failure,
+    refuse_hand_driven_ezlynx,
+    register_agent_process,
+    terminate_gateway_agent,
 )
+from robie_job_engine.ezlynx_discussions import discussion_request_headers
 from robie_job_engine.email_agent_runner import (
     email_agent_timeout_seconds,
     run_scripted_email,
@@ -288,6 +297,16 @@ class StopCommandTests(unittest.TestCase):
         self.assertIn("await self._apply_chat_stop(event)", adapter)
         self.assertIn("_abandon_timed_out_gateway_turn", adapter)
         self.assertIn("gateway_max_turn_seconds", adapter)
+        ceiling = adapter.split("async def _run_gateway_turn_with_ceiling", 1)[1]
+        ceiling = ceiling.split("async def _apply_chat_stop", 1)[0]
+        self.assertIn("running_agent_task", ceiling)
+        self.assertIn("await asyncio.wait_for(agent, timeout=limit)", ceiling)
+        self.assertNotIn("wait_for(self.handle_message", ceiling)
+        self.assertIn("terminate_gateway_agent", adapter)
+        self.assertIn("fail_gateway_restart_orphans", adapter)
+        control = (ROOT / "robie_job_engine/chat_turn_control.py").read_text(encoding="utf-8")
+        self.assertIn("cancel_session_processing", control)
+        self.assertIn("kill_agent_processes", control)
 
 
 class PurposeBuiltRouteTests(unittest.TestCase):
@@ -480,6 +499,212 @@ class HitlEmailTests(unittest.TestCase):
         )
         self.assertIn("ROBIE_CHAT_SA_KEY_FILE", example)
         self.assertNotIn("BEGIN PRIVATE KEY", example)
+
+
+class ProveFollowUpTests(unittest.TestCase):
+    def test_prefixed_questions_use_the_answer_only_route(self):
+        questions = (
+            "@Robie which carriers do we quote for NJ homeowners?",
+            "Can you tell me which carriers we quote for NJ homeowners?",
+        )
+        with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": "1"}, clear=False):
+            for text in questions:
+                route = classify_request(text)
+                self.assertEqual(route.action_type, "hermes.plain_english", text)
+                self.assertTrue(route.answer_only, text)
+                self.assertTrue(is_informational_ask(text), text)
+        with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": ""}, clear=False):
+            self.assertEqual(
+                classify_request("Please change the liability limit on this policy").action_type,
+                "hermes.plain_english",
+            )
+
+    def test_answer_only_close_is_not_the_general_destination_path(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            with mock.patch.dict(
+                os.environ,
+                {"ROBIE_PLAYGROUND": "1", "ROBIE_END_STATE_REPORT": ""},
+                clear=False,
+            ):
+                job_id = open_chat_job(
+                    db,
+                    "spaces/s/messages/question",
+                    "@Robie which carriers do we quote for NJ homeowners?",
+                    conversation_id="spaces/question",
+                )
+                reply = guard_chat_response(
+                    db,
+                    job_id,
+                    "We quote Travelers and Hanover for NJ homeowners.",
+                )
+            job = JobStore(db).get_job(job_id)
+        self.assertTrue(job["payload"]["answer_only"])
+        self.assertEqual(job["action_type"], "hermes.plain_english")
+        self.assertEqual(job["status"], "UNVERIFIED")
+        self.assertEqual(job["last_error"], "answer only; no EZLynx destination readback")
+        self.assertIn("Travelers and Hanover", reply)
+        self.assertNotIn("no structured destination", reply)
+
+    def test_address_change_routes_to_policy_change(self):
+        text = "Change the mailing address for Buster Brown to 100 Test Mailing Rd"
+        with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": ""}, clear=False):
+            self.assertEqual(classify_request(text).action_type, "ezlynx.policy_change")
+        with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": "1"}, clear=False):
+            self.assertEqual(classify_request(text).action_type, "ezlynx.policy_change")
+            self.assertEqual(
+                classify_request("Please change the deductible on this policy").action_type,
+                "ezlynx.policy_change",
+            )
+        self.assertIn("ezlynx_discussion_note", purpose_built_instructions(text))
+
+    def test_restart_fails_running_chat_jobs_with_a_fresh_heartbeat(self):
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job("hermes.plain_english", {"text": "still going"})
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            store.checkpoint(job["id"], "gateway_progress", {"source": "old-process"})
+            kept = store.create_job("ezlynx.reassign", {"text": "bounded"})
+            store.transition(kept["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            failed = store.fail_gateway_restart_orphans()
+            self.assertEqual(failed, [job["id"]])
+            self.assertEqual(store.get_job(job["id"])["status"], "FAILED")
+            self.assertIn("restarted", store.get_job(job["id"])["last_error"])
+            self.assertEqual(store.get_job(kept["id"])["status"], "RUNNING")
+
+    def test_stop_kills_the_browser_process_and_cancels_the_agent(self):
+        proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        register_agent_process("job-stop", proc.pid)
+
+        class Task:
+            def __init__(self):
+                self.cancelled = False
+
+            def done(self):
+                return self.cancelled
+
+            def cancel(self):
+                self.cancelled = True
+
+        task = Task()
+
+        class Adapter:
+            def __init__(self):
+                self._session_tasks = {}
+                self._background_tasks = {task}
+                self.calls = []
+
+            def interrupt_session_activity(self, key, chat_id):
+                self.calls.append(("interrupt", key, chat_id))
+
+            async def cancel_session_processing(self, key):
+                self.calls.append(("cancel", key))
+
+        class Source:
+            chat_id = "spaces/1"
+            thread_id = "thread"
+
+        class Event:
+            source = Source()
+
+        adapter = Adapter()
+        try:
+            import asyncio
+
+            asyncio.run(
+                terminate_gateway_agent(adapter, Event(), "job-stop", reason="/stop")
+            )
+            proc.wait(timeout=3)
+        finally:
+            if proc.poll() is None:
+                kill_agent_processes("job-stop")
+                proc.kill()
+                proc.wait(timeout=3)
+        self.assertIsNotNone(proc.returncode)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(task.cancelled)
+        self.assertIn("cancel", [name for name, *_rest in adapter.calls])
+        self.assertIn("interrupt", [name for name, *_rest in adapter.calls])
+
+    def test_note_tool_failure_refuses_hand_driven_ezlynx(self):
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job("hermes.google_chat_task", {"text": "file the note"})
+            record_note_tool_failure(store, job["id"], "HTTP 403 error 1010")
+            saved = store.get_job(job["id"])
+            self.assertEqual(
+                refuse_hand_driven_ezlynx(saved, store=store),
+                HAND_DRIVEN_EZLYNX_STOP,
+            )
+            policy = store.create_job(
+                "ezlynx.policy_change",
+                {"text": "Change the mailing address for Buster Brown"},
+            )
+            self.assertEqual(refuse_hand_driven_ezlynx(store.get_job(policy["id"])), HAND_DRIVEN_EZLYNX_STOP)
+        self.assertIsNone(refuse_hand_driven_ezlynx({"id": "x", "action_type": "browser.read", "payload": {}}))
+
+    def test_discussion_requests_use_a_browser_identity(self):
+        api = "https://app.uatezlynx.com/DiscussionApi/v8/discussions/by-applicant"
+        token = "https://app.ezlynx.com/auth/connect/token"
+        closed = discussion_request_headers(api, port_open=lambda: False)
+        self.assertIn("Mozilla", closed["User-Agent"])
+        self.assertNotIn("Cookie", closed)
+        cookies = [{"name": "sid", "value": "secret-value", "domain": ".uatezlynx.com"}]
+        loaded = {"called": False}
+
+        def loader():
+            loaded["called"] = True
+            return cookies
+
+        headed = discussion_request_headers(api, cookie_loader=loader)
+        self.assertTrue(loaded["called"])
+        self.assertIn("sid=secret-value", headed["Cookie"])
+        self.assertIn("Mozilla", headed["User-Agent"])
+        self.assertTrue(headed["Origin"].startswith("https://"))
+        token_headers = discussion_request_headers(token, cookie_loader=loader)
+        self.assertNotIn("Cookie", token_headers)
+        self.assertIn("Mozilla", token_headers["User-Agent"])
+
+        def boom():
+            raise AssertionError("CDP must not be opened when the port is closed")
+
+        with mock.patch(
+            "robie_job_engine.ezlynx_portal_session.load_cdp_session_cookies",
+            boom,
+        ):
+            again = discussion_request_headers(api, port_open=lambda: False)
+        self.assertNotIn("Cookie", again)
+
+    def test_missing_pkg_resources_skips_stealth_immediately(self):
+        source = (ROOT / "deploy/hermes/tools/playwright_tool.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        func = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "apply_playwright_stealth"
+        )
+        ns = {"sys": sys, "warnings": __import__("warnings")}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), "tool", "exec"), ns)
+        import builtins
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "playwright_stealth" or str(name).startswith("playwright_stealth"):
+                raise ImportError("No module named 'pkg_resources'")
+            return real_import(name, *args, **kwargs)
+
+        started = time.monotonic()
+        with mock.patch("builtins.__import__", side_effect=blocked):
+            result = ns["apply_playwright_stealth"](object(), log=lambda _message: None)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(result["error"], "pkg_resources missing")
+        self.assertEqual(result["applied"], 0)
+        requirements = (ROOT / "deploy/requirements-test-gateway-playwright.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("setuptools>=70,<81", requirements)
+        self.assertIn("continuing without stealth", source)
 
 
 if __name__ == "__main__":

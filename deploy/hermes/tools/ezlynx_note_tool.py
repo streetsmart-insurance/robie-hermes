@@ -84,11 +84,39 @@ def _file_note(args: dict) -> dict:
     }
 
 
+def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
+    import os
+
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    if not job_id or not db_path:
+        return
+    try:
+        from robie_job_engine.chat_turn_control import record_note_tool_failure
+        from robie_job_engine.store import JobStore
+
+        record_note_tool_failure(JobStore(db_path), job_id, message)
+    except Exception:
+        return
+
+
 def ezlynx_discussion_note_handler(args: dict, **kwargs):
     try:
         report = _file_note(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
-        return tool_error(f"{type(exc).__name__}: {exc}")
+        message = f"{type(exc).__name__}: {exc}"
+        _remember_note_tool_failure(kwargs, message)
+        return tool_error(
+            message
+            + " STOP. Do not drive EZLynx screens by hand. Report this error and stop."
+        )
     return tool_result(report)
 
 

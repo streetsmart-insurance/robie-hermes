@@ -14,6 +14,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from tools.registry import registry
@@ -179,18 +181,26 @@ def wait_for_cdp_json_version(
 
 
 def strip_stealth_import_warning(detail: str) -> str:
-    """Drop the setuptools pkg_resources warning so it is not a blocked error.
+    """Drop stealth import noise so it is not a blocked error.
 
-    playwright-stealth imports pkg_resources. setuptools 81+ warns that
-    pkg_resources is deprecated. Pinning setuptools in this repo would not
-    change the Hermes venv that actually imports playwright-stealth, so the
-    import is guarded and this warning line is removed from runner stderr.
+    playwright-stealth imports pkg_resources. On Test that module is missing,
+    and setuptools 81+ warns that it is deprecated. The test gateway
+    requirements pin setuptools so pkg_resources exists. If it is still
+    missing, stealth is skipped and these lines are removed from stderr so
+    they cannot become a blocked command or a 45 second timeout.
     """
     kept = []
     for line in str(detail or "").splitlines():
+        folded = line.casefold()
         if "pkg_resources is deprecated" in line:
             continue
-        if "pkg_resources" in line and "deprecated" in line.casefold():
+        if "pkg_resources" in line and "deprecated" in folded:
+            continue
+        if "pkg_resources" in folded and (
+            "no module named" in folded or "missing" in folded or "skipped" in folded
+        ):
+            continue
+        if "playwright-stealth skipped" in folded or "playwright-stealth unavailable" in folded:
             continue
         kept.append(line)
     return "\n".join(kept).strip()
@@ -229,6 +239,9 @@ def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
         else:
             print(message, file=sys.stderr)
 
+    def _pkg_resources_missing(exc: BaseException) -> bool:
+        return "pkg_resources" in str(exc).casefold()
+
     apply_one = stealth_apply
     api_name = "injected"
     if apply_one is None:
@@ -245,7 +258,13 @@ def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
 
             apply_one = stealth_sync
             api_name = "stealth_sync"
-        except ImportError:
+        except ImportError as exc:
+            if _pkg_resources_missing(exc):
+                _log(
+                    "playwright-stealth skipped: pkg_resources is missing; "
+                    "continuing without stealth"
+                )
+                return {"ok": False, "applied": 0, "error": "pkg_resources missing"}
             try:
                 import warnings
 
@@ -268,6 +287,12 @@ def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
                 apply_one = apply_sync
                 api_name = "Stealth.apply_stealth_sync"
             except ImportError as exc:
+                if _pkg_resources_missing(exc):
+                    _log(
+                        "playwright-stealth skipped: pkg_resources is missing; "
+                        "continuing without stealth"
+                    )
+                    return {"ok": False, "applied": 0, "error": "pkg_resources missing"}
                 _log(
                     "playwright-stealth not installed; EZLynx Chat attach "
                     f"continues without it: {exc}"
@@ -438,7 +463,13 @@ wait_for_cdp_json_version(cdp_url)
 pw = sync_playwright().start()
 try:
     browser = pw.chromium.connect_over_cdp(cdp_url, timeout=15000)
-    apply_playwright_stealth(browser)
+    try:
+        apply_playwright_stealth(browser)
+    except Exception as exc:
+        print(
+            "playwright-stealth skipped: " + type(exc).__name__ + ": " + str(exc),
+            file=sys.stderr,
+        )
     contexts = browser.contexts
     if not contexts:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: Chrome has no browser context")
@@ -561,6 +592,44 @@ def _persist_playwright_exec_finish(db_path, row_id, result) -> None:
         pass
 
 
+def _kill_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            return
+
+
+def _communicate_until_stopped(proc, timeout: int, job_id: str | None, payload: str):
+    """Wait on the runner, and kill it when /stop or the ceiling asks.
+
+    The full timeout is still one communicate() call. A watcher kills the
+    process group if the job is stopped, which unblocks that call. A
+    TimeoutExpired still propagates so the caller can report it.
+    """
+    from robie_job_engine.chat_turn_control import agent_stop_requested
+
+    stop_watch = threading.Event()
+
+    def _watch() -> None:
+        while not stop_watch.wait(0.2):
+            if job_id and agent_stop_requested(job_id):
+                _kill_process_group(proc.pid)
+                return
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    try:
+        stdout, stderr = proc.communicate(input=payload, timeout=timeout)
+    finally:
+        stop_watch.set()
+    return stdout, stderr, bool(job_id and agent_stop_requested(job_id))
+
+
 def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
     from tools.registry import tool_error, tool_result
 
@@ -584,6 +653,23 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             job = JobStore(bound_db).get_job(bound_job_id)
         except Exception:
             job = None
+    try:
+        from robie_job_engine.chat_turn_control import (
+            agent_stop_requested,
+            refuse_hand_driven_ezlynx,
+        )
+        from robie_job_engine.store import JobStore
+
+        if bound_job_id and agent_stop_requested(bound_job_id):
+            return _finish(tool_error(
+                "PLAYWRIGHT_BLOCKED: this job was stopped. Do not continue."
+            ))
+        note_store = JobStore(bound_db) if bound_job_id and bound_db else None
+        hand = refuse_hand_driven_ezlynx(job, store=note_store)
+        if hand:
+            return _finish(tool_error(hand))
+    except Exception:
+        pass
     # Policy-setup job class: the runner must invoke ezlynx_policy_setup as a
     # real tool call before any playwright_exec. Refuse the fall-through.
     # (342 design; 341's _hard_route_policy_setup hijack is dropped.)
@@ -684,10 +770,23 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             text=True,
             env=env,
         )
-        stdout, stderr = proc.communicate(
-            input=payload,
-            timeout=timeout,
+        from robie_job_engine.chat_turn_control import (
+            register_agent_process,
+            unregister_agent_process,
         )
+
+        register_agent_process(bound_job_id, proc.pid)
+        try:
+            stdout, stderr, stopped = _communicate_until_stopped(
+                proc, timeout, bound_job_id, payload
+            )
+        finally:
+            unregister_agent_process(bound_job_id, proc.pid)
+        if stopped:
+            return _finish(tool_error(
+                "PLAYWRIGHT_BLOCKED: stopped. The browser step was cancelled. "
+                "Do not continue."
+            ))
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGTERM)

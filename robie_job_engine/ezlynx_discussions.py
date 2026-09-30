@@ -39,11 +39,14 @@ Endpoints implemented (per the EZLynx Discussion API documentation):
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib import error, parse, request
+from urllib.parse import urlparse
 
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
@@ -106,6 +109,111 @@ def _default_urlopen(url: str, *, data: bytes | None, headers: dict[str, str], t
     return request.urlopen(req, timeout=timeout)
 
 
+# A browser User-Agent. Cloudflare 1010 rejects the default Python urllib
+# signature. Cookie values are never logged.
+_CHROME_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_BROWSER_CACHE: dict[str, Any] = {}
+_BROWSER_CACHE_SECONDS = 30.0
+
+
+def _is_token_endpoint(url: str) -> bool:
+    path = urlparse(str(url or "")).path.casefold()
+    return path.endswith("/connect/token") or path.rstrip("/").endswith("/token")
+
+
+def _cdp_port_open(timeout: float = 0.2) -> bool:
+    """True when the persistent Chrome debug port accepts a connection."""
+    from .ezlynx_portal_session import cdp_url
+
+    raw = cdp_url()
+    parsed = urlparse(raw if "://" in raw else "http://" + raw)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 9222
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def discussion_request_headers(
+    url: str,
+    *,
+    cookie_loader: Callable[[], list[dict[str, Any]]] | None = None,
+    port_open: Callable[[], bool] | None = None,
+) -> dict[str, str]:
+    """Chrome identity for Discussion API calls. The token host gets no cookies.
+
+    Cookies come from the signed-in Chrome session when that port is open.
+    Unit tests pass ``cookie_loader`` or ``port_open`` and do not attach.
+    """
+    headers = {"User-Agent": _CHROME_USER_AGENT}
+    if _is_token_endpoint(url):
+        return headers
+    headers["Accept"] = "application/json"
+    cookies = _discussion_cookies(cookie_loader=cookie_loader, port_open=port_open)
+    if not cookies:
+        return headers
+    from .ezlynx_portal_session import format_cookie_header, portal_session_headers
+
+    cookie_header = format_cookie_header(cookies)
+    if not cookie_header:
+        return headers
+    parsed = urlparse(str(url or ""))
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    headers["Cookie"] = cookie_header
+    if not origin:
+        return headers
+    try:
+        portal = portal_session_headers(cookie_header, origin, cookies)
+    except Exception:
+        headers["Origin"] = origin
+        headers["Referer"] = origin + "/"
+        return headers
+    for key, value in portal.items():
+        if key == "Content-Type":
+            continue
+        headers[key] = value
+    headers["User-Agent"] = _CHROME_USER_AGENT
+    return headers
+
+
+def _discussion_cookies(
+    *,
+    cookie_loader: Callable[[], list[dict[str, Any]]] | None,
+    port_open: Callable[[], bool] | None,
+) -> list[dict[str, Any]]:
+    if cookie_loader is not None:
+        return [row for row in (cookie_loader() or []) if isinstance(row, dict)]
+    # Pytest must not open Chrome. Callers that want the session pass a loader
+    # or port_open, which is how the live gateway attaches.
+    if port_open is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return []
+    now = time.monotonic()
+    cached_at = float(_BROWSER_CACHE.get("at") or 0)
+    if now - cached_at < _BROWSER_CACHE_SECONDS and "cookies" in _BROWSER_CACHE:
+        return list(_BROWSER_CACHE.get("cookies") or [])
+    cookies: list[dict[str, Any]] = []
+    opener = port_open or _cdp_port_open
+    try:
+        if opener():
+            from .ezlynx_portal_session import load_cdp_session_cookies
+
+            cookies = [
+                row
+                for row in (load_cdp_session_cookies() or [])
+                if isinstance(row, dict)
+            ]
+    except Exception:
+        cookies = []
+    _BROWSER_CACHE["at"] = now
+    _BROWSER_CACHE["cookies"] = cookies
+    return list(cookies)
+
+
 def reject_phone_numbers(body: str) -> str:
     """Refuse a note body containing a dialable phone number.
 
@@ -131,12 +239,15 @@ class DiscussionApiClient:
         config: DiscussionApiConfig,
         urlopen: Callable[..., Any] | None = None,
         clock: Callable[[], float] | None = None,
+        *,
+        session_headers: Callable[[str], dict[str, str]] | None = None,
     ) -> None:
         self._config = config
         self._urlopen = urlopen or _default_urlopen
         self._clock = clock or time.time
         self._token: str | None = None
         self._token_expires_at: float = 0.0
+        self._session_headers = session_headers or discussion_request_headers
 
     # -- authentication -------------------------------------------------
 
@@ -185,6 +296,13 @@ class DiscussionApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> Any:
         headers = dict(headers)
+        try:
+            extra = self._session_headers(url)
+        except Exception:
+            extra = {}
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                headers.setdefault(key, value)
         if authenticated:
             headers["Authorization"] = f"Bearer {self.get_token()}"
         try:

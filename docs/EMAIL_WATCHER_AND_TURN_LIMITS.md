@@ -21,8 +21,16 @@ share that file.
 (`agent.gateway_timeout`, default 1800 seconds). This repo does not contain
 that file. The Chat adapter enforces a separate total ceiling,
 `agent.gateway_max_turn_seconds`, default **600**. Override with
-`ROBIE_GATEWAY_MAX_TURN_SECONDS`. A turn that hits it is marked FAILED and
-the thread gets "I stopped after 10 minutes."
+`ROBIE_GATEWAY_MAX_TURN_SECONDS`.
+
+The gateway's `handle_message` starts the agent in the background and
+returns. The ceiling waits on that background task, not on the wrapper.
+When the limit fires, or someone sends `/stop`, the adapter cancels the
+agent task and kills in-flight browser processes. The job is marked FAILED
+and the thread gets "I stopped after 10 minutes." or the cancelled reply.
+
+A gateway restart fails Chat jobs still marked RUNNING, even if they have
+a recent heartbeat. That heartbeat belonged to the process that just died.
 
 ## Email watcher service
 

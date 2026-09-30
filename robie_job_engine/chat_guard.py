@@ -2059,8 +2059,31 @@ def guard_chat_response(
 
     if is_answer_only_job(job):
         content = _strip_internal_reasoning(content) or content
+        store.checkpoint(
+            job_id, "worker_response", sanitize_worker_response(store, job_id, content)
+        )
+        store.checkpoint(
+            job_id,
+            "answer_only_close",
+            {"reason": "answer only; no EZLynx destination readback"},
+        )
+        current = store.get_job(job_id)
+        if JobStatus(current["status"]) in {JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING}:
+            store.transition(
+                job_id,
+                JobStatus.UNVERIFIED,
+                expected={JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING},
+                error="answer only; no EZLynx destination readback",
+                release_lease=True,
+            )
+        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+        final = store.get_job(job_id)
+        if JobStatus(final["status"]) in TERMINAL_STATUSES:
+            maybe_snapshot_and_bind(db_path, job_id, phase="end")
+            final = _publish_terminal_job(db_path, store, final)
+        return _render_chat_terminal(store, final, content, recordings)
     store.checkpoint(job_id, "worker_response", sanitize_worker_response(store, job_id, content))
-    if store.get_checkpoint(job_id, "action") is None and not is_answer_only_job(job):
+    if store.get_checkpoint(job_id, "action") is None:
         from .chat_destination_binding import bind_destination_for_job, claimed_from_job
 
         bind_destination_for_job(store, job, claimed=claimed_from_job(job, content))

@@ -163,31 +163,41 @@ def purpose_built_instructions(text: str) -> str:
 
 
 def is_informational_ask(text: str) -> bool:
-    """A question to answer, not an EZLynx write or a vague shrug."""
+    """A question to answer, not an EZLynx write or a vague shrug.
+
+    Prefixes are checked on the request after @Robie / please / can you
+    are stripped, so "@Robie which..." and "Can you tell me which..."
+    are questions. The word "quote" inside a question is not a quote job.
+    """
     body = _ask_body(text)
+    core = core_request(text)
     if is_vague_short_request(body, attachment_count=0) and not body.rstrip().endswith("?"):
         # "can you do a book for me" is vague, not a question to research.
-        if not _normalized(body).startswith(_QUESTION_PREFIXES):
+        if not core.startswith(_QUESTION_PREFIXES):
             return False
     normalized = _normalized(body)
-    if not normalized:
+    if not core and not normalized:
         return False
+    if re.search(
+        r"\b(?:get a quote|need a quote|new quote|quote request|request a quote)\b",
+        core,
+    ):
+        return False
+    asks = core.startswith(_QUESTION_PREFIXES) or core.endswith("?") or normalized.endswith("?")
+    work_verb = re.search(
+        r"\b(?:change|update|issue|create|file|draft|bind|endorse|upload)\b",
+        core,
+    )
+    if asks and not work_verb:
+        return True
     if _ACTION_REQUEST.search(normalized) or "mailing address" in normalized:
         return False
     # "get a quote" is work. "which carriers do we quote" is a question.
-    if re.search(
-        r"\b(?:get a quote|need a quote|new quote|quote request|request a quote)\b",
-        normalized,
-    ):
-        return False
-    if re.search(r"\bquotes?\b", normalized) and not normalized.startswith(
-        _QUESTION_PREFIXES
-    ):
+    if re.search(r"\bquotes?\b", core) and not asks:
         return False
     if purpose_built_instructions(body):
         return False
-    question = normalized.endswith("?") or normalized.startswith(_QUESTION_PREFIXES)
-    return question
+    return asks
 
 
 def is_answer_only_job(job: dict[str, Any] | None) -> bool:

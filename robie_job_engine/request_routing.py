@@ -182,6 +182,11 @@ _POLICY_CHANGE_RE = re.compile(
     r"\b(?:policy change|change the policy|change this policy|endorsements?|endorse)\b"
     r"|\b(?:change|update|endorse)\b.{0,48}\bpolic"
     r"|\bpolic\w*\b.{0,48}\b(?:change|update|endorsement)\b"
+    r"|\b(?:change|update|correct|set)\b.{0,48}\b(?:address|deductible|lienholder|mortgagee|limit|garaging)\b"
+)
+_ADDRESS_CHANGE_RE = re.compile(
+    r"\b(?:change|update|correct|set|move)\b.{0,60}\b(?:mailing address|garaging address|address)\b"
+    r"|\b(?:mailing address|garaging address)\b.{0,40}\b(?:change|update|to)\b"
 )
 _CERTIFICATE_RE = re.compile(
     r"\b(?:certificate of insurance|certificate request|cert request|certificates?|coi)\b"
@@ -267,6 +272,11 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
             WORKER_FOR_ACTION["hermes.plain_english"],
             answer_only=True,
         )
+    if _is_address_change(normalized):
+        return RequestClassification(
+            "ezlynx.policy_change",
+            WORKER_FOR_ACTION["ezlynx.policy_change"],
+        )
     playground_route = _classify_playground_ezlynx(normalized)
     if playground_route is not None:
         return playground_route
@@ -321,8 +331,13 @@ def _is_quote_request(text: str) -> bool:
     return _QUOTE_RE.search(text) is not None
 
 
+def _is_address_change(text: str) -> bool:
+    """Mailing-address and other simple address edits, playground or not."""
+    return _ADDRESS_CHANGE_RE.search(text) is not None
+
+
 def _is_policy_change_request(text: str) -> bool:
-    return _POLICY_CHANGE_RE.search(text) is not None
+    return _POLICY_CHANGE_RE.search(text) is not None or _is_address_change(text)
 
 
 def _is_certificate_request(text: str) -> bool:

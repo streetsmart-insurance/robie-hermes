@@ -11,8 +11,12 @@ default 600 seconds, inside the watcher's 930 second process limit.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import re
+import signal
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +141,219 @@ def _abandon_timed_out_gateway_turn(
         {"reason": reply, "limit_seconds": limit},
     )
     return reply
+
+
+_PROC_LOCK = threading.Lock()
+_AGENT_PIDS: dict[str, set[int]] = {}
+_ABORTED_JOBS: set[str] = set()
+
+HAND_DRIVEN_EZLYNX_STOP = (
+    "STOP. Do not drive EZLynx screens by hand for this task. "
+    "The built-in note tool has to file it. "
+    "If that tool failed, report the error in plain English and stop."
+)
+
+_HAND_DRIVEN_ACTIONS = frozenset({"ezlynx.certificate", "ezlynx.policy_change"})
+
+
+def request_agent_stop(job_id: str | None) -> None:
+    """Remember that this job's agent must stop, including in-flight tools."""
+    if not job_id:
+        return
+    with _PROC_LOCK:
+        _ABORTED_JOBS.add(str(job_id))
+
+
+def agent_stop_requested(job_id: str | None) -> bool:
+    if not job_id:
+        return False
+    with _PROC_LOCK:
+        return str(job_id) in _ABORTED_JOBS
+
+
+def register_agent_process(job_id: str | None, pid: int) -> None:
+    """Track a browser/tool process group so /stop and the ceiling can kill it."""
+    if not job_id or not pid:
+        return
+    with _PROC_LOCK:
+        _AGENT_PIDS.setdefault(str(job_id), set()).add(int(pid))
+
+
+def unregister_agent_process(job_id: str | None, pid: int) -> None:
+    if not job_id or not pid:
+        return
+    with _PROC_LOCK:
+        pids = _AGENT_PIDS.get(str(job_id))
+        if not pids:
+            return
+        pids.discard(int(pid))
+        if not pids:
+            _AGENT_PIDS.pop(str(job_id), None)
+
+
+def kill_agent_processes(job_id: str | None) -> list[int]:
+    """SIGTERM, then SIGKILL, every process group started for this job."""
+    if not job_id:
+        return []
+    with _PROC_LOCK:
+        pids = list(_AGENT_PIDS.pop(str(job_id), set()))
+    killed: list[int] = []
+    for pid in pids:
+        dead = False
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pid, sig)
+                dead = True
+                break
+            except ProcessLookupError:
+                dead = True
+                break
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                    dead = True
+                    break
+                except OSError:
+                    continue
+        if dead:
+            killed.append(pid)
+    return killed
+
+
+def record_note_tool_failure(store: Any, job_id: str, message: str) -> None:
+    """Remember a built-in note/cert tool failure so the UI path stays closed."""
+    if not job_id:
+        return
+    store.checkpoint(
+        job_id,
+        "ezlynx_note_tool_failed",
+        {"error": str(message or "")[:500]},
+    )
+
+
+def _note_tool_failed(store: Any, job_id: str) -> bool:
+    if store is None or not job_id:
+        return False
+    try:
+        note = store.get_checkpoint(job_id, "ezlynx_note_tool_failed")
+    except Exception:
+        return False
+    return bool(note)
+
+
+def refuse_hand_driven_ezlynx(job: dict[str, Any] | None, store: Any = None) -> str | None:
+    """Certificates and policy changes do not fall back to hand-driven screens."""
+    if not job:
+        return None
+    action = str(job.get("action_type") or "")
+    payload = dict(job.get("payload") or {})
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("text", "request_text", "prompt")
+    ).casefold()
+    if action in _HAND_DRIVEN_ACTIONS or _note_tool_failed(store, str(job.get("id") or "")):
+        return HAND_DRIVEN_EZLYNX_STOP
+    if "certificate of insurance" in text or (
+        "mailing address" in text and any(word in text for word in ("change", "update", "correct", "set"))
+    ):
+        return HAND_DRIVEN_EZLYNX_STOP
+    return None
+
+
+def session_key_from_adapter(adapter: Any, event: Any) -> str:
+    """Session key the Hermes gateway used for this message, when it has one."""
+    source = getattr(event, "source", None)
+    builder = getattr(adapter, "build_session_key", None)
+    if callable(builder):
+        for args in (
+            (source,),
+            (event,),
+            (source, getattr(event, "message_id", None)),
+        ):
+            try:
+                key = builder(*args)
+            except TypeError:
+                continue
+            except Exception:
+                break
+            if key:
+                return str(key)
+    chat_id = str(getattr(source, "chat_id", "") or "")
+    thread_id = str(getattr(source, "thread_id", "") or "")
+    return f"chat:{chat_id}:{thread_id}"
+
+
+def running_agent_task(adapter: Any, event: Any, *, before: set | None = None) -> Any:
+    """The background agent task. handle_message returns before this finishes."""
+    key = session_key_from_adapter(adapter, event)
+    tasks = getattr(adapter, "_session_tasks", None) or {}
+    task = tasks.get(key) if isinstance(tasks, dict) else None
+    if task is not None and not getattr(task, "done", lambda: False)():
+        return task
+    background = getattr(adapter, "_background_tasks", None) or set()
+    try:
+        current = set(background)
+    except TypeError:
+        current = set()
+    prior = set(before or ())
+    fresh = [
+        item
+        for item in current - prior
+        if item is not None and not getattr(item, "done", lambda: True)()
+    ]
+    if len(fresh) == 1:
+        return fresh[0]
+    return None
+
+
+async def terminate_gateway_agent(
+    adapter: Any,
+    event: Any,
+    job_id: str | None,
+    *,
+    reason: str,
+    store: Any = None,
+) -> None:
+    """Stop the background agent and any browser process it still has open."""
+    request_agent_stop(job_id)
+    if store is not None and job_id:
+        try:
+            store.checkpoint(job_id, "agent_abort", {"reason": str(reason or "")[:300]})
+        except Exception:
+            pass
+    key = session_key_from_adapter(adapter, event)
+    source = getattr(event, "source", None)
+    chat_id = getattr(source, "chat_id", None)
+    interrupt = getattr(adapter, "interrupt_session_activity", None)
+    if callable(interrupt):
+        try:
+            interrupt(key, chat_id)
+        except TypeError:
+            try:
+                interrupt(key)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    cancel = getattr(adapter, "cancel_session_processing", None)
+    if callable(cancel):
+        try:
+            result = cancel(key)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
+    kill_agent_processes(job_id)
+    task = running_agent_task(adapter, event)
+    current = None
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if task is not None and task is not current:
+        cancel_task = getattr(task, "cancel", None)
+        if callable(cancel_task) and not getattr(task, "done", lambda: False)():
+            cancel_task()
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
