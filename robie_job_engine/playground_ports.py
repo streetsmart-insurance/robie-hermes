@@ -19,7 +19,15 @@ class PlaygroundPorts:
     def _read_port(self):
         if self.read_port is None:
             from .ezlynx_api_read_port import EzlynxApiClientReadPort
-            self.read_port = EzlynxApiClientReadPort()
+            from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+            from .ezlynx_api_only_writes import discussion_api_target, LIVE_DISCUSSION_API
+            # Use the same explicit source selection as DiscussionApi. This
+            # never changes ROBIE_ENV or enables writes. In Test, unset stays
+            # UAT; only the existing explicit live selector selects live data.
+            environment = "PRODUCTION" if discussion_api_target() == LIVE_DISCUSSION_API else None
+            self.read_port = EzlynxApiClientReadPort(
+                client=EzlynxApiClient(load_ezlynx_api_config(environment=environment))
+            )
         return self.read_port
 
     def _discussions(self):
