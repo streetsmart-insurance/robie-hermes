@@ -61,13 +61,78 @@ CREATE INDEX IF NOT EXISTS playground_memory_job
 
 _FORBIDDEN = re.compile(
     r"\b(?:passwords?|passcodes?|passphrases?|api[_ ]?keys?|access tokens?|"
-    r"refresh tokens?|bearer tokens?|secrets?|tokens?|ssns?|social security|"
+    r"refresh tokens?|bearer tokens?|secrets?|tokens?|"
     r"credit cards?|debit cards?|card numbers?|cvvs?|cvcs?|routing numbers?|"
     r"bank accounts?|ibans?|private keys?|checking accounts?|savings accounts?)\b",
     re.IGNORECASE,
 )
 _CARD = re.compile(r"\b\d{13,19}\b")
-_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_GROUPED_TAX_ID = re.compile(
+    r"\b\d{3}\s*-\s*\d{2}\s*-\s*\d{4}\b|\b\d{3}\s+\d{2}\s+\d{4}\b"
+)
+_TAX_LABEL = (
+    r"ssns?|ss\s*#|social security(?:\s+numbers?)?|"
+    r"itins?|i\.?\s*t\.?\s*i\.?\s*n\.?s?|"
+    r"individual taxpayer identification(?:\s+numbers?)?"
+)
+_TAX_LABEL_RE = rf"(?:{_TAX_LABEL}|\bsocial\b(?!\s+media\b))"
+_LABELED_TAX_ID = re.compile(
+    rf"(?P<label>\b(?:{_TAX_LABEL_RE})\b)"
+    rf"(?:(?P<gap>\s*(?:[:#]|number|no\.?|is|of)\s*)|\s+){{0,4}}"
+    rf"(?P<num>\d{{3}}\s*-\s*\d{{2}}\s*-\s*\d{{4}}|\d{{3}}\s+\d{{2}}\s+\d{{4}}|\d{{9}})\b",
+    re.IGNORECASE,
+)
+_TAX_ID_THEN_LABEL = re.compile(
+    rf"(?P<num>\b\d{{9}}\b)"
+    rf"\s+(?:is\s+)?(?:his|her|their|the|my|our)?\s*"
+    rf"(?P<label>\b(?:{_TAX_LABEL_RE})\b)",
+    re.IGNORECASE,
+)
+_POLICY_OR_PHONE = re.compile(
+    r"(?i)\b(?:polic(?:y|ies)|phone|telephone|mobile|cell|fax)\b"
+    r"(?:\s+(?:number|no\.?|#|is|the)){0,4}\s*[:#-]?\s*$"
+)
+SSN_REMOVED = "[SSN removed]"
+ITIN_REMOVED = "[ITIN removed]"
+_TAX_FILLER = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "his",
+        "her",
+        "their",
+        "my",
+        "our",
+        "is",
+        "was",
+        "are",
+        "of",
+        "and",
+        "or",
+        "to",
+        "for",
+        "that",
+        "this",
+        "it",
+        "number",
+        "no",
+        "ssn",
+        "ssns",
+        "social",
+        "security",
+        "itin",
+        "itins",
+        "taxpayer",
+        "identification",
+        "individual",
+        "remember",
+        "please",
+        "do",
+        "not",
+        "dont",
+    }
+)
 _ACCOUNT = re.compile(
     r"\b(?:account|routing)\s*(?:number|#|no\.?)?\s*[:#]?\s*\d{6,}\b",
     re.IGNORECASE,
@@ -86,6 +151,7 @@ _SECRET_STORED = (
     "A request included a secret, password, token, or payment detail, "
     "so the words were not stored."
 )
+_TAX_REFUSED = "A Social Security number or ITIN was not stored."
 _TEAM_QUESTION = (
     "Which team should I save that for: Commercial, Personal, or Trucking?"
 )
@@ -141,6 +207,28 @@ class Memory:
 
 
 @dataclass(frozen=True)
+class TaxIdScrub:
+    """How a Social Security number or ITIN was handled.
+
+    ``action`` is ``ok``, ``secret`` (some other secret), ``tax_refused``,
+    or ``tax_redacted``. ``text`` never contains the digits.
+    """
+
+    action: str
+    text: str
+    removed_ssn: bool = False
+    removed_itin: bool = False
+
+    @property
+    def found(self) -> bool:
+        return self.action in {"tax_refused", "tax_redacted"}
+
+    @property
+    def useful(self) -> bool:
+        return self.action == "tax_redacted"
+
+
+@dataclass(frozen=True)
 class PlannedMemory:
     scope: str = ""
     team: str = ""
@@ -158,7 +246,46 @@ def memory_db_path(jobs_db: str) -> str:
 
 
 def memory_contains_secret(text: str) -> bool:
-    """True when the words must not be stored or repeated."""
+    """True when the words must not be stored or repeated as written."""
+    return prepare_memory_text(text).action != "ok"
+
+
+def prepare_memory_text(text: str) -> TaxIdScrub:
+    """Drop a Social Security number or ITIN, or refuse the whole note.
+
+    A password, token, or payment detail refuses the whole note. A tax id
+    alone is refused and not saved. If the rest of the note is still a real
+    preference, the number is replaced and the rest is kept.
+    """
+    raw = " ".join(str(text or "").split())
+    if _contains_non_tax_secret(raw):
+        return TaxIdScrub(action="secret", text=_SECRET_STORED)
+    hits = _tax_id_hits(raw)
+    if not hits:
+        return TaxIdScrub(action="ok", text=raw)
+    removed_ssn = any(hit[2] == "ssn" for hit in hits)
+    removed_itin = any(hit[2] == "itin" for hit in hits)
+    if not _tax_remainder_is_useful(raw, hits):
+        return TaxIdScrub(
+            action="tax_refused",
+            text=_TAX_REFUSED,
+            removed_ssn=removed_ssn,
+            removed_itin=removed_itin,
+        )
+    redacted = _replace_tax_ids(raw, hits)
+    return TaxIdScrub(
+        action="tax_redacted",
+        text=redacted,
+        removed_ssn=removed_ssn,
+        removed_itin=removed_itin,
+    )
+
+
+def safe_text(text: str) -> str:
+    return prepare_memory_text(text).text
+
+
+def _contains_non_tax_secret(text: str) -> bool:
     raw = str(text or "")
     if not raw.strip():
         return False
@@ -168,8 +295,6 @@ def memory_contains_secret(text: str) -> bool:
         return True
     if _CARD.search(raw):
         return True
-    if _SSN.search(raw):
-        return True
     if _ACCOUNT.search(raw):
         return True
     if _PIN.search(raw):
@@ -177,10 +302,66 @@ def memory_contains_secret(text: str) -> bool:
     return False
 
 
-def safe_text(text: str) -> str:
-    if memory_contains_secret(text):
-        return _SECRET_STORED
-    return " ".join(str(text or "").split())
+def _tax_id_hits(text: str) -> list[tuple[int, int, str]]:
+    """Digit spans that are a Social Security number or an ITIN."""
+    covered: list[tuple[int, int, str]] = []
+    for pattern in (_LABELED_TAX_ID, _TAX_ID_THEN_LABEL):
+        for match in pattern.finditer(text):
+            number = match.group("num")
+            start = match.start("num")
+            end = match.end("num")
+            covered.append((start, end, _tax_kind(number, match.group("label") or "")))
+    for match in _GROUPED_TAX_ID.finditer(text):
+        if any(start <= match.start() and match.end() <= end for start, end, _kind in covered):
+            continue
+        prefix = text[max(0, match.start() - 48) : match.start()]
+        if _POLICY_OR_PHONE.search(prefix):
+            continue
+        covered.append((match.start(), match.end(), _tax_kind(match.group(0), "")))
+    covered.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    kept: list[tuple[int, int, str]] = []
+    last_end = -1
+    for start, end, kind in covered:
+        if start < last_end:
+            continue
+        kept.append((start, end, kind))
+        last_end = end
+    return kept
+
+
+def _tax_kind(number: str, label: str) -> str:
+    folded = label.casefold()
+    if "itin" in folded or "taxpayer" in folded:
+        return "itin"
+    if "ssn" in folded or "social" in folded or folded.strip() in {"ss#", "ss #"}:
+        return "ssn"
+    digits = re.sub(r"\D", "", number)
+    if len(digits) == 9 and digits.startswith("9"):
+        group = int(digits[3:5])
+        if 50 <= group <= 65 or 70 <= group <= 88 or 90 <= group <= 92 or 94 <= group <= 99:
+            return "itin"
+    return "ssn"
+
+
+def _tax_remainder_is_useful(text: str, hits: list[tuple[int, int, str]]) -> bool:
+    chars = list(text)
+    for start, end, _kind in hits:
+        for index in range(start, end):
+            chars[index] = " "
+    words = re.findall(r"[A-Za-z][A-Za-z']{1,}", "".join(chars))
+    kept = [word for word in words if word.casefold().replace("'", "") not in _TAX_FILLER]
+    return len(kept) >= 3
+
+
+def _replace_tax_ids(text: str, hits: list[tuple[int, int, str]]) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, kind in hits:
+        pieces.append(text[cursor:start])
+        pieces.append(ITIN_REMOVED if kind == "itin" else SSN_REMOVED)
+        cursor = end
+    pieces.append(text[cursor:])
+    return " ".join("".join(pieces).split())
 
 
 def canonical_team(name: str) -> str:
@@ -245,9 +426,12 @@ def plan_preference(
     A team is never guessed. If the words need a team and nobody in the
     config matches, the result is one question.
     """
-    if memory_contains_secret(fact) or memory_contains_secret(requested_by):
+    if _contains_non_tax_secret(fact) or _contains_non_tax_secret(requested_by):
         return None
-    body = " ".join(str(fact or "").split())
+    prepared = prepare_memory_text(fact)
+    if prepared.action == "tax_refused":
+        return None
+    body = prepared.text
     expires = _expires_at(body, now)
     author_team = team_for(requested_by)
     hinted = canonical_team(team_hint)
@@ -535,12 +719,16 @@ def record_job(
     """
     if not job_id:
         return None
-    secret = memory_contains_secret(text) or memory_contains_secret(outcome)
-    body = _SECRET_STORED if secret else " ".join(str(text or "").split())[:800]
-    client = "" if secret else " ".join(str(client_name or "").split())
-    applicant = "" if secret else " ".join(str(applicant_id or "").split())
+    body = safe_text(text)[:800]
+    outcome_text = safe_text(outcome) if str(outcome or "").strip() else ""
+    client = " ".join(str(client_name or "").split())
+    applicant = " ".join(str(applicant_id or "").split())
+    if _contains_non_tax_secret(client) or _tax_id_hits(client):
+        client = ""
+    if _contains_non_tax_secret(applicant) or _tax_id_hits(applicant):
+        applicant = ""
     author = requested_by or "unknown"
-    if memory_contains_secret(author):
+    if _contains_non_tax_secret(author) or _tax_id_hits(author):
         author = "unknown"
     stamp = now.isoformat()
     team = team_for(author)
@@ -561,7 +749,7 @@ def record_job(
                     body,
                     client,
                     applicant or None,
-                    outcome,
+                    outcome_text,
                     stamp,
                     author,
                     team,
@@ -576,7 +764,7 @@ def record_job(
                        source_job_id, expires_at, kind, client_name, outcome,
                        forgotten_at
                    ) VALUES ('client', ?, ?, ?, ?, ?, ?, NULL, 'job', ?, ?, '')""",
-                (author, team, applicant or None, body, stamp, job_id, client, outcome),
+                (author, team, applicant or None, body, stamp, job_id, client, outcome_text),
             )
             row_id = int(cursor.lastrowid)
         row = conn.execute(
