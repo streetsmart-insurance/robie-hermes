@@ -78,10 +78,84 @@ POLICY_CHANGE_ROUTE = (
     "existing discussion title named in the request. For a mailing-address "
     "change, use that existing title (for example Policy Change Request "
     "Checkup - Mailing Address update). Do not create a discussion. "
+    "The note must say the mailing-address change was requested until a "
+    "readback shows the new address. Do not say the mailing address was "
+    "updated before that readback. "
     "Do not use Playwright Add Note or Save Note. "
     "Do not bind, take payment, or email the client. "
     "Do not read Robie's source, jobs.db, or token files."
 )
+
+_VERIFIER_NOISE = re.compile(r"file-mutation verifier", re.IGNORECASE)
+
+_ADDRESS_COMPLETION_CLAIMS = (
+    (
+        re.compile(r"\bupdated the mailing address\b", re.IGNORECASE),
+        "requested a mailing address change",
+    ),
+    (
+        re.compile(r"\bmailing address has been updated\b", re.IGNORECASE),
+        "mailing address change was requested",
+    ),
+    (
+        re.compile(r"\bmailing address was updated\b", re.IGNORECASE),
+        "mailing address change was requested",
+    ),
+    (
+        re.compile(r"\bmailing address updated\b", re.IGNORECASE),
+        "mailing address change requested",
+    ),
+)
+
+
+def strip_answer_verifier_noise(text: str) -> str:
+    """Drop Hermes verifier warnings from an answer-only reply."""
+    kept = [
+        line
+        for line in str(text or "").splitlines()
+        if not _VERIFIER_NOISE.search(line)
+    ]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def address_readback_proved(args: dict | None = None) -> bool:
+    """True only when this call or a checkpoint says the new address was read back."""
+    payload = dict(args or {})
+    flag = payload.get("address_readback_proved")
+    if flag is True or str(flag or "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    import os
+
+    job_id = str(
+        payload.get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        note = JobStore(db_path).get_checkpoint(job_id, "address_readback")
+    except Exception:
+        return False
+    if not note:
+        return False
+    if note.get("passed") is True or note.get("proved") is True:
+        return True
+    return str(note.get("status") or "").casefold() == "passed"
+
+
+def rewrite_unproved_address_note(note_text: str, *, proved: bool = False) -> str:
+    """Keep a completion claim only after the address readback proved it."""
+    text = str(note_text or "")
+    if proved:
+        return text
+    for pattern, replacement in _ADDRESS_COMPLETION_CLAIMS:
+        text = pattern.sub(replacement, text)
+    return text
 
 FORBIDDEN_READ_RULE = (
     "Do not read Robie's own source, jobs.db, .hermes/google_token.json, "

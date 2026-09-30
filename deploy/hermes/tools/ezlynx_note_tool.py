@@ -59,6 +59,15 @@ def _file_note(args: dict) -> dict:
         raise ValueError("applicant_id is required")
     if not note_text:
         raise ValueError("note_text is required")
+    from robie_job_engine.answer_only import (
+        address_readback_proved,
+        rewrite_unproved_address_note,
+    )
+
+    note_text = rewrite_unproved_address_note(
+        note_text,
+        proved=address_readback_proved(args),
+    )
     folded = note_text.casefold()
     if "robie was here" not in folded:
         note_text = note_text + "\n\nRobie was here"

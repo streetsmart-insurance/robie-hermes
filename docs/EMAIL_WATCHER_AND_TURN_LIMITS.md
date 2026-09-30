@@ -28,10 +28,20 @@ returns. The Chat handler must return too. The gateway reads one Chat
 message at a time (`GOOGLE_CHAT_MAX_MESSAGES` stays 1), so a ceiling wait
 inside the handler blocks `/stop` until the job ends. The ceiling is a
 background watchdog. It does not hold the message slot. When the limit
-fires, or someone sends `/stop`, the adapter awaits the session interrupt,
-cancels the agent task, and kills in-flight browser processes. A stopped
-job cannot post another message or start another tool call. The thread
-gets "I stopped after 10 minutes." or the cancelled reply.
+fires, or someone sends `/stop`, the adapter calls the gateway runner's
+`_interrupt_and_clear_session` on the real session key. That stops the
+agent loop and releases the turn lease. The adapter then cancels the
+session task, drops the session guard, and SIGKILLs the browser and
+recording process group (the capture process, ffmpeg, and the Playwright
+node). A stopped job cannot post another message or start another tool
+call. The thread gets "I stopped after 10 minutes." or the cancelled
+reply, and that post is stored as a `chat_delivery` checkpoint when
+Google returns a message id.
+
+A new message in a busy session does not cancel the running job. Only
+`/stop` and the ceiling cancel. The new message gets "I'm finishing
+another job, one moment." and waits until that session is free. A
+message in a different session is not queued behind it.
 
 A gateway restart fails Chat jobs still marked RUNNING, even if they have
 a recent heartbeat. That heartbeat belonged to the process that just died.

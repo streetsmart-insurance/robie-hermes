@@ -162,6 +162,7 @@ def render_answer_only(
     client: Any = None,
 ) -> str:
     """Plain reply: the answer, Details, and the job id. No EZLynx readback."""
+    from .answer_only import strip_answer_verifier_noise
     from .email_guard import _strip_internal_reasoning
 
     job_id = str(job.get("id") or "")
@@ -171,6 +172,7 @@ def render_answer_only(
     payload = dict(job.get("payload") or {})
     ask = _ask_text(payload) or _fragment(str(worker_text or ""))
     answer = _strip_internal_reasoning(str(worker_text or ""))
+    answer = strip_answer_verifier_noise(str(answer or ""))
     answer = str(answer or "").strip()
     if end_state_report_enabled():
         scorer = client if client is not None else build_jev_client()

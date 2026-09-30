@@ -436,6 +436,12 @@ class RecordingManager:
         recording = self.store.create(job_id, output, stop_file)
         try:
             pid = self.capture.start(output, stop_file)
+            try:
+                from .chat_turn_control import register_agent_process
+
+                register_agent_process(job_id, int(pid))
+            except Exception:
+                pass
             return self.store.update(recording["id"], status="RECORDING", capture_pid=pid)
         except Exception as exc:
             return self.store.update(

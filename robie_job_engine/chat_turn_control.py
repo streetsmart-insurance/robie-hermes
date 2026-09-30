@@ -191,32 +191,134 @@ def unregister_agent_process(job_id: str | None, pid: int) -> None:
             _AGENT_PIDS.pop(str(job_id), None)
 
 
+def _descendant_pids(pid: int) -> list[int]:
+    """Child processes of ``pid``, including grandchildren. /proc only."""
+    if pid <= 1:
+        return []
+    found: list[int] = []
+    stack = [pid]
+    seen = {pid, os.getpid()}
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return []
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(proc.iterdir())
+        except OSError:
+            break
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            child = int(entry.name)
+            if child in seen:
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            close = stat.rfind(")")
+            if close < 0:
+                continue
+            parts = stat[close + 1 :].split()
+            if len(parts) < 2:
+                continue
+            try:
+                ppid = int(parts[1])
+            except ValueError:
+                continue
+            if ppid != current:
+                continue
+            seen.add(child)
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def _kill_process_tree(pid: int) -> list[int]:
+    """SIGKILL a process group and every descendant. Does not close Chrome."""
+    if pid <= 1 or pid == os.getpid():
+        return []
+    try:
+        if pid == os.getpgrp():
+            return []
+    except OSError:
+        return []
+    victims = [pid, *_descendant_pids(pid)]
+    killed: list[int] = []
+    seen: set[int] = set()
+    for item in victims:
+        if item in seen or item <= 1 or item == os.getpid():
+            continue
+        seen.add(item)
+        try:
+            os.killpg(item, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.kill(item, signal.SIGKILL)
+        except OSError:
+            pass
+        killed.append(item)
+    return killed
+
+
 def kill_agent_processes(job_id: str | None) -> list[int]:
-    """SIGTERM, then SIGKILL, every process group started for this job."""
+    """SIGKILL every process group started for this job, and its children."""
     if not job_id:
         return []
     with _PROC_LOCK:
         pids = list(_AGENT_PIDS.pop(str(job_id), set()))
     killed: list[int] = []
     for pid in pids:
-        dead = False
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+        killed.extend(_kill_process_tree(pid))
+    return killed
+
+
+def kill_job_recordings(job_id: str | None, store: Any = None) -> list[int]:
+    """SIGKILL recording process groups stored for this job.
+
+    The capture process is its own session. ffmpeg and the Playwright node
+    are its children. Killing that group does not call browser.close on the
+    shared Chrome.
+    """
+    if not job_id or store is None:
+        return []
+    db_path = getattr(store, "path", None) or getattr(store, "db_path", None)
+    if not db_path:
+        return []
+    try:
+        from .recording import RecordingStore
+
+        recordings = RecordingStore(db_path)
+        rows = recordings.list_for_job(job_id)
+    except Exception:
+        return []
+    killed: list[int] = []
+    for row in rows:
+        stop_file = str(row.get("stop_file") or "")
+        if stop_file:
             try:
-                os.killpg(pid, sig)
-                dead = True
-                break
-            except ProcessLookupError:
-                dead = True
-                break
+                Path(stop_file).touch(exist_ok=True)
             except OSError:
-                try:
-                    os.kill(pid, sig)
-                    dead = True
-                    break
-                except OSError:
-                    continue
-        if dead:
-            killed.append(pid)
+                pass
+        pid = int(row.get("capture_pid") or 0)
+        if pid:
+            killed.extend(_kill_process_tree(pid))
+        status = str(row.get("status") or "")
+        if status in {"STARTING", "RECORDING", "STOPPING"}:
+            try:
+                from .recording import _now
+
+                recordings.update(
+                    row["id"],
+                    status="FAILED",
+                    failure="stopped",
+                    failure_stage="STOP",
+                    stopped_at=_now(),
+                )
+            except Exception:
+                pass
     return killed
 
 
@@ -261,8 +363,26 @@ def refuse_hand_driven_ezlynx(job: dict[str, Any] | None, store: Any = None) -> 
 
 
 def session_key_from_adapter(adapter: Any, event: Any) -> str:
-    """Session key the Hermes gateway used for this message, when it has one."""
+    """Session key the Hermes gateway used for this message, when it has one.
+
+    The real key comes from the adapter's ``_event_session_key``. A
+    ``chat:{id}:{thread}`` fallback does not match ``_active_sessions``, so
+    interrupt and cancel would miss the running turn.
+    """
     source = getattr(event, "source", None)
+    for name, args in (
+        ("_event_session_key", (event,)),
+        ("_source_session_key", (source,)),
+    ):
+        method = getattr(adapter, name, None)
+        if not callable(method):
+            continue
+        try:
+            key = method(*args)
+        except Exception:
+            continue
+        if key:
+            return str(key)
     builder = getattr(adapter, "build_session_key", None)
     if callable(builder):
         for args in (
@@ -286,6 +406,114 @@ def session_key_from_adapter(adapter: Any, event: Any) -> str:
 STOPPED_OUTPUT = (
     "This job was stopped. Do not send another message or call another tool."
 )
+
+BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
+
+
+def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:
+    """What to do with a Chat message while a turn may already be running.
+
+    Only /stop (and the ceiling, which is not a message) cancels a job.
+    A second message is queued. It is not answered on the same Hermes
+    session, because that session's busy mode interrupts the running agent.
+    """
+    if is_stop:
+        return "stop"
+    if session_busy:
+        return "defer"
+    return "run"
+
+
+def _turn_record_running(record: Any) -> bool:
+    if not isinstance(record, dict) or not record.get("job_id"):
+        return False
+    task = record.get("task")
+    watchdog = record.get("watchdog")
+    if task is not None and not getattr(task, "done", lambda: True)():
+        return True
+    if task is None and (
+        watchdog is None or not getattr(watchdog, "done", lambda: True)()
+    ):
+        return True
+    return False
+
+
+def session_is_busy(adapter: Any, event: Any) -> bool:
+    """True when this Chat session already has a live agent turn."""
+    key = session_key_from_adapter(adapter, event)
+    active = getattr(adapter, "_active_sessions", None)
+    if isinstance(active, dict) and key in active:
+        return True
+    turns = getattr(adapter, "_gateway_turns", None)
+    if not isinstance(turns, dict):
+        return False
+    source = getattr(event, "source", None)
+    wanted = turn_key(
+        getattr(source, "chat_id", None),
+        getattr(source, "thread_id", None),
+    )
+    record = turns.get(wanted)
+    if record is None and wanted[1]:
+        record = turns.get((wanted[0], ""))
+    return _turn_record_running(record)
+
+
+def _release_session_guard(adapter: Any, key: str) -> None:
+    """Drop the in-memory hold so the next message is not stuck behind it."""
+    for name in ("_active_sessions", "_session_tasks", "_pending_messages"):
+        mapping = getattr(adapter, name, None)
+        if isinstance(mapping, dict):
+            mapping.pop(key, None)
+
+
+def record_chat_delivery(
+    store: Any,
+    job_id: str | None,
+    message_id: str | None,
+    text: str,
+    kind: str,
+) -> bool:
+    """Prove a stop or ceiling reply was posted. Missing id is not proof."""
+    posted_id = str(message_id or "").strip()
+    if store is None or not job_id or not posted_id:
+        return False
+    store.checkpoint(
+        job_id,
+        "chat_delivery",
+        {
+            "message_id": posted_id,
+            "text": str(text or "")[:2000],
+            "kind": str(kind or ""),
+            "posted": True,
+        },
+    )
+    existing = None
+    try:
+        existing = store.get_checkpoint(job_id, "worker_response")
+    except Exception:
+        existing = None
+    if not existing:
+        from .worker_contract import sanitize_worker_response
+
+        store.checkpoint(
+            job_id,
+            "worker_response",
+            sanitize_worker_response(store, job_id, str(text or "")[:2000]),
+        )
+    return True
+
+
+def sent_message_id(result: Any) -> str:
+    """Google message id from a send result. Empty when the post is unproved."""
+    direct = getattr(result, "message_id", None)
+    if direct:
+        return str(direct).strip()
+    raw = getattr(result, "raw_response", None)
+    if isinstance(raw, dict):
+        name = raw.get("name") or raw.get("message_id")
+        if name:
+            return str(name).strip()
+    return ""
 
 
 def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
@@ -389,6 +617,21 @@ def running_agent_task(adapter: Any, event: Any, *, before: set | None = None) -
     return None
 
 
+def _capture_session_task(adapter: Any, event: Any, key: str) -> Any:
+    """Read the agent task before cancel removes it from the session map."""
+    tasks = getattr(adapter, "_session_tasks", None)
+    if isinstance(tasks, dict):
+        task = tasks.get(key)
+        if task is not None and not getattr(task, "done", lambda: False)():
+            return task
+    return running_agent_task(adapter, event)
+
+
+async def _await_interrupt(result: Any) -> None:
+    if inspect.isawaitable(result):
+        await result
+
+
 async def terminate_gateway_agent(
     adapter: Any,
     event: Any,
@@ -397,39 +640,71 @@ async def terminate_gateway_agent(
     reason: str,
     store: Any = None,
 ) -> None:
-    """Stop the background agent and any browser process it still has open."""
+    """Stop the agent, release its session lease, and kill its process group.
+
+    ``interrupt_session_activity`` only sets a flag. The gateway runner's
+    ``_interrupt_and_clear_session`` is what stops the agent loop and drops
+    the turn lease. The session maps are cleared even if that task is still
+    unwinding, so the next message does not wait for a gateway restart.
+    """
     request_agent_stop(job_id)
     if store is not None and job_id:
         try:
             store.checkpoint(job_id, "agent_abort", {"reason": str(reason or "")[:300]})
         except Exception:
             pass
+        db_path = getattr(store, "path", None) or getattr(store, "db_path", None)
+        if db_path:
+            try:
+                from .chat_guard import stop_generic_chat_job_heartbeat
+
+                stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
+            except Exception:
+                pass
     key = session_key_from_adapter(adapter, event)
     source = getattr(event, "source", None)
     chat_id = getattr(source, "chat_id", None)
-    interrupt = getattr(adapter, "interrupt_session_activity", None)
-    if callable(interrupt):
+    task = _capture_session_task(adapter, event, key)
+    runner = getattr(adapter, "gateway_runner", None)
+    clear = getattr(runner, "_interrupt_and_clear_session", None) if runner is not None else None
+    if callable(clear):
         try:
-            result = interrupt(key, chat_id)
+            result = clear(
+                key,
+                source,
+                interrupt_reason=reason,
+                invalidation_reason=reason,
+            )
         except TypeError:
             try:
-                result = interrupt(key)
+                result = clear(key, source)
             except Exception:
                 result = None
         except Exception:
             result = None
-        if inspect.isawaitable(result):
-            await result
+        await _await_interrupt(result)
+    else:
+        interrupt = getattr(adapter, "interrupt_session_activity", None)
+        if callable(interrupt):
+            try:
+                result = interrupt(key, chat_id)
+            except TypeError:
+                try:
+                    result = interrupt(key)
+                except Exception:
+                    result = None
+            except Exception:
+                result = None
+            await _await_interrupt(result)
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
             result = cancel(key)
-            if inspect.isawaitable(result):
-                await result
+            await _await_interrupt(result)
         except Exception:
             pass
     kill_agent_processes(job_id)
-    task = running_agent_task(adapter, event)
+    kill_job_recordings(job_id, store)
     current = None
     try:
         current = asyncio.current_task()
@@ -439,6 +714,12 @@ async def terminate_gateway_agent(
         cancel_task = getattr(task, "cancel", None)
         if callable(cancel_task) and not getattr(task, "done", lambda: False)():
             cancel_task()
+        if inspect.isawaitable(task):
+            try:
+                await asyncio.wait_for(task, timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+    _release_session_guard(adapter, key)
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:

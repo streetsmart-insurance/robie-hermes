@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from robie_job_engine.answer_only import (
     is_informational_ask,
     is_vague_short_request,
     purpose_built_instructions,
+    rewrite_unproved_address_note,
+    strip_answer_verifier_noise,
 )
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
@@ -40,6 +43,7 @@ from robie_job_engine.chat_guard import (
     open_chat_job,
 )
 from robie_job_engine.chat_turn_control import (
+    BUSY_SESSION_REPLY,
     DEFAULT_GATEWAY_MAX_TURN_SECONDS,
     HAND_DRIVEN_EZLYNX_STOP,
     STOPPED_AFTER_TEN_MINUTES,
@@ -48,13 +52,17 @@ from robie_job_engine.chat_turn_control import (
     agent_output_blocked,
     fail_cancelled_chat_job,
     gateway_max_turn_seconds,
+    incoming_message_action,
     is_stop_command,
     kill_agent_processes,
+    kill_job_recordings,
+    record_chat_delivery,
     record_note_tool_failure,
     refuse_current_tool_call,
     refuse_hand_driven_ezlynx,
     register_agent_process,
     request_agent_stop,
+    session_is_busy,
     terminate_gateway_agent,
     watch_turn_ceiling,
 )
@@ -69,7 +77,7 @@ from robie_job_engine.email_dispatch import (
     run_email_batch,
 )
 from robie_job_engine.email_guard import _strip_internal_reasoning
-from robie_job_engine.end_state_report import render_job_end_state
+from robie_job_engine.end_state_report import render_answer_only, render_job_end_state
 from robie_job_engine.hitl_email import CARLO_EMAIL, carlo_hitl_email_sender
 from robie_job_engine.hitl_escalation import HitlRequest, escalate
 from robie_job_engine.models import JobStatus
@@ -321,10 +329,25 @@ class StopCommandTests(unittest.TestCase):
         watch = watch.split("def running_agent_task", 1)[0]
         self.assertIn("await asyncio.wait_for(asyncio.shield(agent), timeout=limit)", watch)
         terminate = control.split("async def terminate_gateway_agent", 1)[1]
-        self.assertIn("inspect.isawaitable(result)", terminate)
-        self.assertIn("await result", terminate)
+        self.assertIn("_await_interrupt", terminate)
+        self.assertIn("_interrupt_and_clear_session", terminate)
+        self.assertIn("_release_session_guard", terminate)
+        self.assertIn("kill_job_recordings", terminate)
+        awaited = control.split("async def _await_interrupt", 1)[1]
+        self.assertIn("inspect.isawaitable(result)", awaited)
+        self.assertIn("await result", awaited)
         self.assertIn("cancel_session_processing", control)
         self.assertIn("kill_agent_processes", control)
+        self.assertIn("BUSY_SESSION_REPLY", adapter)
+        defer_at = adapter.index("BUSY_SESSION_REPLY")
+        self.assertLess(stop_at, defer_at)
+        self.assertLess(defer_at, open_at)
+        between = adapter.split("if is_stop_command(text)", 1)[1].split(
+            "job_id = await asyncio.to_thread", 1
+        )[0]
+        self.assertNotIn("interrupt", between)
+        self.assertIn("record_chat_delivery", adapter)
+        self.assertIn("robie_delivery_kind", adapter)
         for relative in (
             "deploy/hermes/tools/ezlynx_note_tool.py",
             "deploy/hermes/tools/ezlynx_document_tool.py",
@@ -1195,6 +1218,368 @@ class LiveDiscussionApiTests(unittest.TestCase):
         self.assertIn("does not fall back to UAT", runbook)
         example = (ROOT / "deploy/systemd/robie-ezlynx.env.example").read_text(encoding="utf-8")
         self.assertIn("# ROBIE_EZLYNX_DISCUSSION_API=live", example)
+
+
+class ProveSessionReleaseTests(unittest.TestCase):
+    def test_stop_ends_the_agent_and_releases_the_session_lease(self):
+        import asyncio
+
+        from robie_job_engine.chat_guard import (
+            _GENERIC_CHAT_HEARTBEATS,
+            start_generic_chat_job_heartbeat,
+            stop_generic_chat_job_heartbeat,
+        )
+
+        async def scenario(store, job_id):
+            agent = {"alive": True, "beats": 0}
+            released = {}
+
+            async def loop():
+                while agent["alive"]:
+                    agent["beats"] += 1
+                    await asyncio.sleep(0.05)
+
+            task = asyncio.create_task(loop())
+            await asyncio.sleep(0.08)
+
+            class Runner:
+                async def _interrupt_and_clear_session(
+                    self,
+                    key,
+                    source,
+                    *,
+                    interrupt_reason,
+                    invalidation_reason,
+                    release_running_state=True,
+                ):
+                    released["awaited"] = True
+                    released["key"] = key
+                    released["reason"] = interrupt_reason
+                    agent["alive"] = False
+                    released["ok"] = True
+
+            class Adapter:
+                def __init__(self):
+                    self._active_sessions = {
+                        "google_chat:dm:spaces/1": asyncio.Event()
+                    }
+                    self._session_tasks = {"google_chat:dm:spaces/1": task}
+                    self._pending_messages = {"google_chat:dm:spaces/1": ["held"]}
+                    self._background_tasks = {task}
+                    self.gateway_runner = Runner()
+                    self.interrupts = []
+
+                def _event_session_key(self, event):
+                    return "google_chat:dm:spaces/1"
+
+                async def interrupt_session_activity(self, key, chat_id=None):
+                    self.interrupts.append(key)
+
+                async def cancel_session_processing(self, key):
+                    found = self._session_tasks.pop(key, None)
+                    if found is not None and not found.done():
+                        found.cancel()
+
+            class Source:
+                chat_id = "spaces/1"
+                thread_id = ""
+
+            class Event:
+                source = Source()
+
+            adapter = Adapter()
+            await terminate_gateway_agent(
+                adapter, Event(), job_id, reason="/stop", store=store
+            )
+            return adapter, agent, released, task
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job("hermes.google_chat_task", {"text": "long job"})
+            store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+            start_generic_chat_job_heartbeat(db, job["id"], interval_seconds=30)
+            try:
+                adapter, agent, released, task = asyncio.run(scenario(store, job["id"]))
+            finally:
+                stop_generic_chat_job_heartbeat(db, job["id"])
+                _clear_agent_stop(job["id"])
+            heartbeat_key = (str(Path(db).resolve()), job["id"])
+            self.assertNotIn(heartbeat_key, _GENERIC_CHAT_HEARTBEATS)
+            self.assertGreater(agent["beats"], 0)
+            self.assertFalse(agent["alive"])
+            self.assertTrue(task.done())
+            self.assertNotIn("google_chat:dm:spaces/1", adapter._active_sessions)
+            self.assertNotIn("google_chat:dm:spaces/1", adapter._session_tasks)
+            self.assertNotIn("google_chat:dm:spaces/1", adapter._pending_messages)
+            self.assertTrue(released.get("ok"))
+            self.assertTrue(released.get("awaited"))
+            self.assertEqual(released.get("key"), "google_chat:dm:spaces/1")
+            self.assertEqual(adapter.interrupts, [])
+
+    def test_stop_kills_the_recording_process_group(self):
+        proc = subprocess.Popen(
+            ["bash", "-c", "sleep 60 & sleep 60 & wait"],
+            start_new_session=True,
+        )
+        deadline = time.time() + 2
+        children: list[int] = []
+        while time.time() < deadline and len(children) < 2:
+            children = _child_pids(proc.pid)
+            time.sleep(0.05)
+        try:
+            self.assertGreaterEqual(len(children), 2, children)
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                stop_file = Path(tmp) / "capture.stop"
+
+                class PathStore:
+                    def __init__(self, path: str) -> None:
+                        self.path = path
+
+                from robie_job_engine.recording import RecordingStore
+
+                recordings = RecordingStore(db)
+                row = recordings.create("job-rec", Path(tmp) / "capture.webm", stop_file)
+                recordings.update(row["id"], status="RECORDING", capture_pid=proc.pid)
+                killed = kill_job_recordings("job-rec", PathStore(db))
+                self.assertIn(proc.pid, killed)
+                proc.wait(timeout=3)
+                saved = recordings.get(row["id"])
+                self.assertTrue(stop_file.is_file())
+                self.assertEqual(saved["status"], "FAILED")
+            self.assertIsNotNone(proc.poll())
+            self.assertNotEqual(proc.returncode, 0)
+            for child in children:
+                self.assertFalse(Path(f"/proc/{child}").exists(), child)
+            self.assertEqual(saved["failure"], "stopped")
+        finally:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                proc.wait(timeout=3)
+
+    def test_a_new_message_is_queued_and_does_not_cancel_the_running_job(self):
+        self.assertEqual(
+            incoming_message_action(session_busy=True, is_stop=False), "defer"
+        )
+        self.assertEqual(
+            incoming_message_action(session_busy=True, is_stop=True), "stop"
+        )
+        self.assertEqual(
+            incoming_message_action(session_busy=False, is_stop=False), "run"
+        )
+        self.assertEqual(BUSY_SESSION_REPLY, "I'm finishing another job, one moment.")
+
+        class Agent:
+            def __init__(self):
+                self.interrupted = False
+
+            def interrupt(self, text=None):
+                self.interrupted = True
+
+        agent = Agent()
+        running = {"status": "RUNNING"}
+        if incoming_message_action(session_busy=True, is_stop=False) != "defer":
+            agent.interrupt("Which carriers do we quote?")
+            running["status"] = "FAILED"
+        self.assertFalse(agent.interrupted)
+        self.assertEqual(running["status"], "RUNNING")
+
+        class Adapter:
+            def __init__(self):
+                self._active_sessions = {}
+                self._gateway_turns = {}
+
+            def _event_session_key(self, event):
+                thread = getattr(event.source, "thread_id", "") or ""
+                return f"google_chat:group:spaces/1:{thread}"
+
+        class Source:
+            def __init__(self, thread_id):
+                self.chat_id = "spaces/1"
+                self.thread_id = thread_id
+
+        class Event:
+            def __init__(self, thread_id):
+                self.source = Source(thread_id)
+
+        adapter = Adapter()
+        live = type("Task", (), {"done": lambda self: False})()
+        adapter._active_sessions["google_chat:group:spaces/1:thread-a"] = object()
+        adapter._gateway_turns[("spaces/1", "thread-a")] = {
+            "job_id": "job-long",
+            "task": live,
+            "watchdog": live,
+        }
+        self.assertTrue(session_is_busy(adapter, Event("thread-a")))
+        self.assertFalse(session_is_busy(adapter, Event("thread-b")))
+        adapter._active_sessions.clear()
+        finished = type("Task", (), {"done": lambda self: True})()
+        adapter._gateway_turns[("spaces/1", "thread-a")] = {
+            "job_id": "job-long",
+            "task": finished,
+            "watchdog": finished,
+        }
+        self.assertFalse(session_is_busy(adapter, Event("thread-a")))
+
+    def test_answer_only_omits_file_mutation_verifier_noise(self):
+        noisy = (
+            "We quote Travelers and Hanover for NJ homeowners.\n"
+            "File-mutation verifier: unexpected write under /tmp\n"
+        )
+        self.assertEqual(
+            strip_answer_verifier_noise(noisy),
+            "We quote Travelers and Hanover for NJ homeowners.",
+        )
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job("hermes.plain_english", {"text": QUESTION})
+            with mock.patch.dict(os.environ, {"ROBIE_END_STATE_REPORT": ""}, clear=False):
+                reply = render_answer_only(store, store.get_job(job["id"]), noisy)
+        self.assertIn("Travelers and Hanover", reply)
+        self.assertNotIn("File-mutation", reply)
+        self.assertNotIn("verifier", reply.casefold())
+
+    def test_address_note_claims_only_what_readback_proved(self):
+        from robie_job_engine.answer_only import address_readback_proved
+
+        unproved = rewrite_unproved_address_note("Mailing address updated")
+        self.assertIn("requested", unproved.casefold())
+        self.assertNotIn("updated", unproved.casefold())
+        self.assertEqual(
+            rewrite_unproved_address_note("Mailing address updated", proved=True),
+            "Mailing address updated",
+        )
+        self.assertIn("requested", POLICY_CHANGE_ROUTE.casefold())
+        self.assertIn("readback", POLICY_CHANGE_ROUTE.casefold())
+        with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": ""}, clear=False):
+            self.assertEqual(
+                classify_request(
+                    "Please change the liability limit on this policy"
+                ).action_type,
+                "hermes.plain_english",
+            )
+            self.assertEqual(
+                classify_request(
+                    "Change the mailing address for Buster Brown to 100 Test Mailing Rd"
+                ).action_type,
+                "ezlynx.policy_change",
+            )
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "ezlynx.policy_change",
+                {"text": "Change the mailing address"},
+            )
+            self.assertFalse(
+                address_readback_proved({"job_id": job["id"], "db_path": db})
+            )
+            store.checkpoint(job["id"], "address_readback", {"passed": True})
+            self.assertTrue(
+                address_readback_proved({"job_id": job["id"], "db_path": db})
+            )
+            self.assertEqual(
+                rewrite_unproved_address_note(
+                    "Mailing address updated",
+                    proved=address_readback_proved({"job_id": job["id"], "db_path": db}),
+                ),
+                "Mailing address updated",
+            )
+        note, previous, created = _load_hermes_tool(
+            "ezlynx_note_tool_address_claim", "ezlynx_note_tool.py"
+        )
+        try:
+            with mock.patch(
+                "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                return_value={"status": "filed", "note_id": "note-1"},
+            ) as filed:
+                note._file_note(
+                    {
+                        "applicant_id": "26356199",
+                        "note_text": "Mailing address updated",
+                    }
+                )
+            sent = filed.call_args[0][1]
+        finally:
+            _restore_modules(previous, created)
+        self.assertIn("requested", sent.casefold())
+        self.assertNotIn("updated", sent.casefold())
+        self.assertIn("Robie was here", sent)
+
+    def test_stop_and_ceiling_replies_record_delivery(self):
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job = store.create_job("hermes.google_chat_task", {"text": "working"})
+            self.assertFalse(
+                record_chat_delivery(store, job["id"], "", "Cancelled.", "stop")
+            )
+            self.assertIsNone(store.get_checkpoint(job["id"], "chat_delivery"))
+            self.assertTrue(
+                record_chat_delivery(
+                    store,
+                    job["id"],
+                    "spaces/1/messages/9",
+                    "I stopped after 10 minutes. Send it again if you still want it done.",
+                    "ceiling",
+                )
+            )
+            saved = store.get_checkpoint(job["id"], "chat_delivery")
+            worker = store.get_checkpoint(job["id"], "worker_response")
+            self.assertEqual(saved["message_id"], "spaces/1/messages/9")
+            self.assertTrue(saved["posted"])
+            self.assertEqual(saved["kind"], "ceiling")
+            self.assertIn("stopped after 10 minutes", str(worker).casefold())
+            store.checkpoint(
+                job["id"], "worker_response", {"response_text": "keep me"}
+            )
+            record_chat_delivery(
+                store,
+                job["id"],
+                "spaces/1/messages/10",
+                "Stopped. That job is cancelled.",
+                "stop",
+            )
+            self.assertEqual(
+                store.get_checkpoint(job["id"], "worker_response"),
+                {"response_text": "keep me"},
+            )
+            self.assertEqual(
+                store.get_checkpoint(job["id"], "chat_delivery")["kind"], "stop"
+            )
+        send = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        send = send.split("async def send(", 1)[1].split("async def send_card(", 1)[0]
+        self.assertIn("record_chat_delivery", send)
+        self.assertIn("robie_stop_notice", send)
+        self.assertIn("sent_message_id", send)
+
+
+def _child_pids(pid: int) -> list[int]:
+    found = []
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        close = stat.rfind(")")
+        if close < 0:
+            continue
+        parts = stat[close + 1 :].split()
+        if len(parts) < 2:
+            continue
+        try:
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        if ppid == pid:
+            found.append(int(entry.name))
+    return found
 
 
 if __name__ == "__main__":

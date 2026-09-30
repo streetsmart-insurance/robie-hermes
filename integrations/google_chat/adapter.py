@@ -1027,6 +1027,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # In-flight Chat turns, keyed by (chat_id, thread_id). /stop cancels
         # the task and fails the linked job. It does not open a new job.
         self._gateway_turns: Dict[tuple, Dict[str, Any]] = {}
+        # Messages that arrived while this session was busy. Drained after
+        # the session guard is free. They do not interrupt the running job.
+        self._robie_deferred: Dict[str, list] = {}
+        self._robie_deferred_drains: Dict[str, asyncio.Task] = {}
+        self._robie_deferred_release_ids: set = set()
         # Last-seen inbound thread name per chat_id (space). Google Chat
         # DMs create a NEW thread per top-level user message but the user
         # views them as one logical conversation. We:
@@ -1602,6 +1607,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     metadata={
                         "thread_id": getattr(source, "thread_id", None),
                         "robie_stop_notice": True,
+                        "robie_delivery_kind": "ceiling",
                     },
                 )
 
@@ -1661,6 +1667,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             metadata={
                 "thread_id": getattr(source, "thread_id", None),
                 "robie_stop_notice": True,
+                "robie_delivery_kind": "stop",
             },
         )
 
@@ -3001,11 +3008,85 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 await self._apply_chat_stop(event)
                 return
 
-            message_id = event.message_id or f"unidentified:{id(event)}"
-            text = redact_text(text)
-            attachment_kwargs = self._chat_job_attachment_kwargs(event)
-            attachment_count = attachment_kwargs["expected_attachment_count"]
-            job_id = await asyncio.to_thread(
+            from robie_job_engine.chat_turn_control import (
+                BUSY_SESSION_REPLY,
+                incoming_message_action,
+                session_is_busy,
+                session_key_from_adapter,
+            )
+
+            if (
+                id(event) not in self._robie_deferred_release_ids
+                and event.source is not None
+                and incoming_message_action(
+                    session_busy=session_is_busy(self, event),
+                    is_stop=False,
+                )
+                == "defer"
+            ):
+                await self.send(
+                    event.source.chat_id,
+                    BUSY_SESSION_REPLY,
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
+                key = session_key_from_adapter(self, event)
+                self._robie_deferred.setdefault(key, []).append(event)
+                self._ensure_deferred_chat_drain(key)
+                return
+
+            await self._open_and_run_chat_job(event, text)
+        except Exception:
+            logger.exception("[GoogleChat] _dispatch_message failed")
+            # Pub/Sub may ACK only after the durable handoff succeeds. Let the
+            # coordinator NACK failures so Google can redeliver the same
+            # idempotent event instead of silently losing executable work.
+            raise
+
+    def _ensure_deferred_chat_drain(self, key: str) -> None:
+        """Start one drainer for this session. A second message only queues."""
+        existing = self._robie_deferred_drains.get(key)
+        if existing is not None and not existing.done():
+            return
+        self._robie_deferred_drains[key] = asyncio.create_task(
+            self._drain_deferred_chat(key),
+            name=f"robie-deferred-chat:{key}",
+        )
+
+    async def _drain_deferred_chat(self, key: str) -> None:
+        """Run queued messages only after this session's guard is free."""
+        from robie_job_engine.chat_turn_control import session_is_busy
+
+        try:
+            while self._robie_deferred.get(key):
+                event = self._robie_deferred[key][0]
+                if session_is_busy(self, event):
+                    await asyncio.sleep(0.25)
+                    continue
+                self._robie_deferred[key].pop(0)
+                self._robie_deferred_release_ids.add(id(event))
+                try:
+                    await self._open_and_run_chat_job(
+                        event, str(getattr(event, "text", "") or "")
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GoogleChat] deferred Chat message failed session=%s",
+                        key,
+                    )
+            self._robie_deferred.pop(key, None)
+        finally:
+            current = self._robie_deferred_drains.get(key)
+            if current is asyncio.current_task():
+                self._robie_deferred_drains.pop(key, None)
+
+    async def _open_and_run_chat_job(self, event: MessageEvent, text: str) -> None:
+        """Open one job and run it. Caller has already decided this turn may start."""
+        message_id = event.message_id or f"unidentified:{id(event)}"
+        text = redact_text(text)
+        attachment_kwargs = self._chat_job_attachment_kwargs(event)
+        attachment_count = attachment_kwargs["expected_attachment_count"]
+        job_id = await asyncio.to_thread(
                 open_chat_job,
                 ROBIE_JOB_DB,
                 message_id,
@@ -3020,89 +3101,83 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 expected_attachment_count=attachment_count,
                 attachment_refs=attachment_kwargs["attachment_refs"],
                 drive_port=attachment_kwargs["drive_port"],
+        )
+        related_only = chat_message_is_related_only(
+            text,
+            expected_attachment_count=attachment_count,
+        )
+        correction = classify_request(text, attachment_count=attachment_count)
+        if job_id:
+            queue = await asyncio.to_thread(self._durable_chat_queue)
+            relation = (
+                "CORRECTION"
+                if related_only and correction.action_type in BOUNDED_ENGINE_ACTIONS
+                else "CONTINUATION" if related_only else "CREATED"
             )
-            related_only = chat_message_is_related_only(
-                text,
-                expected_attachment_count=attachment_count,
-            )
-            correction = classify_request(text, attachment_count=attachment_count)
-            if job_id:
-                queue = await asyncio.to_thread(self._durable_chat_queue)
-                relation = (
-                    "CORRECTION"
-                    if related_only and correction.action_type in BOUNDED_ENGINE_ACTIONS
-                    else "CONTINUATION" if related_only else "CREATED"
-                )
-                try:
-                    await asyncio.to_thread(
-                        queue.link_conversation_job,
-                        conversation_id=getattr(event.source, "chat_id", None)
-                        or "google-chat:unknown",
-                        job_id=job_id,
-                        message_id=message_id,
-                        event_id=message_id,
-                        relation=relation,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[GoogleChat] Could not link conversation job for %s: %s",
-                        message_id,
-                        exc,
-                    )
-            if job_id and await self._halt_failed_drive_ingestion(
-                event, job_id, attachment_kwargs["attachment_refs"]
-            ):
-                return
-            if job_id and await self._halt_action_gate_refuse(event, job_id):
-                return
-            if await self._halt_retry_refusal(event, job_id, text):
-                return
-            if related_only:
-                # A corrective reply may safely retarget the exact active
-                # zero-attempt Job to a bounded destination action. Execute
-                # that same Job ID instead of dispatching Hermes or creating
-                # a duplicate. Ordinary status/questions remain conversational.
-                if (
-                    job_id
-                    and correction.action_type in BOUNDED_ENGINE_ACTIONS
-                    and await self._enqueue_bounded_chat_job(
-                        event, job_id, related_only=True
-                    )
-                ):
-                    return
-                await self.handle_message(event)
-                return
-            # Test AND Production: operational bounded work goes through
-            # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
-            # DurableWorkLedger. Ledger/path failures fail closed. Hermes
-            # is only for non-operational or explicit sandbox chat.
-            if job_id and await self._enqueue_bounded_chat_job(
-                event, job_id, related_only=False
-            ):
-                return
-            if dispatch_operational_chat(
-                ROBIE_JOB_DB,
-                job_id,
-                sandbox=chat_path_is_sandbox(
-                    conversation_id=getattr(event.source, "chat_id", None)
-                    if getattr(event, "source", None)
-                    else None
-                ),
-            ):
-                return
-            execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
             try:
-                event.text = execution_text
-            except Exception:
-                from dataclasses import replace
-                event = replace(event, text=execution_text)
-            await self._run_generic_chat_job(job_id, event)
+                await asyncio.to_thread(
+                    queue.link_conversation_job,
+                    conversation_id=getattr(event.source, "chat_id", None)
+                    or "google-chat:unknown",
+                    job_id=job_id,
+                    message_id=message_id,
+                    event_id=message_id,
+                    relation=relation,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[GoogleChat] Could not link conversation job for %s: %s",
+                    message_id,
+                    exc,
+                )
+        if job_id and await self._halt_failed_drive_ingestion(
+            event, job_id, attachment_kwargs["attachment_refs"]
+        ):
+            return
+        if job_id and await self._halt_action_gate_refuse(event, job_id):
+            return
+        if await self._halt_retry_refusal(event, job_id, text):
+            return
+        if related_only:
+            # A corrective reply may safely retarget the exact active
+            # zero-attempt Job to a bounded destination action. Execute
+            # that same Job ID instead of dispatching Hermes or creating
+            # a duplicate. Ordinary status/questions remain conversational.
+            if (
+                job_id
+                and correction.action_type in BOUNDED_ENGINE_ACTIONS
+                and await self._enqueue_bounded_chat_job(
+                    event, job_id, related_only=True
+                )
+            ):
+                return
+            await self.handle_message(event)
+            return
+        # Test AND Production: operational bounded work goes through
+        # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
+        # DurableWorkLedger. Ledger/path failures fail closed. Hermes
+        # is only for non-operational or explicit sandbox chat.
+        if job_id and await self._enqueue_bounded_chat_job(
+            event, job_id, related_only=False
+        ):
+            return
+        if dispatch_operational_chat(
+            ROBIE_JOB_DB,
+            job_id,
+            sandbox=chat_path_is_sandbox(
+                conversation_id=getattr(event.source, "chat_id", None)
+                if getattr(event, "source", None)
+                else None
+            ),
+        ):
+            return
+        execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
+        try:
+            event.text = execution_text
         except Exception:
-            logger.exception("[GoogleChat] _dispatch_message failed")
-            # Pub/Sub may ACK only after the durable handoff succeeds. Let the
-            # coordinator NACK failures so Google can redeliver the same
-            # idempotent event instead of silently losing executable work.
-            raise
+            from dataclasses import replace
+            event = replace(event, text=execution_text)
+        await self._run_generic_chat_job(job_id, event)
 
     async def _handle_setup_files_command(
         self,
@@ -3955,6 +4030,31 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # Cleared in on_processing_complete.
             if patched_typing:
                 self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+            if (
+                (metadata or {}).get("robie_stop_notice")
+                and job_id
+                and last_result is not None
+                and getattr(last_result, "success", False)
+            ):
+                try:
+                    from robie_job_engine.chat_turn_control import (
+                        record_chat_delivery,
+                        sent_message_id,
+                    )
+
+                    await asyncio.to_thread(
+                        record_chat_delivery,
+                        JobStore(ROBIE_JOB_DB),
+                        job_id,
+                        sent_message_id(last_result),
+                        content,
+                        str((metadata or {}).get("robie_delivery_kind") or "stop"),
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GoogleChat] could not record stop delivery job=%s",
+                        job_id,
+                    )
             return last_result
         finally:
             self.resume_typing_for_chat(chat_id)
