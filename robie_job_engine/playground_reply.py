@@ -203,7 +203,7 @@ def cancelled_reply(*, reason: str, job_id: str) -> str:
     )
 
 
-def sop_reply(*, answer: str, source: str, job_id: str) -> str:
+def sop_reply(*, answer: str, source: str, job_id: str, freshness: str = "") -> str:
     if not answer:
         return status_reply(
             headline="I don't have that in the procedures I can read.",
@@ -213,6 +213,9 @@ def sop_reply(*, answer: str, source: str, job_id: str) -> str:
             details="I didn't guess.",
             job_id=job_id,
         )
+    note = str(freshness or "").strip()
+    if note:
+        answer = f"{answer.rstrip()} {note}"
     return status_reply(
         headline=answer,
         what_happened="This comes from a StreetSmart procedure, not a guess.",

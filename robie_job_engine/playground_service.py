@@ -372,7 +372,12 @@ def _start(
         hits = retrieve_sop(text, sop_docs)
         if hits:
             hit = hits[0]
-            reply = sop_reply(answer=hit.excerpt, source=hit.citation, job_id=job_id)
+            reply = sop_reply(
+                answer=hit.excerpt,
+                source=hit.citation,
+                job_id=job_id,
+                freshness=hit.freshness_note,
+            )
         else:
             reply = sop_reply(answer="", source="", job_id=job_id)
         _note("answered")
