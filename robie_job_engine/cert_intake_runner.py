@@ -6,9 +6,11 @@ Pipeline per message:
    ledger — the durable checkpoint is)
 2. fetch the full message + attachments
 3. skip when the checkpoint already saw it (exactly-once per message)
-4. extract request facts (email + readable PDFs; scanned PDFs hold)
-5. match to an applicant via the full-book index (or hold)
-6. record per-step metadata in the checkpoint so an interrupted run resumes
+4. skip noise (bot callbacks, bounces, automatic replies, out-of-office):
+   mark processed and do not build a record or an unverified entry
+5. extract request facts (email + readable PDFs; scanned PDFs hold)
+6. match to an applicant via the full-book index (or hold)
+7. record per-step metadata in the checkpoint so an interrupted run resumes
    the missing steps instead of duplicating or dropping work
 
 This module performs NO EZLynx writes and creates NO tasks. Its output is a
@@ -36,6 +38,7 @@ from .cert_intake import (
     discover_messages,
     extract_request_facts,
     is_duplicate,
+    is_noise,
     mark_processed,
 )
 
@@ -204,12 +207,17 @@ def run_intake_once(
     checkpointed, NOT matched, and NOT added to the retry ledger. They
     count in ``stats["skipped_pre_cutoff"]``. ``None`` disables the
     cutoff (legacy behavior).
+
+    Noise (the bot's own ``[cert-task-callback]`` confirmations, delivery
+    failures, mailer-daemon, automatic replies, and out-of-office) is
+    checkpointed and counted in ``stats["skipped_noise"]``. It produces
+    no intake record, so the sweep cannot file it or queue it unverified.
     """
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     records: list[IntakeRecord] = []
     stats = {"discovered": 0, "processed": 0, "duplicates": 0,
              "matched": 0, "held": 0, "errors": 0,
-             "skipped_pre_cutoff": 0}
+             "skipped_pre_cutoff": 0, "skipped_noise": 0}
 
     try:
         ids = discover_messages(gmail, query)
@@ -248,6 +256,19 @@ def run_intake_once(
         duplicate, reason = is_duplicate(email, store)
         if duplicate:
             stats["duplicates"] += 1
+            continue
+
+        # Callbacks, bounces, and automatic replies are not certificate
+        # requests. Checkpoint them so the next sweep does not re-examine
+        # them, and do not build a record (no hold, no unverified entry).
+        noise, noise_reason = is_noise(email)
+        if noise:
+            mark_processed(email, store, {
+                "skipped": "noise",
+                "reason": noise_reason,
+                "swept_at": stamp,
+            })
+            stats["skipped_noise"] += 1
             continue
 
         facts = extract_request_facts(

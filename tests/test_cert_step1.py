@@ -117,6 +117,39 @@ def test_runner_matches_and_dedupes():
     assert out2["stats"]["processed"] == 0
 
 
+def test_runner_skips_noise_without_record():
+    """Callbacks, bounces, and auto-replies are checkpointed and dropped.
+
+    A real request in the same sweep still becomes a record. Noise must
+    not be counted as held or as a duplicate of a request.
+    """
+    session = FakeSession({
+        "m-noise": gmail_payload(
+            "m-noise", "mailer-daemon@example.com",
+            "[cert-task-callback] certificate task for applicant 123",
+            "Zap confirmation",
+        ),
+        "m-real": gmail_payload(
+            "m-real", "office@fonsecagc.com",
+            "Fwd: Insurance Certificate Request",
+            "Named insured: Fonseca General Contractor LLC",
+        ),
+    })
+    adapter = CertGmailAdapter(session)
+    store = MemoryDedupeStore()
+    out = run_intake_once(adapter, store, make_index(), query="newer_than:1d")
+    assert out["stats"]["discovered"] == 2
+    assert out["stats"]["skipped_noise"] == 1
+    assert out["stats"]["processed"] == 1
+    assert out["stats"]["matched"] == 1
+    assert out["stats"]["held"] == 0
+    assert out["stats"]["duplicates"] == 0
+    assert [r.gmail_id for r in out["records"]] == ["m-real"]
+    noise_meta = store._seen["gmail:m-noise"]
+    assert noise_meta.get("skipped") == "noise"
+    assert "callback" in noise_meta.get("reason", "").lower()
+
+
 def test_identical_bodies_are_not_duplicates():
     """Regression: two distinct messages with byte-identical bodies (e.g.
     thread replies quoting prior content) must both be processed. The live
