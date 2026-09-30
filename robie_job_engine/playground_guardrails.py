@@ -469,6 +469,7 @@ def _base_proposal(kind: str, original: str) -> Proposal:
         kind=kind,
         client=client,
         applicant_id=_applicant_id(original, client),
+        body=original,
     )
 
 
@@ -523,6 +524,10 @@ def _match_allowed(original: str, norm: str) -> Decision | None:
         proposal.discussion_title = title
         proposal.old_value = "none"
         proposal.new_value = f"note on {title}"
+        content = re.search(r"\bsaying\s+(.+)$", original, re.I | re.S)
+        if not content or not content.group(1).strip():
+            return Decision(VAGUE, question="What exact text should I add to that discussion?", proposal=proposal)
+        proposal.body = content.group(1).strip()
         question = _missing_client(proposal)
         if question:
             return Decision(VAGUE, question=question, proposal=proposal)
