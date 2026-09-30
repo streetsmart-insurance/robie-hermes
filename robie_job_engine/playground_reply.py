@@ -89,6 +89,8 @@ def confirmation_reply(
     new = str(proposal.extra.get("display_new") or proposal.new_value or "(missing)")
     client = proposal.client or proposal.applicant_id or "that client"
     subject = f" Subject {proposal.subject}." if proposal.subject else ""
+    if proposal.kind == "note":
+        new = f'note on {proposal.discussion_title}, exact text: "{proposal.body}"'
     remembered = _remembered(memory_lines)
     memory = f" {remembered}" if remembered else ""
     sentence = (
