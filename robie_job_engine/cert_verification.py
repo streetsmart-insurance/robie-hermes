@@ -543,17 +543,18 @@ def verify_record(record: Any, index: Any,
 # Triple filing guard (Carlo's standing rule, 2026-09-25)
 # ---------------------------------------------------------------------------
 
-def verify_filing_target(verified: VerificationResult, discussion_id: Any,
-                         verifier: EzlynxReadClient) -> bool:
-    """Fail-closed triple check before any email-sourced EZLynx write.
+def verify_applicant_anchor(verified: VerificationResult,
+                          verifier: EzlynxReadClient) -> bool:
+    """Fail-closed checks 1-2 of the triple filing guard, without needing a
+    discussion id.
 
     1. The verified record's insured/policy agrees with the email's
        (guaranteed by verify_record — status must be VERIFIED).
     2. The email's policy digits are anchored to the applicant in EZLynx.
-    3. The selected discussion belongs to that applicant.
 
-    Raises FilingTargetMismatch on any failure. Nothing is written here;
-    the filing step calls this first.
+    Raises FilingTargetMismatch on any failure. The auto-create path runs
+    this BEFORE any document upload (the discussion does not exist yet),
+    then runs the full :func:`verify_filing_target` after creation.
     """
     if verified.status != VERIFIED or not verified.applicant_id:
         raise FilingTargetMismatch(
@@ -575,6 +576,22 @@ def verify_filing_target(verified: VerificationResult, discussion_id: Any,
         if not verified.evidence:
             raise FilingTargetMismatch(
                 "no policy numbers and no verification evidence — refusing")
+    return True
+
+
+def verify_filing_target(verified: VerificationResult, discussion_id: Any,
+                         verifier: EzlynxReadClient) -> bool:
+    """Fail-closed triple check before any email-sourced EZLynx write.
+
+    1. The verified record's insured/policy agrees with the email's
+       (guaranteed by verify_record — status must be VERIFIED).
+    2. The email's policy digits are anchored to the applicant in EZLynx.
+    3. The selected discussion belongs to that applicant.
+
+    Raises FilingTargetMismatch on any failure. Nothing is written here;
+    the filing step calls this first.
+    """
+    verify_applicant_anchor(verified, verifier)
 
     discussions = verifier.get_discussions(verified.applicant_id)
     ids = {str(d.get("id") or d.get("discussionId") or d.get("DiscussionId"))

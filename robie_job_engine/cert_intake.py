@@ -238,6 +238,10 @@ _INSURED_PATTERNS = (
     re.compile(r"(?i)loss runs?\s+for\s+(.+?)\s+(?:pol#|policy\b)"),
     re.compile(r"(?i)^(.+?)\s+(?:homeowners|dwelling fire|auto|general liability|gl|wc|workers comp)\s+policy\b"),
     re.compile(r"(?i)on behalf of\s+(.+?)(?:,|\n|$)"),
+    # Compliance-platform phrasing: "COI for EPHE LLC Expires Tomorrow"
+    # (Highway). Runs over subject+body; the "expires"/"covering" tails
+    # keep renewal/holder tails from gluing onto the name.
+    re.compile(r"(?i)\bcoi\s+for\s+(.+?)(?:\s+expires|\s+covering|\n|$)"),
 )
 
 _POLICY_RE = re.compile(
@@ -247,6 +251,16 @@ _POLICY_RE = re.compile(
 )
 
 _HOLDER_RE = re.compile(r"(?i)certificate holder\s*[:\-]\s*(.+?)(?:\n|$)")
+# "Certificate Holder Information" with the name on the following line(s)
+# (e.g. Descartes MyCarrierPortal requests). The name is captured from the
+# first non-empty line after the header. Handles markdown asterisks.
+_HOLDER_INFO_RE = re.compile(
+    r"(?i)\*?certificate holder(?: information)?\*?\s*\n+\s*(.+?)(?:\n|$)"
+)
+# "Additional insured:" — a holder-equivalent for certificate purposes.
+_ADDITIONAL_INSURED_RE = re.compile(
+    r"(?i)additional insured\s*[:\-]\s*(.+?)(?:\n|$)"
+)
 # Subject pattern "Certificate of Insurance {INSURED} to {HOLDER}" — the
 # holder is named in the subject but never labeled "certificate holder:".
 # Narrow on purpose: the subject must open with the certificate phrase and
@@ -280,6 +294,8 @@ _SUBJECT_PATTERNS = [
     re.compile(r"certificate request\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
     # "COI - Fonseca General Contractor LLC"
     re.compile(r"\bcoi\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
+    # "Renewal COI Request: COI for EPHE LLC Expires Tomorrow" (Highway)
+    re.compile(r"\bcoi\s+for\s+(.+?)(?:\s+expires|\s*$)", re.IGNORECASE),
 ]
 
 _NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
@@ -357,10 +373,13 @@ def _clean_name(value: str) -> str:
     value = re.sub(r"\s+", " ", (value or "").strip())
     value = _truncate_sentence_runoff(value)
     # A trailing period is sentence punctuation, not part of the name —
-    # unless the name ends in an abbreviation/entity suffix ("P.C.").
+    # unless the final token is itself an abbreviation ("P.C.", "St.").
+    # A bare entity suffix ("LLC.") never takes a period: the dot ended
+    # the sentence, not the name.
     if value.endswith("."):
-        last = value[:-1].split()[-1].rstrip(".").lower() if value[:-1].split() else ""
-        if last not in _ABBREVIATIONS and last not in _ENTITY_SUFFIXES:
+        words = value[:-1].split()
+        last = words[-1] if words else ""
+        if "." not in last:
             value = value[:-1]
     return value[:120]
 
@@ -373,6 +392,19 @@ class RequestFacts:
     insured_name: str | None = None
     dba: str | None = None
     policy_numbers: list[str] = field(default_factory=list)
+    # Multi-insured emails ("COIs for ABC LLC and XYZ Inc"): every
+    # additional insured named in the request. The sweep matches/files
+    # each one independently so no company is silently dropped.
+    additional_insured_names: list[str] = field(default_factory=list)
+    # Where insured_name came from: "body", "subject", "pdf_text",
+    # "pdf_filename". Weak sources (pdf_filename) are confirm-only:
+    # they still have to hit the applicant index to match.
+    insured_name_source: str = ""
+    # US phone numbers seen in the request (digits only). Used ONLY to
+    # break exact-name ties between same-named applicants — never as a
+    # general match key (signature blocks are full of other people's
+    # numbers).
+    phones: list[str] = field(default_factory=list)
     requester_name: str | None = None
     requester_email: str | None = None
     holder_names: list[str] = field(default_factory=list)
@@ -427,6 +459,123 @@ def _from_name_email(from_header: str) -> tuple[str | None, str | None]:
     return (name or None), None
 
 
+# ---------------------------------------------------------------------------
+# Quoted-history hygiene
+# ---------------------------------------------------------------------------
+#
+# On RE:/Fwd: threads the newest message sits on top and the quoted
+# history below it can name a DIFFERENT (stale) insured — or quote our
+# own canned auto-reply. Extracting from history misroutes the request,
+# so it is stripped before extraction. Prefer the newest block, always.
+
+_ON_WROTE_RE = re.compile(r"(?im)^on\s.+?\bwrote:\s*$")
+_QUOTED_LINE_RE = re.compile(r"^\s*>")
+# Distinctive sentence from our own canned auto-reply
+# (certificates+canned.response). Replies quoting it back must not feed
+# extraction — our words are never the insured.
+_CANNED_MARKER = "we have received your request for a certificate of insurance"
+
+
+def _strip_quoted_history(body: str | None) -> str:
+    """Return only the newest message block of ``body``.
+
+    Drops ``>``-quoted lines, cuts everything from the first
+    "On ... wrote:" line down (older quoted content), and drops any
+    paragraph quoting our own canned auto-reply. A reply whose newest
+    block names no insured yields no name — held, never guessed from
+    history.
+    """
+    lines = (body or "").splitlines()
+    kept: list[str] = []
+    for line in lines:
+        if _QUOTED_LINE_RE.match(line):
+            continue
+        if _ON_WROTE_RE.match(line):
+            break
+        kept.append(line)
+    text = "\n".join(kept)
+    paras = [p for p in re.split(r"\n\s*\n", text)
+             if _CANNED_MARKER not in p.lower()]
+    return "\n\n".join(paras).strip()
+
+
+# ---------------------------------------------------------------------------
+# Multi-insured emails
+# ---------------------------------------------------------------------------
+#
+# "Please issue COIs for ABC LLC and XYZ Inc" names two insureds; the old
+# code kept only the first pattern hit and silently dropped the second.
+# Name blobs are split on "and"/"&"/";" — but ONLY the split parts are
+# offered as additional candidates, and the sweep tries the whole blob
+# first: "Smith and Sons LLC" still matches the one client exactly and
+# the parts are ignored. Commas are not split ("Smith, John" is one
+# person).
+
+_MULTI_SPLIT_RE = re.compile(r"\s*(?:\band\b|&|;)\s*", re.IGNORECASE)
+
+
+def _split_multi_name(blob: str | None) -> list[str]:
+    """Split "ABC LLC and XYZ Inc" into ["ABC LLC", "XYZ Inc"].
+
+    Returns [] when there is nothing to split. Each part is cleaned;
+    empty parts are dropped. The caller (sweep fan-out) tries the whole
+    blob first and only falls back to parts when the blob matches no
+    applicant — so "Smith and Sons LLC" never becomes "Smith".
+    """
+    cleaned = _clean_name(blob)
+    if not cleaned:
+        return []
+    parts = [_clean_name(p) for p in _MULTI_SPLIT_RE.split(cleaned)]
+    parts = [p for p in parts if p and len(p) >= 2]
+    if len(parts) < 2:
+        return []
+    # Guard: don't split when a part is a lone fragment of the whole
+    # ("Sons LLC" from "Smith and Sons LLC" is fine as a *candidate* —
+    # the sweep only uses parts when the whole blob matched nothing).
+    return parts
+
+
+# ---------------------------------------------------------------------------
+# PDF filenames as a weak name source
+# ---------------------------------------------------------------------------
+#
+# When body+subject yield no insured name, the attachment filenames get
+# one shot: "arias_con_certificate_of_liability_ins.pdf" -> "arias con".
+# Confirm-only: the candidate still has to hit the applicant index
+# (exact or fuzzy, single candidate) to match — a filename can never
+# invent a client.
+
+_FILENAME_STOPWORDS = frozenset({
+    "certificate", "cert", "certs", "of", "liability", "ins", "insurance",
+    "coi", "request", "requests", "form", "forms", "doc", "docs",
+    "document", "documents", "copy", "scan", "scanned", "new", "updated",
+    "renewal", "policy", "policies", "declarations", "dec", "page",
+    "pages", "attachment", "file", "final", "draft", "sample",
+})
+
+
+def _insured_from_filename(filename: str | None) -> str | None:
+    """Best-effort insured name from an attachment filename."""
+    if not filename:
+        return None
+    stem = str(filename).rsplit(".", 1)[0]
+    tokens = [t for t in re.split(r"[_\-\s]+", stem)
+              if t and t.lower() not in _FILENAME_STOPWORDS
+              and len(t) > 1 and not t.isdigit()
+              and not re.fullmatch(r"\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", t)]
+    name = _clean_name(" ".join(tokens))
+    if not name or not _NAME_LIKE.search(name):
+        return None
+    return name
+
+
+# US phone numbers, for ambiguous-name tie-breaking only. Deliberately
+# conservative shape; digit runs that are also extracted policy numbers
+# are excluded by the caller.
+_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)")
+
+
 def extract_request_facts(
     email: CertEmail, pdf_text_extractor: Any = None
 ) -> RequestFacts:
@@ -438,13 +587,33 @@ def extract_request_facts(
     the request belongs to our client.
     """
     facts = RequestFacts(raw_subject=email.subject, raw_from=email.from_header)
-    text = f"{email.subject}\n{email.body_text}"
+    # Quoted history is stripped FIRST: on RE: threads the quoted block
+    # below can name a stale/different insured (or quote our own canned
+    # reply). The newest block is the request.
+    clean_body = _strip_quoted_history(email.body_text)
+    text = f"{email.subject}\n{clean_body}"
 
+    # Collect EVERY insured-name candidate, not just the first pattern
+    # hit — multi-insured emails name several companies and the second
+    # one must never be silently dropped.
+    names: list[str] = []
     for pat in _INSURED_PATTERNS:
-        m = pat.search(text)
-        if m and _clean_name(m.group(1)):
-            facts.insured_name = _clean_name(m.group(1))
-            break
+        for m in pat.finditer(text):
+            cleaned = _clean_name(m.group(1))
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+    if names:
+        facts.insured_name = names[0]
+        facts.insured_name_source = "body"
+        # "ABC LLC and XYZ Inc": the blob is tried whole first (so
+        # "Smith and Sons LLC" still matches the one client); the parts
+        # are offered as additional candidates for the sweep fan-out.
+        for blob in names:
+            for part in _split_multi_name(blob):
+                if (part != facts.insured_name
+                        and part not in names
+                        and part not in facts.additional_insured_names):
+                    facts.additional_insured_names.append(part)
     if not facts.insured_name:
         # Subject lines often carry the cleanest name
         # ("Renewal Certificate Request- Abg Transportation MC1121844").
@@ -452,6 +621,7 @@ def extract_request_facts(
         subj_name = extract_subject_insured(email.subject)
         if subj_name and _clean_name(subj_name):
             facts.insured_name = _clean_name(subj_name)
+            facts.insured_name_source = "subject"
     dba_m = _DBA_RE.search(text)
     if dba_m:
         facts.dba = _clean_name(dba_m.group(1))
@@ -461,11 +631,35 @@ def extract_request_facts(
         if num not in seen:
             seen.add(num)
             facts.policy_numbers.append(num)
+    # Phone numbers: tie-break signal for ambiguous names ONLY, never a
+    # general match key. Digit runs already taken as policy numbers are
+    # excluded (a 10-digit policy number is not a phone number).
+    policy_digits = {re.sub(r"\D", "", n) for n in facts.policy_numbers}
+    for m in _PHONE_RE.finditer(text):
+        digits = re.sub(r"\D", "", m.group(0))
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) == 10 and digits not in policy_digits \
+                and digits not in facts.phones:
+            facts.phones.append(digits)
     facts.holder_names = [
         _clean_name(m.group(1))
         for m in _HOLDER_RE.finditer(text)
         if _clean_name(m.group(1))
     ]
+    # "Certificate Holder Information" with the name on the next line.
+    for m in _HOLDER_INFO_RE.finditer(text):
+        name = _clean_name(m.group(1))
+        if name and name not in facts.holder_names:
+            # Skip if this is just a repeat of the _HOLDER_RE match (the
+            # _HOLDER_INFO_RE is broader and would double-capture).
+            if not any(name in h or h in name for h in facts.holder_names):
+                facts.holder_names.append(name)
+    # "Additional insured:" is a holder-equivalent for certificate purposes.
+    for m in _ADDITIONAL_INSURED_RE.finditer(text):
+        name = _clean_name(m.group(1))
+        if name and name not in facts.holder_names:
+            facts.holder_names.append(name)
     # Holder named in the subject: "Certificate of Insurance {INSURED} to
     # {HOLDER}". Only accepted when the text before " to " resembles the
     # extracted insured name — otherwise "to" is just a preposition.
@@ -509,6 +703,7 @@ def extract_request_facts(
                             m = pat.search(pdf_text)
                             if m and _clean_name(m.group(1)):
                                 facts.insured_name = _clean_name(m.group(1))
+                                facts.insured_name_source = "pdf_text"
                                 break
                     for m in _POLICY_RE.finditer(pdf_text):
                         num = m.group(1).strip().upper()
@@ -517,6 +712,18 @@ def extract_request_facts(
                             facts.policy_numbers.append(num)
                 else:
                     facts.pdf_unreadable = True
+    if not facts.insured_name:
+        # Last resort, confirm-only: an attachment filename can SUGGEST
+        # the insured ("arias_con_certificate_of_liability_ins.pdf" ->
+        # "arias con") but it still has to hit the applicant index to
+        # match — a filename can never invent a client or route a
+        # non-client.
+        for att in email.attachments:
+            fname = _insured_from_filename(att.filename)
+            if fname:
+                facts.insured_name = fname
+                facts.insured_name_source = "pdf_filename"
+                break
     return facts
 
 

@@ -475,15 +475,56 @@ def refuse_playwright_start(
     return action_hold_reason(action_id, env=env)
 
 
+def _refusal_note_is_ascend(job: dict[str, Any], error: str) -> bool:
+    """True when this refusal is about Ascend, so the Ascend sentence applies."""
+    payload = dict(job.get("payload") or {})
+    blob = " ".join(
+        str(part or "")
+        for part in (
+            job.get("action_type"),
+            payload.get("text"),
+            payload.get("action"),
+            payload.get("skill"),
+            payload.get("skill_name"),
+            error,
+        )
+    ).casefold()
+    return any(
+        marker in blob
+        for marker in (
+            "ascend",
+            "useascend",
+            "premium finance",
+            "premium-finance",
+            "pawiva",
+            "221398001",
+        )
+    )
+
+
 def format_action_gate_chat_note(job: dict[str, Any] | None) -> str:
+    from . import status_format
+
     job = dict(job or {})
     job_id = str(job.get("id") or "")
     error = str(job.get("last_error") or CHAT_REFUSE_NOTE)
-    return (
-        f"ROBIE Job {job_id} — FAILED\n\n"
-        f"{error}\n\n"
-        "No Ascend API request was sent. "
-        "A recorded clean Test API creation and fresh-readback PASS for this exact action is required."
+    if _refusal_note_is_ascend(job, error):
+        hold_note = (
+            "No Ascend API request was sent. A recorded clean Test API creation "
+            "and fresh-readback PASS for this exact action is required."
+        )
+    else:
+        hold_note = (
+            "This action was refused before it started. "
+            "Nothing was sent and nothing was changed."
+        )
+    return status_format.render_simple_status(
+        headline="Couldn't finish.",
+        what_happened=status_format.plain_reason(error),
+        anything_needed="Needs a human to review before this action can run.",
+        status_line="Blocked \u2014 the action was refused before it started.",
+        details=f"{hold_note}\n\nTechnical detail: {error}",
+        job_id=job_id,
     )
 
 

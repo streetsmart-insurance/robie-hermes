@@ -22,9 +22,10 @@ class EmailGuardTests(unittest.TestCase):
 
             first = run_guarded_email_task(db_path=db, gmail_message_id="m-1", prompt="move it", run_agent=run)
             second = run_guarded_email_task(db_path=db, gmail_message_id="m-1", prompt="move it", run_agent=run)
-            self.assertIn("UNVERIFIED", first)
-            self.assertIn("must not be treated as COMPLETE", first)
-            self.assertIn("UNVERIFIED", second)
+            self.assertTrue(first.startswith("Not verified."))
+            self.assertIn("Status: Not verified", first)
+            self.assertIn("don't treat this as done", first)
+            self.assertTrue(second.startswith("Not verified."))
             self.assertEqual(len(calls), 1)
             self.assertIn(SECURITY_GUARD_STOP_RULE, calls[0])
             self.assertIn("NEVER ask a human to lift a security control", calls[0])

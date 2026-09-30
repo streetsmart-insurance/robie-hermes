@@ -119,3 +119,52 @@ def test_api_error_fails_open():
     skip, _ = should_skip_send(service, "a@b.com", "Subject")
     assert skip is False
     assert find_recent_sent(service, "a@b.com", "Subject") == []
+
+
+def test_metadata_scope_403_retries_without_query_and_finds_the_sent_message():
+    """gmail.metadata 403s on q=. Listing SENT without q still catches a duplicate."""
+    message = _sent_message("s9", "one@streetsmart.insurance", "Action required")
+    calls = []
+
+    class Messages:
+        def list(self, **kwargs):
+            calls.append(dict(kwargs))
+            if "labelIds" in kwargs or "q" in kwargs:
+                raise RuntimeError(
+                    "HttpError 403: Metadata scope does not support the q parameter"
+                )
+            result = Mock()
+            result.execute.return_value = {"messages": [{"id": "s9"}]}
+            return result
+
+        def get(self, **kwargs):
+            result = Mock()
+            result.execute.return_value = message
+            return result
+
+    service = Mock()
+    service.users.return_value.messages.return_value = Messages()
+    skip, reason = should_skip_send(
+        service, "one@streetsmart.insurance", "Action required"
+    )
+    assert skip is True
+    assert "s9" in reason
+    assert calls[0].get("labelIds") == ["SENT"]
+    assert "q" not in calls[0]
+    assert "q" not in calls[1]
+    assert "labelIds" not in calls[1]
+
+
+def test_wrong_mailbox_does_not_count_as_an_empty_sent_folder():
+    service = Mock()
+    profile = service.users.return_value.getProfile.return_value.execute
+    profile.return_value = {"emailAddress": "someone.else@streetsmart.insurance"}
+    skip, reason = should_skip_send(
+        service,
+        "one@streetsmart.insurance",
+        "Action required",
+        expected_mailbox="robie@streetsmart.insurance",
+    )
+    assert skip is False
+    assert reason == "sent check skipped: wrong mailbox"
+    service.users.return_value.messages.return_value.list.assert_not_called()

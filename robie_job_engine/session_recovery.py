@@ -25,6 +25,7 @@ factory so it is testable without a browser, a network, or a box.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Callable, Mapping
 
 from .secrets import redact_exception
@@ -102,6 +103,37 @@ def attempt_session_recovery(
             "reason": f"{RECOVERY_ERROR}: {redact_exception(exc)}",
         }
     return {"recovered": True, "state": state.value, "marker": RECOVERED}
+
+
+# Login can leave the CDP tab list on /auth/account/login for longer than the
+# old ~4s post-relogin read. A single immediate recheck false-fails
+# SESSION_LOGGED_OUT after a successful credential submit.
+POST_LOGIN_CHECK_ATTEMPTS = 10
+POST_LOGIN_CHECK_DELAY_SECONDS = 3.0
+
+
+def confirm_session_after_recovery(
+    check: Callable[[], Mapping[str, Any]],
+    *,
+    attempts: int = POST_LOGIN_CHECK_ATTEMPTS,
+    delay_seconds: float = POST_LOGIN_CHECK_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    """Re-read the browser after login until it is no longer provably logged out.
+
+    ``attempts`` reads are spaced by ``delay_seconds``. The default window is
+    about 30 seconds, not a single 4-second glance.
+    """
+    pause = sleeper or time.sleep
+    last: dict[str, Any] = {"blocking": True, "reason": "SESSION_LOGGED_OUT"}
+    total = max(1, int(attempts))
+    for index in range(total):
+        last = dict(check() or {})
+        if not last.get("blocking"):
+            return last
+        if index < total - 1:
+            pause(delay_seconds)
+    return last
 
 
 def recovery_summary(result: Mapping[str, Any] | None) -> str:

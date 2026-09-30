@@ -221,7 +221,7 @@ def _file_routes(discussions):
             ("/notes", {"noteId": "n7"}),
             (
                 "v8/discussions/",
-                {"discussionId": "d1", "notes": [{"noteId": "n7", "body": "Filed note"}]},
+                {"discussionId": "d1", "notes": [{"noteId": "n7", "body": "seed"}]},
             ),
         ]
     )

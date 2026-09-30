@@ -43,6 +43,14 @@ DISCUSSION_NOTE_SCHEMA = {
                     "(New Business, Renewal, Submission Center, ...)."
                 ),
             },
+            "plan": {
+                "type": "object",
+                "description": (
+                    "The plan stated before the write: write, target, and values. "
+                    "Required when this job has no locked plan. The note is not "
+                    "posted until that plan is locked."
+                ),
+            },
         },
         "required": ["applicant_id", "note_text"],
     },
@@ -59,6 +67,21 @@ def _file_note(args: dict) -> dict:
         raise ValueError("applicant_id is required")
     if not note_text:
         raise ValueError("note_text is required")
+    from robie_job_engine.answer_only import (
+        address_readback_proved,
+        holder_readback_proved,
+        rewrite_unproved_address_note,
+        rewrite_unproved_holder_note,
+    )
+
+    note_text = rewrite_unproved_address_note(
+        note_text,
+        proved=address_readback_proved(args),
+    )
+    note_text = rewrite_unproved_holder_note(
+        note_text,
+        proved=holder_readback_proved(args),
+    )
     folded = note_text.casefold()
     if "robie was here" not in folded:
         note_text = note_text + "\n\nRobie was here"
@@ -68,27 +91,104 @@ def _file_note(args: dict) -> dict:
         title_hint=title_hint,
         discussion_title=title_hint,
     )
-    if filed.get("status") != "filed":
+    status = str(filed.get("status") or "")
+    if status not in {"filed", "posted, verifying"}:
         raise RuntimeError(
-            f"DiscussionApi did not file the note: {filed.get('reason') or filed.get('status')}"
+            f"DiscussionApi did not file the note: {filed.get('reason') or status}"
         )
-    if not filed.get("note_id"):
+    if status == "filed" and not filed.get("note_id") and not filed.get("read_back"):
         raise RuntimeError("DiscussionApi filed without note_id; refusing success")
     return {
-        "ok": True,
+        "ok": status == "filed" and bool(filed.get("read_back") or filed.get("note_id")),
+        "status": status,
         "note_id": filed.get("note_id"),
         "discussion_id": filed.get("discussion_id"),
         "discussion_title": filed.get("discussion_title"),
         "applicant_id": applicant_id,
-        "read_back": True,
+        "read_back": bool(filed.get("read_back")),
+        "verified_by": filed.get("verified_by"),
+        "reason": filed.get("reason"),
     }
 
 
+def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
+    import os
+
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    if not job_id or not db_path:
+        return
+    try:
+        from robie_job_engine.chat_turn_control import record_note_tool_failure
+        from robie_job_engine.store import JobStore
+
+        record_note_tool_failure(JobStore(db_path), job_id, message)
+    except Exception:
+        return
+
+
+def _remember_discussion_note(kwargs: dict, report: dict) -> None:
+    import os
+
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    if not job_id or not db_path:
+        return
+    try:
+        from robie_job_engine.store import JobStore
+
+        JobStore(db_path).checkpoint(
+            job_id,
+            "discussion_note",
+            {
+                "status": report.get("status"),
+                "discussion_title": report.get("discussion_title"),
+                "discussion_id": report.get("discussion_id"),
+                "note_id": report.get("note_id"),
+                "read_back": bool(report.get("read_back")),
+                "verified_by": report.get("verified_by"),
+                "reason": report.get("reason"),
+            },
+        )
+    except Exception:
+        return
+
+
 def ezlynx_discussion_note_handler(args: dict, **kwargs):
+    from robie_job_engine.chat_turn_control import refuse_current_tool_call
+
+    stopped = refuse_current_tool_call(kwargs)
+    if stopped:
+        return tool_error(stopped)
+    from robie_job_engine.write_verification_loop import refuse_tool_write
+
+    refused = refuse_tool_write(args, kwargs)
+    if refused:
+        return tool_error(refused)
     try:
         report = _file_note(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
-        return tool_error(f"{type(exc).__name__}: {exc}")
+        message = f"{type(exc).__name__}: {exc}"
+        _remember_note_tool_failure(kwargs, message)
+        return tool_error(
+            message
+            + " STOP. Do not drive EZLynx screens by hand. Report this error and stop."
+        )
+    _remember_discussion_note(kwargs, report)
     return tool_result(report)
 
 

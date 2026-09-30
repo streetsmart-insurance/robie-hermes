@@ -68,8 +68,31 @@ def activate_mdc_combobox(control: Any, label: str) -> None:
     force_click(control, label)
 
 
+def pick_exact_labeled_option(options: Any, expected: str) -> Any | None:
+    """Return the option whose visible text is exactly ``expected``.
+
+    The one-off Submission Center launcher scans ``mat-option`` text for
+    ``100`` when the role query misses the overlay. Whitespace is collapsed.
+    """
+    count_fn = getattr(options, "count", None)
+    nth = getattr(options, "nth", None)
+    if not callable(count_fn) or not callable(nth):
+        return None
+    wanted = " ".join(str(expected).split())
+    for index in range(int(count_fn())):
+        item = nth(index)
+        text = " ".join(str(item.inner_text() or "").split())
+        if text == wanted:
+            return item
+    return None
+
+
 def activate_sort_header(header: Any, label: str) -> None:
-    """Force-click ``.mat-sort-header-container`` when Enter is a no-op."""
+    """Force-click the MDC sort container. Enter does not change live Status sort."""
+    container = header.locator(MDC_SORT_HEADER_CONTAINER)
+    if container is not None and container.count() > 0:
+        force_click(container, f"{label} container")
+        return
     before = str(header.get_attribute("aria-sort") or "none").casefold()
     target = first_visible(header, label)
     scroll = getattr(target, "scroll_into_view_if_needed", None)
@@ -86,9 +109,5 @@ def activate_sort_header(header: Any, label: str) -> None:
         pressed = False
     after = str(header.get_attribute("aria-sort") or "none").casefold()
     if pressed and after != before:
-        return
-    container = header.locator(MDC_SORT_HEADER_CONTAINER)
-    if container is not None and container.count() > 0:
-        force_click(container, f"{label} container")
         return
     force_click(header, label)

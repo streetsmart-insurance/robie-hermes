@@ -27,6 +27,7 @@ from .submission_center_controls import (
     activate_mdc_checkbox,
     activate_mdc_combobox,
     activate_sort_header,
+    pick_exact_labeled_option,
 )
 
 
@@ -88,6 +89,11 @@ def _first_visible(locator: Locator, label: str) -> Locator:
 def _activate(locator: Locator, label: str, *, key: str = "Enter") -> None:
     target = _first_visible(locator, label)
     target.scroll_into_view_if_needed()
+    if "sort header" in label.casefold():
+        # Same step as the manual one-off: force-click the MDC sort container.
+        # Enter does not change the live Status header.
+        activate_sort_header(target, label)
+        return
     try:
         target.press(key, timeout=5_000)
     except PlaywrightError:
@@ -251,14 +257,21 @@ def _set_page_size(page: Page) -> None:
     if selected_value.count() and selected_value.first.inner_text().strip() == "100":
         return
     # Live MDC paginator: a touch-target layer intercepts pointer clicks and
-    # Enter is a no-op. Force-click the combobox and option 100, then the
-    # caller verifies rendered row count fail-closed.
+    # Enter is a no-op. Force-click the combobox, wait for the overlay, then
+    # force-click option 100. The manual one-off launcher does this; without
+    # the wait the option query races the overlay and raises PLAYWRIGHT_BLOCKED.
     activate_mdc_combobox(selector.first, "page-size control")
+    page.wait_for_timeout(500)
     option = page.get_by_role("option", name=re.compile(r"^100$"))
     if not option.count():
         option = page.locator("mat-option").filter(has_text=re.compile(r"^100$"))
     if not option.count():
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: 100 page-size option not found")
+        scanned = pick_exact_labeled_option(
+            page.locator("mat-option, [role=option]"), "100"
+        )
+        if scanned is None:
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: 100 page-size option not found")
+        option = scanned
     activate_mdc_combobox(option, "100 page-size option")
     page.wait_for_timeout(1_000)
 

@@ -542,7 +542,13 @@ def run_false_success_scenario(*, work_dir: Path) -> dict[str, Any]:
             and status != JobStatus.COMPLETE.value
             and action is None
             and evidence == []
-            and "COMPLETE" not in response.split("UNVERIFIED")[0]
+            # Headline block (Jake's three lines) must not claim COMPLETE.
+            # Details legitimately carries the guard's own documented
+            # disclaimer "does not authorize COMPLETE" plus the labeled
+            # worker report, so scope the check above the Details section.
+            and "COMPLETE" not in response.split("Details")[0]
+            and not response.startswith("Done.")
+            and ("Not verified." in response or "Couldn't finish." in response)
             and "I did it" not in response
         )
         return _result(

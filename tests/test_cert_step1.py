@@ -40,6 +40,9 @@ def gmail_payload(gmail_id, sender, subject, body):
                 header("Date", "Sat, 26 Sep 2026 09:00:00 -0400"),
                 header("Message-ID", f"<{gmail_id}@example.com>"),
             ],
+            # mimeType is always present in real Gmail API responses;
+            # without it _walk_parts ignores the body data.
+            "mimeType": "text/plain",
             "body": {"data": raw_body},
             "parts": [],
         },
@@ -149,3 +152,85 @@ def test_runner_checkpoint_meta_records_steps():
     metas = list(store._seen.values())
     assert any(m.get("stage") == "intake_complete"
                and m.get("applicant_id") == 116349171 for m in metas)
+
+
+def make_two_client_index():
+    return build_index([
+        {"account_name": "ABC LLC", "applicant_id": 501,
+         "email_primary": "office@abc.example", "phones": []},
+        {"account_name": "XYZ Inc", "applicant_id": 502,
+         "email_primary": "office@xyz.example", "phones": []},
+        {"account_name": "Smith and Sons LLC", "applicant_id": 503,
+         "email_primary": "", "phones": []},
+    ])
+
+
+def test_multi_insured_email_fans_out_to_two_records():
+    """Two named insureds -> two records, matched independently; the
+    second company is never silently dropped."""
+    session = FakeSession({
+        "m1": gmail_payload("m1", "requester@example.com",
+                           "COI request",
+                           "Please issue a certificate of insurance "
+                           "for ABC LLC and XYZ Inc\nThanks!"),
+    })
+    adapter = CertGmailAdapter(session)
+    store = MemoryDedupeStore()
+    out = run_intake_once(adapter, store, make_two_client_index(),
+                          query="newer_than:1d")
+    assert out["stats"]["processed"] == 2
+    assert out["stats"]["matched"] == 2
+    assert out["stats"]["held"] == 0
+    by_insured = {r.facts.insured_name: r for r in out["records"]}
+    assert set(by_insured) == {"ABC LLC", "XYZ Inc"}
+    assert by_insured["ABC LLC"].match.applicant_id == 501
+    assert by_insured["XYZ Inc"].match.applicant_id == 502
+    # Distinct retry identities; the source message is checkpointed once.
+    keys = sorted(r.ledger_key for r in out["records"])
+    assert keys == ["m1", "m1#2"]
+    assert out["stats"]["duplicates"] == 0
+
+
+def test_multi_insured_partial_match_holds_second_independently():
+    """One part matches, the other doesn't -> first files, second is
+    held with its own ledger row (never silently dropped)."""
+    session = FakeSession({
+        "m1": gmail_payload("m1", "requester@example.com",
+                           "COI request",
+                           "Please issue a certificate of insurance "
+                           "for ABC LLC and Unknown Company LLC\nThanks!"),
+    })
+    adapter = CertGmailAdapter(session)
+    store = MemoryDedupeStore()
+    out = run_intake_once(adapter, store, make_two_client_index(),
+                          query="newer_than:1d")
+    assert out["stats"]["processed"] == 2
+    assert out["stats"]["matched"] == 1
+    assert out["stats"]["held"] == 1
+    matched = [r for r in out["records"] if not r.held][0]
+    held = [r for r in out["records"] if r.held][0]
+    assert matched.facts.insured_name == "ABC LLC"
+    assert matched.ledger_key == "m1"
+    assert held.facts.insured_name == "Unknown Company LLC"
+    assert held.ledger_key == "m1#2"
+    assert "EZLynx lookup" in held.hold_reason
+
+
+def test_and_inside_one_client_name_does_not_fan_out():
+    """"Smith and Sons LLC" is one client: the whole blob matches, so
+    there is exactly one record (no phantom "Smith" filing)."""
+    session = FakeSession({
+        "m1": gmail_payload("m1", "requester@example.com",
+                           "COI request",
+                           "Please issue a certificate for Smith and Sons LLC"),
+    })
+    adapter = CertGmailAdapter(session)
+    store = MemoryDedupeStore()
+    out = run_intake_once(adapter, store, make_two_client_index(),
+                          query="newer_than:1d")
+    assert out["stats"]["processed"] == 1
+    assert out["stats"]["matched"] == 1
+    rec = out["records"][0]
+    assert rec.facts.insured_name == "Smith and Sons LLC"
+    assert rec.match.applicant_id == 503
+    assert rec.ledger_key == "m1"

@@ -262,6 +262,25 @@ EXPECTED_HEADERS: dict[str, list[str]] = {
         "Policy Labels",
         "Change Request Created Date",
     ],
+    # 4744 Mortgagee Verification Queue - ROBIE: 8 cols. Verified
+    # 2026-09-28 ~07:00 EDT against the real 2026-09-28 05:01 delivery
+    # (Gmail 1a0e73f8f39ced03,
+    # Mortgagee_Verification_Queue_-_ROBIE_2026-09-28T0501.csv): exact
+    # 8-column header match, 189 data rows, no totals row. This is the
+    # policy-expiration mortgagee report (Homeowners + Flood, Active,
+    # expiring within 45 days); it shares its subject line with the old
+    # retired 4372 task export, so it is selected by header fingerprint,
+    # never by subject.
+    "4744": [
+        "Account Name",
+        "Policy Number",
+        "Master Company",
+        "Line Of Business",
+        "Premium - Annualized",
+        "Assigned Producer",
+        "CSR",
+        "Policy Expiration Date",
+    ],
 }
 
 REPORT_DISPLAY_NAMES: dict[str, str] = {
@@ -269,6 +288,7 @@ REPORT_DISPLAY_NAMES: dict[str, str] = {
     "4246": "Audit Verification Queue - ROBIE",
     "4372": "Mortgagee Verification Queue - ROBIE",
     "4359": "Policy Change Request Confirmation Queue - ROBIE",
+    "4744": "Mortgagee Verification Queue - ROBIE",
 }
 
 # Mirrored from report_registry.VERIFIED_REPORTS (keep in sync).
@@ -278,11 +298,15 @@ REPORT_DISPLAY_NAMES: dict[str, str] = {
 # (Gmail 1a0b9a359d14407a, ROBIE_daily_CSV_2026-09-19T0827.csv): exact
 # 19-column header match, 69 rows, zero blank Policy Number, zero blank
 # Change Request Created Date, 69 unique per-request identity keys.
+# 4744 verified 2026-09-28 ~07:00 EDT against the real 2026-09-28 delivery
+# (Gmail 1a0e73f8f39ced03): exact 8-column header match, 189 data rows,
+# no totals row, zero blank Policy Number.
 SCHEMA_VERIFIED: dict[str, bool] = {
     "4247": True,
     "4246": True,
     "4372": True,
     "4359": True,
+    "4744": True,
 }
 
 # Work-item identity column per report. Decided 2026-09-19 by Carlo:
@@ -298,6 +322,7 @@ IDENTITY_COLUMNS: dict[str, str] = {
     "4246": "Policy Number",
     "4372": "Policy Number",
     "4359": "Policy Number",
+    "4744": "Policy Number",
 }
 
 # 4359 has no request-ID column; requests on one policy are told apart by
@@ -434,7 +459,7 @@ def validate_headers(report_id: str, actual: Sequence[str]) -> list[str]:
 def fingerprint_report_id(headers: Sequence[str]) -> str:
     """Route a CSV to its report by exact header fingerprint.
 
-    Used for 4246/4247/4359, which still share the "ROBIE daily CSV"
+    Used for 4246/4247/4359/4744, which still share the "ROBIE daily CSV"
     envelope. 4372 is subject-exclusive: do not assign 4372 from headers
     alone in :func:`ingest_daily_reports`. Raises when zero or multiple
     reports match, so a foreign CSV can never be ingested silently.
@@ -934,7 +959,7 @@ def _self_test() -> None:
         else:
             failures.append(f"{name}: expected GmailReportIngestionError, got success")
 
-    expected_counts = {"4247": 22, "4246": 24, "4372": 32, "4359": 19}
+    expected_counts = {"4247": 22, "4246": 24, "4372": 32, "4359": 19, "4744": 8}
 
     for report_id, count in expected_counts.items():
         def make_ok(rid=report_id, want=count):
@@ -963,7 +988,7 @@ def _self_test() -> None:
         for report_id in expected_counts:
             routed = fingerprint_report_id(expected_headers(report_id))
             assert routed == report_id, f"fingerprint routed {report_id} -> {routed}"
-    check("header fingerprint routes all four reports", fingerprint_routes_all)
+    check("header fingerprint routes all five reports", fingerprint_routes_all)
 
     def fingerprint_rejects_unknown():
         fingerprint_report_id(["Nope", "Unknown", "Headers"])

@@ -155,7 +155,7 @@ def test_registry_hit_is_deterministic():
     entry = SimpleNamespace(discussion_id="999")
     discs = [_d("999", "Certificate of Insurance Request - RMIS",
                 "2026-09-15T17:19:14+00:00")]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(entry), FakeDiscussions(discs))
     assert did == "999"
     assert "registry" in how
@@ -168,7 +168,7 @@ def test_single_holder_discussion_resolves_strong():
         _d("2", "Certificate of Insurance Request - Manasquan PBA",
            "2026-05-19T19:44:32+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["Anderson Market"], FakeRegistry(),
         FakeDiscussions(discs),
         email_date="Fri, 25 Sep 2026 21:06:08 +0000")
@@ -184,7 +184,7 @@ def test_policy_digits_narrow_multiple_candidates():
         _d("2", "Certificate of Insurance Request - RMIS policy 998877",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(policies=["998877"]), ["RMIS"], FakeRegistry(),
         FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000")
@@ -202,7 +202,7 @@ def test_stale_same_holder_threads_hold_with_dates():
         _d("3", "Certificate of Insurance Request - RMIS",
            "2025-10-27T15:04:53+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did is None
@@ -217,7 +217,7 @@ def test_fresh_discussion_for_new_request_resolves_medium():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did == "1"
@@ -231,7 +231,7 @@ def test_fresh_discussion_does_not_resolve_a_followup():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=True)
     assert did is None  # a reply may belong to the older thread
@@ -240,7 +240,7 @@ def test_fresh_discussion_does_not_resolve_a_followup():
 def test_no_candidates_holds():
     discs = [_d("1", "General Inquiry - billing question",
                 "2026-09-01T10:00:00+00:00")]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs))
     assert did is None
     assert "no certificates discussion" in how
@@ -253,7 +253,7 @@ def test_no_holder_extracted_holds_when_many():
         _d("2", "Certificate of Insurance Request - RXO",
            "2026-05-14T13:57:23+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), [], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000")
     assert did is None
@@ -268,7 +268,7 @@ def test_recency_alone_never_resolves():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did == "2"  # the single RMIS-anchored one, not the fresh RXO one
@@ -371,3 +371,78 @@ def test_writer_without_readback_is_flagged_not_failed(monkeypatch):
                         "owner", False)
     assert out.status == FILED
     assert any("did not report a read-back" in e for e in out.evidence)
+
+
+# ---------------------------------------------------------------------------
+# find_best_certificate_discussion (2026-09-29: with-note 500 fallback)
+# ---------------------------------------------------------------------------
+
+from robie_job_engine.cert_filing import find_best_certificate_discussion  # noqa: E402
+
+
+def test_find_best_single_cert_discussion():
+    """Exactly one certificate discussion: use it (the applicant's cert discussion)."""
+    discs = [
+        _d("1", "Certificate of Insurance for Daniel Mahler", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Policy Renewal Discussion", "2026-09-02T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Forest Glen"])
+    assert result == ("1", "Certificate of Insurance for Daniel Mahler")
+
+
+def test_find_best_holder_match_among_many():
+    """Multiple cert discussions: pick the one naming the holder."""
+    discs = [
+        _d("1", "Certificate of Insurance Request - Descartes MyCarrierPortal", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Certificate of Insurance Request - Highway App, Inc.", "2026-09-02T10:00:00+00:00"),
+        _d("3", "Policy Renewal", "2026-09-03T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Descartes MyCarrierPortal"])
+    assert result == ("1", "Certificate of Insurance Request - Descartes MyCarrierPortal")
+
+
+def test_find_best_no_holder_match_returns_none():
+    """Multiple cert discussions, no holder match: return None (don't guess)."""
+    discs = [
+        _d("1", "Certificate of Insurance Request - Descartes MyCarrierPortal", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Certificate of Insurance Request - Highway App, Inc.", "2026-09-02T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Unknown Holder XYZ"])
+    assert result is None
+
+
+def test_find_best_no_cert_discussions_returns_none():
+    """Zero certificate discussions: return None (caller tries with-note)."""
+    discs = [
+        _d("1", "Policy Renewal Discussion", "2026-09-01T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Some Holder"])
+    assert result is None
+
+
+def test_holder_info_format_extraction():
+    """'Certificate Holder Information' with name on next line is extracted."""
+    em = CertEmail(gmail_id="g", thread_id="t", rfc_message_id="r",
+                   from_header="Lisa Velez <lisa@gmail.com>",
+                   subject="Fwd: Insurance Certificate Request",
+                   date="Tue, 29 Sep 2026 09:01:31 -0400",
+                   body_text="*Certificate Holder Information*\n\nDescartes MyCarrierPortal\n543 Country Club Dr.",
+                   attachments=[])
+    facts = extract_request_facts(em)
+    assert "Descartes MyCarrierPortal" in facts.holder_names
+
+
+def test_additional_insured_extraction():
+    """'Additional insured:' is extracted as a holder."""
+    em = CertEmail(gmail_id="g", thread_id="t", rfc_message_id="r",
+                   from_header="PNM <pnm@gmail.com>",
+                   subject="cert req.",
+                   date="Tue, 29 Sep 2026 09:49:14 -0400",
+                   body_text="Certificate Holder: homeowner.\nAdditional insured: Forest Glen c/o Midlantic Property Management",
+                   attachments=[])
+    facts = extract_request_facts(em)
+    assert any("Forest Glen" in h for h in facts.holder_names)

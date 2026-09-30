@@ -36,6 +36,20 @@ _REASONING_HEADING = re.compile(
 # user-facing reply that follows them.
 _FIRST_PERSON_NARRATION = re.compile(r"^(I\b|I'm\b|I’ve\b|My\b|We\b)", re.IGNORECASE)
 
+_THINK_BLOCK = re.compile(
+    r"<(?:think|thinking|reasoning)>.*?</(?:think|thinking|reasoning)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Drop model thinking tags before the heading-based strip."""
+    cleaned = _THINK_BLOCK.sub("", text)
+    cleaned = re.sub(r"</?(?:think|thinking|reasoning)>", "", cleaned, flags=re.IGNORECASE)
+    if cleaned != text:
+        cleaned = cleaned.strip()
+    return cleaned
+
 
 def _strip_internal_reasoning(text):
     """Remove agent reasoning sections from a worker draft before replying.
@@ -52,6 +66,9 @@ def _strip_internal_reasoning(text):
         return text
     if text == "":
         return ""
+    text = _strip_think_blocks(text)
+    if not isinstance(text, str):
+        return text
     lines = text.split("\n")
     out = []
     stripped_any = False
@@ -99,15 +116,24 @@ class HermesEmailWorker:
         self.store = store
         self.run_agent_with_context = run_agent_with_context
 
-    def perform(self, job, *, idempotency_key: str) -> WorkerResult:
+    def _invoke_agent(self, job, prompt: str) -> str:
         if self.run_agent_with_context is not None:
-            response = self.run_agent_with_context(job["payload"]["prompt"], job["id"], self.store.path)
-        else:
-            response = self.run_agent(job["payload"]["prompt"])
+            return self.run_agent_with_context(prompt, job["id"], self.store.path)
+        return self.run_agent(prompt)
+
+    def perform(self, job, *, idempotency_key: str) -> WorkerResult:
+        prompt = str((job.get("payload") or {}).get("prompt") or "")
+        response = self._response_after_plan(job, prompt)
+        response = _strip_internal_reasoning(response)
+        from .answer_only import is_answer_only_job
+
+        answer_only = is_answer_only_job(job)
         from .chat_destination_binding import claimed_from_job, derive_destination, read_exec_rows
-        binding = derive_destination(read_exec_rows(self.store, job["id"]), claimed_from_job(job, response))
+        binding = None
+        if not answer_only:
+            binding = derive_destination(read_exec_rows(self.store, job["id"]), claimed_from_job(job, response))
         destination = {"gmail_message_id": job["payload"]["gmail_message_id"]}
-        if binding.bindable:
+        if binding is not None and binding.bindable:
             destination.update(binding.checkpoint(job["id"])["destination"])
             payload = dict(job["payload"])
             for key, value in binding.payload_patch().items():
@@ -163,11 +189,46 @@ class HermesEmailWorker:
             error=error,
         )
 
+    def _response_after_plan(self, job, prompt: str) -> str:
+        """Lock the model's plan before the acting call on a write job.
+
+        The planner is not the acting model. When it states a plan, the
+        acting call receives that plan and nothing else is authorized.
+        When it does not, the plan stays unlocked and write tools refuse.
+        """
+        from .write_verification_loop import (
+            default_plan_model,
+            is_ezlynx_write_job,
+            lock_stated_plan,
+            locked_plan_instructions,
+            parse_model_plan,
+            plan_is_locked,
+            plan_prompt_for_job,
+            remember_unlocked_plan,
+        )
+
+        if is_ezlynx_write_job(job) and not plan_is_locked(self.store, job["id"]):
+            planner = getattr(self, "plan_model", None) or default_plan_model
+            raw_plan = planner(plan_prompt_for_job(job))
+            statement = parse_model_plan(raw_plan)
+            if statement is None:
+                remember_unlocked_plan(self.store, job, raw_plan)
+            else:
+                locked = lock_stated_plan(self.store, job, statement)
+                prompt = prompt + "\n\n" + locked_plan_instructions(locked)
+        return self._invoke_agent(job, prompt)
+
 
 def _default_email_verifiers():
     # Email uses the same independent destination reader as Chat.
+    # Questions skip EZLynx readback inside SkipDestinationReadback.
+    from .answer_only import SkipDestinationReadback
     from .chat_guard import _default_chat_verifiers
-    return {"hermes.email_task": _default_chat_verifiers()["hermes.google_chat_task"]}
+    return {
+        "hermes.email_task": SkipDestinationReadback(
+            _default_chat_verifiers()["hermes.google_chat_task"]
+        )
+    }
 
 
 def run_guarded_email_task(
@@ -232,12 +293,15 @@ def run_guarded_email_task(
                 f"ROBIE Job {job['id']} is {job['status']}; keep email unread"
             )
     else:
+        from .answer_only import is_informational_ask
+
         payload = {
             "worker": "hermes-cua",
             "gmail_message_id": gmail_message_id,
             "prompt": prompt,
             "request_text": request_text,
             "document_names": list(attachment_names),
+            "answer_only": is_informational_ask(request_text),
             **targets,
         }
         if str(thread_id or "").strip():
@@ -259,14 +323,94 @@ def run_guarded_email_task(
     response = _strip_internal_reasoning(response)
     from .message_results import verification_summary
     summary = verification_summary(store, job["id"])
-    details = f"\n\n{summary}" if summary else ""
     status = JobStatus(final["status"])
     if status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING, JobStatus.RETRY_WAIT}:
         raise EmailTaskPending(f"ROBIE Job {job['id']} is {status.value}; keep email unread")
+    return _render_email_terminal(
+        job_id=job["id"],
+        status=status,
+        response=response,
+        summary=str(summary or ""),
+        store=store,
+    )
+
+
+def _render_email_terminal(
+    *,
+    job_id: str,
+    status: JobStatus,
+    response: str,
+    summary: str,
+    store: JobStore | None = None,
+) -> str:
+    """Render the email reply in the simple shared format.
+
+    Same shape as the Chat terminal renderer (Jake's What happened /
+    Anything needed / Status, plain words first, job ref at the bottom),
+    via the shared status_format module. Internal worker codes are
+    translated for display only.
+
+    When ``ROBIE_END_STATE_REPORT`` is on, the reply is the end-state
+    report instead, in Test or in Production. The old
+    "Worker report (not proof)" line is display-only and is skipped.
+    Destination verifiers still run before this render.
+    """
+    from .answer_only import is_answer_only_job
+    from .end_state_report import end_state_report_enabled, render_job_end_state
+
+    if store is not None:
+        try:
+            job = store.get_job(job_id)
+        except KeyError:
+            job = None
+        if job is not None and is_answer_only_job(job):
+            return render_job_end_state(
+                store, job, response, channel="email"
+            )
+        if job is not None:
+            from .write_verification_loop import write_reply_if_planned
+
+            planned = write_reply_if_planned(store, job, response)
+            if planned:
+                return planned
+    if end_state_report_enabled() and store is not None:
+        job = store.get_job(job_id)
+        return render_job_end_state(
+            store, job, response, channel="email"
+        )
+
+    from . import status_format
+
     if status == JobStatus.COMPLETE:
-        return f"ROBIE Job {job['id']} — COMPLETE\n\n{summary or 'The requested result was independently verified.'}"
-    return (
-        f"ROBIE Job {job['id']} — {status.value}\n\n"
-        f"Worker report (not proof): {response}{details}\n\n"
-        "ROBIE did not independently verify the destination state. This result must not be treated as COMPLETE."
+        return status_format.render_simple_status(
+            headline="Done.",
+            what_happened=str(summary or "The requested result was independently verified."),
+            anything_needed="No.",
+            status_line="Verified \u2014 the result was checked against the destination.",
+            job_id=job_id,
+        )
+    headline = {
+        JobStatus.FAILED: "Couldn't finish.",
+        JobStatus.UNVERIFIED: "Not verified.",
+    }.get(status, "Waiting.")
+    status_line = {
+        JobStatus.FAILED: "Failed.",
+        JobStatus.UNVERIFIED: "Not verified \u2014 don't treat this as done.",
+    }.get(status, "Not finished.")
+    details = "Worker report (not proof): " + str(response or "").strip()
+    if summary:
+        details += "\n\n" + str(summary).strip()
+    what_happened = status_format.plain_reason(response)
+    # The retry guidance lives in the "Anything needed" line; don't repeat it.
+    what_happened = what_happened.replace(
+        "Check saved results before retrying.", "").replace("  ", " ").strip(" .")
+    if what_happened and not what_happened.endswith("."):
+        what_happened += "."
+    return status_format.render_simple_status(
+        headline=headline,
+        what_happened=what_happened or "The job ended without a clear result.",
+        anything_needed="Check the saved results before retrying.",
+        status_line=status_line,
+        details=details,
+        job_id=job_id,
     )

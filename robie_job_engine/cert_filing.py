@@ -37,14 +37,22 @@ from .cert_task_registry import (
 )
 from .cert_verification import (
     ACTION_ACK, ACTION_NEW_REQUEST, VERIFIED,
-    FilingTargetMismatch, verify_filing_target,
+    FilingTargetMismatch, verify_applicant_anchor, verify_filing_target,
 )
+from .ezlynx_discussions import create_discussion_with_note
 
 FILED = "FILED"
 DRY_RUN = "DRY_RUN"
 HELD = "HELD"
 PARTIAL = "PARTIAL"
 ERROR = "ERROR"
+
+# Auto-created discussions are reused for follow-up requests for the same
+# applicant + normalized holder indefinitely (Carlo 2026-09-29): a later
+# email about the same client and holder appends to the existing discussion
+# instead of creating a duplicate. Reuse stays safe because the discussion
+# is GET-verified in EZLynx before reuse; a discussion that no longer reads
+# back is never reused.
 
 
 @dataclass
@@ -93,6 +101,7 @@ class FilingStore:
                 note_status TEXT NOT NULL DEFAULT 'pending',
                 note_id TEXT,
                 discussion_id TEXT,
+                thread_id TEXT,
                 docs_json TEXT NOT NULL DEFAULT '{}',
                 task_status TEXT NOT NULL DEFAULT 'pending',
                 task_id TEXT,
@@ -101,9 +110,29 @@ class FilingStore:
                 updated_at REAL NOT NULL
             )"""
         )
+        # Migration for databases created before thread_id existed.
+        cols = {row[1] for row in
+                self._db.execute("PRAGMA table_info(cert_filing)").fetchall()}
+        if "thread_id" not in cols:
+            self._db.execute("ALTER TABLE cert_filing ADD COLUMN thread_id TEXT")
+        # Ledger of discussions the sweep auto-created (Carlo 2026-09-28:
+        # no human gate). One row per (applicant, normalized holder): a
+        # follow-up request for the same holder reuses the discussion
+        # indefinitely instead of creating a duplicate.
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS cert_auto_discussions (
+                applicant_id TEXT NOT NULL,
+                holder_norm TEXT NOT NULL DEFAULT '',
+                discussion_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                PRIMARY KEY (applicant_id, holder_norm)
+            )"""
+        )
         self._db.commit()
 
-    def claim(self, message_id: str, owner: str, ttl_s: int = 600) -> bool:
+    def claim(self, message_id: str, owner: str, ttl_s: int = 600,
+              thread_id: str | None = None) -> bool:
         """Take the lease for a message. False = another worker holds it."""
         now = time.time()
         row = self._db.execute(
@@ -113,13 +142,14 @@ class FilingStore:
         if row and row[0] != owner and row[1] > now:
             return False
         self._db.execute(
-            """INSERT INTO cert_filing (message_id, lease_owner, lease_expires, updated_at)
-               VALUES (?,?,?,?)
+            """INSERT INTO cert_filing (message_id, thread_id, lease_owner, lease_expires, updated_at)
+               VALUES (?,?,?,?,?)
                ON CONFLICT(message_id) DO UPDATE SET
+                thread_id=COALESCE(excluded.thread_id, cert_filing.thread_id),
                 lease_owner=excluded.lease_owner,
                 lease_expires=excluded.lease_expires,
                 updated_at=excluded.updated_at""",
-            (message_id, owner, now + ttl_s, now),
+            (message_id, thread_id, owner, now + ttl_s, now),
         )
         self._db.commit()
         return True
@@ -151,6 +181,51 @@ class FilingStore:
         self._db.execute(
             f"UPDATE cert_filing SET {cols}, updated_at=? WHERE message_id=?",
             (*fields.values(), time.time(), message_id),
+        )
+        self._db.commit()
+
+    # -- auto-created discussion ledger ------------------------------------
+
+    def thread_discussion(self, thread_id: str,
+                         exclude_message_id: str | None = None) -> str | None:
+        """Newest discussion filed for another message in the same Gmail
+        thread, or None. Lets a follow-up reuse the thread's discussion."""
+        row = self._db.execute(
+            """SELECT discussion_id FROM cert_filing
+               WHERE thread_id=? AND message_id != COALESCE(?, '')
+                 AND discussion_id IS NOT NULL AND discussion_id != ''
+               ORDER BY updated_at DESC LIMIT 1""",
+            (thread_id, exclude_message_id),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def auto_discussion_get(self, applicant_id: Any,
+                            holder_norm: str) -> dict[str, Any] | None:
+        """Ledger row for (applicant, normalized holder), or None."""
+        row = self._db.execute(
+            """SELECT discussion_id, title, created_at
+               FROM cert_auto_discussions
+               WHERE applicant_id=? AND holder_norm=?""",
+            (str(applicant_id), holder_norm or ""),
+        ).fetchone()
+        if not row:
+            return None
+        return {"discussion_id": str(row[0]), "title": str(row[1] or ""),
+                "created_at": float(row[2] or 0)}
+
+    def auto_discussion_record(self, applicant_id: Any, holder_norm: str,
+                               discussion_id: str, title: str) -> None:
+        """Upsert the auto-created discussion for (applicant, holder)."""
+        self._db.execute(
+            """INSERT INTO cert_auto_discussions
+                 (applicant_id, holder_norm, discussion_id, title, created_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(applicant_id, holder_norm) DO UPDATE SET
+                 discussion_id=excluded.discussion_id,
+                 title=excluded.title,
+                 created_at=excluded.created_at""",
+            (str(applicant_id), holder_norm or "", str(discussion_id),
+             title or "", time.time()),
         )
         self._db.commit()
 
@@ -285,16 +360,28 @@ def _grade_candidates(candidates: list[dict[str, Any]],
     return annotated
 
 
+# resolve_discussion outcome codes. Carlo 2026-09-28: the two hold codes
+# (NO_DISCUSSION, AMBIGUOUS) no longer need a human gate — the sweep
+# auto-creates a named discussion for them via create_discussion_with_note.
+DISCUSSION_RESOLVED = "resolved"
+DISCUSSION_NONE = "no_discussion"
+DISCUSSION_AMBIGUOUS = "ambiguous"
+AUTO_CREATE_CODES = (DISCUSSION_NONE, DISCUSSION_AMBIGUOUS)
+
+
 def resolve_discussion(verified: Any, holder_names: list[str],
                        registry: Any, discussions_client: Any,
                        email_date: Any = None,
                        is_followup: bool = False,
-                       ) -> tuple[str | None, str | None, str]:
-    """Find the discussion to file into. Never creates, never guesses.
+                       ) -> tuple[str | None, str | None, str, str]:
+    """Find the discussion to file into. Never guesses.
 
-    Returns (discussion_id, discussion_title, reason). The title is passed
-    to the note writer as its title hint so the writer's own fail-closed
-    selection confirms the same discussion.
+    Returns (discussion_id, discussion_title, reason, code). The title is
+    passed to the note writer as its title hint so the writer's own
+    fail-closed selection confirms the same discussion. ``code`` is one of
+    DISCUSSION_RESOLVED / DISCUSSION_NONE / DISCUSSION_AMBIGUOUS; the two
+    hold codes are auto-create-eligible (see AUTO_CREATE_CODES) — the sweep
+    creates a named discussion for them instead of asking a human.
 
     Confidence ladder (recorded in the reason):
       1. task registry hit — deterministic: this applicant+policy+holder
@@ -326,7 +413,8 @@ def resolve_discussion(verified: Any, holder_names: list[str],
         did = str(entry.discussion_id)
         return (did, titles.get(did),
                 f"task registry: applicant+policy+holder filed to "
-                f"discussion {did} before (title {titles.get(did)!r})")
+                f"discussion {did} before (title {titles.get(did)!r})",
+                DISCUSSION_RESOLVED)
 
     cert_discs = []
     for d in discussions:
@@ -378,7 +466,7 @@ def resolve_discussion(verified: Any, holder_names: list[str],
             else "MEDIUM"
         return did, title, (
             f"{strength}: single certificates discussion {title!r} "
-            f"({ev})")
+            f"({ev})"), DISCUSSION_RESOLVED
 
     if len(filtered) > 1:
         ann = _grade_candidates(filtered, holder_names,
@@ -395,7 +483,7 @@ def resolve_discussion(verified: Any, holder_names: list[str],
                        "looks created for it")
             return a["id"], a["title"], (
                 f"STRONG: {len(filtered)} candidates narrowed to one by "
-                f"{ev} — discussion {a['title']!r}")
+                f"{ev} — discussion {a['title']!r}"), DISCUSSION_RESOLVED
         # Tiebreaker 2: exactly one holder-anchored candidate created for
         # this request — fresh (non-reply) email + brand-new discussion.
         # Never on recency alone: the holder anchor is required.
@@ -411,7 +499,7 @@ def resolve_discussion(verified: Any, holder_names: list[str],
                     f"MEDIUM: {len(filtered)} candidates; "
                     f"{a['title']!r} is the only holder-anchored one "
                     f"created {age_days(a['id'])} day(s) before this new "
-                    f"request ({'; '.join(a['_anchors'])})")
+                    f"request ({'; '.join(a['_anchors'])})"), DISCUSSION_RESOLVED
         # Still ambiguous: say exactly why, with dates.
         parts = []
         for a in ann[:6]:
@@ -432,10 +520,10 @@ def resolve_discussion(verified: Any, holder_names: list[str],
                           "looks created for this request.")
         return None, None, (
             f"{len(filtered)} certificates discussions match{holder_s} "
-            f"({shown}){stale_note}; refusing to guess — create a new "
-            "named discussion in EZLynx or pick one by hand")
+            f"({shown}){stale_note}; refusing to guess — auto-creating a "
+            "new named discussion in EZLynx"), DISCUSSION_AMBIGUOUS
     return None, None, ("no certificates discussion on file for this request — "
-                        "create a named one in EZLynx or approve auto-creation")
+                        "auto-creating a named one in EZLynx"), DISCUSSION_NONE
 
 
 def _note_count(discussions_client: Any, applicant_id: int,
@@ -459,10 +547,18 @@ def file_record(record: Any, verified: Any, deps: FilingDeps,
         res.hold_reasons.append("record is not VERIFIED — refusing to file")
         return res
     applicant_id = verified.applicant_id
-    message_id = getattr(record, "gmail_id", None) or getattr(
-        record, "message_id", "unknown")
+    # Filing identity is per insured target (ledger_key), not per
+    # message: a multi-insured email files one note/task chain per named
+    # insured, and the store's "already filed" note/task state must not
+    # leak from one target into another's. Single-insured records keep
+    # ledger_key == gmail_id, so behavior there is unchanged.
+    message_id = (getattr(record, "ledger_key", None)
+                  or getattr(record, "gmail_id", None)
+                  or getattr(record, "message_id", "unknown"))
 
-    if deps.store and not deps.store.claim(message_id, owner):
+    if deps.store and not deps.store.claim(
+            message_id, owner,
+            thread_id=getattr(record, "thread_id", None)):
         res.hold_reasons.append("another worker holds the lease — skipping")
         return res
     try:
@@ -655,21 +751,75 @@ def _build_uploads(record: Any) -> list[tuple[str, bytes, str]]:
     return uploads
 
 
+def _upload_documents_step(record: Any, deps: FilingDeps, res: FilingResult,
+                           applicant_id: int, dry_run: bool
+                           ) -> list[tuple[str, bytes, str]] | None:
+    """Build the email PDF + attachments and upload each with destination
+    proof. Returns the uploads list on success; in dry-run mode the uploads
+    are built but nothing is sent. Returns None when the filing must stop
+    UNVERIFIED (res.status/hold_reasons already updated) — the email stays
+    unread and no task is created."""
+    try:
+        uploads = _build_uploads(record)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: could not render the email PDF ({exc}); "
+            "email left unread for human review")
+        res.status = ERROR
+        return None
+    if dry_run:
+        res.evidence.append("dry run: documents not uploaded")
+        return uploads
+    outcome_counts = {"uploaded": 0, "already_present": 0, "recovered": 0}
+    for doc_name, file_bytes, filename in uploads:
+        document_id, outcome = _upload_document_verified(
+            deps, applicant_id, doc_name, file_bytes, filename, res)
+        if outcome == "unverified":
+            res.status = ERROR
+            return None
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if document_id:
+            res.document_ids.append(document_id)
+    res.evidence.append(
+        f"{len(uploads)} document(s) proven in Documents: "
+        f"{outcome_counts['uploaded']} uploaded, "
+        f"{outcome_counts['already_present']} already present, "
+        f"{outcome_counts['recovered']} recovered after uncertain POST")
+    return uploads
+
+
 def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                   res: FilingResult, message_id: str, applicant_id: int,
                   owner: str, dry_run: bool) -> FilingResult:
     # --- discussion -------------------------------------------------------
-    discussion_id, discussion_title, how = resolve_discussion(
-        verified, list(getattr(record.facts, "holder_names", []) or []),
+    holder_names = list(getattr(record.facts, "holder_names", []) or [])
+    discussion_id, discussion_title, how, code = resolve_discussion(
+        verified, holder_names,
         deps.registry, deps.discussions_client,
         email_date=getattr(record, "date", None),
         is_followup=_looks_like_followup(getattr(record, "subject", "")))
-    if not discussion_id:
-        res.hold_reasons.append(how)
-        return res
-    res.discussion_id = discussion_id
-    res.evidence.append(f"discussion resolved: {how}")
+    if discussion_id:
+        res.discussion_id = discussion_id
+        res.evidence.append(f"discussion resolved: {how}")
+        return _file_to_discussion(
+            record, verified, deps, res, message_id, applicant_id,
+            discussion_id, discussion_title, dry_run)
+    if code in AUTO_CREATE_CODES:
+        # Carlo 2026-09-28: no human gate. The sweep auto-creates a named
+        # discussion (the filing note becomes its first note) and reuses it
+        # for follow-ups instead of asking Carlo.
+        res.evidence.append(f"discussion hold ({code}): {how}")
+        return _file_via_auto_create(
+            record, verified, deps, res, message_id, applicant_id,
+            holder_names, dry_run)
+    res.hold_reasons.append(how)
+    return res
 
+
+def _file_to_discussion(record: Any, verified: Any, deps: FilingDeps,
+                        res: FilingResult, message_id: str, applicant_id: int,
+                        discussion_id: str, discussion_title: str | None,
+                        dry_run: bool) -> FilingResult:
     # --- applicant proof before every write --------------------------------
     # Carlo's rule: the identity guard runs immediately before EACH write
     # (note, documents, task) — not just once up front. A guard that fails
@@ -692,15 +842,7 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
     # The full original email goes first as a PDF, then every attachment
     # regardless of type. UNVERIFIED rendering fails the whole filing — the
     # email stays unread and no task is created.
-    try:
-        uploads = _build_uploads(record)
-    except Exception as exc:
-        res.hold_reasons.append(
-            f"UNVERIFIED: could not render the email PDF ({exc}); "
-            "email left unread for human review")
-        res.status = ERROR
-        return res
-
+    #
     # --- documents (before the note) -----------------------------------------
     # Documents are uploaded and exact-name-proven BEFORE the note is
     # written, so a document failure can never leave a note claiming
@@ -709,28 +851,12 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
     # BEFORE any re-send. Anything UNVERIFIED fails the filing here — the
     # email stays unread and no task is created (the unread inbox is the
     # flag).
-    if dry_run:
-        res.evidence.append("dry run: documents not uploaded")
-    else:
-        if not _prove_target("document uploads"):
-            res.status = ERROR
-            return res
-        outcome_counts = {"uploaded": 0, "already_present": 0,
-                          "recovered": 0}
-        for doc_name, file_bytes, filename in uploads:
-            document_id, outcome = _upload_document_verified(
-                deps, applicant_id, doc_name, file_bytes, filename, res)
-            if outcome == "unverified":
-                res.status = ERROR
-                return res
-            outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-            if document_id:
-                res.document_ids.append(document_id)
-        res.evidence.append(
-            f"{len(uploads)} document(s) proven in Documents: "
-            f"{outcome_counts['uploaded']} uploaded, "
-            f"{outcome_counts['already_present']} already present, "
-            f"{outcome_counts['recovered']} recovered after uncertain POST")
+    if not dry_run and not _prove_target("document uploads"):
+        res.status = ERROR
+        return res
+    uploads = _upload_documents_step(record, deps, res, applicant_id, dry_run)
+    if uploads is None:
+        return res
 
     # --- note --------------------------------------------------------------
     # Written only after every document is destination-proven, so the note
@@ -824,6 +950,311 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
     res.status = FILED if res.status == HELD else res.status
     return _task_step(record, verified, deps, res, message_id, applicant_id,
                       note_text, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Auto-created named discussions (Carlo 2026-09-28: no human gate).
+# ---------------------------------------------------------------------------
+
+def _auto_discussion_title(holder_names: list[str], record: Any) -> str:
+    """Title for an auto-created discussion:
+    ``COI Request — {holder or "Certificate"} — {YYYY-MM-DD}``."""
+    holder = ""
+    if holder_names:
+        holder = str(holder_names[0] or "").strip()
+    parsed = _parse_email_date(getattr(record, "date", None))
+    day = parsed.strftime("%Y-%m-%d") if parsed else time.strftime("%Y-%m-%d")
+    return f"COI Request — {holder or 'Certificate'} — {day}"
+
+
+def _find_discussion_by_exact_title(discussions_client: Any,
+                                    applicant_id: int, title: str
+                                    ) -> tuple[str, str] | None:
+    """Exact-title lookup in the applicant's discussion list.
+
+    Destination-based dedup: catches a discussion created by an earlier run
+    whose ledger record never landed. Returns (discussion_id, title)."""
+    try:
+        rows = discussions_client.get_discussions(applicant_id) or []
+    except Exception:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _discussion_title(row) == title:
+            did = _discussion_id(row)
+            if did:
+                return did, title
+    return None
+
+
+def _cert_title_words(title: str) -> set[str]:
+    """Significant lowercase words from a discussion title."""
+    words = set()
+    for word in str(title or "").lower().split():
+        cleaned = "".join(c for c in word if c.isalnum())
+        if len(cleaned) >= 4:
+            words.add(cleaned)
+    return words
+
+
+def find_best_certificate_discussion(
+    discussions_client: Any,
+    applicant_id: int,
+    holder_names: list[str],
+) -> tuple[str, str] | None:
+    """Find the best existing certificate discussion to append the filing note to.
+
+    The with-note creation endpoint (POST v8/discussions/with-note) returns
+    HTTP 500 for every payload shape (proven 2026-09-29: the endpoint exists
+    but its server-side handler is broken). Appending to an existing
+    certificate discussion via POST v8/discussions/{id}/notes is the proven
+    path, so prefer it over creating a new discussion.
+
+    Selection rules (fail-closed):
+    - Only discussions whose title mentions certificate/cert/coi qualify.
+    - Exactly one qualifying discussion: it is the applicant's certificate
+      discussion — use it. The filing note names the holder explicitly.
+    - Multiple qualifying discussions: use the one whose title contains a
+      significant word from a holder name (e.g. holder "Descartes
+      MyCarrierPortal" matches "Certificate of Insurance Request -
+      Descartes MyCarrierPortal"). No holder word in any title: return None
+      (caller holds UNVERIFIED rather than guessing).
+    - Zero qualifying discussions: return None (caller falls back to
+      with-note creation).
+
+    Returns (discussion_id, title) or None.
+    """
+    try:
+        rows = discussions_client.get_discussions(applicant_id) or []
+    except Exception:
+        return None
+    cert_rows: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = _discussion_title(row) or ""
+        lowered = title.lower()
+        if "certificate" not in lowered and "cert" not in lowered \
+                and "coi" not in lowered:
+            continue
+        did = _discussion_id(row)
+        if did:
+            cert_rows.append((did, title))
+    if not cert_rows:
+        return None
+    if len(cert_rows) == 1:
+        return cert_rows[0]
+    holder_words: set[str] = set()
+    for holder in holder_names or []:
+        holder_words |= _cert_title_words(holder)
+    if not holder_words:
+        return None
+    best: tuple[str, str] | None = None
+    best_score = 0
+    for did, title in cert_rows:
+        title_words = _cert_title_words(title)
+        score = len(holder_words & title_words)
+        if score > best_score:
+            best_score = score
+            best = (did, title)
+    return best if best_score > 0 else None
+
+
+def _verify_reused_discussion(discussions_client: Any,
+                              discussion_id: str) -> str | None:
+    """GET-verify a dedup-reused discussion still exists. Returns its title,
+    or None when it does not read back."""
+    try:
+        record = discussions_client.get_discussion(discussion_id)
+    except Exception:
+        return None
+    if not isinstance(record, dict) or not record:
+        return None
+    return _discussion_title(record) or None
+
+
+def _reuse_discussion(record: Any, verified: Any, deps: FilingDeps,
+                      res: FilingResult, message_id: str, applicant_id: int,
+                      discussion_id: str, discussion_title: str | None,
+                      why: str, dry_run: bool) -> FilingResult:
+    """File into an already-existing discussion found by the auto-create
+    dedup. The normal flow applies (documents, note append, task) — the
+    note was NOT filed via with-note for this email, so no duplication."""
+    res.discussion_id = discussion_id
+    res.evidence.append(f"reusing discussion {discussion_id} ({why})")
+    return _file_to_discussion(
+        record, verified, deps, res, message_id, applicant_id,
+        discussion_id, discussion_title, dry_run)
+
+
+def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
+                          res: FilingResult, message_id: str,
+                          applicant_id: int, holder_names: list[str],
+                          dry_run: bool) -> FilingResult:
+    """No existing discussion safely fits: reuse or create a named one.
+
+    Dedup order (never two discussions for the same request):
+      (a) another email in the same Gmail thread already filed somewhere —
+          reuse that discussion;
+      (b) the ledger's auto-created discussion for this applicant +
+          normalized holder — GET-verified, then reused. No expiry: a later
+          email about the same client and holder appends to the existing
+          discussion rather than creating a duplicate;
+      (c) the exact auto title already on the applicant in EZLynx —
+          destination-based catch for a create whose ledger row never landed;
+      (c2) the best existing certificate discussion on the applicant —
+          appended to via the proven append-note API. The with-note creation
+          endpoint is broken server-side (HTTP 500, proven 2026-09-29), so
+          an existing certificate discussion is preferred over creating one.
+          Fail-closed: no confident match means no guess;
+      (d) create via POST v8/discussions/with-note with the filing note as
+          the first note, then prove it with a fresh GET read-back.
+
+    Creation failure or an unverified read-back holds UNVERIFIED: nothing
+    is filed and the email stays unread.
+    """
+    store = deps.store
+    client = deps.discussions_client
+    holder_norm = holder_key_for(holder_names)
+    title = _auto_discussion_title(holder_names, record)
+
+    # (a) same Gmail thread already handled
+    thread_id = getattr(record, "thread_id", None)
+    if thread_id and store:
+        did = store.thread_discussion(thread_id, exclude_message_id=message_id)
+        if did:
+            seen = _verify_reused_discussion(client, did)
+            if seen is not None:
+                return _reuse_discussion(
+                    record, verified, deps, res, message_id, applicant_id,
+                    did, seen, f"earlier email in thread {thread_id}",
+                    dry_run)
+            res.evidence.append(
+                f"thread discussion {did} no longer reads back — "
+                "not reusing")
+
+    # (b) same applicant + normalized holder — reused indefinitely (no
+    # expiry). The GET-verification below keeps this safe: a discussion
+    # that no longer reads back in EZLynx is never reused.
+    if store:
+        entry = store.auto_discussion_get(applicant_id, holder_norm)
+        if entry:
+            seen = _verify_reused_discussion(client, entry["discussion_id"])
+            if seen is not None:
+                return _reuse_discussion(
+                    record, verified, deps, res, message_id, applicant_id,
+                    entry["discussion_id"], seen,
+                    "auto-created for this holder (no expiry)",
+                    dry_run)
+            res.evidence.append(
+                f"ledger discussion {entry['discussion_id']} no longer "
+                "reads back — not reusing")
+
+    # (c) exact title already on the applicant in EZLynx
+    found = _find_discussion_by_exact_title(client, applicant_id, title)
+    if found:
+        did, _ = found
+        if store:
+            store.auto_discussion_record(applicant_id, holder_norm, did,
+                                         title)
+        return _reuse_discussion(
+            record, verified, deps, res, message_id, applicant_id,
+            did, title, "exact title already on the applicant", dry_run)
+
+    # (c2) best existing certificate discussion on the applicant. The
+    # with-note creation endpoint is broken server-side (HTTP 500 for every
+    # payload shape, proven 2026-09-29), so prefer appending the filing note
+    # to the applicant's existing certificate discussion via the proven
+    # append-note API. Fail-closed: no confident match means no guess — the
+    # caller falls through to (d).
+    best = find_best_certificate_discussion(client, applicant_id,
+                                            holder_names)
+    if best:
+        did, best_title = best
+        seen = _verify_reused_discussion(client, did)
+        if seen is not None:
+            if store:
+                store.auto_discussion_record(applicant_id, holder_norm, did,
+                                             best_title)
+            return _reuse_discussion(
+                record, verified, deps, res, message_id, applicant_id,
+                did, seen,
+                "best existing certificate discussion on the applicant",
+                dry_run)
+        res.evidence.append(
+            f"best certificate discussion {did} no longer reads back — "
+            "not reusing")
+
+    # (d) create. Dry run validates everything but posts nothing.
+    if dry_run:
+        res.status = DRY_RUN
+        res.evidence.append(
+            f"dry run: would auto-create discussion {title!r} with the "
+            "filing note via with-note; nothing written")
+        note_text = summarize_for_note(
+            getattr(record, "email", record), record.facts,
+            filed_documents=[])
+        return _task_step(record, verified, deps, res, message_id,
+                          applicant_id, note_text, dry_run=True)
+
+    # Applicant anchor BEFORE any write (checks 1-2 of the triple guard).
+    # Check 3 (the discussion belongs to the applicant) runs after creation.
+    try:
+        verify_applicant_anchor(verified, deps.verifier)
+    except FilingTargetMismatch as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: auto-create refused: applicant proof failed: "
+            f"{exc}; email left unread for human review")
+        res.status = ERROR
+        return res
+    res.evidence.append("applicant proof before auto-create: passed")
+
+    # Documents first: the filing note names them truthfully.
+    uploads = _upload_documents_step(record, deps, res, applicant_id,
+                                    dry_run=False)
+    if uploads is None:
+        return res
+
+    note_text = summarize_for_note(
+        getattr(record, "email", record), record.facts,
+        filed_documents=[name for name, _, _ in uploads])
+    try:
+        created = create_discussion_with_note(client, applicant_id, title,
+                                              note_text)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: auto-create discussion failed ({exc}); "
+            "email left unread for human review")
+        res.status = ERROR
+        return res
+
+    new_id = str(created["discussion_id"])
+    res.discussion_id = new_id
+    res.note_id = str(created.get("note_id") or "") or f"with-note:{new_id}"
+    res.evidence.append(
+        f"auto-created discussion {new_id} titled {title!r} with the "
+        "filing note as its first note (POST with-note + GET read-back "
+        "verified: title matches, noteCount >= 1)")
+    if store:
+        store.auto_discussion_record(applicant_id, holder_norm, new_id,
+                                     title)
+        store.set(message_id, note_status="written", note_id=res.note_id,
+                  discussion_id=new_id)
+
+    # Full triple guard now that the discussion exists.
+    try:
+        verify_filing_target(verified, new_id, deps.verifier)
+    except FilingTargetMismatch as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: applicant proof failed on the new discussion: "
+            f"{exc}; email left unread for human review")
+        res.status = ERROR
+        return res
+    res.evidence.append("applicant proof on the new discussion: passed")
+
+    return _task_step(record, verified, deps, res, message_id,
+                      applicant_id, note_text, dry_run=dry_run)
 
 
 def _task_step(record: Any, verified: Any, deps: FilingDeps,
