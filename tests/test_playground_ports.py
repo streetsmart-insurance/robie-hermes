@@ -10,6 +10,7 @@ class Reader:
  def documents_for_applicant(self,n):self.calls.append(n);return [{'id':'10','name':'Declarations.pdf'}]
 class Discussions:
  def get_discussions(self,n):return [{'id':'12','title':'Existing Renewal'}]
+ def get_discussion(self,n):return {'discussionId':n,'applicantId':'26356199','title':'Existing Renewal'}
 
 def test_documents_use_explicit_applicant_and_never_write():
  r=Reader();p=PlaygroundPorts(r)
@@ -40,16 +41,16 @@ def test_discussion_ids_preserved():
 def test_note_write_guard_precedes_network(applicant,enabled):
  writer=Mock();p=PlaygroundPorts(note_writer=writer)
  with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':enabled}):
-  with pytest.raises(PermissionError):p.file_note(Proposal(kind='note',applicant_id=applicant),'Existing','Exact note')
+  with pytest.raises(PermissionError):p.file_note(Proposal(kind='note',applicant_id=applicant),'Existing Renewal','Exact note')
  assert not writer.called
 
 def test_note_receipt_without_independent_readback_is_not_success():
  w=Mock(return_value={'status':'filed','note_id':'20'});p=PlaygroundPorts(discussion_client=Discussions(),note_writer=w)
- with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):assert p.file_note(Proposal(kind='note',applicant_id='26356199'),'Existing','Exact note')==''
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):assert p.file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')==''
 
 def test_verified_note_id_returned():
  w=Mock(return_value={'status':'filed','note_id':'20','read_back':True});p=PlaygroundPorts(discussion_client=Discussions(),note_writer=w)
- with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):assert p.file_note(Proposal(kind='note',applicant_id='26356199'),'Existing','Exact note')=='20'
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):assert p.file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')=='20'
 
 def test_lookup_retains_original_query_for_typed_reader():
  d=classify_playground_request('Find documents for Buster Brown applicant 26356199')
@@ -64,15 +65,17 @@ def test_exact_note_text_retained_not_command_label():
  d=classify_playground_request('File a note on the existing Renewal discussion for Buster Brown saying Called; no answer.')
  assert d.proposal.body=='Called; no answer.'
 
-def test_live_note_passes_exact_body_and_requires_readback():
+def test_live_note_uses_guarded_destination_port():
  from contextlib import nullcontext
  from robie_job_engine.playground_execute import default_apply
  proposal=Proposal(kind='note',applicant_id='26356199',discussion_title='Renewal',body='Called; no answer.',new_value='note on Renewal')
- with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}), patch('robie_job_engine.playground_execute.with_ezlynx_lock',return_value=nullcontext()), patch('robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion',return_value={'status':'filed','note_id':'10','read_back':True}) as writer:
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}), patch('robie_job_engine.playground_execute.with_ezlynx_lock',return_value=nullcontext()), patch('robie_job_engine.playground_ports.runtime_ports') as ports:
+  ports.return_value.file_note.return_value='10'
   assert default_apply(proposal).applied
-  assert writer.call_args.args==('26356199','Called; no answer.')
-  writer.return_value={'status':'filed','note_id':'10'}
+  ports.return_value.file_note.assert_called_once_with(proposal,'Renewal','Called; no answer.')
+  ports.return_value.file_note.return_value=''
   assert not default_apply(proposal).applied
+
 
 def test_off_space_does_not_construct_ports():
  from robie_job_engine.playground_ports import chat_port_kwargs
@@ -132,3 +135,39 @@ def test_bad_source_selector_fails_before_credentials_or_network():
  with patch.dict(os.environ,{'ROBIE_EZLYNX_DISCUSSION_API':'production-guess'}), patch('robie_job_engine.ezlynx_api.load_ezlynx_api_config') as config:
   with pytest.raises(RuntimeError):PlaygroundPorts()._read_port()
   config.assert_not_called()
+
+@pytest.mark.parametrize('record',[
+ {'discussionId':'12','applicantId':'99999999','title':'Existing Renewal'},
+ {'discussionId':'12','title':'Existing Renewal'},
+ {'discussionId':'13','applicantId':'26356199','title':'Existing Renewal'},
+ {'discussionId':'12','applicantId':'26356199','title':'Changed title'},
+])
+def test_note_destination_mismatch_never_calls_writer(record):
+ d=Mock();d.get_discussions.return_value=[{'id':'12','title':'Existing Renewal'}];d.get_discussion.return_value=record
+ w=Mock();ports=PlaygroundPorts(discussion_client=d,note_writer=w)
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):
+  with pytest.raises(ValueError):ports.file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')
+ w.assert_not_called()
+
+@pytest.mark.parametrize('rows',[
+ [{'id':'12','title':'Existing Renewal extended'}],
+ [{'id':'12','title':'Existing Renewal'},{'id':'13','title':'Existing Renewal'}],
+])
+def test_note_substring_or_duplicate_title_never_calls_writer(rows):
+ d=Mock();d.get_discussions.return_value=rows;w=Mock()
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):
+  with pytest.raises(ValueError):PlaygroundPorts(discussion_client=d,note_writer=w).file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')
+ w.assert_not_called();d.get_discussion.assert_not_called()
+
+def test_pinned_writer_cannot_redirect_or_rewrite():
+ d=Mock();d.get_discussions.return_value=[{'id':'12','title':'Existing Renewal'}];d.get_discussion.return_value={'discussionId':'12','applicantId':'26356199','title':'Existing Renewal'}
+ def writer(applicant,body,**kwargs):
+  pinned=kwargs['discussion_client']
+  assert pinned.get_discussions(applicant)==[d.get_discussion.return_value]
+  with pytest.raises(ValueError):pinned.append_note('13',body)
+  with pytest.raises(ValueError):pinned.append_note('12','different text')
+  pinned.append_note('12',body)
+  return {'status':'filed','note_id':'20','read_back':True}
+ with patch.dict(os.environ,{'ROBIE_PLAYGROUND_LIVE_WRITES':'1'}):
+  assert PlaygroundPorts(discussion_client=d,note_writer=writer).file_note(Proposal(kind='note',applicant_id='26356199'),'Existing Renewal','Exact note')=='20'
+ d.append_note.assert_called_once_with('12','Exact note',note_type='Note')
