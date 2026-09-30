@@ -116,11 +116,14 @@ class HermesEmailWorker:
         self.store = store
         self.run_agent_with_context = run_agent_with_context
 
-    def perform(self, job, *, idempotency_key: str) -> WorkerResult:
+    def _invoke_agent(self, job, prompt: str) -> str:
         if self.run_agent_with_context is not None:
-            response = self.run_agent_with_context(job["payload"]["prompt"], job["id"], self.store.path)
-        else:
-            response = self.run_agent(job["payload"]["prompt"])
+            return self.run_agent_with_context(prompt, job["id"], self.store.path)
+        return self.run_agent(prompt)
+
+    def perform(self, job, *, idempotency_key: str) -> WorkerResult:
+        prompt = str((job.get("payload") or {}).get("prompt") or "")
+        response = self._response_after_plan(job, prompt)
         response = _strip_internal_reasoning(response)
         from .answer_only import is_answer_only_job
 
@@ -185,6 +188,35 @@ class HermesEmailWorker:
             hold_status=hold,
             error=error,
         )
+
+    def _response_after_plan(self, job, prompt: str) -> str:
+        """Lock the model's plan before the acting call on a write job.
+
+        The planner is not the acting model. When it states a plan, the
+        acting call receives that plan and nothing else is authorized.
+        When it does not, the plan stays unlocked and write tools refuse.
+        """
+        from .write_verification_loop import (
+            default_plan_model,
+            is_ezlynx_write_job,
+            lock_stated_plan,
+            locked_plan_instructions,
+            parse_model_plan,
+            plan_is_locked,
+            plan_prompt_for_job,
+            remember_unlocked_plan,
+        )
+
+        if is_ezlynx_write_job(job) and not plan_is_locked(self.store, job["id"]):
+            planner = getattr(self, "plan_model", None) or default_plan_model
+            raw_plan = planner(plan_prompt_for_job(job))
+            statement = parse_model_plan(raw_plan)
+            if statement is None:
+                remember_unlocked_plan(self.store, job, raw_plan)
+            else:
+                locked = lock_stated_plan(self.store, job, statement)
+                prompt = prompt + "\n\n" + locked_plan_instructions(locked)
+        return self._invoke_agent(job, prompt)
 
 
 def _default_email_verifiers():
@@ -335,6 +367,12 @@ def _render_email_terminal(
             return render_job_end_state(
                 store, job, response, channel="email"
             )
+        if job is not None:
+            from .write_verification_loop import write_reply_if_planned
+
+            planned = write_reply_if_planned(store, job, response)
+            if planned:
+                return planned
     if end_state_report_enabled() and store is not None:
         job = store.get_job(job_id)
         return render_job_end_state(

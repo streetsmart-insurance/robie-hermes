@@ -208,6 +208,11 @@ def ezlynx_policy_setup_handler(args: dict, **kwargs):
     stopped = refuse_current_tool_call(kwargs)
     if stopped:
         return tool_error(stopped)
+    from robie_job_engine.write_verification_loop import refuse_tool_write
+
+    refused = refuse_tool_write(args, kwargs)
+    if refused:
+        return tool_error(refused)
     policy_number = str((args or {}).get("policy_number") or "").strip()
     if not policy_number:
         return tool_error("policy_number is required")

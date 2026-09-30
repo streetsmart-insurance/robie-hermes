@@ -1486,6 +1486,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         except Exception:
             pass
         await self._maintain_generic_chat_job_heartbeat(job_id)
+        from robie_job_engine.write_verification_loop import prepare_chat_write_plan
+
+        # A write states its plan before Hermes acts. Questions skip this.
+        await asyncio.to_thread(prepare_chat_write_plan, ROBIE_JOB_DB, job_id)
         await self._run_gateway_turn_with_ceiling(job_id, event)
 
     async def _send_clarification_if_needed(self, job_id: str, event: MessageEvent) -> None:

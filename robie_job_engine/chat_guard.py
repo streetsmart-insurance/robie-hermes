@@ -972,6 +972,22 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             "Do not open EZLynx. Do not write a note or a document. "
             "Do not include your reasoning or thinking."
         )
+    from .write_verification_loop import (
+        get_locked_plan,
+        is_ezlynx_write_job,
+        locked_plan_instructions,
+    )
+
+    if is_ezlynx_write_job(job):
+        locked = get_locked_plan(store, job_id)
+        if locked:
+            lines.append(locked_plan_instructions(locked))
+        else:
+            lines.append(
+                "Before any tool or write, state a plan of exactly the write, "
+                "the target, and the values. Do not invent a value. Do not write "
+                "until that plan is locked."
+            )
     lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
     from .runtime_env import playground_enabled
@@ -1899,6 +1915,11 @@ def _render_chat_terminal(
         return render_job_end_state(
             store, job, content, recordings=recordings, channel="chat"
         )
+    from .write_verification_loop import write_reply_if_planned
+
+    planned_reply = write_reply_if_planned(store, job, content)
+    if planned_reply:
+        return planned_reply
     # Flag on: one end-state report scored by Jev. The old "Not verified"
     # wording is display-only and is skipped here. Deterministic verifiers
     # still ran before this render; a failed hard readback forces wrong.
