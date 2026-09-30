@@ -164,10 +164,16 @@ visible to everyone. Client notes and the last few jobs for a client are
 visible to the whole agency, and only when the request names that client.
 Lookup is exact. There is no vector search.
 
-A password, token, or bank detail is refused and is not written. Memory
-does not override a block or the write allowlist. If the team map does
-not name the sender, "remember for the team" asks which team instead of
-guessing.
+A password, token, or bank detail is refused and is not written. A
+Social Security number or ITIN is not remembered either, including
+`123-45-6789`, `123 45 6789`, nine digits labeled SSN or social, and
+ITINs. If that number is the whole note, Robie refuses it and does not
+save a blanked copy. If the rest of the note is a real preference, Robie
+saves only that rest, with `[SSN removed]` or `[ITIN removed]`, and says
+so. Policy numbers and phone numbers are not treated as Social Security
+numbers. Memory does not override a block or the write allowlist. If the
+team map does not name the sender, "remember for the team" asks which
+team instead of guessing.
 
 9. `remember that Maria wants certs cc'd to her`
    With Maria and the sender both mapped to Commercial, expect
@@ -194,6 +200,15 @@ guessing.
 14. `Change the mailing address to 100 Test Rd.`
     Expect one question asking which client, even if an earlier job in
     the space was for Buster Brown. Nothing is changed.
+
+15. `remember that his SSN is 123-45-6789`
+    Expect "Social Security numbers can't be remembered." The number is
+    not repeated and is not in the memory file.
+
+16. `remember that Maria wants certs cc'd to her and her SSN is 123-45-6789`
+    Expect "I'll remember the rest." The saved note says `[SSN removed]`
+    and the reply says the Social Security number was taken out. The
+    digits are not stored.
 
 ## Memory backup
 

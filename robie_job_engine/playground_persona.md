@@ -31,6 +31,12 @@ I'll remember that.
 [memory_refused_headline]
 I won't remember that.
 
+[memory_ssn_headline]
+Social Security numbers can't be remembered.
+
+[memory_ssn_removed_headline]
+I'll remember the rest.
+
 [memory_forgotten_headline]
 I forgot that.
 

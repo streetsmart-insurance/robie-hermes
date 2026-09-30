@@ -230,6 +230,7 @@ def memory_saved_reply(
     job_id: str,
     team: str = "",
     client: str = "",
+    tax_note: str = "",
 ) -> str:
     if scope == "team":
         who = f"the {team} team" if team else "that team"
@@ -239,15 +240,29 @@ def memory_saved_reply(
         who = f"{client or 'that client'}, for the whole agency"
     else:
         who = "you"
+    happened = f"I saved this for {who}."
+    if tax_note:
+        happened = f"{happened} {tax_note}"
     return status_reply(
-        headline=line("memory_saved_headline"),
-        what_happened=f"I saved this for {who}.",
+        headline=line("memory_ssn_removed_headline") if tax_note else line("memory_saved_headline"),
+        what_happened=happened,
         anything_needed="No.",
         status_line="Remembered.",
         details=(
             f"{fact}\n"
             "This does not override a block or the write allowlist."
         ),
+        job_id=job_id,
+    )
+
+
+def memory_ssn_refused_reply(*, job_id: str) -> str:
+    return status_reply(
+        headline=line("memory_ssn_headline"),
+        what_happened="Social Security numbers and ITINs can't be remembered.",
+        anything_needed="Leave the number out and send the rest again.",
+        status_line="Not stored.",
+        details="I did not save it, and I will not repeat the number.",
         job_id=job_id,
     )
 

@@ -15,8 +15,11 @@ from robie_job_engine.models import JobStatus
 from robie_job_engine.playground_execute import ApplyResult
 from robie_job_engine.playground_guardrails import Proposal, classify_playground_request
 from robie_job_engine.playground_memory import (
+    ITIN_REMOVED,
+    SSN_REMOVED,
     memory_contains_secret,
     memory_db_path,
+    prepare_memory_text,
     recall_for_turn,
     stored_text_contains,
 )
@@ -591,3 +594,117 @@ class MemoryTests(unittest.TestCase):
             self.assertTrue(any("short notes" in item.text for item in fresh))
             self.assertFalse(any("short notes" in item.text for item in stale))
             self.assertFalse(any("short notes" in item.text for item in other))
+
+    def test_ssn_and_itin_are_refused_or_removed(self):
+        refused = [
+            "123-45-6789",
+            "123 45 6789",
+            "SSN 123456789",
+            "social security number 123456789",
+            "social 123 45 6789",
+            "123456789 is his SSN",
+            "ITIN 912-70-1234",
+            "ITIN 912701234",
+        ]
+        allowed = [
+            "policy number 123456789",
+            "policy number is 123-45-6789",
+            "policy # HO1234567",
+            "phone 555-123-4567",
+            "phone number 5551234567",
+            "555 123 4567",
+            "(555) 123-4567",
+            "applicant 26356199",
+        ]
+        for text in refused:
+            self.assertTrue(memory_contains_secret(text), text)
+            self.assertNotIn("123", prepare_memory_text(text).text)
+        for text in allowed:
+            self.assertFalse(memory_contains_secret(text), text)
+        useful = prepare_memory_text(
+            "Maria wants certs cc'd to her and her SSN is 123-45-6789"
+        )
+        self.assertEqual(useful.action, "tax_redacted")
+        self.assertIn(SSN_REMOVED, useful.text)
+        self.assertNotIn("123-45-6789", useful.text)
+        itin = prepare_memory_text("Buster prefers morning calls. ITIN 912-70-1234")
+        self.assertEqual(itin.action, "tax_redacted")
+        self.assertIn(ITIN_REMOVED, itin.text)
+        self.assertNotIn("912-70-1234", itin.text)
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            with mock.patch.dict(
+                os.environ,
+                _env(ROBIE_PLAYGROUND_TEAM_MEMBERS="Commercial=Casey,Maria"),
+                clear=False,
+            ):
+                blocked = handle_playground_chat(
+                    db,
+                    "remember that his SSN is 123-45-6789",
+                    conversation_id=SPACE,
+                    thread_id="ssn-1",
+                    message_id="ssn-1",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                saved = handle_playground_chat(
+                    db,
+                    "remember that Maria wants certs cc'd to her and her SSN is 123-45-6789",
+                    conversation_id=SPACE,
+                    thread_id="ssn-2",
+                    message_id="ssn-2",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                itin_saved = handle_playground_chat(
+                    db,
+                    "remember that Buster prefers morning calls. ITIN 912701234",
+                    conversation_id=SPACE,
+                    thread_id="ssn-3",
+                    message_id="ssn-3",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                policy = handle_playground_chat(
+                    db,
+                    "remember that the policy number is HO1234567",
+                    conversation_id=SPACE,
+                    thread_id="ssn-4",
+                    message_id="ssn-4",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+                phone = handle_playground_chat(
+                    db,
+                    "remember that the phone is 555-123-4567",
+                    conversation_id=SPACE,
+                    thread_id="ssn-5",
+                    message_id="ssn-5",
+                    requested_by="Casey",
+                    now=WHEN,
+                )
+            self.assertIn("Social Security numbers can't be remembered", blocked[0])
+            self.assertNotIn("123-45-6789", blocked[0])
+            self.assertNotIn(SSN_REMOVED, blocked[0])
+            self.assertIn("I'll remember the rest", saved[0])
+            self.assertIn("I took out the Social Security number", saved[0])
+            self.assertIn(SSN_REMOVED, saved[0])
+            self.assertNotIn("123-45-6789", saved[0])
+            self.assertIn("I'll remember the rest", itin_saved[0])
+            self.assertIn("I took out the ITIN", itin_saved[0])
+            self.assertIn(ITIN_REMOVED, itin_saved[0])
+            self.assertNotIn("912701234", itin_saved[0])
+            self.assertIn("I'll remember that", policy[0])
+            self.assertIn("HO1234567", policy[0])
+            self.assertIn("555-123-4567", phone[0])
+            blob = Path(db).read_bytes() + Path(memory_db_path(db)).read_bytes()
+            for secret in (
+                b"123-45-6789",
+                b"123 45 6789",
+                b"123456789",
+                b"912701234",
+                b"912-70-1234",
+            ):
+                self.assertNotIn(secret, blob)
+            self.assertIn(SSN_REMOVED.encode(), blob)
+            self.assertIn(ITIN_REMOVED.encode(), blob)

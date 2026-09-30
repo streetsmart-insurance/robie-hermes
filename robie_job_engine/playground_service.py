@@ -41,6 +41,7 @@ from .playground_memory import (
     list_memories,
     memory_contains_secret,
     plan_preference,
+    prepare_memory_text,
     recall_for_turn,
     record_job,
     safe_text,
@@ -59,6 +60,7 @@ from .playground_reply import (
     memory_list_reply,
     memory_refused_reply,
     memory_saved_reply,
+    memory_ssn_refused_reply,
     mismatch_reply,
     sop_reply,
     working_reply,
@@ -550,6 +552,16 @@ def _sync_job_outcome(
     )
 
 
+def _tax_note(prepared: Any) -> str:
+    if getattr(prepared, "action", "") != "tax_redacted":
+        return ""
+    if prepared.removed_ssn and prepared.removed_itin:
+        return "I took out the Social Security number and the ITIN."
+    if prepared.removed_itin:
+        return "I took out the ITIN."
+    return "I took out the Social Security number."
+
+
 def _format_memory(item: Any) -> str:
     if item.kind == "job":
         client = f" for {item.client_name}" if item.client_name else ""
@@ -637,10 +649,16 @@ def _memory_turn(
         return reply
     fact = proposal.body
     if decision.intent == REMEMBER:
-        if memory_contains_secret(text) or memory_contains_secret(fact):
+        prepared = prepare_memory_text(fact)
+        if prepared.action == "secret" or prepare_memory_text(text).action == "secret":
             reply = memory_refused_reply(job_id=job_id)
             _note("refused")
             return _fail(store, job_id, reply, error="Not stored.")
+        if prepared.action == "tax_refused":
+            reply = memory_ssn_refused_reply(job_id=job_id)
+            _note("refused")
+            return _fail(store, job_id, reply, error="Not stored.")
+        fact = prepared.text
         scope_hint = proposal.field if proposal.field in {"person", "team", "client", "agency"} else ""
         planned = plan_preference(
             fact,
@@ -681,14 +699,21 @@ def _memory_turn(
             job_id=job_id,
             team=saved.team,
             client=saved.client_name,
+            tax_note=_tax_note(prepared),
         )
         _note("remembered")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
     if decision.intent == FORGET:
-        if memory_contains_secret(fact):
+        prepared = prepare_memory_text(fact)
+        if prepared.action == "secret":
             reply = memory_refused_reply(job_id=job_id)
             _note("refused")
             return _fail(store, job_id, reply, error="Not stored.")
+        if prepared.action == "tax_refused":
+            reply = memory_ssn_refused_reply(job_id=job_id)
+            _note("refused")
+            return _fail(store, job_id, reply, error="Not stored.")
+        fact = prepared.text
         forgotten = forget_matching(
             store.path,
             requested_by=requested_by,
@@ -701,10 +726,16 @@ def _memory_turn(
         )
         _note("forgotten")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
-    if memory_contains_secret(fact):
+    prepared = prepare_memory_text(fact)
+    if prepared.action == "secret":
         reply = memory_refused_reply(job_id=job_id)
         _note("refused")
         return _fail(store, job_id, reply, error="Not stored.")
+    if prepared.action == "tax_refused":
+        reply = memory_ssn_refused_reply(job_id=job_id)
+        _note("refused")
+        return _fail(store, job_id, reply, error="Not stored.")
+    fact = prepared.text
     rows = list_memories(store.path, requested_by=requested_by, about=fact)
     reply = memory_list_reply(
         about=fact,
