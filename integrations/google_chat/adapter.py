@@ -235,6 +235,13 @@ from robie_job_engine.chat_guard import (
     retry_without_job_reply,
     start_generic_chat_job_heartbeat,
 )
+from robie_job_engine.chat_thread import (
+    bind_job_chat_thread,
+    inbound_thread_to_bind,
+    outbound_thread_spec,
+    read_job_chat_thread,
+    remember_created_thread,
+)
 from robie_job_engine.engine import is_retry_text
 from robie_job_engine.chat_queue import (
     DurableChatEventQueue,
@@ -1042,6 +1049,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         #       replies still land in the right visual thread without
         #       re-coupling sessions to threads.
         self._last_inbound_thread: Dict[str, str] = {}
+        # Job currently handling this space, so thinking/clarify/status
+        # sends can find the job when the gateway omits robie_job_id.
+        self._active_chat_job: Dict[str, str] = {}
+        # Inbound message name → thread.name when the user replied inside
+        # a thread that already had messages (not a brand-new top-level).
+        self._reply_in_existing_thread: Dict[str, str] = {}
         # Inbound message count per (chat_id, thread_name). Drives the
         # DM main-flow vs side-thread heuristic in _build_message_event
         # and the outbound thread routing in _resolve_thread_id.
@@ -1447,6 +1460,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # A retryable exception leaves the durable event available after restart.
         await asyncio.to_thread(require_message_execution_available, ROBIE_JOB_DB)
+        if job_id:
+            await self._bind_inbound_job_thread(event, job_id)
         if job_id:
             from robie_job_engine.chat_hitl import run_chat_hitl_coverage_resume
             from robie_job_engine.policy_setup_dispatch import is_coverage_fill_miss
@@ -2910,6 +2925,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         context = None
                         interaction = {}
                 if interaction.get("awaiting") == "human_input":
+                    await self._bind_inbound_job_thread(
+                        event, (context or {}).get("job_id")
+                    )
                     message_id = event.message_id or f"human:{id(event)}"
                     value = human_reply_value(text)
                     accepts_value = interaction.get("accepts_value", True)
@@ -3142,6 +3160,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 attachment_refs=attachment_kwargs["attachment_refs"],
                 drive_port=attachment_kwargs["drive_port"],
         )
+        await self._bind_inbound_job_thread(event, job_id)
         related_only = chat_message_is_related_only(
             text,
             expected_attachment_count=attachment_count,
@@ -3548,6 +3567,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if thread_name and space_name:
                 self._last_inbound_thread[space_name] = thread_name
 
+        # A reply inside a thread that already had messages is bound to
+        # the job. A brand-new top-level (prev count 0) is not: the first
+        # outbound starts the job's own thread.
+        inbound_name = str(msg.get("name") or "")
+        if thread_name and inbound_name and prev_thread_count > 0:
+            self._reply_in_existing_thread[inbound_name] = thread_name
+
         source = self.build_source(
             chat_id=space_name,
             chat_name=space.get("displayName") or space.get("name") or "",
@@ -3949,6 +3975,103 @@ class GoogleChatAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Outbound send paths
     # ------------------------------------------------------------------
+    def _remember_active_chat_job(self, chat_id: str | None, job_id: str | None) -> None:
+        if chat_id and job_id:
+            self._active_chat_job[str(chat_id)] = str(job_id)
+
+    async def _bind_inbound_job_thread(self, event: MessageEvent, job_id: str | None) -> None:
+        """When the user replied inside a thread, keep that thread on the job."""
+        if not job_id or event is None:
+            return
+        source = getattr(event, "source", None)
+        chat_id = getattr(source, "chat_id", None) if source else None
+        self._remember_active_chat_job(chat_id, job_id)
+        message_id = getattr(event, "message_id", None)
+        raw_message = getattr(event, "raw_message", None) or {}
+        raw_thread = ""
+        if isinstance(raw_message, dict):
+            thread = raw_message.get("thread") or {}
+            if isinstance(thread, dict):
+                raw_thread = str(thread.get("name") or "")
+        session_thread = getattr(source, "thread_id", None) if source else None
+        marked = self._reply_in_existing_thread.get(str(message_id or ""))
+
+        def _bind() -> None:
+            store = JobStore(ROBIE_JOB_DB)
+            try:
+                job = store.get_job(job_id)
+            except KeyError:
+                return
+            name = inbound_thread_to_bind(
+                job=job,
+                message_id=message_id,
+                session_thread_id=session_thread,
+                raw_thread_name=raw_thread or marked,
+                reply_in_existing_thread=bool(marked),
+            )
+            if name:
+                bind_job_chat_thread(store, job_id, name)
+
+        try:
+            await asyncio.to_thread(_bind)
+        except Exception:
+            logger.exception("[GoogleChat] could not bind job thread job=%s", job_id)
+
+    def _thread_spec_for_outbound(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        job_id: str | None,
+        job_owns_thread: bool,
+        reply_to: str | None = None,
+    ) -> Dict[str, str]:
+        """thread.name for a bound job, or threadKey for the job's first message."""
+        explicit = None
+        if not job_owns_thread:
+            explicit = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
+        stored = None
+        if job_id:
+            try:
+                stored = read_job_chat_thread(JobStore(ROBIE_JOB_DB), job_id)
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] job thread lookup failed job=%s", job_id, exc_info=True
+                )
+        return outbound_thread_spec(
+            job_id=job_id,
+            stored_thread_name=stored,
+            explicit_thread_name=explicit,
+            prefer_job_thread_key=job_owns_thread,
+        )
+
+    def _media_thread_spec(
+        self,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+        reply_to: str | None = None,
+    ) -> Tuple[str | None, Dict[str, str]]:
+        meta = metadata if isinstance(metadata, dict) else None
+        job_id = str((meta or {}).get("robie_job_id") or "").strip() or None
+        owns = bool(job_id)
+        if not job_id:
+            mapped = self._active_chat_job.get(chat_id)
+            if mapped:
+                job_id = mapped
+                owns = True
+            else:
+                cron_job = str((meta or {}).get("job_id") or "").strip()
+                if cron_job:
+                    job_id = cron_job
+                    owns = False
+        return job_id, self._thread_spec_for_outbound(
+            chat_id,
+            meta,
+            job_id=job_id,
+            job_owns_thread=owns,
+            reply_to=reply_to,
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -3998,6 +4121,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     success=False,
                     error="durable reply-to-Job lookup failed",
                 )
+        # Thread routing is separate from the guard's job id. The active
+        # map and a cron job_id choose the thread only. They must not make
+        # an unrelated send look like the job's guarded reply.
+        thread_job_id = job_id
+        job_owns_thread = bool(job_id) and delivery_kind != "idle_stop"
+        if delivery_kind != "idle_stop" and not thread_job_id:
+            mapped = self._active_chat_job.get(chat_id)
+            if mapped:
+                thread_job_id = mapped
+                job_owns_thread = True
+            else:
+                cron_job = str((metadata or {}).get("job_id") or "").strip()
+                if cron_job:
+                    thread_job_id = cron_job
+                    job_owns_thread = False
         if not (metadata or {}).get("robie_stop_notice") and job_id:
             from robie_job_engine.chat_turn_control import agent_output_blocked
 
@@ -4029,7 +4167,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
             content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
         else:
             content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
-        thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
+        thread_spec = self._thread_spec_for_outbound(
+            chat_id,
+            metadata,
+            job_id=thread_job_id,
+            job_owns_thread=job_owns_thread,
+            reply_to=reply_to,
+        )
         self.pause_typing_for_chat(chat_id)
         try:
             # Convert standard Markdown emitted by the LLM to Chat's dialect
@@ -4049,15 +4193,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             for idx, chunk in enumerate(chunks):
                 body: Dict[str, Any] = {"text": chunk}
-                # Only set thread on new-message create path. Patch inherits.
-                if thread_id and (idx > 0 or not typing_msg_name):
-                    body["thread"] = {"name": thread_id}
+                # Only set thread on new-message create path. Patch inherits
+                # the thread the thinking card was created in.
+                creating_new = idx > 0 or not typing_msg_name
+                if thread_spec and creating_new:
+                    body["thread"] = dict(thread_spec)
                 try:
                     if idx == 0 and typing_msg_name:
                         result = await self._patch_message(typing_msg_name, body)
                         patched_typing = True
                     else:
-                        result = await self._create_message(chat_id, body)
+                        result = await self._create_message(
+                            chat_id, body, job_id=thread_job_id
+                        )
                     last_result = result
                 except HttpError as exc:
                     status = getattr(getattr(exc, "resp", None), "status", None)
@@ -4077,7 +4225,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
                                 "[GoogleChat] Typing card disappeared; creating new message"
                             )
                             typing_msg_name = None
-                            result = await self._create_message(chat_id, body)
+                            if thread_spec and "thread" not in body:
+                                body["thread"] = dict(thread_spec)
+                            result = await self._create_message(
+                                chat_id, body, job_id=thread_job_id
+                            )
                             last_result = result
                             continue
                         logger.info("[GoogleChat] send target 404; skipping")
@@ -4154,11 +4306,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         body: Dict[str, Any] = {"cardsV2": [card]}
-        thread_id = self._resolve_thread_id(None, metadata, chat_id=chat_id)
-        if thread_id:
-            body["thread"] = {"name": thread_id}
+        meta = metadata if isinstance(metadata, dict) else {}
+        job_id = str(meta.get("robie_job_id") or "").strip() or None
+        job_owns_thread = bool(job_id)
+        if not job_id:
+            mapped = self._active_chat_job.get(chat_id)
+            if mapped:
+                job_id = mapped
+                job_owns_thread = True
+            else:
+                cron_job = str(meta.get("job_id") or "").strip()
+                if cron_job:
+                    job_id = cron_job
+                    job_owns_thread = False
+        thread_spec = self._thread_spec_for_outbound(
+            chat_id,
+            meta or None,
+            job_id=job_id,
+            job_owns_thread=job_owns_thread,
+        )
+        if thread_spec:
+            body["thread"] = dict(thread_spec)
         try:
-            result = await self._create_message(chat_id, body)
+            result = await self._create_message(chat_id, body, job_id=job_id)
             result.raw_response = result.raw_response or {"cardsV2": body["cardsV2"]}
             return result
         except HttpError as exc:
@@ -4618,7 +4788,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         raise RuntimeError(f"{op_name}: retry loop exited without result")
 
     async def _create_message(
-        self, chat_id: str, body: Dict[str, Any]
+        self, chat_id: str, body: Dict[str, Any], job_id: str | None = None,
     ) -> SendResult:
         """POST spaces/{space}/messages via REST, returning SendResult.
 
@@ -4634,12 +4804,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
         thread_meta = body.get("thread") or {}
-        if thread_meta.get("name"):
+        if thread_meta.get("name") or thread_meta.get("threadKey"):
             # FALLBACK_TO_NEW_THREAD: try the requested thread; if Chat
             # can't route there (e.g. thread no longer exists), create a
             # new one rather than erroring. Safer than REPLY_MESSAGE_OR_FAIL
             # for a chat-bot context where stale thread names are rare
-            # but possible.
+            # but possible. Required for both thread.name and threadKey —
+            # the default option ignores both.
             kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
         def _do_create() -> Dict[str, Any]:
@@ -4665,6 +4836,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
             except Exception:
                 logger.debug(
                     "[GoogleChat] outbound thread-count incr failed",
+                    exc_info=True,
+                )
+        if job_id and resp_thread:
+            try:
+                remember_created_thread(JobStore(ROBIE_JOB_DB), job_id, resp)
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] could not store created job thread",
                     exc_info=True,
                 )
         return SendResult(success=True, message_id=resp.get("name"))
@@ -4720,8 +4899,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 pass
             return
 
-        thread_id = self._resolve_thread_id(
-            reply_to=None, metadata=metadata, chat_id=chat_id,
+        meta = metadata if isinstance(metadata, dict) else None
+        job_id = str((meta or {}).get("robie_job_id") or "").strip() or None
+        job_owns_thread = bool(job_id)
+        if not job_id:
+            mapped = self._active_chat_job.get(chat_id)
+            if mapped:
+                job_id = mapped
+                job_owns_thread = True
+            else:
+                cron_job = str((meta or {}).get("job_id") or "").strip()
+                if cron_job:
+                    job_id = cron_job
+                    job_owns_thread = False
+        thread_spec = self._thread_spec_for_outbound(
+            chat_id,
+            meta,
+            job_id=job_id,
+            job_owns_thread=job_owns_thread,
         )
         typing_choices = [
             "Robie is thinking…",
@@ -4737,15 +4932,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         body: Dict[str, Any] = {
             "text": status_text
         }
-        if thread_id:
-            body["thread"] = {"name": thread_id}
+        if thread_spec:
+            body["thread"] = dict(thread_spec)
 
         completed = asyncio.Event()
         self._typing_card_inflight[chat_id] = completed
 
         async def _create_and_record() -> None:
             try:
-                result = await self._create_message(chat_id, body)
+                result = await self._create_message(chat_id, body, job_id=job_id)
                 if result.success and result.message_id:
                     # Only overwrite the slot if nothing else has claimed it
                     # in the meantime (e.g. send() racing ahead of us).
@@ -4924,7 +5119,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the image (caption + URL) — same anti-tombstone pattern used by
         ``send()``. Otherwise create a new message.
         """
-        thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
+        job_id, thread_spec = self._media_thread_spec(chat_id, metadata, reply_to)
         text_parts: List[str] = []
         if caption:
             text_parts.append(caption)
@@ -4936,9 +5131,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if patched is not None:
                 return patched
             body: Dict[str, Any] = {"text": text}
-            if thread_id:
-                body["thread"] = {"name": thread_id}
-            return await self._create_message(chat_id, body)
+            if thread_spec:
+                body["thread"] = dict(thread_spec)
+            return await self._create_message(chat_id, body, job_id=job_id)
         except HttpError as exc:
             return SendResult(success=False, error=_redact_sensitive(str(exc)))
 
@@ -4950,10 +5145,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        _job_id, thread_spec = self._media_thread_spec(
+            chat_id, kwargs.get("metadata"), reply_to
+        )
         return await self._send_file(
             chat_id, image_path, caption,
             mime_hint="image/*",
-            thread_id=self._resolve_thread_id(reply_to, kwargs.get("metadata"), chat_id=chat_id),
+            thread_id=thread_spec.get("name"),
+            thread_key=thread_spec.get("threadKey"),
+            job_id=_job_id,
         )
 
     async def send_document(
@@ -4965,10 +5165,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        _job_id, thread_spec = self._media_thread_spec(
+            chat_id, kwargs.get("metadata"), reply_to
+        )
         return await self._send_file(
             chat_id, file_path, caption,
             mime_hint=None,
-            thread_id=self._resolve_thread_id(reply_to, kwargs.get("metadata"), chat_id=chat_id),
+            thread_id=thread_spec.get("name"),
+            thread_key=thread_spec.get("threadKey"),
+            job_id=_job_id,
             override_filename=file_name,
         )
 
@@ -4980,10 +5185,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        _job_id, thread_spec = self._media_thread_spec(
+            chat_id, kwargs.get("metadata"), reply_to
+        )
         return await self._send_file(
             chat_id, audio_path, caption,
             mime_hint="audio/ogg",
-            thread_id=self._resolve_thread_id(reply_to, kwargs.get("metadata"), chat_id=chat_id),
+            thread_id=thread_spec.get("name"),
+            thread_key=thread_spec.get("threadKey"),
+            job_id=_job_id,
         )
 
     async def send_video(
@@ -4994,10 +5204,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        _job_id, thread_spec = self._media_thread_spec(
+            chat_id, kwargs.get("metadata"), reply_to
+        )
         return await self._send_file(
             chat_id, video_path, caption,
             mime_hint="video/mp4",
-            thread_id=self._resolve_thread_id(reply_to, kwargs.get("metadata"), chat_id=chat_id),
+            thread_id=thread_spec.get("name"),
+            thread_key=thread_spec.get("threadKey"),
+            job_id=_job_id,
         )
 
     async def send_animation(
@@ -5169,6 +5384,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         mime_hint: Optional[str],
         thread_id: Optional[str] = None,
         override_filename: Optional[str] = None,
+        thread_key: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> SendResult:
         """Native Chat attachment via user-OAuth media.upload.
 
@@ -5208,6 +5425,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 filename=filename,
                 caption=caption,
                 thread_id=thread_id,
+                thread_key=thread_key,
+                job_id=job_id,
             )
 
         # Pre-patch the typing card with the caption (or single space) so
@@ -5250,6 +5469,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     filename=filename,
                     caption=caption,
                     thread_id=thread_id,
+                    thread_key=thread_key,
+                    job_id=job_id,
                 )
             return SendResult(
                 success=False, error=_redact_sensitive(str(exc))
@@ -5269,14 +5490,16 @@ class GoogleChatAdapter(BasePlatformAdapter):
             body["text"] = caption
         if thread_id:
             body["thread"] = {"name": thread_id}
+        elif thread_key:
+            body["thread"] = {"threadKey": thread_key}
 
         # The accompanying messages.create that references the attachment
         # also needs user auth (the attachmentDataRef is bound to the
         # uploading principal). messageReplyOption is required for the
-        # thread.name in body to actually be honored — see
+        # thread.name or threadKey in body to actually be honored — see
         # _create_message docstring for the API quirk.
         create_kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
-        if thread_id:
+        if thread_id or thread_key:
             create_kwargs["messageReplyOption"] = (
                 "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
             )
@@ -5303,6 +5526,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         "[GoogleChat] outbound thread-count incr failed",
                         exc_info=True,
                     )
+            if job_id and resp_thread:
+                try:
+                    remember_created_thread(JobStore(ROBIE_JOB_DB), job_id, resp)
+                except Exception:
+                    logger.debug(
+                        "[GoogleChat] could not store attachment job thread",
+                        exc_info=True,
+                    )
             return SendResult(
                 success=True, message_id=resp.get("name"),
             )
@@ -5318,6 +5549,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         filename: str,
         caption: Optional[str],
         thread_id: Optional[str],
+        thread_key: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> SendResult:
         """Post a text notice when native attachment delivery is unavailable.
 
@@ -5340,8 +5573,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         body: Dict[str, Any] = {"text": "\n".join(lines)}
         if thread_id:
             body["thread"] = {"name": thread_id}
+        elif thread_key:
+            body["thread"] = {"threadKey": thread_key}
         try:
-            await self._create_message(chat_id, body)
+            await self._create_message(chat_id, body, job_id=job_id)
         except Exception:
             logger.debug(
                 "[GoogleChat] attachment fallback notice send failed",

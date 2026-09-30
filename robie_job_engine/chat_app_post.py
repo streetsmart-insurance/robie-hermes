@@ -290,6 +290,7 @@ def post_as_chat_app(
     text: str,
     *,
     thread_name: str | None = None,
+    thread_key: str | None = None,
     chat: Any | None = None,
 ) -> dict[str, Any]:
     """POST spaces.messages.create as the Chat APP. Fail-closed on auth errors."""
@@ -304,6 +305,9 @@ def post_as_chat_app(
     if thread_name:
         body["thread"] = {"name": thread_name}
         kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    elif thread_key:
+        body["thread"] = {"threadKey": thread_key}
+        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     result = client.spaces().messages().create(**kwargs).execute()
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
 
@@ -313,6 +317,7 @@ def post_card_as_chat_app(
     cards_v2: list[dict[str, Any]],
     *,
     thread_name: str | None = None,
+    thread_key: str | None = None,
     chat: Any | None = None,
 ) -> dict[str, Any]:
     """POST spaces.messages.create with cardsV2 as the Chat APP.
@@ -331,6 +336,9 @@ def post_card_as_chat_app(
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}
     if thread_name:
         body["thread"] = {"name": thread_name}
+        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    elif thread_key:
+        body["thread"] = {"threadKey": thread_key}
         kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     result = client.spaces().messages().create(**kwargs).execute()
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
@@ -385,9 +393,17 @@ def post_hitl_to_originating_thread(
     send = poster if poster is not None else post_as_chat_app
     try:
         try:
-            send(space, message, thread_name=thread)
+            if thread:
+                send(space, message, thread_name=thread)
+            else:
+                from .chat_thread import job_thread_key
+
+                send(space, message, thread_key=job_thread_key(job_key))
         except TypeError:
-            send(space, message)
+            try:
+                send(space, message, thread_name=thread)
+            except TypeError:
+                send(space, message)
         return True
     except ChatAppIdentityError as exc:
         # The Chat identity is broken: page the operator on the email/ops

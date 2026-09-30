@@ -220,9 +220,17 @@ def notify_terminal_chat_job(
         space, thread = target
         try:
             try:
-                send(space, message, thread_name=thread)
+                if thread:
+                    send(space, message, thread_name=thread)
+                else:
+                    from .chat_thread import job_thread_key
+
+                    send(space, message, thread_key=job_thread_key(job_id))
             except TypeError:
-                send(space, message)
+                try:
+                    send(space, message, thread_name=thread)
+                except TypeError:
+                    send(space, message)
             posted = True
         except Exception:
             logger.exception("terminal Chat post failed job=%s", job_id)
