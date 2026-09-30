@@ -235,9 +235,21 @@ def run_guarded_email_task(
     verifiers: dict[str, Any] | None = None,
     attachment_names: tuple[str, ...] = (),
     thread_id: str = "",
+    sender: str = "",
 ) -> str:
     """Run once and require independent destination evidence before completion."""
     request_text = prompt
+    from .playground_service import handle_playground_email
+
+    playground_reply = handle_playground_email(
+        db_path,
+        request_text,
+        sender=sender,
+        thread_id=thread_id,
+        message_id=gmail_message_id,
+    )
+    if playground_reply is not None:
+        return playground_reply
     prompt = add_synced_context(
         prompt
         + "\n\n"

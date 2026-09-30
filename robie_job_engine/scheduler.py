@@ -74,6 +74,18 @@ def run_once(db_path: str) -> dict[str, int]:
         maybe_periodic_login_secret_check(db_path)
     except Exception:
         pass
+    playground_expired: list[str] = []
+    try:
+        from .playground_service import expire_due_confirmations
+
+        def _post_expired(space: str, text: str, thread_name: str | None = None) -> None:
+            from .chat_app_post import post_as_chat_app
+
+            post_as_chat_app(space, text, thread_name=thread_name)
+
+        playground_expired = expire_due_confirmations(jobs, poster=_post_expired)
+    except Exception:
+        playground_expired = []
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
     try:
         from .chat_job_controls import sweep_dead_running_jobs
@@ -147,6 +159,7 @@ def run_once(db_path: str) -> dict[str, int]:
     return {
         "woke": len(woke),
         "orphaned_chat_jobs": len(orphaned_chat_jobs),
+        "playground_expired": len(playground_expired),
         "expired_contexts": len(expired_contexts),
         "created": created,
         "executed": executed,

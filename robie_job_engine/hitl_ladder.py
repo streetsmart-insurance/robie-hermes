@@ -205,6 +205,9 @@ def unanswered_hitl_kill_reason(
         return None
     if status != JobStatus.AWAITING_HUMAN_INPUT:
         return None
+    # Playground confirmations expire with their own plain message.
+    if str(job.get("action_type") or "") == "playground.task":
+        return None
     posted = hitl_posted_at_from_job(job)
     if posted is None:
         return None
