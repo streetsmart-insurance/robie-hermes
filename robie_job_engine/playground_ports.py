@@ -81,9 +81,46 @@ class PlaygroundPorts:
             raise PermissionError('Playground note writes are restricted to enabled Buster Brown tests')
         if not title.strip() or not body.strip():
             raise ValueError('An existing discussion title and exact note text are required')
+        # Require one exact existing title, then independently verify its
+        # applicant and title immediately before calling any note writer.
+        from .ezlynx_discussions import discussion_id_of, discussion_title_of
+        client = self._discussions()
+        rows = client.get_discussions(proposal.applicant_id)
+        matches = [row for row in rows if isinstance(row, dict)
+                   and discussion_title_of(row).strip() == title.strip()
+                   and discussion_id_of(row)]
+        if len(matches) != 1:
+            raise ValueError("One exact existing discussion is required")
+        selected_id = discussion_id_of(matches[0])
+        record = client.get_discussion(selected_id)
+        if not isinstance(record, dict):
+            raise ValueError("Discussion ownership could not be verified")
+        owner = str(record.get('applicantId') or record.get('ApplicantId') or '').strip()
+        if (owner != proposal.applicant_id
+                or discussion_id_of(record) != selected_id
+                or discussion_title_of(record).strip() != title.strip()):
+            raise ValueError("Discussion destination did not match")
+
+        # The common writer uses title hints. Pin its list to the verified
+        # exact destination so a later list read cannot redirect the note.
+        class PinnedDiscussionClient:
+            def get_discussions(self, applicant_id):
+                if str(applicant_id) != proposal.applicant_id:
+                    raise ValueError("Wrong applicant")
+                return [record]
+            def get_discussion(self, discussion_id):
+                if str(discussion_id) != selected_id:
+                    raise ValueError("Wrong discussion")
+                return client.get_discussion(discussion_id)
+            def append_note(self, discussion_id, text, *, note_type='Note'):
+                if str(discussion_id) != selected_id or text != body.strip():
+                    raise ValueError("Note destination or text changed")
+                return client.append_note(discussion_id, text, note_type=note_type)
+
         from .ezlynx_api_only_writes import add_note_to_discussion
         writer = self.note_writer or add_note_to_discussion
-        result = writer(proposal.applicant_id, body, discussion_title=title, discussion_client=self._discussions())
+        result = writer(proposal.applicant_id, body, discussion_title=title,
+                        discussion_client=PinnedDiscussionClient())
         if not isinstance(result, dict) or result.get('status') != 'filed' or result.get('read_back') is not True:
             return ''
         return str(result.get('note_id') or '').strip()
