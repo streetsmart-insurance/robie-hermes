@@ -402,7 +402,7 @@ def parse_memo_grid(grid: MemoGrid, *, agent_code: str) -> tuple[MemoRow, ...]:
         if decision != "take":
             raise IntakeHold("Communications memo list is ambiguous")
         policy = _norm(cells[indexes["policy_number"]])
-        insured = _norm(cells[indexes["insured_name"]])
+        insured = clean_insured_name(cells[indexes["insured_name"]])
         if not _POLICY_NUMBER.fullmatch(policy):
             raise IntakeHold("Memo policy number is missing or ambiguous")
         if not insured:
@@ -3050,6 +3050,27 @@ def _write_private_file(path: Path, payload: bytes) -> None:
 
 def _emit(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+_STREET_START = re.compile(r"[\s,]+(?=\d+[A-Za-z]?\s+[A-Za-z])")
+_CONTACT_START = re.compile(r"[\s,]+(?:p\.?\s*o\.?\s*box\b|[HWCM]:\s*\(|email\b)", re.IGNORECASE)
+
+
+def clean_insured_name(value: str) -> str:
+    """Just the name from the legacy "Primary Named Insured" cell.
+
+    Live 2026-09-30 the cell also holds the street address, phone, and an
+    Email link ("Groesbeck, Zachary 2 Round Hill Rd Jackson, Nj 08527
+    H:(732) 995-2407 Email"). The name is everything before the first
+    street number, PO box, phone label, or Email.
+    """
+    lines = [line for line in (_norm(part) for part in str(value or "").splitlines()) if line]
+    text = lines[0] if lines else ""
+    for pattern in (_CONTACT_START, _STREET_START):
+        match = pattern.search(text)
+        if match and match.start() > 0:
+            text = text[: match.start()]
+    return text.strip(" ,")
 
 
 def _norm(value: str) -> str:
