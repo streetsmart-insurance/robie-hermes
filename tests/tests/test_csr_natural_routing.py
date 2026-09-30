@@ -37,3 +37,22 @@ def test_mixed_mutations_stay_refused(text):
 ])
 def test_safe_read_exemptions_do_not_bypass_hard_guards(text):
  assert route(text).blocked
+
+@pytest.mark.parametrize('text,intent',[
+ ("what\u2019s the status of that endo from yesterday?", 'vague'),
+ ("add note to the policy change discussion that premium doesn\u2019t match carrier endo, needs agent review", 'vague'),
+])
+def test_canonical_bank_smart_apostrophes(text,intent):
+ assert route(text).intent==intent
+
+@pytest.mark.parametrize('text',[
+ "add note to the policy change discussion that premium doesn\u2019t match carrier endo, needs agent review and bind coverage",
+ "add note to the policy change discussion that premium doesn\u2019t match carrier endo, needs agent review and set premium to 4280",
+])
+def test_smart_apostrophes_never_bypass_mixed_mutation_guards(text):
+ assert route(text).blocked
+
+def test_normalize_does_not_change_exact_requested_note_body():
+ text="File a note on the existing Renewal discussion for Buster Brown saying Insured\u2019s caller didn\u2019t answer."
+ decision=route(text)
+ assert decision.proposal.body=="Insured\u2019s caller didn\u2019t answer."
