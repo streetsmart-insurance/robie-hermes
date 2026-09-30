@@ -62,9 +62,30 @@ class EzlynxApiClientReadPort:
         return downloaded.body
 
     def discussions_for_applicant(self, applicant_id: str) -> list[dict[str, Any]]:
-        rows = self._require_client().get_applicant_discussions(applicant_id, page_size=50) or []
+        # v8 by-applicant endpoint (DiscussionApiClient). The OAuth
+        # DiscussionApi/discussion/v1/applicant/{id} endpoint 404s and the
+        # old path silently returned [], which made every discussion read
+        # look empty. Use the working v8 client instead.
+        rows = self._discussion_client().get_discussions(applicant_id) or []
         return [
-            {"title": str(r.get("Title") or r.get("title") or r.get("Subject") or "")}
+            {"title": str(r.get("title") or r.get("Title") or r.get("subject") or r.get("Subject") or "")}
             for r in rows
             if isinstance(r, dict)
         ]
+
+    def note_in_discussion(self, discussion_id: str, note_id: str) -> bool:
+        """Fresh GET of one discussion; True iff ``note_id`` is present."""
+        from .ezlynx_api_only_writes import note_id_in_discussion
+
+        record = self._discussion_client().get_discussion(discussion_id)
+        return note_id_in_discussion(record, note_id)
+
+    def _discussion_client(self) -> Any:
+        if getattr(self, "_discussion_client_cached", None) is None:
+            from .ezlynx_api_only_writes import _discussion_config_from_secret
+            from .ezlynx_discussions import DiscussionApiClient
+
+            self._discussion_client_cached = DiscussionApiClient(
+                _discussion_config_from_secret()
+            )
+        return self._discussion_client_cached
