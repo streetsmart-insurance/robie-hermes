@@ -26,6 +26,9 @@ SIMPLE_EDIT = "simple_edit"
 ADD_DRIVER = "add_driver"
 ADD_VEHICLE = "add_vehicle"
 CARRIER_EMAIL = "carrier_email"
+REMEMBER = "remember"
+FORGET = "forget"
+RECALL = "recall"
 
 ALLOWED_WRITES = frozenset(
     {CERT_DRAFT, NOTE, SIMPLE_EDIT, ADD_DRIVER, ADD_VEHICLE, CARRIER_EMAIL}
@@ -151,6 +154,20 @@ _HOLDER = re.compile(
     r"\bholder\s+(.+?)(?:,|\s+applicant\b|$)",
     re.IGNORECASE,
 )
+_REMEMBER = re.compile(
+    r"^(?:please\s+)?remember(?:\s+for\s+the\s+team)?\s+that\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_FORGET = re.compile(
+    r"^(?:please\s+)?forget(?:\s+that\s+)(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_RECALL = re.compile(
+    r"^what do you remember(?:\s+about\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_REMEMBER_BARE = re.compile(r"^(?:please\s+)?remember[.!]?$", re.IGNORECASE)
+_FORGET_BARE = re.compile(r"^(?:please\s+)?forget(?:\s+that)?[.!]?$", re.IGNORECASE)
 
 
 @dataclass
@@ -248,6 +265,42 @@ def is_go(text: str) -> bool:
 
 def is_help(text: str) -> bool:
     return _HELP.match(normalize(text).strip(" .!")) is not None
+
+
+def mentioned_client(text: str) -> str:
+    return _client_name(str(text or ""))
+
+
+def _command_text(original: str) -> str:
+    body = str(original or "").strip()
+    if body.lower().startswith("subject:") and "\n\n" in body:
+        body = body.split("\n\n", 1)[1].strip()
+    body = _MENTION.sub("", body.strip())
+    return " ".join(body.split())
+
+
+def _memory_command(original: str) -> Decision | None:
+    text = _command_text(original)
+    if _REMEMBER_BARE.match(text):
+        return Decision(REMEMBER, question="What should I remember?")
+    if _FORGET_BARE.match(text):
+        return Decision(FORGET, question="What should I forget?")
+    remember = _REMEMBER.match(text)
+    if remember:
+        fact = " ".join(remember.group(1).split()).strip()
+        proposal = Proposal(kind=REMEMBER, body=fact)
+        if re.search(r"\bfor the team\b", text, re.IGNORECASE):
+            proposal.field = "team"
+        return Decision(REMEMBER, proposal=proposal)
+    forget = _FORGET.match(text)
+    if forget:
+        fact = " ".join(forget.group(1).split()).strip(" .")
+        return Decision(FORGET, proposal=Proposal(kind=FORGET, body=fact))
+    recall = _RECALL.match(text.rstrip(" ?.!"))
+    if recall:
+        about = " ".join((recall.group(1) or "").split()).strip(" ?.!")
+        return Decision(RECALL, proposal=Proposal(kind=RECALL, body=about, field=about))
+    return None
 
 
 def _client_name(original: str) -> str:
@@ -491,6 +544,9 @@ def classify_playground_request(text: str) -> Decision:
         return Decision(STOP)
     if is_go(original):
         return Decision(GO)
+    memory = _memory_command(original)
+    if memory is not None:
+        return memory
     blocked = _blocked(norm)
     if blocked:
         code, reason = blocked

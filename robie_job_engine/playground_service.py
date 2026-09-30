@@ -6,6 +6,7 @@ classified here. Writes wait for go. Blocked actions never call a writer.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -25,11 +26,25 @@ from .playground_execute import (
 )
 from .playground_guardrails import (
     CARRIER_EMAIL,
+    FORGET,
     NOTE,
+    RECALL,
+    REMEMBER,
     SIMPLE_EDIT,
     Decision,
     Proposal,
     classify_playground_request,
+    mentioned_client,
+)
+from .playground_memory import (
+    forget_matching,
+    list_memories,
+    memory_contains_secret,
+    recall_for_turn,
+    record_job,
+    remember_preference,
+    safe_text,
+    team_discussion_title,
 )
 from .playground_reply import (
     blocked_reply,
@@ -39,10 +54,15 @@ from .playground_reply import (
     help_reply,
     lookup_reply,
     matched_reply,
+    memory_forgotten_reply,
+    memory_list_reply,
+    memory_refused_reply,
+    memory_saved_reply,
     mismatch_reply,
     sop_reply,
     working_reply,
 )
+from .playground_voice import render_turn_prompt
 from .playground_sop import retrieve_sop
 from .playground_undo import record_write
 from .store import JobStore, utc_now
@@ -50,6 +70,7 @@ from .store import JobStore, utc_now
 PLAYGROUND_ACTION = "playground.task"
 CONFIRM_KIND = "playground_confirmation"
 REPLY_KIND = "playground_reply"
+PROMPT_KIND = "playground_prompt"
 CANCEL_NO_GO = "Cancelled. I didn't get a go within 30 minutes, so I didn't change anything."
 STOPPED = "Stopped. That job is cancelled."
 
@@ -153,6 +174,16 @@ def expire_due_confirmations(
             release_lease=True,
         )
         store.checkpoint(job["id"], REPLY_KIND, {"text": reply, "reason": "timeout"})
+        payload = dict(job.get("payload") or {})
+        _remember_job(
+            store,
+            job["id"],
+            requested_by=str(payload.get("requested_by") or ""),
+            text=str(payload.get("text") or ""),
+            client=str(payload.get("client") or ""),
+            outcome="cancelled",
+            now=moment,
+        )
         expired.append(job["id"])
         if poster is None:
             continue
@@ -187,7 +218,7 @@ def _dispatch(
     expire_due_confirmations(store, now=moment)
     decision = classify_playground_request(text)
     if decision.intent == "stop":
-        return [_stop(store, conversation_id, thread_id)]
+        return [_stop(store, conversation_id, thread_id, requested_by=requested_by, now=moment)]
     if decision.intent == "go":
         return _approve(
             store,
@@ -199,6 +230,19 @@ def _dispatch(
             discussions=discussions,
             file_note=file_note,
         )
+    if decision.intent in {REMEMBER, FORGET, RECALL}:
+        return [
+            _memory_turn(
+                store,
+                decision,
+                text=text,
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                requested_by=requested_by,
+                now=moment,
+            )
+        ]
     _cancel_pending(store, conversation_id, thread_id, reason="Replaced by a new request.")
     return [
         _start(
@@ -229,31 +273,77 @@ def _start(
     read: ReadFn | None,
     sop_docs: list[dict[str, Any]] | None,
 ) -> str:
+    stored = safe_text(text)
+    channel = "email" if conversation_id.startswith("email:") else "chat"
     job = store.create_job(
         PLAYGROUND_ACTION,
         {
             "playground": True,
-            "text": text,
+            "text": stored,
             "conversation_id": conversation_id,
             "thread_id": thread_id,
             "requested_by": requested_by,
-            "channel": "email" if conversation_id.startswith("email:") else "chat",
+            "channel": channel,
         },
-        idempotency_key=f"playground:{message_id or text}:{conversation_id}"[:180],
+        idempotency_key=f"playground:{message_id or stored}:{conversation_id}"[:180],
     )
     job_id = job["id"]
     if JobStatus(job["status"]) != JobStatus.PENDING:
         saved = store.get_checkpoint(job_id, REPLY_KIND) or {}
         return str(saved.get("text") or "I already have that message.")
+    client = ""
+    if decision.proposal is not None:
+        client = decision.proposal.client
+    client = client or mentioned_client(text)
+    memories = recall_for_turn(
+        store.path,
+        requested_by=requested_by,
+        text=stored,
+        client=client,
+    )
+    decision = _with_standing_discussion(text, decision, memories)
+    if decision.proposal is not None and decision.proposal.client:
+        client = decision.proposal.client
+    _checkpoint_prompt(
+        store,
+        job_id,
+        channel=channel,
+        requested_by=requested_by,
+        text=stored,
+        memories=memories,
+    )
+    remembered = _preference_lines(memories)
+
+    def _note(outcome: str) -> None:
+        _remember_job(
+            store,
+            job_id,
+            requested_by=requested_by,
+            text=stored,
+            client=client,
+            outcome=outcome,
+            now=now,
+        )
+
     if decision.intent == "help":
-        return _finish_reply(store, job_id, help_reply(job_id=job_id), terminal=JobStatus.COMPLETE, answer_only=True)
+        reply = _finish_reply(store, job_id, help_reply(job_id=job_id), terminal=JobStatus.COMPLETE, answer_only=True)
+        _note("answered")
+        return reply
     if decision.blocked:
         reply = blocked_reply(reason=decision.reason, job_id=job_id)
+        _note("blocked")
         return _fail(store, job_id, reply, error=decision.reason)
     if decision.intent == "vague" or decision.question:
         question = decision.question or "What should I do? Name the client and the task."
-        reply = clarify_reply(question=question, job_id=job_id)
-        store.checkpoint(job_id, "clarification", {"question": question})
+        reply = clarify_reply(question=question, job_id=job_id, memory_lines=remembered)
+        store.checkpoint(job_id, "clarification", {"question": question, "needs_clarification": True})
+        store.update_payload(
+            job_id,
+            {
+                **dict(store.get_job(job_id).get("payload") or {}),
+                "needs_clarification": True,
+            },
+        )
         store.transition(
             job_id,
             JobStatus.NEEDS_CLARIFICATION,
@@ -262,6 +352,7 @@ def _start(
             release_lease=True,
         )
         store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+        _note("needs_clarification")
         return reply
     if decision.intent == "sop":
         hits = retrieve_sop(text, sop_docs)
@@ -270,12 +361,14 @@ def _start(
             reply = sop_reply(answer=hit.excerpt, source=hit.citation, job_id=job_id)
         else:
             reply = sop_reply(answer="", source="", job_id=job_id)
+        _note("answered")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
     if decision.intent == "lookup":
         found = ""
         if read is not None and decision.proposal is not None:
             found = str(read(decision.proposal) or "")
         reply = lookup_reply(found=found, job_id=job_id)
+        _note("answered")
         return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
     proposal = decision.proposal or Proposal(kind=decision.intent)
     proposal.requested_by = requested_by
@@ -289,7 +382,15 @@ def _start(
                 f"I don't have the current {proposal.field} for "
                 f"{proposal.client or 'that client'}. What is it now?"
             )
-            reply = clarify_reply(question=question, job_id=job_id)
+            reply = clarify_reply(question=question, job_id=job_id, memory_lines=remembered)
+            store.checkpoint(job_id, "clarification", {"question": question, "needs_clarification": True})
+            store.update_payload(
+                job_id,
+                {
+                    **dict(store.get_job(job_id).get("payload") or {}),
+                    "needs_clarification": True,
+                },
+            )
             store.transition(
                 job_id,
                 JobStatus.NEEDS_CLARIFICATION,
@@ -298,11 +399,13 @@ def _start(
                 release_lease=True,
             )
             store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+            _note("needs_clarification")
             return reply
         proposal.old_value = current
     refusal = refuse_if_not_allowlisted(proposal)
     if refusal:
         reply = blocked_reply(reason=refusal, job_id=job_id)
+        _note("blocked")
         return _fail(store, job_id, reply, error=refusal)
     expires = now + timedelta(minutes=confirm_timeout_minutes())
     store.checkpoint(
@@ -324,7 +427,7 @@ def _start(
             "playground_kind": proposal.kind,
         },
     )
-    reply = confirmation_reply(proposal, job_id=job_id)
+    reply = confirmation_reply(proposal, job_id=job_id, memory_lines=remembered)
     store.transition(
         job_id,
         JobStatus.AWAITING_HUMAN_INPUT,
@@ -332,7 +435,226 @@ def _start(
         release_lease=True,
     )
     store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+    _note("awaiting_go")
     return reply
+
+
+_NEW_DISCUSSION = re.compile(
+    r"\b(?:untitled|new discussion|create a discussion|start a discussion)\b",
+    re.IGNORECASE,
+)
+
+
+def _with_standing_discussion(text: str, decision: Decision, memories: list) -> Decision:
+    """Use a stored discussion title. Never turns a block into a write."""
+    if decision.code != "untitled_note":
+        return decision
+    if _NEW_DISCUSSION.search(text):
+        return decision
+    title = team_discussion_title(memories)
+    if not title:
+        return decision
+    rewritten = f"File a note on the existing {title} discussion. {text}"
+    revised = classify_playground_request(rewritten)
+    if revised.blocked or revised.intent not in {NOTE, "vague"}:
+        return decision
+    return revised
+
+
+def _preference_lines(memories: list) -> list[str]:
+    return [item.body for item in memories if item.kind == "preference"][:3]
+
+
+def _checkpoint_prompt(
+    store: JobStore,
+    job_id: str,
+    *,
+    channel: str,
+    requested_by: str,
+    text: str,
+    memories: list,
+) -> None:
+    store.checkpoint(
+        job_id,
+        PROMPT_KIND,
+        {
+            "text": render_turn_prompt(
+                channel=channel,
+                requested_by=requested_by,
+                text=text,
+                memories=memories,
+            )
+        },
+    )
+
+
+def _remember_job(
+    store: JobStore,
+    job_id: str,
+    *,
+    requested_by: str,
+    text: str,
+    client: str,
+    outcome: str,
+    now: datetime,
+) -> None:
+    record_job(
+        store.path,
+        job_id=job_id,
+        requested_by=requested_by,
+        text=safe_text(text),
+        client_name="" if memory_contains_secret(text) else client,
+        outcome=safe_text(outcome),
+        now=now,
+    )
+
+
+def _sync_job_outcome(
+    store: JobStore,
+    job_id: str,
+    *,
+    outcome: str,
+    client: str,
+    now: datetime,
+    requested_by: str = "",
+) -> None:
+    payload = dict(store.get_job(job_id).get("payload") or {})
+    _remember_job(
+        store,
+        job_id,
+        requested_by=requested_by or str(payload.get("requested_by") or ""),
+        text=str(payload.get("text") or ""),
+        client=client,
+        outcome=outcome,
+        now=now,
+    )
+
+
+def _format_memory(item: Any) -> str:
+    if item.kind == "job":
+        client = f" for {item.client_name}" if item.client_name else ""
+        return f"Job {item.job_id}{client}: {item.outcome}. {item.body}"
+    who = "Team" if item.scope == "team" else item.owner
+    return f"{who}: {item.body}"
+
+
+def _memory_turn(
+    store: JobStore,
+    decision: Decision,
+    *,
+    text: str,
+    conversation_id: str,
+    thread_id: str,
+    message_id: str,
+    requested_by: str,
+    now: datetime,
+) -> str:
+    stored = safe_text(text)
+    channel = "email" if conversation_id.startswith("email:") else "chat"
+    job = store.create_job(
+        PLAYGROUND_ACTION,
+        {
+            "playground": True,
+            "text": stored,
+            "conversation_id": conversation_id,
+            "thread_id": thread_id,
+            "requested_by": requested_by,
+            "channel": channel,
+        },
+        idempotency_key=f"playground:{message_id or stored}:{conversation_id}"[:180],
+    )
+    job_id = job["id"]
+    if JobStatus(job["status"]) != JobStatus.PENDING:
+        saved = store.get_checkpoint(job_id, REPLY_KIND) or {}
+        return str(saved.get("text") or "I already have that message.")
+    memories = recall_for_turn(
+        store.path,
+        requested_by=requested_by,
+        text=stored,
+        client=mentioned_client(stored),
+    )
+    _checkpoint_prompt(
+        store,
+        job_id,
+        channel=channel,
+        requested_by=requested_by,
+        text=stored,
+        memories=memories,
+    )
+    proposal = decision.proposal or Proposal(kind=decision.intent)
+
+    def _note(outcome: str) -> None:
+        _remember_job(
+            store,
+            job_id,
+            requested_by=requested_by,
+            text=stored,
+            client="",
+            outcome=outcome,
+            now=now,
+        )
+
+    if decision.question:
+        reply = clarify_reply(question=decision.question, job_id=job_id)
+        store.transition(
+            job_id,
+            JobStatus.NEEDS_CLARIFICATION,
+            expected={JobStatus.PENDING},
+            error=decision.question,
+            release_lease=True,
+        )
+        store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+        _note("needs_clarification")
+        return reply
+    fact = proposal.body
+    if decision.intent == REMEMBER:
+        if memory_contains_secret(text) or memory_contains_secret(fact):
+            reply = memory_refused_reply(job_id=job_id)
+            _note("refused")
+            return _fail(store, job_id, reply, error="Not stored.")
+        saved = remember_preference(
+            store.path,
+            requested_by=requested_by,
+            fact=fact,
+            now=now,
+            force_team=proposal.field == "team",
+        )
+        if saved is None:
+            reply = memory_refused_reply(job_id=job_id)
+            _note("refused")
+            return _fail(store, job_id, reply, error="Not stored.")
+        reply = memory_saved_reply(fact=saved.body, scope=saved.scope, job_id=job_id)
+        _note("remembered")
+        return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
+    if decision.intent == FORGET:
+        if memory_contains_secret(fact):
+            reply = memory_refused_reply(job_id=job_id)
+            _note("refused")
+            return _fail(store, job_id, reply, error="Not stored.")
+        forgotten = forget_matching(
+            store.path,
+            requested_by=requested_by,
+            query=fact,
+            now=now,
+        )
+        reply = memory_forgotten_reply(
+            facts=[item.body for item in forgotten],
+            job_id=job_id,
+        )
+        _note("forgotten")
+        return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
+    if memory_contains_secret(fact):
+        reply = memory_refused_reply(job_id=job_id)
+        _note("refused")
+        return _fail(store, job_id, reply, error="Not stored.")
+    rows = list_memories(store.path, requested_by=requested_by, about=fact)
+    reply = memory_list_reply(
+        about=fact,
+        facts=[_format_memory(item) for item in rows],
+        job_id=job_id,
+    )
+    _note("listed")
+    return _finish_reply(store, job_id, reply, terminal=JobStatus.COMPLETE, answer_only=True)
 
 
 def _present_carrier(proposal: Proposal) -> Proposal:
@@ -377,11 +699,16 @@ def _approve(
             },
             idempotency_key=f"playground-go-empty:{conversation_id}:{thread_id}:{now.isoformat()}",
         )
-        reply = clarify_reply(
-            question="I don't have a change waiting. Tell me the client and what should change.",
-            job_id=opened["id"],
+        question = "I don't have a change waiting. Tell me the client and what should change."
+        reply = clarify_reply(question=question, job_id=opened["id"])
+        store.transition(
+            opened["id"],
+            JobStatus.NEEDS_CLARIFICATION,
+            expected={JobStatus.PENDING},
+            error=question,
+            release_lease=True,
         )
-        _fail(store, opened["id"], reply, error="No change was waiting.")
+        store.checkpoint(opened["id"], REPLY_KIND, {"text": reply})
         return [reply]
     note = store.get_checkpoint(pending["id"], CONFIRM_KIND) or {}
     deadline = _parse_time(str(note.get("expires_at") or ""))
@@ -394,6 +721,7 @@ def _approve(
     if refusal:
         reply = blocked_reply(reason=refusal, job_id=pending["id"])
         _fail(store, pending["id"], reply, error=refusal)
+        _sync_job_outcome(store, pending["id"], outcome="blocked", client=proposal.client, now=now)
         return [reply]
     progress = working_reply(proposal, job_id=pending["id"])
     store.transition(
@@ -412,6 +740,7 @@ def _approve(
             reply,
             error=f"The change did not finish ({type(exc).__name__}).",
         )
+        _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
         return [progress, reply]
     if not result.applied:
         reply = mismatch_reply(
@@ -420,6 +749,7 @@ def _approve(
             job_id=pending["id"],
         )
         _fail(store, pending["id"], reply, error=result.detail or "not applied")
+        _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
         return [progress, reply]
     observed = result.observed
     if read is not None:
@@ -459,6 +789,7 @@ def _approve(
         if note_line:
             reply = reply.rstrip() + f"\n{note_line}\n"
         _mark_confirmed(store, pending["id"], proposal, readback.observed, reply)
+        _sync_job_outcome(store, pending["id"], outcome="confirmed", client=proposal.client, now=now)
         return [progress, reply]
     reply = mismatch_reply(proposal, observed=readback.observed, job_id=pending["id"])
     if note_line:
@@ -471,6 +802,7 @@ def _approve(
         release_lease=True,
     )
     store.checkpoint(pending["id"], REPLY_KIND, {"text": reply, "human_required": True})
+    _sync_job_outcome(store, pending["id"], outcome="not_confirmed", client=proposal.client, now=now)
     return [progress, reply]
 
 
@@ -582,7 +914,14 @@ def _mark_confirmed(store: JobStore, job_id: str, proposal: Proposal, observed: 
     store.checkpoint(job_id, REPLY_KIND, {"text": reply})
 
 
-def _stop(store: JobStore, conversation_id: str, thread_id: str) -> str:
+def _stop(
+    store: JobStore,
+    conversation_id: str,
+    thread_id: str,
+    *,
+    requested_by: str = "",
+    now: datetime | None = None,
+) -> str:
     pending = _find(
         store,
         conversation_id,
@@ -613,6 +952,14 @@ def _stop(store: JobStore, conversation_id: str, thread_id: str) -> str:
         )
     store.checkpoint(pending["id"], "cancelled", {"by": "stop", "reason": "Cancelled."})
     store.checkpoint(pending["id"], REPLY_KIND, {"text": reply})
+    _sync_job_outcome(
+        store,
+        pending["id"],
+        outcome="cancelled",
+        client="",
+        now=now or _aware(None),
+        requested_by=requested_by,
+    )
     return reply
 
 

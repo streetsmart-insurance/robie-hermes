@@ -9,21 +9,15 @@ from __future__ import annotations
 
 from .playground_config import buster_brown_only_mode, confirm_timeout_minutes
 from .playground_guardrails import Proposal
+from .playground_voice import line
 from .status_format import render_simple_status
 
-HELP_MENU = """Here's what I can do in the Playground:
 
-- Answer a procedure question and name the document it came from
-- Look up a client
-- Draft a certificate (I create it; I don't send it)
-- Add a note on a discussion that already has a title
-- Change an address, a phone number, or an email
-- Add a driver or a vehicle
-- Email a carrier to request a policy change
-
-I won't delete or cancel anything. I won't bind, issue, reinstate, or non-renew. I won't change billing, a mortgagee, premium, dates, limits, or coverage. I won't email or text a client. I won't read our code or tokens.
-
-Before I change anything, I tell you the client, the field, the old value, and the new value, and I wait for you to say go."""
+def _remembered(memory_lines: list[str] | None) -> str:
+    facts = [str(item).strip() for item in (memory_lines or []) if str(item).strip()]
+    if not facts:
+        return ""
+    return "I remember:\n" + "\n".join(facts[:3])
 
 
 def tag_practice(text: str) -> str:
@@ -63,14 +57,14 @@ def help_reply(*, job_id: str | None = None) -> str:
         what_happened="This is the Playground menu.",
         anything_needed="Tell me the task in a sentence.",
         status_line="Waiting for a task.",
-        details=HELP_MENU,
+        details=line("help_menu"),
         job_id=job_id,
     )
 
 
 def blocked_reply(*, reason: str, job_id: str) -> str:
     return status_reply(
-        headline="I can't do that.",
+        headline=line("blocked_headline"),
         what_happened=reason,
         anything_needed="A person has to do that. I won't.",
         status_line="Blocked.",
@@ -79,18 +73,27 @@ def blocked_reply(*, reason: str, job_id: str) -> str:
     )
 
 
-def clarify_reply(*, question: str, job_id: str) -> str:
+def clarify_reply(*, question: str, job_id: str, memory_lines: list[str] | None = None) -> str:
+    details = "I didn't guess, and I didn't change anything."
+    remembered = _remembered(memory_lines)
+    if remembered:
+        details = details + "\n" + remembered
     return status_reply(
         headline=question,
         what_happened="I need one detail before I can start.",
         anything_needed=question,
         status_line="Waiting for you.",
-        details="I didn't guess, and I didn't change anything.",
+        details=details,
         job_id=job_id,
     )
 
 
-def confirmation_reply(proposal: Proposal, *, job_id: str) -> str:
+def confirmation_reply(
+    proposal: Proposal,
+    *,
+    job_id: str,
+    memory_lines: list[str] | None = None,
+) -> str:
     minutes = confirm_timeout_minutes()
     old = proposal.old_value or "not on file"
     new = str(proposal.extra.get("display_new") or proposal.new_value or "(missing)")
@@ -106,6 +109,9 @@ def confirmation_reply(proposal: Proposal, *, job_id: str) -> str:
     lines.append(
         f"If I don't hear go or yes in this thread within {minutes} minutes, I'll cancel this."
     )
+    remembered = _remembered(memory_lines)
+    if remembered:
+        lines.append(remembered)
     details = "\n".join(lines)
     return status_reply(
         headline="On it. Here is exactly what I will change. Nothing is changed yet.",
@@ -193,6 +199,74 @@ def sop_reply(*, answer: str, source: str, job_id: str) -> str:
         anything_needed="No.",
         status_line="Answered.",
         details=f"Source: {source}" if source else "",
+        job_id=job_id,
+    )
+
+
+def memory_saved_reply(*, fact: str, scope: str, job_id: str) -> str:
+    who = "the whole team" if scope == "team" else "you"
+    return status_reply(
+        headline=line("memory_saved_headline"),
+        what_happened=f"I saved this for {who}.",
+        anything_needed="No.",
+        status_line="Remembered.",
+        details=(
+            f"{fact}\n"
+            "This does not override a block or the write allowlist."
+        ),
+        job_id=job_id,
+    )
+
+
+def memory_refused_reply(*, job_id: str) -> str:
+    return status_reply(
+        headline=line("memory_refused_headline"),
+        what_happened="That looks like a password, token, or payment detail.",
+        anything_needed="Leave secrets out of chat and email.",
+        status_line="Not stored.",
+        details="I did not store it, and I will not repeat it.",
+        job_id=job_id,
+    )
+
+
+def memory_forgotten_reply(*, facts: list[str], job_id: str) -> str:
+    if not facts:
+        return status_reply(
+            headline=line("memory_none_headline"),
+            what_happened="Nothing stored matched that.",
+            anything_needed="No.",
+            status_line="Nothing forgotten.",
+            details="I didn't guess, and I didn't change anything.",
+            job_id=job_id,
+        )
+    return status_reply(
+        headline=line("memory_forgotten_headline"),
+        what_happened="I hid the matching notes. Past EZLynx changes stay in the change list.",
+        anything_needed="No.",
+        status_line="Forgotten.",
+        details="\n".join(facts),
+        job_id=job_id,
+    )
+
+
+def memory_list_reply(*, about: str, facts: list[str], job_id: str) -> str:
+    if not facts:
+        return status_reply(
+            headline=line("memory_none_headline"),
+            what_happened="Nothing stored matched that." if about else "I don't have any notes yet.",
+            anything_needed="No.",
+            status_line="Nothing stored.",
+            details=about or "I didn't guess.",
+            job_id=job_id,
+        )
+    base = line("memory_list_headline").rstrip(".")
+    headline = f"{base} about {about}." if about else f"{base}."
+    return status_reply(
+        headline=headline,
+        what_happened="These are the notes I have. They do not change what I am allowed to do.",
+        anything_needed="No.",
+        status_line="Remembered.",
+        details="\n".join(facts),
         job_id=job_id,
     )
 
