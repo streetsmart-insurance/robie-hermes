@@ -253,10 +253,37 @@ def strip_blank_saved_span(text: str) -> str:
     return cleaned.strip()
 
 FORBIDDEN_READ_RULE = (
-    "Do not read Robie's own source, jobs.db, .hermes/google_token.json, "
-    "or any token file during a job. Do not grep the server. "
+    "Do not read Robie's own source, the repository, tests, fixtures, "
+    "scripts, jobs.db, .hermes/google_token.json, or any token file during a job. "
+    "Do not grep the server. Do not answer from test files. "
+    "If a live EZLynx lookup fails, say that it failed. "
     "Use the purpose-built tool named in the task."
 )
+
+FIXTURE_POLICY_MARKER = "BB-2026-ASC-001"
+LIVE_LOOKUP_FAILED = (
+    "The live EZLynx lookup failed. I cannot report a record from test files."
+)
+_INTERNAL_USER_MARKER = re.compile(
+    r"(?:ROBIE_BLOCKED|PLAYWRIGHT_BLOCKED)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_internal_user_markers(text: str) -> str:
+    """Drop worker markers on the way out to a CSR. Detection uses the raw text."""
+    cleaned = _INTERNAL_USER_MARKER.sub("", str(text or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    return cleaned.strip()
+
+
+def scrub_user_reply(text: str) -> str:
+    """User text only. Fixture policy numbers are not agency records."""
+    raw = str(text or "")
+    if FIXTURE_POLICY_MARKER in raw:
+        return LIVE_LOOKUP_FAILED
+    return strip_internal_user_markers(raw)
 
 
 def _normalized(text: str) -> str:

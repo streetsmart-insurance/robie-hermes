@@ -986,7 +986,10 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             lines.append(
                 "Before any tool or write, state a plan of exactly the write, "
                 "the target, and the values. Do not invent a value. Do not write "
-                "until that plan is locked."
+                "until that plan is locked. target may be the account id, the "
+                "policy number, or the discussion name. If a write tool names "
+                "the wrong field, fix that field once. If it refuses again, stop. "
+                "Do not call the tool again."
             )
     lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
@@ -1900,9 +1903,15 @@ def _render_chat_terminal(
     every user gets the same shape. Internal codes are translated for
     display only -- detection on raw worker text is untouched.
     """
-    from .answer_only import is_answer_only_job
+    from .answer_only import (
+        FIXTURE_POLICY_MARKER,
+        LIVE_LOOKUP_FAILED,
+        is_answer_only_job,
+    )
     from .end_state_report import end_state_report_enabled, render_job_end_state
 
+    if FIXTURE_POLICY_MARKER in str(content or ""):
+        return LIVE_LOOKUP_FAILED + "\n"
     forced = _unproved_field_user_reply(store, job)
     if forced:
         from . import status_format
@@ -1915,11 +1924,28 @@ def _render_chat_terminal(
         return render_job_end_state(
             store, job, content, recordings=recordings, channel="chat"
         )
-    from .write_verification_loop import write_reply_if_planned
+    from .runtime_env import playground_enabled
+    from .write_verification_loop import (
+        is_ezlynx_write_job,
+        nothing_written_line,
+        unwritten_write_reason,
+        write_landed,
+        write_reply_if_planned,
+    )
 
-    planned_reply = write_reply_if_planned(store, job, content)
-    if planned_reply:
-        return planned_reply
+    keep_quote = (
+        playground_enabled() and str(job.get("action_type") or "") == "ezlynx.quote"
+    )
+    if is_ezlynx_write_job(job) and not keep_quote:
+        planned_reply = write_reply_if_planned(store, job, content)
+        if write_landed(store, job) and planned_reply:
+            return planned_reply
+        if not write_landed(store, job):
+            return nothing_written_line(unwritten_write_reason(store, job)) + "\n"
+    else:
+        planned_reply = write_reply_if_planned(store, job, content)
+        if planned_reply:
+            return planned_reply
     # Flag on: one end-state report scored by Jev. The old "Not verified"
     # wording is display-only and is skipped here. Deterministic verifiers
     # still ran before this render; a failed hard readback forces wrong.
@@ -2092,7 +2118,63 @@ def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
     return ""
 
 
+_RECORDING_KEEP_OPEN = {
+    JobStatus.PENDING.value,
+    JobStatus.RUNNING.value,
+    JobStatus.VERIFYING.value,
+}
+
+
+def _release_chat_recording(
+    db_path: str,
+    job_id: str | None,
+    recordings: RecordingManager | None,
+) -> None:
+    """Stop the screen recording unless the job is still in progress.
+
+    The verifier can set UNVERIFIED after this function has already read
+    the job. A later check of that first copy skips safe_stop, and the
+    webm keeps growing. This reads the job again.
+    """
+    if not job_id or not db_path:
+        return
+    status = JobStatus.UNVERIFIED.value
+    try:
+        status = str(JobStore(db_path).get_job(job_id).get("status") or status)
+    except Exception:
+        status = JobStatus.UNVERIFIED.value
+    if status in _RECORDING_KEEP_OPEN:
+        return
+    manager = recordings or RecordingManager(db_path)
+    manager.safe_stop(job_id, status)
+
+
 def guard_chat_response(
+    db_path: str,
+    job_id: str | None,
+    content: str,
+    *,
+    verifiers: dict[str, Any] | None = None,
+    recordings: RecordingManager | None = None,
+) -> str:
+    """User-facing Chat reply. The recording stops on the way out."""
+    from .answer_only import scrub_user_reply
+
+    try:
+        return scrub_user_reply(
+            _guard_chat_response_impl(
+                db_path,
+                job_id,
+                content,
+                verifiers=verifiers,
+                recordings=recordings,
+            )
+        )
+    finally:
+        _release_chat_recording(db_path, job_id, recordings)
+
+
+def _guard_chat_response_impl(
     db_path: str,
     job_id: str | None,
     content: str,

@@ -199,23 +199,17 @@ class HermesEmailWorker:
         from .write_verification_loop import (
             default_plan_model,
             is_ezlynx_write_job,
-            lock_stated_plan,
             locked_plan_instructions,
-            parse_model_plan,
             plan_is_locked,
-            plan_prompt_for_job,
-            remember_unlocked_plan,
         )
 
         if is_ezlynx_write_job(job) and not plan_is_locked(self.store, job["id"]):
             planner = getattr(self, "plan_model", None) or default_plan_model
-            raw_plan = planner(plan_prompt_for_job(job))
-            statement = parse_model_plan(raw_plan)
-            if statement is None:
-                remember_unlocked_plan(self.store, job, raw_plan)
-            else:
-                locked = lock_stated_plan(self.store, job, statement)
-                prompt = prompt + "\n\n" + locked_plan_instructions(locked)
+            from .write_verification_loop import prepare_write_plan
+
+            result = prepare_write_plan(self.store, job, planner)
+            if result.get("locked"):
+                prompt = prompt + "\n\n" + locked_plan_instructions(result)
         return self._invoke_agent(job, prompt)
 
 
@@ -368,11 +362,33 @@ def _render_email_terminal(
                 store, job, response, channel="email"
             )
         if job is not None:
-            from .write_verification_loop import write_reply_if_planned
+            from .runtime_env import playground_enabled
+            from .write_verification_loop import (
+                is_ezlynx_write_job,
+                nothing_written_line,
+                unwritten_write_reason,
+                write_landed,
+                write_reply_if_planned,
+            )
 
-            planned = write_reply_if_planned(store, job, response)
-            if planned:
-                return planned
+            keep_quote = (
+                playground_enabled()
+                and str(job.get("action_type") or "") == "ezlynx.quote"
+            )
+            if is_ezlynx_write_job(job) and not keep_quote:
+                planned = write_reply_if_planned(store, job, response)
+                if write_landed(store, job) and planned:
+                    return planned
+                if not write_landed(store, job):
+                    from .answer_only import scrub_user_reply
+
+                    return scrub_user_reply(
+                        nothing_written_line(unwritten_write_reason(store, job))
+                    )
+            else:
+                planned = write_reply_if_planned(store, job, response)
+                if planned:
+                    return planned
     if end_state_report_enabled() and store is not None:
         job = store.get_job(job_id)
         return render_job_end_state(
@@ -406,11 +422,15 @@ def _render_email_terminal(
         "Check saved results before retrying.", "").replace("  ", " ").strip(" .")
     if what_happened and not what_happened.endswith("."):
         what_happened += "."
-    return status_format.render_simple_status(
-        headline=headline,
-        what_happened=what_happened or "The job ended without a clear result.",
-        anything_needed="Check the saved results before retrying.",
-        status_line=status_line,
-        details=details,
-        job_id=job_id,
+    from .answer_only import scrub_user_reply
+
+    return scrub_user_reply(
+        status_format.render_simple_status(
+            headline=headline,
+            what_happened=what_happened or "The job ended without a clear result.",
+            anything_needed="Check the saved results before retrying.",
+            status_line=status_line,
+            details=details,
+            job_id=job_id,
+        )
     )
