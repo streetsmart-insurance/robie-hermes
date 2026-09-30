@@ -33,10 +33,35 @@ ROBIE_PLAYGROUND_CARRIER_EMAIL_SINK=carlo@streetsmart.insurance
 ROBIE_PLAYGROUND_SOP_INDEX=/opt/streetsmart-hermes-test/robie-job-engine/data/playground-sop-index.json
 ```
 
-`26356199` is Buster Brown. Real clients stay closed until
-`ROBIE_PLAYGROUND_REAL_CLIENTS=1` and their applicant ids are added to
-the allowlist. Leave live writes off until a person is watching the
-first Buster Brown change.
+`26356199` is Buster Brown. Leave `ROBIE_EZLYNX_WRITE_SCOPE` empty on
+Test until the guardrails have been watched. Leave live writes off until
+a person is watching the first Buster Brown change.
+
+## All real clients (later, not this deploy)
+
+Carlo approved opening every real client once these guardrails are in
+place. The switch is explicit and stays closed until someone sets it.
+It does not turn on by itself, and this pull request does not set it
+on Test or Production.
+
+Prod flip, after QA, on the Production env file:
+
+```
+ROBIE_PLAYGROUND=1
+ROBIE_EZLYNX_WRITE_SCOPE=all
+```
+
+`ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*` means the same request. All-clients
+is used only while the Playground flag is on and the hard blocks, the
+go step, and the undo log are active. If the Playground is off, Robie
+falls back to `ROBIE_EZLYNX_WRITE_APPLICANT_IDS`, or to test account
+`220250093` when that list is empty.
+
+Buster Brown (`26356199`) and the other test id (`220250093`) still
+say Practice mode, and their carrier change-request emails still go to
+`carlo@streetsmart.insurance`. A real client's carrier email goes to
+the real carrier only after the read-back and a go. Deletes, binds,
+billing, coverage changes, and client emails or texts stay blocked.
 
 Load that file from the Test gateway drop-in
 (`deploy/systemd/test-playground.conf` already turns the flag on; add

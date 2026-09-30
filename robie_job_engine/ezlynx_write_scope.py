@@ -12,6 +12,9 @@ Ops flip (Carlo 2026-09-17; fail-closed default 2026-09-26):
 - **Widened**: set the variable to a comma list, e.g.
   ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093,123456789``. Only those IDs
   pass the compiled allowlist.
+- **All clients**: set ``ROBIE_EZLYNX_WRITE_SCOPE=all`` (or the id list to
+  ``*``). This is honored only while Playground guardrails are active.
+  Otherwise the id list above is used. Default is closed.
 
 A Job payload, prompt, or any other runtime input cannot widen a
 restricted list — authorizing a new account is a deployment-config
@@ -32,6 +35,7 @@ rule is enforced separately.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -39,10 +43,16 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
 ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "ROBIE_EZLYNX_WRITE_APPLICANT_IDS"
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "EZLYNX_WRITE_APPLICANT_IDS"
+# Explicit all-clients switch. Default closed. Honored only while the
+# Playground hard blocks, read-back-then-go, and undo log are active.
+ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR = "ROBIE_EZLYNX_WRITE_SCOPE"
+WRITE_SCOPE_ALL = "all"
 # Preferred name first; legacy alias kept so existing Test/CI env still applies.
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VARS = (
     ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR,
@@ -176,9 +186,77 @@ def _load_allowed_applicant_ids() -> frozenset[str]:
     raw = _raw_allowlist_env()
     if raw is None or not raw.strip():
         return frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
-    ids = {normalize_applicant_id(part) for part in raw.split(",")}
-    ids.discard("")
+    ids: set[str] = set()
+    for part in raw.split(","):
+        token = normalize_applicant_id(part)
+        if not token or token == "*" or token.casefold() == WRITE_SCOPE_ALL:
+            continue
+        ids.add(token)
     return frozenset(ids) if ids else frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
+
+
+def write_scope_requests_all() -> bool:
+    """True only for an explicit all-clients setting. Default closed.
+
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is the switch. ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*``
+    means the same request. Any other value, including empty, stays on the
+    id list.
+    """
+
+    scope = str(os.environ.get(ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR) or "").strip().casefold()
+    if scope == WRITE_SCOPE_ALL:
+        return True
+    raw = _raw_allowlist_env()
+    if raw is None:
+        return False
+    parts = {normalize_applicant_id(part) for part in raw.split(",") if part.strip()}
+    return "*" in parts
+
+
+def all_clients_scope_honored() -> bool:
+    """All-clients counts only while Playground guardrails are active.
+
+    Hard blocks, read-back-then-go, and the undo log have to be in force.
+    Otherwise this falls back to the applicant id list.
+    """
+
+    if not write_scope_requests_all():
+        return False
+    from .playground_config import playground_guardrails_active
+
+    return playground_guardrails_active()
+
+
+def describe_write_scope() -> str:
+    """One startup line. All-clients is named only when it is actually honored."""
+
+    if write_scope_requests_all() and all_clients_scope_honored():
+        return (
+            "EZLynx write scope is all clients. Playground guardrails are active: "
+            "hard blocks, read-back-then-go, and the undo log. "
+            "Bind, delete, billing, coverage, and client email stay blocked."
+        )
+    if write_scope_requests_all():
+        return (
+            "ROBIE_EZLYNX_WRITE_SCOPE=all was requested, but Playground guardrails "
+            "are not active. Falling back to the applicant allowlist."
+        )
+    count = 0 if ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None else len(ALLOWED_EZLYNX_WRITE_APPLICANT_IDS)
+    return (
+        f"EZLynx write scope is the applicant allowlist ({count} ids). "
+        "All-clients is closed."
+    )
+
+
+def log_write_scope_at_startup() -> str:
+    """Log the scope once per process start. Returns the same line for tests."""
+
+    message = describe_write_scope()
+    if "Falling back" in message:
+        logger.warning(message)
+    else:
+        logger.info(message)
+    return message
 
 
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
@@ -242,6 +320,8 @@ def applicant_is_write_allowed(value: object) -> bool:
     if live is not None:
         return applicant == live
     if write_allowlist_is_unrestricted():
+        return True
+    if all_clients_scope_honored():
         return True
     if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
         return True
@@ -343,3 +423,6 @@ def ezlynx_control_scope_block_reason(
             "write-allowed"
         )
     return None
+
+
+log_write_scope_at_startup()

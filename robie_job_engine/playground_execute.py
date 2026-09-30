@@ -76,7 +76,11 @@ def compare_readback(*, expected: str, observed: str | None) -> Readback:
 
 
 def prepare_carrier_delivery(proposal: Proposal) -> Proposal:
-    """Redirect practice and non-allowlisted carrier mail. Never the real carrier."""
+    """Send a real client to the carrier only in honored all-clients mode.
+
+    Test clients, and everyone else, go to the sink. The caller still
+    waits for go before this delivery is used.
+    """
     if proposal.kind != CARRIER_EMAIL:
         return proposal
     original = proposal.carrier_address

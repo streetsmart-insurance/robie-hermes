@@ -330,7 +330,12 @@ def _start(
         _note("answered")
         return reply
     if decision.blocked:
-        reply = blocked_reply(reason=decision.reason, job_id=job_id)
+        reply = blocked_reply(
+            reason=decision.reason,
+            job_id=job_id,
+            applicant_id=decision.proposal.applicant_id if decision.proposal else "",
+            client_name=mentioned_client(text) or (decision.proposal.client if decision.proposal else ""),
+        )
         _note("blocked")
         return _fail(store, job_id, reply, error=decision.reason)
     if decision.intent == "vague" or decision.question:
@@ -404,7 +409,12 @@ def _start(
         proposal.old_value = current
     refusal = refuse_if_not_allowlisted(proposal)
     if refusal:
-        reply = blocked_reply(reason=refusal, job_id=job_id)
+        reply = blocked_reply(
+            reason=refusal,
+            job_id=job_id,
+            applicant_id=proposal.applicant_id,
+            client_name=proposal.client,
+        )
         _note("blocked")
         return _fail(store, job_id, reply, error=refusal)
     expires = now + timedelta(minutes=confirm_timeout_minutes())
@@ -719,7 +729,12 @@ def _approve(
     proposal = Proposal.from_dict(note.get("proposal"))
     refusal = refuse_if_not_allowlisted(proposal)
     if refusal:
-        reply = blocked_reply(reason=refusal, job_id=pending["id"])
+        reply = blocked_reply(
+            reason=refusal,
+            job_id=pending["id"],
+            applicant_id=proposal.applicant_id,
+            client_name=proposal.client,
+        )
         _fail(store, pending["id"], reply, error=refusal)
         _sync_job_outcome(store, pending["id"], outcome="blocked", client=proposal.client, now=now)
         return [reply]

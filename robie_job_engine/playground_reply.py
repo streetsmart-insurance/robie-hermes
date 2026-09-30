@@ -1,8 +1,8 @@
 """Plain-English Playground replies in the shared status format.
 
 Summary first, then the Details block, then ``Ref: job <full id>`` last.
-Practice mode is a tag on the first line while Buster Brown is the only
-client Robie may change.
+Practice mode is a tag on the first line for a test client. A real client
+is not tagged once all-clients mode is actually on.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ def _remembered(memory_lines: list[str] | None) -> str:
     return "I remember:\n" + "\n".join(facts[:3])
 
 
-def tag_practice(text: str) -> str:
+def tag_practice(text: str, *, applicant_id: str = "", client_name: str = "") -> str:
     body = str(text or "").strip()
-    if not body or not buster_brown_only_mode():
+    if not body or not buster_brown_only_mode(applicant_id, client_name):
         return body + ("\n" if body and not body.endswith("\n") else "")
     if body.startswith("Practice mode"):
         return body if body.endswith("\n") else body + "\n"
@@ -38,6 +38,8 @@ def status_reply(
     status_line: str,
     details: str = "",
     job_id: str | None = None,
+    applicant_id: str = "",
+    client_name: str = "",
 ) -> str:
     return tag_practice(
         render_simple_status(
@@ -47,7 +49,9 @@ def status_reply(
             status_line=status_line,
             details=details,
             job_id=job_id,
-        )
+        ),
+        applicant_id=applicant_id,
+        client_name=client_name,
     )
 
 
@@ -62,7 +66,13 @@ def help_reply(*, job_id: str | None = None) -> str:
     )
 
 
-def blocked_reply(*, reason: str, job_id: str) -> str:
+def blocked_reply(
+    *,
+    reason: str,
+    job_id: str,
+    applicant_id: str = "",
+    client_name: str = "",
+) -> str:
     return status_reply(
         headline=line("blocked_headline"),
         what_happened=reason,
@@ -70,6 +80,8 @@ def blocked_reply(*, reason: str, job_id: str) -> str:
         status_line="Blocked.",
         details=reason,
         job_id=job_id,
+        applicant_id=applicant_id,
+        client_name=client_name,
     )
 
 
@@ -120,6 +132,8 @@ def confirmation_reply(
         status_line="Waiting for you.",
         details=details,
         job_id=job_id,
+        applicant_id=proposal.applicant_id,
+        client_name=proposal.client,
     )
 
 
@@ -132,6 +146,8 @@ def working_reply(proposal: Proposal, *, job_id: str) -> str:
         status_line="Working.",
         details=f"New value: {proposal.new_value}",
         job_id=job_id,
+        applicant_id=proposal.applicant_id,
+        client_name=proposal.client,
     )
 
 
@@ -153,6 +169,8 @@ def matched_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
             ]
         ),
         job_id=job_id,
+        applicant_id=proposal.applicant_id,
+        client_name=proposal.client,
     )
 
 
@@ -169,6 +187,8 @@ def mismatch_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
         status_line="Not confirmed.",
         details="I am not calling this a success.",
         job_id=job_id,
+        applicant_id=proposal.applicant_id,
+        client_name=proposal.client,
     )
 
 
