@@ -56,15 +56,22 @@ _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _POLICY_NUMBER = re.compile(r"^\d{10}$")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN = ZoneInfo("America/New_York")
-NOTICE_NAMES = ("Pending Cancellation Notice", "CANCELLATION NOTICE")
+NOTICE_NAMES = ("Pending Cancellation Notice", "CANCELLATION NOTICE", "Cancellation Notice")
 PERSONAL_PRODUCT = "private passenger auto"
 COMMERCIAL_PRODUCT = "commercial auto"
+# Live Gateway 2026-09-30 shows the product as "Personal Auto" or "Commercial".
+PERSONAL_PRODUCTS = frozenset({PERSONAL_PRODUCT, "personal auto"})
+COMMERCIAL_PRODUCTS = frozenset({COMMERCIAL_PRODUCT, "commercial"})
+# A Billing notice issued this long before the alert's due date belongs to an
+# earlier cancellation (live: notice issued 6/24/2026 for a 7/6/2026 cancel,
+# alert due 10/6/2026). It is not pulled as this alert's notice.
+NOTICE_MAX_AGE_DAYS = 35
 
 _HEADER_FIELDS = (
-    ("status", frozenset({"severity", "status"})),
+    ("status", frozenset({"severity", "status", "priority"})),
     ("policy_number", frozenset({"policy number", "policy"})),
     ("insured_name", frozenset({"insured name", "insured"})),
-    ("product", frozenset({"product"})),
+    ("product", frozenset({"product", "product/description"})),
     ("due_date", frozenset({"due date"})),
 )
 
@@ -131,6 +138,7 @@ class AlertRow:
 class NoticePath:
     kind: str
     notice_name: str = ""
+    issued_on: date | None = None
 
 
 @dataclass(frozen=True)
@@ -154,9 +162,9 @@ def refuse_production_host() -> None:
 
 def classify_line(product: str) -> str:
     key = _norm(product).casefold()
-    if key == PERSONAL_PRODUCT:
+    if key in PERSONAL_PRODUCTS:
         return "personal"
-    if key == COMMERCIAL_PRODUCT:
+    if key in COMMERCIAL_PRODUCTS:
         return "commercial"
     raise IntakeHold("Pending Cancellation product line is missing or ambiguous")
 
@@ -189,7 +197,8 @@ def parse_due_date(value: str) -> date:
 
 def header_indexes(headers: tuple[str, ...]) -> dict[str, int]:
     normalized = tuple(_norm(header).casefold() for header in headers)
-    if not normalized or any(not header for header in normalized) or len(normalized) != len(set(normalized)):
+    named = [header for header in normalized if header]
+    if not named or len(named) != len(set(named)):
         raise IntakeHold("Pending Cancellations table is missing or ambiguous")
     indexes: dict[str, int] = {}
     for index, header in enumerate(normalized):
@@ -369,12 +378,7 @@ def collect_notice_observation(
             except Exception:
                 pass
         for item in opened:
-            closer = getattr(item, "close", None)
-            if callable(closer):
-                try:
-                    closer()
-                except Exception:
-                    pass
+            _close_gateway_page(item)
 
 
 def assert_authenticated(page: Any) -> None:
@@ -441,7 +445,22 @@ def _chip_toggle(locator: Any) -> str:
     return "bare"
 
 
+_PENDING_TOGGLE_TEXT = re.compile(r"^\s*Pending Cancellations", re.IGNORECASE)
+
+
 def _pending_chip_matches(page: Any) -> list[tuple[int, Any]]:
+    # Live Gateway chip is <gds-toggle-button aria-pressed> with a shadow
+    # button inside, so role queries see two buttons. The host element is the
+    # one control and carries aria-pressed.
+    try:
+        toggle = page.locator("gds-toggle-button", has_text=_PENDING_TOGGLE_TEXT)
+        toggles = _locator_count(toggle)
+    except Exception:
+        toggles = 0
+    if toggles == 1:
+        return [(1, toggle)]
+    if toggles > 1:
+        return [(toggles, toggle)]
     found = []
     for role in _CHIP_ROLES:
         locator = page.get_by_role(role, name=_PENDING_CHIP_NAME, exact=False)
@@ -465,7 +484,7 @@ def _pending_chip_view(page: Any) -> str:
 
 def _alerts_table_count(page: Any) -> int:
     try:
-        return int(page.locator("table").count())
+        return int(page.locator("table").count()) + int(page.locator("gds-table").count())
     except Exception:
         return -1
 
@@ -625,16 +644,165 @@ def classify_policy_documents(page: Any) -> NoticePath:
     return NoticePath("noc", notices_after[0])
 
 
+POLICY_VIEW_HOST = "edgeextended.geico.com"
+POLICY_TAB_TIMEOUT_MS = 30000
+_DOCUMENTS_BOX = "gds-navigational-box#documents-consolidated-documents"
+_ISSUED = re.compile(r"issued\s+(\d{1,2}/\d{1,2}/\d{4})", re.IGNORECASE)
+
+
+def _settle(page: Any, ms: int = 3000) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=POLICY_TAB_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(ms)
+    except Exception:
+        pass
+
+
+def _close_gateway_page(page: Any) -> None:
+    """Close a Geico tab this pull opened. Never anything else."""
+    host = (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").casefold()
+    if host and not (host == "geico.com" or host.endswith(".geico.com")) and host != "about:blank":
+        return
+    try:
+        page.close()
+    except Exception:
+        pass
+
+
+def _click_or_dispatch(locator: Any) -> None:
+    # The Documents box sits under a summary overlay that swallows a real
+    # click on the live policy page; the element's own click event still works.
+    try:
+        locator.click(timeout=6000)
+    except Exception:
+        locator.dispatch_event("click")
+
+
+def notice_issued_on(text: str) -> date | None:
+    found = {datetime.strptime(item, "%m/%d/%Y").date() for item in _ISSUED.findall(str(text or ""))}
+    return found.pop() if len(found) == 1 else None
+
+
+def open_billing_notices(page: Any) -> NoticePath:
+    """Policy tab -> Documents -> Billing tab -> the one Cancellation Notice."""
+    _settle(page, 6000)
+    assert_authenticated(page)
+    documents = page.locator(_DOCUMENTS_BOX)
+    if _locator_count(documents) != 1:
+        return NoticePath("absent")
+    _click_or_dispatch(documents)
+    _settle(page, 4000)
+    billing = page.get_by_role("tab", name="Billing", exact=True)
+    if _locator_count(billing) != 1:
+        return NoticePath("ambiguous")
+    _click_or_dispatch(billing)
+    _settle(page, 4000)
+    notice = _notice_match(page)
+    if notice is None:
+        return NoticePath("absent")
+    if notice == "ambiguous":
+        return NoticePath("ambiguous")
+    try:
+        item = page.locator("li", has=notice[1])
+        text = str(item.first.inner_text() or "") if _locator_count(item) >= 1 else ""
+    except Exception:
+        text = ""
+    return NoticePath("noc", notice[0], issued_on=notice_issued_on(text))
+
+
+def notice_is_stale(issued_on: date | None, due_on: date) -> bool:
+    if issued_on is None:
+        return False
+    return (due_on - issued_on).days > NOTICE_MAX_AGE_DAYS
+
+
+def capture_viewer_notice(page: Any, *, timeout_ms: int = POLICY_TAB_TIMEOUT_MS) -> bytes:
+    """Click the notice; the viewer loads the PDF from edgeextended's view-document.
+
+    The page shows it through a blob it revokes, so the PDF response itself is
+    kept (Geico host, application/pdf) and must be exactly one document.
+    """
+    notice = _notice_match(page)
+    if not isinstance(notice, tuple):
+        raise IntakeHold("NOC PDF capture is missing or ambiguous")
+    seen: list[Any] = []
+
+    def on_response(response: Any) -> None:
+        try:
+            ctype = str(response.headers.get("content-type", "")).casefold()
+            if "application/pdf" in ctype and _allowed_pdf_url(str(response.url)):
+                seen.append(response)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+    try:
+        notice[1].click()
+        waited = 0
+        while not seen and waited < timeout_ms:
+            page.wait_for_timeout(500)
+            waited += 500
+        page.wait_for_timeout(1000)
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+    blobs = []
+    for response in seen:
+        try:
+            body = bytes(response.body())
+        except Exception:
+            continue
+        if _is_pdf(body):
+            blobs.append(body)
+    if len({hashlib.sha256(blob).digest() for blob in blobs}) != 1:
+        raise IntakeHold("NOC PDF capture is missing or ambiguous")
+    return blobs[0]
+
+
+ALERT_LIST_WAIT_MS = 20000
+
+
+def wait_for_alert_list(page: Any, *, timeout_ms: int = ALERT_LIST_WAIT_MS) -> None:
+    """The live list renders a moment after the chip click; wait for one list
+    whose row count holds steady across two looks. Pages without a wait hook
+    (tests) return at once."""
+    wait = getattr(page, "wait_for_timeout", None)
+    if not callable(wait):
+        return
+    last = None
+    waited = 0
+    while waited < timeout_ms:
+        if _alerts_table_count(page) == 1:
+            try:
+                rows = int(page.locator("gds-table gds-table-tbody gds-table-tr").count()) + int(
+                    page.locator("table tbody tr").count()
+                )
+            except Exception:
+                rows = -1
+            if rows > 0 and rows == last:
+                return
+            last = rows
+        wait(500)
+        waited += 500
+
+
 class PlaywrightGeicoNocBrowser:
     """Drive one already-authenticated Gateway tab. Does not type credentials."""
 
     def __init__(self, page: Any):
         self.page = page
         self._list_url = ""
+        self.policy_page: Any = None
 
     def load_pending_cancellations(self) -> AlertGrid:
         ensure_pending_view(self.page)
         assert_authenticated(self.page)
+        wait_for_alert_list(self.page)
         headers, rows = extract_alert_grid(self.page)
         grid = AlertGrid(
             list_url=str(getattr(self.page, "url", "") or ""),
@@ -654,12 +822,52 @@ class PlaywrightGeicoNocBrowser:
         return require_png(data)
 
     def inspect_notice_path(self, policy_number: str) -> NoticePath:
+        if self._gds_list():
+            return self._inspect_gds_policy(policy_number)
         self._open_policy(policy_number)
         return classify_policy_documents(self.page)
+
+    def _gds_list(self) -> bool:
+        try:
+            return self.page.locator("table").count() == 0 and self.page.locator("gds-table").count() == 1
+        except Exception:
+            return False
+
+    def _inspect_gds_policy(self, policy_number: str) -> NoticePath:
+        """Live Gateway: the row's View Policy link opens the policy in a new tab.
+
+        No link on the row, or a link to Geico's separate commercial site, is
+        reported as such without leaving the list.
+        """
+        policy = str(policy_number or "").strip()
+        if not self._on_list() or not _POLICY_NUMBER.fullmatch(policy):
+            raise IntakeHold("Policy open control is missing or ambiguous")
+        rows = self.page.locator("gds-table gds-table-tbody gds-table-tr", has_text=policy)
+        if _locator_count(rows) != 1:
+            raise IntakeHold("Policy open control is missing or ambiguous")
+        link = rows.get_by_role("link", name="View Policy", exact=True)
+        count = _locator_count(link)
+        if count == 0:
+            return NoticePath("no_policy_link")
+        if count != 1:
+            return NoticePath("ambiguous")
+        href = str(link.get_attribute("href") or "")
+        host = (urllib.parse.urlsplit(href).hostname or "").casefold()
+        if host.startswith("commercialservicing"):
+            return NoticePath("commercial_site")
+        if host != POLICY_VIEW_HOST:
+            return NoticePath("ambiguous")
+        with self.page.context.expect_page(timeout=POLICY_TAB_TIMEOUT_MS) as info:
+            link.click()
+        popup = info.value
+        self.policy_page = popup
+        return open_billing_notices(popup)
 
     def download_notice(self, policy_number: str) -> bytes:
         if not _POLICY_NUMBER.fullmatch(str(policy_number or "").strip()):
             raise IntakeHold("NOC policy number is missing or ambiguous")
+        if self.policy_page is not None:
+            return capture_viewer_notice(self.policy_page)
         notice = _notice_match(self.page)
         if not isinstance(notice, tuple):
             raise IntakeHold("NOC PDF capture is missing or ambiguous")
@@ -670,6 +878,9 @@ class PlaywrightGeicoNocBrowser:
         return pdf_bytes_from_observation(collect_notice_observation(self.page, open_notice))
 
     def return_to_pending_list(self) -> None:
+        popup, self.policy_page = self.policy_page, None
+        if popup is not None:
+            _close_gateway_page(popup)
         if self._on_list():
             return
         go_back = getattr(self.page, "go_back", None)
@@ -693,13 +904,73 @@ class PlaywrightGeicoNocBrowser:
                 return False
             if not pending_view_selected(self.page):
                 return False
-            return self.page.locator("table").count() == 1
+            return _alerts_table_count(self.page) == 1
         except IntakeHold:
             return False
 
 
+_GDS_CLIENT_HEADER = "client/policy#"
+
+
+def split_client_cell(text: str) -> tuple[str, str]:
+    """Gateway "Client/Policy#" cell: name line(s) then the 10-digit policy."""
+    lines = [_norm(line) for line in str(text or "").splitlines() if _norm(line)]
+    if len(lines) < 2 or not _POLICY_NUMBER.fullmatch(lines[-1]):
+        raise IntakeHold("NOC policy number is missing or ambiguous")
+    return " ".join(lines[:-1]), lines[-1]
+
+
+def normalize_gds_grid(
+    headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...]
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Turn the live gds-table into the Insured / Policy / Product shape.
+
+    Cells keep their line breaks here. The Client/Policy# cell splits into
+    insured and policy; Product/Description keeps its first line (the product).
+    """
+    keys = [_norm(header).casefold() for header in headers]
+    if keys.count(_GDS_CLIENT_HEADER) != 1:
+        raise IntakeHold("Pending Cancellations table is missing or ambiguous")
+    out_headers: list[str] = []
+    for key, header in zip(keys, headers):
+        if key == _GDS_CLIENT_HEADER:
+            out_headers.extend(["Insured", "Policy"])
+        else:
+            out_headers.append(_norm(header))
+    out_rows = []
+    for cells in rows:
+        if len(cells) != len(headers):
+            raise IntakeHold("Pending Cancellations list is ambiguous")
+        row: list[str] = []
+        for key, cell in zip(keys, cells):
+            if key == _GDS_CLIENT_HEADER:
+                row.extend(split_client_cell(cell))
+            elif key == "product/description":
+                first = next((_norm(line) for line in str(cell or "").splitlines() if _norm(line)), "")
+                row.append(first)
+            else:
+                row.append(_norm(cell))
+        out_rows.append(tuple(row))
+    return tuple(out_headers), tuple(out_rows)
+
+
+def _gds_row_locators(page: Any) -> tuple[Any, ...]:
+    return tuple(page.locator("gds-table gds-table-tbody gds-table-tr").all())
+
+
 def extract_alert_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
     tables = page.locator("table")
+    if tables.count() == 0 and page.locator("gds-table").count() == 1:
+        grid = page.locator("gds-table")
+        header_nodes = grid.locator("gds-table-thead gds-table-th").all()
+        if not header_nodes:
+            raise IntakeHold("Pending Cancellations table is missing or ambiguous")
+        headers = tuple(str(node.inner_text() or "") for node in header_nodes)
+        rows = tuple(
+            tuple(str(cell.inner_text() or "") for cell in row.locator("gds-table-td").all())
+            for row in _gds_row_locators(page)
+        )
+        return normalize_gds_grid(headers, rows)
     if tables.count() != 1:
         raise IntakeHold("Pending Cancellations table is missing or ambiguous")
     header_nodes = _unique_child(tables, "thead").locator("th").all()
@@ -939,6 +1210,16 @@ def run_pull(
                 fail(row["reason"])
             path = browser.inspect_notice_path(alert.policy_number)
             back()
+            if path.kind in {"no_policy_link", "commercial_site"}:
+                reason = (
+                    "Commercial policy. Geico has no policy page link on this alert, so no notice was pulled."
+                    if path.kind == "no_policy_link"
+                    else "Commercial policy. Geico sends this one to its separate commercial site, so no notice was pulled."
+                )
+                row = _row_payload(alert, outcome="HELD", reason=reason)
+                held.append(row)
+                remember(alert, row)
+                continue
             if path.kind == "billing_only":
                 row = _row_payload(
                     alert,
@@ -977,6 +1258,25 @@ def run_pull(
             remember(alert, _row_payload(alert, outcome="ALREADY_DELIVERED", filename=alert.filename))
             continue
         path = browser.inspect_notice_path(alert.policy_number)
+        soft_reason = ""
+        if path.kind == "no_policy_link":
+            soft_reason = "Geico has no policy page link on this alert, so no notice was pulled."
+        elif path.kind == "noc" and notice_is_stale(path.issued_on, alert.due_on):
+            issued = path.issued_on
+            soft_reason = (
+                f"The only cancellation notice Geico shows was issued {issued.month}/{issued.day}/{issued.year}, "
+                f"well before this cancellation due {alert.due_on.month}/{alert.due_on.day}/{alert.due_on.year}, "
+                "so it belongs to an earlier cancellation and was not pulled."
+            )
+        if soft_reason:
+            try:
+                browser.return_to_pending_list()
+            except IntakeHold as exc:
+                fail(str(exc))
+            row = _row_payload(alert, outcome="HELD", reason=soft_reason)
+            held.append(row)
+            remember(alert, row)
+            continue
         if path.kind != "noc":
             try:
                 browser.return_to_pending_list()

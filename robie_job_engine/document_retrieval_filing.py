@@ -25,6 +25,7 @@ section holds the batch and does not invent a row.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -69,7 +70,13 @@ class FilingDecision:
 
 
 NICOLE_ASSIGNEE = "Nicole Segovia"
-NO_WORKFLOW_SHEET_COMMENT = "Doc filed (no WF); Nicole EZLynx task created for review"
+NO_WORKFLOW_SHEET_COMMENT = (
+    "Filed the document. There was no matching workflow, so Nicole has a review task in EZLynx."
+)
+# Test-only: file every document to one test applicant (Buster Brown) instead
+# of the real client. Honored only with ROBIE_ENV=TEST on hermes-test-01.
+TEST_APPLICANT_ENV = "ROBIE_DOCUMENT_RETRIEVAL_TEST_APPLICANT_ID"
+TEST_DISCUSSION_ENV = "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE"
 
 
 @dataclass(frozen=True)
@@ -137,16 +144,19 @@ GEICO_NOC_RULE = sketch_carrier_rule(
     carrier_section="GEICO",
     carrier_label="Geico",
     document_type="Cancellation",
+    note_label="Geico cancellation notice",
 )
 PROGRESSIVE_BOP_RULE = sketch_carrier_rule(
     carrier_section="Progressive BOP/CGL",
     carrier_label="Progressive BOP",
     document_type="Cancellation",
+    note_label="Progressive business policy cancellation notice",
 )
 NATGEN_NOC_RULE = sketch_carrier_rule(
     carrier_section="NatGen",
     carrier_label="NatGen",
     document_type="NOC",
+    note_label="NatGen cancellation notice",
 )
 TRAVELERS_ACTIVITY_RULE = sketch_carrier_rule(
     carrier_section="Travelers",
@@ -243,7 +253,7 @@ def sheet_date_text(day: date) -> str:
 
 
 def nicole_status_comment(rule: FilingRule) -> str:
-    return f"Added to the {rule.folder} folder and WF: {rule.workflow_title}"
+    return f"Added to the {rule.folder} folder and the {rule.workflow_title} workflow."
 
 
 def review_task_payload(
@@ -851,6 +861,197 @@ def _batch(
     }
 
 
+def test_applicant_override(environ: Mapping[str, str], hostname: str) -> str | None:
+    """The Test-only applicant every document is filed to, or ``None``.
+
+    Set outside Test (any other ROBIE_ENV or host) it refuses instead of
+    being ignored, so a stray setting can never reach a real client.
+    """
+
+    raw = str(environ.get(TEST_APPLICANT_ENV) or "").strip()
+    if not raw:
+        return None
+    env_name = str(environ.get("ROBIE_ENV") or "").strip().upper()
+    host = str(hostname or "").split(".")[0].strip().lower()
+    if env_name != "TEST" or host != TEST_FILING_HOST:
+        raise FilingHeld(
+            f"{TEST_APPLICANT_ENV} is only allowed with ROBIE_ENV=TEST on {TEST_FILING_HOST}; refusing"
+        )
+    if not raw.isdigit():
+        raise FilingHeld(f"{TEST_APPLICANT_ENV} must be a numeric EZLynx applicant id")
+    return raw
+
+
+def _hint_matches(rows: list[dict[str, Any]], hint: str) -> list[dict[str, Any]]:
+    # Same rule the Notes writer uses: case-insensitive substring.
+    want = hint.strip().lower()
+    return [row for row in rows if want and want in discussion_title_of(row).lower()]
+
+
+def choose_test_discussion(
+    discussions: list, *, preferred: Sequence[str]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Pick an existing titled discussion on the test applicant. Never creates one.
+
+    The first title in ``preferred`` that names exactly one titled discussion
+    (by the Notes writer's own substring rule) wins. Returns the record, or
+    ``None``, and every titled discussion seen, for the report.
+    """
+
+    rows = [
+        row for row in (discussions or [])
+        if isinstance(row, dict) and not is_untitled_discussion(row) and discussion_id_of(row)
+    ]
+    titles = [discussion_title_of(row) for row in rows]
+    for title in preferred:
+        title = str(title or "").strip()
+        if not title:
+            continue
+        exact = [row for row in rows if " ".join(discussion_title_of(row).casefold().split()) == " ".join(title.casefold().split())]
+        if len(exact) == 1 and len(_hint_matches(rows, title)) == 1:
+            return exact[0], titles
+    return None, titles
+
+
+def _display_policy(policy_number: str) -> str:
+    """Full policy number, or its last four when the digits would look dialable."""
+
+    text = str(policy_number or "").strip()
+    try:
+        reject_phone_numbers(text)
+        return text
+    except Exception:
+        runs = [run for run in re.findall(r"\d+", text) if len(run) >= 4]
+        return f"ending in {runs[0][-4:]}" if runs else "on file"
+
+
+def test_account_note(rule: FilingRule, *, insured_name: str, policy_number: str, processed_on: date) -> str:
+    """Plain-English note naming the real client and policy, e.g.
+    "Progressive memo dated 9/29/2026 for Groesbeck, Zachary, policy 876263535,
+    saved to this test account. ROBIE was here"."""
+
+    policy = _display_policy(policy_number)
+    policy_text = f"policy {policy}"
+    text = (
+        f"{rule.note_label} dated {sheet_date_text(processed_on)} for {insured_name.strip()}, "
+        f"{policy_text}, saved to this test account. {ROBIE_SIGNATURE}"
+    )
+    reject_phone_numbers(text)
+    return text
+
+
+def _file_one_test_account(
+    item: Mapping[str, Any],
+    *,
+    rule: FilingRule,
+    deps: FilingDeps,
+    applicant_id: str,
+    discussion: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Upload to the test applicant and add the note. No real-client lookup,
+    no status sheet, no review task."""
+
+    policy_number = str(item.get("policy_number") or "").strip()
+    filename = str(item.get("filename") or "").strip()
+    insured_name = str(item.get("insured_name") or "").strip()
+    base = {"applicant_id": applicant_id, "real_client": insured_name, "real_policy": policy_number}
+    if not policy_number or not filename or not insured_name:
+        return _item_result("held", item, reason="policy, insured name, or filename is missing", **base)
+    if _policy_key(policy_number) not in _policy_key(filename):
+        return _item_result("held", item, reason="upload file name must include the real policy number", **base)
+    try:
+        processed_on = _parse_processed_on(item.get("processed_on") or item.get("processed_date"))
+        pdf = _pdf_bytes(item)
+    except FilingHeld as exc:
+        return _item_result("held", item, reason=str(exc), **base)
+    try:
+        duplicate = _duplicate_on_applicant(
+            deps, applicant_id=applicant_id, policy_number=policy_number, filename=filename
+        )
+    except Exception as exc:
+        return _item_result("held", item, reason=f"document search failed ({type(exc).__name__})", **base)
+    if duplicate:
+        return _item_result(
+            "skipped_duplicate", item, reason=f"matching {duplicate} already exists; upload skipped", **base
+        )
+    title = discussion_title_of(dict(discussion))
+    try:
+        note_text = test_account_note(
+            rule, insured_name=insured_name, policy_number=policy_number, processed_on=processed_on
+        )
+    except Exception as exc:
+        return _item_result("held", item, reason=f"note text was refused ({type(exc).__name__})", **base)
+    try:
+        uploaded = deps.upload(applicant_id, filename, pdf, filename=filename)
+        document_id = _read_back_document_id(uploaded)
+    except FilingHeld as exc:
+        return _item_result("held", item, reason=str(exc), **base)
+    except Exception as exc:
+        return _item_result("held", item, reason=f"document upload failed ({type(exc).__name__})", **base)
+    try:
+        noted = deps.add_note(applicant_id, note_text, discussion_title=title)
+    except Exception as exc:
+        return _item_result(
+            "document_filed_note_held", item, document_id=document_id,
+            reason=f"note failed after upload ({type(exc).__name__})", **base,
+        )
+    note_id = str((noted or {}).get("note_id") or "").strip()
+    discussion_id = str((noted or {}).get("discussion_id") or "") or discussion_id_of(dict(discussion))
+    if (noted or {}).get("status") != "filed" or not note_id or not (noted or {}).get("read_back"):
+        return _item_result(
+            "document_filed_note_held", item, document_id=document_id, discussion_id=discussion_id,
+            reason="DiscussionApi did not return a read-back note_id", **base,
+        )
+    return _item_result(
+        "filed", item, document_id=document_id, note_id=note_id, discussion_id=discussion_id,
+        discussion_title=title, note_text=note_text, test_account=True, **base,
+    )
+
+
+def _file_test_account_batch(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    rule: FilingRule,
+    applicant_id: str,
+    environ: Mapping[str, str],
+    factory: Callable[[], FilingDeps],
+) -> dict[str, Any]:
+    try:
+        deps = factory()
+    except Exception as exc:
+        return _batch("held", f"EZLynx filing client is unavailable ({type(exc).__name__}: {exc})")
+    try:
+        discussions = deps.list_discussions(applicant_id)
+    except Exception as exc:
+        return _batch("held", f"discussion lookup failed ({type(exc).__name__})")
+    preferred = [rule.workflow_title, str(environ.get(TEST_DISCUSSION_ENV) or "")]
+    chosen, titles = choose_test_discussion(discussions, preferred=preferred)
+    if chosen is None:
+        batch = _batch(
+            "held",
+            "no existing discussion on the test account matches the configured title; nothing was filed",
+        )
+        batch["test_account_discussions"] = titles
+        return batch
+    results = [
+        _file_one_test_account(item, rule=rule, deps=deps, applicant_id=applicant_id, discussion=chosen)
+        for item in items
+    ]
+    status = _overall_status(results)
+    reason = {
+        "filed": "documents and notes were read back on the test account",
+        "skipped_duplicate": "every document was already on the test account",
+        "held": "one or more documents were not filed",
+    }.get(status, status)
+    batch = _batch(status, reason, results=results, activities_check="not_used")
+    batch["test_account"] = applicant_id
+    batch["test_account_discussion"] = {
+        "id": discussion_id_of(chosen),
+        "title": discussion_title_of(chosen),
+    }
+    return batch
+
+
 def file_carrier_batch(
     items: Sequence[Mapping[str, Any]],
     *,
@@ -868,9 +1069,21 @@ def file_carrier_batch(
     decision = live_filing_decision(env, host)
     if not decision.allowed:
         return _batch("disabled", decision.reason)
+    try:
+        test_applicant = test_applicant_override(env, host)
+    except FilingHeld as exc:
+        return _batch("held", str(exc))
     if not items:
         return _batch("empty", "no local documents to file")
     day = sheet_day or eastern_today()
+    if test_applicant is not None:
+        return _file_test_account_batch(
+            items,
+            rule=rule,
+            applicant_id=test_applicant,
+            environ=env,
+            factory=client_factory or (lambda: build_live_deps(test_account=True)),
+        )
     factory = client_factory or build_live_deps
     try:
         deps = factory()
@@ -931,8 +1144,15 @@ def file_progressive_memos(
     )
 
 
-def build_live_deps() -> FilingDeps:
-    """Real Documents, Notes, and Sheets clients. Raises when any client is missing."""
+def build_live_deps(*, test_account: bool = False) -> FilingDeps:
+    """Real Documents, Notes, and Sheets clients. Raises when any client is missing.
+
+    ``test_account`` (the Buster Brown override on hermes-test-01) builds only
+    Documents and Notes. The test applicant lives in live EZLynx, so with
+    ``ROBIE_EZLYNX_DISCUSSION_API=live`` DocumentApi uses the same live API
+    secret the Notes client does, refusing any UAT host. Every write still
+    passes the ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` allowlist.
+    """
 
     from .ezlynx_api import EzlynxApiClient, EzlynxApiConfigurationError, load_ezlynx_api_config
     from .ezlynx_api_only_writes import (
@@ -943,13 +1163,22 @@ def build_live_deps() -> FilingDeps:
     from .ezlynx_discussions import DiscussionApiClient
 
     try:
-        api = EzlynxApiClient(load_ezlynx_api_config())
+        if test_account and str(os.environ.get("ROBIE_EZLYNX_DISCUSSION_API") or "").strip().lower() == "live":
+            config = load_ezlynx_api_config(environment="PRODUCTION")
+            hosts = f"{config.token_endpoint} {config.document_base_url}".casefold()
+            if "uatezlynx" in hosts:
+                raise FilingUnavailable("live EZLynx API secret points at UAT; refusing")
+            api = EzlynxApiClient(config)
+        else:
+            api = EzlynxApiClient(load_ezlynx_api_config())
         discussions = DiscussionApiClient(_discussion_config_from_secret())
+    except FilingUnavailable:
+        raise
     except EzlynxApiConfigurationError as exc:
         raise FilingUnavailable(f"EZLynx API is not configured: {exc}") from exc
     except Exception as exc:
         raise FilingUnavailable(f"EZLynx API client could not be built ({type(exc).__name__})") from exc
-    sheets = build_status_sheet_client()
+    sheets = None if test_account else build_status_sheet_client()
 
     def upload(applicant_id: str, document_name: str, file_bytes: bytes, filename: str) -> dict:
         return upload_document_via_api(
@@ -983,7 +1212,7 @@ def build_live_deps() -> FilingDeps:
         add_note=add_note,
         sheets=sheets,
         activities=None,
-        fire_task=fire,
+        fire_task=None if test_account else fire,
     )
 
 
@@ -1106,3 +1335,82 @@ __all__ = [
     "retrieval_date_window",
     "status_tab_title",
 ]
+
+
+CARRIER_RULES = {
+    "fao": PROGRESSIVE_MEMO_RULE,
+    "bop": PROGRESSIVE_BOP_RULE,
+    "geico": GEICO_NOC_RULE,
+    "natgen": NATGEN_NOC_RULE,
+}
+_INSURED_KEYS = ("insured_name", "named_insured", "insured", "client")
+
+
+def pack_filing_items(output_dir: str | Path) -> list[dict[str, Any]]:
+    """Filing items from a pull's QA packs (``<output>/<YYYY-MM-DD>/manifest.json``).
+
+    Only pulled PDFs that are on disk next to their manifest are returned.
+    """
+
+    root = Path(output_dir)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for manifest_path in sorted(root.glob("*/manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        processed = str(manifest.get("processed_date") or manifest.get("report_date") or manifest_path.parent.name)
+        for value in manifest.values():
+            if not isinstance(value, list):
+                continue
+            for entry in value:
+                if not isinstance(entry, dict):
+                    continue
+                filename = str(entry.get("filename") or "").strip()
+                policy = str(entry.get("policy_number") or "").strip()
+                insured = next((str(entry.get(k) or "").strip() for k in _INSURED_KEYS if entry.get(k)), "")
+                disposition = str(entry.get("disposition") or "pulled").strip().lower()
+                path = manifest_path.parent / filename
+                if not filename or not policy or disposition != "pulled" or not path.is_file():
+                    continue
+                if str(path) in seen:
+                    continue
+                seen.add(str(path))
+                items.append(
+                    {
+                        "policy_number": policy,
+                        "insured_name": insured,
+                        "filename": filename,
+                        "path": str(path),
+                        "processed_on": str(entry.get("processed_date") or processed),
+                    }
+                )
+    return items
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """File pulled PDFs from one carrier's QA packs through the shared API path.
+
+    Every gate above still applies: the kill switch, the Test host, and (for
+    the Buster Brown test) the Test-only applicant override.
+    """
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--carrier", required=True, choices=sorted(CARRIER_RULES))
+    parser.add_argument("--output-dir", required=True, help="pull output folder holding <date>/manifest.json")
+    parser.add_argument("--list-only", action="store_true", help="print the items and file nothing")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    items = pack_filing_items(args.output_dir)
+    if args.list_only:
+        print(json.dumps({"status": "listed", "count": len(items), "items": items}, indent=2))
+        return 0
+    result = file_carrier_batch(items, rule=CARRIER_RULES[args.carrier])
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("status") in {"filed", "skipped_duplicate", "empty", "filed_no_workflow"} else 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

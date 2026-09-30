@@ -726,7 +726,7 @@ class FakeNode:
             "a": self.role == "link",
             "embed[type='application/pdf']": self.role == "embed" and self.attrs.get("type") == "application/pdf",
             "input[type='password']": self.attrs.get("type") == "password",
-        }[selector]
+        }.get(selector, False)
 
 
 class NodeLocator:
@@ -1123,6 +1123,72 @@ class _RoleList:
 
     def click(self):
         self.page.clicks.append(self.names[0])
+
+
+
+class _Toggle:
+    def __init__(self, count, pressed):
+        self._count = count
+        self.pressed = pressed
+
+    def count(self):
+        return self._count
+
+    def get_attribute(self, name):
+        return self.pressed if name == "aria-pressed" else None
+
+
+class _TogglePage:
+    def __init__(self, count, pressed="true"):
+        self.toggle = _Toggle(count, pressed)
+        self.role_queries = 0
+
+    def locator(self, selector, has_text=None):
+        assert selector == "gds-toggle-button"
+        return self.toggle
+
+    def get_by_role(self, role, name=None, exact=False):
+        self.role_queries += 1
+        return _Toggle(2, None)
+
+
+class PendingToggleChipTests(unittest.TestCase):
+    def test_single_gds_toggle_is_the_one_chip_and_reads_aria_pressed(self):
+        from robie_job_engine.geico_pending_cancellation_noc import _pending_chip_view
+
+        page = _TogglePage(1, "true")
+        self.assertEqual(_pending_chip_view(page), "selected")
+        self.assertEqual(page.role_queries, 0)
+        self.assertEqual(_pending_chip_view(_TogglePage(1, "false")), "unselected")
+        self.assertEqual(_pending_chip_view(_TogglePage(2, "true")), "ambiguous")
+
+
+class GatewayLivePageTests(unittest.TestCase):
+    def test_gds_grid_splits_client_and_policy(self):
+        from robie_job_engine.geico_pending_cancellation_noc import normalize_gds_grid
+
+        headers, rows = normalize_gds_grid(
+            ("", "Client/Policy#", "Product/Description", "Due Date"),
+            (("", "Charlemagne Guevara\n6253395526", "Personal Auto\nPending cancellation", "10/06/2026"),),
+        )
+        self.assertEqual(headers, ("", "Insured", "Policy", "Product/Description", "Due Date"))
+        self.assertEqual(rows[0], ("", "Charlemagne Guevara", "6253395526", "Personal Auto", "10/06/2026"))
+
+    def test_client_cell_without_policy_holds(self):
+        from robie_job_engine.geico_pending_cancellation_noc import split_client_cell
+
+        with self.assertRaises(IntakeHold):
+            split_client_cell("Only A Name")
+
+    def test_old_notice_is_stale(self):
+        from robie_job_engine.geico_pending_cancellation_noc import notice_is_stale, notice_issued_on
+
+        issued = notice_issued_on("Cancellation Notice Issued 06/24/2026")
+        self.assertEqual(issued, date(2026, 6, 24))
+        self.assertTrue(notice_is_stale(issued, date(2026, 10, 6)))
+        self.assertFalse(notice_is_stale(date(2026, 9, 20), date(2026, 10, 6)))
+        self.assertFalse(notice_is_stale(None, date(2026, 10, 6)))
+        self.assertIsNone(notice_issued_on("Issued 06/24/2026 and Issued 07/01/2026"))
 
 
 if __name__ == "__main__":

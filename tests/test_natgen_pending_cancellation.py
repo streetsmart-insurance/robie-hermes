@@ -843,5 +843,48 @@ def tempfile_dir():
     return tempfile.TemporaryDirectory()
 
 
+
+LIVE_HEADERS = ("POLICY", "NAMED INSURED", "PHONE #", "PRODUCT", "DIV", "REASON", "CANCEL DATE", "AMOUNT DUE", "ADDITIONAL PRODUCTS")
+
+
+class LiveReportSnapshotTests(unittest.TestCase):
+    def live_grid(self):
+        row = ("2035471506 00", "A&E CONTRACTOR LLC", "(555) 555-0100", "CA", "1",
+               "Pending Cancel for Non Payment", "10/7/2026", "$100.00", "")
+        return grid_from_rows([row], headers=LIVE_HEADERS)
+
+    def test_report_without_process_date_is_a_dated_snapshot(self):
+        from robie_job_engine.natgen_pending_cancellation import SNAPSHOT_SOURCE
+
+        rows = parse_noc_grid(self.live_grid(), snapshot_on=date(2026, 9, 30))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.policy_number, "2035471506 00")
+        self.assertEqual(row.reason, "non-payment")
+        self.assertEqual(row.cancel_effective, date(2026, 10, 7))
+        self.assertEqual(row.processed_on, date(2026, 9, 30))
+        self.assertEqual(row.processed_date_source, SNAPSHOT_SOURCE)
+        self.assertEqual(row.document_id, "natgen-noc:2035471506 00:snapshot:non-payment:2026-10-07")
+
+    def test_snapshot_keeps_the_first_seen_date(self):
+        rows = parse_noc_grid(
+            self.live_grid(), snapshot_on=date(2026, 9, 30), first_seen=lambda _doc: date(2026, 9, 29)
+        )
+        self.assertEqual(rows[0].processed_on, date(2026, 9, 29))
+
+    def test_live_reason_wording(self):
+        from robie_job_engine.natgen_pending_cancellation import normalize_reason
+
+        self.assertEqual(normalize_reason("Pending cancel for NSF"), "nsf")
+        self.assertEqual(normalize_reason("Pending Cancel for Non Payment"), "non-payment")
+
+    def test_ledger_first_seen(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalDeliveryLedger(Path(tmp))
+            self.assertIsNone(ledger.first_seen("natgen-noc:x"))
+
+
 if __name__ == "__main__":
     unittest.main()

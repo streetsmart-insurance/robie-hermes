@@ -152,6 +152,10 @@ class FakePage:
         if self.close_raises:
             raise RuntimeError("HPLanding close failed")
 
+    def goto(self, url, **kwargs):
+        self.clicked.append(("goto", url))
+        self.url = url
+
     def locator(self, selector):
         return FakeLocator(self, selector)
 
@@ -400,7 +404,7 @@ class ProgressiveBopTests(unittest.TestCase):
         self.assertIs(opened, report)
         self.assertEqual(
             shell.clicked,
-            [("link", "Businessowner/Contractor GL")],
+            [("goto", "https://www.foragentsonly.com/landingpages/managepolicies/"), ("link", "Businessowner/Contractor GL")],
         )
         self.assertNotIn(("link", "Manage Policies"), shell.clicked)
         self.assertEqual(
@@ -948,10 +952,11 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 )
                 opened = navigate_to_pending_cancel(page, "CA33617")
                 self.assertIs(opened, report)
-                self.assertEqual(
-                    page.clicked,
-                    [("link", "Businessowner/Contractor GL")],
-                )
+                already_landing = "/landingpages/managepolicies" in url
+                expected = [("link", "Businessowner/Contractor GL")]
+                if not already_landing:
+                    expected.insert(0, ("goto", "https://www.foragentsonly.com/landingpages/managepolicies/"))
+                self.assertEqual(page.clicked, expected)
                 self.assertNotIn(("link", "Manage Policies"), page.clicked)
                 self.assertNotIn(("home", "Manage Policies Home"), page.clicked)
 
@@ -963,11 +968,11 @@ class AgentContextAndHomeTests(unittest.TestCase):
             page.clicked,
             [
                 ("home", "Manage Policies Home"),
-                ("link", "Manage Policies"),
+                ("goto", "https://www.foragentsonly.com/landingpages/managepolicies/"),
                 ("link", "Businessowner/Contractor GL"),
             ],
         )
-        self.assertEqual(page.url, "https://www.foragentsonly.com/managepolicies/")
+        self.assertEqual(page.url, "https://www.foragentsonly.com/landingpages/managepolicies/")
         self.assertEqual(
             page.popup.clicked,
             [("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")],
@@ -977,7 +982,7 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 landed = _AttachedShell(COMMUNICATIONS_URL, home=home)
                 navigate_to_pending_cancel(landed, "CA33617")
                 self.assertEqual(landed.clicked[0], ("home", "Manage Policies Home"))
-                self.assertEqual(landed.url, "https://www.foragentsonly.com/managepolicies/")
+                self.assertEqual(landed.url, "https://www.foragentsonly.com/landingpages/managepolicies/")
 
     def test_home_click_that_lands_on_manage_policies_landing_succeeds(self):
         landings = (
@@ -995,7 +1000,6 @@ class AgentContextAndHomeTests(unittest.TestCase):
                     page.clicked,
                     [
                         ("home", "Manage Policies Home"),
-                        ("link", "Manage Policies"),
                         ("link", "Businessowner/Contractor GL"),
                     ],
                 )
@@ -1121,6 +1125,31 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 self.assertNotIn("gemini", reason.lower())
                 self.assertNotIn(("link", "Businessowner/Contractor GL"), page.clicked)
                 self.assertNotIn(("link", "Manage Policies"), page.clicked)
+
+
+
+class BopLivePageFixTests(unittest.TestCase):
+    def test_partner_sign_on_retry_clicks_once_only_on_popup_blocker_text(self):
+        from robie_job_engine.progressive_bop import _retry_partner_sign_on
+
+        blocked = FakePage({("button", "Service Homeowners Policies")}, body="Please disable your pop-up blocker")
+        self.assertTrue(_retry_partner_sign_on(blocked))
+        self.assertEqual(blocked.clicked, [("button", "Service Homeowners Policies")])
+        quiet = FakePage({("button", "Service Homeowners Policies")}, body="Loading")
+        self.assertFalse(_retry_partner_sign_on(quiet))
+        self.assertEqual(quiet.clicked, [])
+        missing = FakePage(set(), body="popup blocker")
+        self.assertFalse(_retry_partner_sign_on(missing))
+
+    def test_landing_goto_is_skipped_when_already_there(self):
+        from robie_job_engine.progressive_bop import ensure_manage_policies_landing
+
+        page = FakePage(set(), url="https://www.foragentsonly.com/landingpages/managepolicies/")
+        ensure_manage_policies_landing(page)
+        self.assertEqual(page.clicked, [])
+        away = FakePage(set(), url="https://www.foragentsonly.com/home")
+        ensure_manage_policies_landing(away)
+        self.assertEqual(away.clicked, [("goto", "https://www.foragentsonly.com/landingpages/managepolicies/")])
 
 
 if __name__ == "__main__":

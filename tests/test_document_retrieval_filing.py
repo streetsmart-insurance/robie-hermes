@@ -449,7 +449,7 @@ class FilingGateTests(unittest.TestCase):
         self.assertTrue(deps.notes[0]["text"].endswith("ROBIE was here"))
         self.assertEqual(deps.notes[0]["title"], PROGRESSIVE_MEMO_RULE.workflow_title)
         comment = nicole_status_comment(PROGRESSIVE_MEMO_RULE)
-        self.assertEqual(comment, "Added to the Additional Information folder and WF: Additional Information - Progressive Memo")
+        self.assertEqual(comment, "Added to the Additional Information folder and the Additional Information - Progressive Memo workflow.")
         written = [values for _row, values in deps.sheets.writes]
         self.assertTrue(any(row[6] == comment and row[2] == "993334183" for row in written))
         self.assertTrue(any(row[0] == "Progressive BOP/CGL" for row in deps.sheets.rows))
@@ -543,6 +543,143 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn("discussions/v1/notes", text)
         self.assertIn("hermes-poc-01", text)
         self.assertNotIn("systemd", text.casefold())
+
+
+TEST_OVERRIDE = {**ENABLED, "ROBIE_DOCUMENT_RETRIEVAL_TEST_APPLICANT_ID": "26356199"}
+BB_DISCUSSIONS = [
+    {"discussionId": "819225260", "title": "Additional Information - CHANGE ME"},
+    {"discussionId": "819225210", "title": "additional information"},
+    {"discussionId": "900", "title": ""},
+]
+
+
+class TestApplicantOverrideTests(unittest.TestCase):
+    def test_override_is_refused_outside_test(self):
+        from robie_job_engine.document_retrieval_filing import FilingHeld, test_applicant_override
+
+        with self.assertRaises(FilingHeld):
+            test_applicant_override({**TEST_OVERRIDE, "ROBIE_ENV": "PRODUCTION"}, HOST)
+        with self.assertRaises(FilingHeld):
+            test_applicant_override(TEST_OVERRIDE, "hermes-poc-01")
+        with self.assertRaises(FilingHeld):
+            test_applicant_override({**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_APPLICANT_ID": "bb"}, HOST)
+        self.assertIsNone(test_applicant_override(ENABLED, HOST))
+        self.assertEqual(test_applicant_override(TEST_OVERRIDE, HOST), "26356199")
+
+    def test_override_on_production_host_writes_nothing(self):
+        deps = FakeDeps()
+        result = file_carrier_batch(
+            [memo_item()], rule=PROGRESSIVE_MEMO_RULE, environ=TEST_OVERRIDE,
+            hostname="hermes-poc-01", client_factory=deps.as_deps,
+        )
+        self.assertNotEqual(result["status"], "filed")
+        self.assertEqual(deps.uploads, [])
+
+    def test_files_to_test_account_with_plain_note_and_no_sheet_or_task(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS), applicants=("999",))
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        item = memo_item(
+            policy_number="876263535", insured_name="Groesbeck, Zachary",
+            filename="876263535 Progressive Memo Discount Memo.pdf", processed_on="2026-09-29",
+        )
+        result = file_with(deps, [item], env)
+        self.assertEqual(result["status"], "filed", result)
+        self.assertEqual(deps.uploads[0]["applicant_id"], "26356199")
+        self.assertEqual(deps.uploads[0]["filename"], "876263535 Progressive Memo Discount Memo.pdf")
+        self.assertEqual(deps.notes[0]["title"], "Additional Information - CHANGE ME")
+        self.assertEqual(
+            deps.notes[0]["text"],
+            "Progressive memo dated 9/29/2026 for Groesbeck, Zachary, policy 876263535, "
+            "saved to this test account. ROBIE was here",
+        )
+        self.assertEqual(deps.sheets.writes, [])
+        self.assertEqual(deps.tasks, [])
+        row = result["results"][0]
+        self.assertEqual((row["real_client"], row["real_policy"], row["document_id"], row["note_id"]),
+                         ("Groesbeck, Zachary", "876263535", "501", "77"))
+        self.assertEqual(result["test_account_discussion"]["id"], "819225260")
+
+    def test_phone_like_policy_is_shortened_in_the_note(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        item = memo_item(
+            policy_number="2035471506 00", insured_name="A&E CONTRACTOR LLC",
+            filename="2035471506 00 NatGen NOC non-payment.pdf", processed_on="2026-09-30",
+        )
+        result = file_with(deps, [item], env, rule=NATGEN_NOC_RULE)
+        self.assertEqual(result["status"], "filed", result)
+        self.assertEqual(
+            deps.notes[0]["text"],
+            "NatGen cancellation notice dated 9/30/2026 for A&E CONTRACTOR LLC, policy ending in 1506, "
+            "saved to this test account. ROBIE was here",
+        )
+        reject_phone_numbers(deps.notes[0]["text"])
+
+    def test_duplicate_on_test_account_skips_upload(self):
+        deps = FakeDeps(
+            discussions=list(BB_DISCUSSIONS),
+            documents={"results": [{"name": "876263535 Progressive Memo Discount Memo.pdf", "id": 5}]},
+        )
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        item = memo_item(policy_number="876263535", filename="876263535 Progressive Memo Discount Memo.pdf")
+        result = file_with(deps, [item], env)
+        self.assertEqual(result["results"][0]["status"], "skipped_duplicate", result)
+        self.assertEqual(deps.uploads, [])
+
+    def test_missing_discussion_holds_and_lists_titles_without_creating(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
+        result = file_with(deps, [memo_item()], TEST_OVERRIDE)
+        self.assertEqual(result["status"], "held")
+        self.assertIn("Additional Information - CHANGE ME", result["test_account_discussions"])
+        self.assertEqual(deps.uploads, [])
+        self.assertEqual(deps.notes, [])
+
+    def test_ambiguous_substring_title_is_not_used(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "additional information"}
+        result = file_with(deps, [memo_item()], env)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(deps.uploads, [])
+
+    def test_filename_without_policy_is_held(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        result = file_with(deps, [memo_item(filename="memo.pdf")], env)
+        self.assertEqual(result["results"][0]["status"], "held")
+        self.assertEqual(deps.uploads, [])
+
+
+class PackItemTests(unittest.TestCase):
+    def test_pack_items_read_pulled_pdfs_from_manifests(self):
+        import json
+        import tempfile
+
+        from robie_job_engine.document_retrieval_filing import pack_filing_items
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / "2026-09-30"
+            day.mkdir()
+            (day / "2035471506 00 NatGen NOC non-payment.pdf").write_bytes(PDF)
+            (day / "manifest.json").write_text(json.dumps({
+                "processed_date": "2026-09-30",
+                "nocs": [
+                    {"filename": "2035471506 00 NatGen NOC non-payment.pdf", "policy_number": "2035471506 00",
+                     "insured_name": "A&E CONTRACTOR LLC", "disposition": "pulled"},
+                    {"filename": "missing.pdf", "policy_number": "1", "insured_name": "X", "disposition": "pulled"},
+                    {"filename": "held.pdf", "policy_number": "2", "insured_name": "Y", "disposition": "held"},
+                ],
+            }))
+            items = pack_filing_items(tmp)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["policy_number"], "2035471506 00")
+        self.assertEqual(items[0]["processed_on"], "2026-09-30")
+
+
+class PlainSheetTextTests(unittest.TestCase):
+    def test_sheet_texts_have_no_codes(self):
+        for text in (NO_WORKFLOW_SHEET_COMMENT, nicole_status_comment(PROGRESSIVE_MEMO_RULE)):
+            self.assertNotIn("WF", text)
+            self.assertNotIn(";", text)
 
 
 if __name__ == "__main__":

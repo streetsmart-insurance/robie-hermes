@@ -64,7 +64,8 @@ DRIVE_UPLOAD_UNAVAILABLE = (
     "Drive upload of the NatGen QA pack is not available; "
     "refusing to report the pack as uploaded"
 )
-_POLICY_NUMBER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{4,19}$")
+# Live report shows "2035471506 00" (policy and term suffix).
+_POLICY_NUMBER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{4,19}(?: [A-Za-z0-9]{1,4})?$")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN_NAME = "America/New_York"
 _NOC_LABELS = frozenset({"pending cancellation", "noc"})
@@ -81,11 +82,21 @@ _HEADER_FIELDS = (
         "cancellation effective date",
         "cancel effective",
         "cancellation date",
+        "cancel date",
     })),
 )
+# Live Pending Cancellations report (AgencyActivityReports.aspx?r=5).
+PENDING_TABLE_CSS = "#ctl00_MainContent_gvPendingCancellations"
+# Live Policy Summary history grid. Its header is the first row, not a thead.
+HISTORY_TABLE_CSS = "#ctl00_MainContent_PolicyHistoryControl2_dgPolicyHistory"
+# The live report has no process-date column. It is read as a snapshot: a row
+# first seen today takes the pull's end date, and a row already in the ledger
+# keeps its first-seen date. The manifest says which.
+SNAPSHOT_SOURCE = "report snapshot (no process date on the NatGen report)"
+LIST_SOURCE = "NatGen list"
 _HISTORY_FIELDS = (
-    ("on", frozenset({"date", "transaction date", "processed date"})),
-    ("label", frozenset({"type", "transaction", "description"})),
+    ("on", frozenset({"date", "transaction date", "processed date", "date processed"})),
+    ("label", frozenset({"type", "transaction", "description", "activity"})),
 )
 _NAV_STEPS = (
     ("Agent Dashboard", ("link", "button")),
@@ -135,6 +146,12 @@ class NocRow:
     filename: str
     row_index: int
     source_url: str
+    processed_date_source: str = LIST_SOURCE
+
+
+def snapshot_document_id(policy_number: str, reason: str, cancel_effective: date) -> str:
+    policy = require_policy_number(policy_number)
+    return f"natgen-noc:{policy}:snapshot:{normalize_reason(reason)}:{cancel_effective.isoformat()}"
 
 
 @dataclass(frozen=True)
@@ -174,6 +191,11 @@ def normalize_reason(reason: str) -> str:
     folded = re.sub(r"\s+", " ", cleaned.casefold().replace("_", " "))
     if folded in _NON_PAYMENT:
         return "non-payment"
+    # Live reasons read "Pending Cancel for Non Payment" / "Pending cancel for NSF".
+    if re.search(r"\bnon[- ]?payment\b", folded):
+        return "non-payment"
+    if re.search(r"\bnsf\b", folded):
+        return "nsf"
     return folded
 
 
@@ -240,14 +262,29 @@ def classify_noc_row(notice_type: str | None, controls: int) -> str:
     return "skip" if controls == 0 else "ambiguous"
 
 
-def parse_noc_grid(grid: NocGrid) -> tuple[NocRow, ...]:
+def _eastern_today() -> date:
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(_EASTERN_NAME)).date()
+
+
+def parse_noc_grid(
+    grid: NocGrid,
+    *,
+    snapshot_on: date | None = None,
+    first_seen: Callable[[str], date | None] | None = None,
+) -> tuple[NocRow, ...]:
+    """Rows to pull. Without a process-date column the report is a snapshot:
+    each row's date is its ledger first-seen date, else ``snapshot_on``
+    (the pull's end date; today in Eastern when not given)."""
     list_url = require_list_url(grid.list_url)
     if len(grid.rows) != len(grid.policy_controls):
         raise IntakeHold("Pending Cancellations list is ambiguous")
     indexes = header_indexes(
         grid.headers,
-        required=("policy_number", "insured_name", "reason", "processed_date", "cancel_effective"),
+        required=("policy_number", "insured_name", "reason", "cancel_effective"),
     )
+    snapshot = "processed_date" not in indexes
     found: list[NocRow] = []
     for index, (cells, controls) in enumerate(zip(grid.rows, grid.policy_controls)):
         if len(cells) != len(grid.headers):
@@ -265,10 +302,18 @@ def parse_noc_grid(grid: NocGrid) -> tuple[NocRow, ...]:
         if not insured:
             raise IntakeHold("NOC insured name is missing or ambiguous")
         reason = normalize_reason(cells[indexes["reason"]])
-        processed = parse_carrier_date(cells[indexes["processed_date"]])
         cancel_effective = parse_carrier_date(cells[indexes["cancel_effective"]])
+        if snapshot:
+            document_id = snapshot_document_id(policy, reason, cancel_effective)
+            seen = first_seen(document_id) if first_seen is not None else None
+            processed = seen or snapshot_on or _eastern_today()
+            source = SNAPSHOT_SOURCE
+        else:
+            processed = parse_carrier_date(cells[indexes["processed_date"]])
+            document_id = noc_document_id(policy, processed, reason, cancel_effective)
+            source = LIST_SOURCE
         found.append(NocRow(
-            document_id=noc_document_id(policy, processed, reason, cancel_effective),
+            document_id=document_id,
             policy_number=policy,
             insured_name=insured,
             reason=reason,
@@ -277,6 +322,7 @@ def parse_noc_grid(grid: NocGrid) -> tuple[NocRow, ...]:
             filename=noc_filename(policy, reason),
             row_index=index,
             source_url=list_url,
+            processed_date_source=source,
         ))
     if len({row.document_id for row in found}) != len(found):
         raise IntakeHold("Pending Cancellations list is ambiguous")
@@ -285,7 +331,11 @@ def parse_noc_grid(grid: NocGrid) -> tuple[NocRow, ...]:
 
 def choose_most_recent_noc(entries: tuple[HistoryEntry, ...] | list[HistoryEntry]) -> HistoryEntry:
     """Pick the single latest Pending Cancellation or NOC history row."""
-    chosen = [entry for entry in entries if _norm(entry.label).casefold() in _NOC_LABELS]
+    chosen = [
+        entry for entry in entries
+        if _norm(entry.label).casefold() in _NOC_LABELS
+        or _norm(entry.label).casefold().startswith("pending cancel")
+    ]
     if not chosen:
         raise IntakeHold("Pending Cancellation NOC in Policy History is missing or ambiguous")
     latest = max(entry.on for entry in chosen)
@@ -424,12 +474,23 @@ def collect_noc_observation(
             except Exception:
                 pass
         for item in opened:
-            closer = getattr(item, "close", None)
-            if callable(closer):
-                try:
-                    closer()
-                except Exception:
-                    pass
+            _close_natgen_page(item)
+
+
+def _close_natgen_page(page: Any) -> None:
+    """Close a tab this pull opened on NatGen. Never another site's tab."""
+    host = (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").casefold()
+    if host and not (
+        host == "natgenagency.com" or host.endswith(".natgenagency.com")
+        or host == "nationalgeneral.com" or host.endswith(".nationalgeneral.com")
+    ):
+        return
+    closer = getattr(page, "close", None)
+    if callable(closer):
+        try:
+            closer()
+        except Exception:
+            pass
 
 
 def assert_authenticated(page: Any) -> None:
@@ -668,7 +729,7 @@ class PlaywrightNatGenNocBrowser:
         headers, raw_rows, locators = extract_table(self.page)
         indexes = header_indexes(
             headers,
-            required=("policy_number", "insured_name", "reason", "processed_date", "cancel_effective"),
+            required=("policy_number", "insured_name", "reason", "cancel_effective"),
         )
         controls = []
         for cells, locator in zip(raw_rows, locators):
@@ -701,6 +762,9 @@ class PlaywrightNatGenNocBrowser:
 
         def open_noc() -> None:
             click_policy_control(target, policy_number)
+            if self._live_history_grid():
+                self._open_live_history_noc()
+                return
             click_named(self.page, "Policy History", roles=("link", "button", "tab"))
             self._open_most_recent_history_noc()
             click_forms_view(self.page)
@@ -713,10 +777,54 @@ class PlaywrightNatGenNocBrowser:
         """Full-page PNG of the Pending Cancellations list before any policy is opened."""
         if self._grid is None or str(getattr(self.page, "url", "") or "") != self._list_url:
             raise IntakeHold("Pending Cancellations list screenshot is missing or not a PNG")
-        if self.page.locator("table").count() != 1:
+        if self.page.locator(PENDING_TABLE_CSS).count() != 1 and self.page.locator("table").count() != 1:
             raise IntakeHold("Pending Cancellations list screenshot is missing or not a PNG")
         data = self.page.screenshot(full_page=True, type="png")
         return require_png(data)
+
+    def _live_history_grid(self) -> bool:
+        wait = getattr(self.page, "wait_for_selector", None)
+        if callable(wait):
+            try:
+                wait(HISTORY_TABLE_CSS, timeout=POLICY_SUMMARY_WAIT_MS)
+            except Exception:
+                return False
+        try:
+            return int(self.page.locator(HISTORY_TABLE_CSS).count()) == 1
+        except Exception:
+            return False
+
+    def _open_live_history_noc(self) -> None:
+        """Policy Summary history: latest "Pending Cancel..." row, its PDF
+        control, then View. View opens DisplayPDF.aspx in a new tab."""
+        headers, raw_rows, locators = extract_history_table(self.page)
+        indexes = header_indexes(headers, fields=_HISTORY_FIELDS, required=("on", "label"))
+        entries: list[HistoryEntry] = []
+        for index, cells in enumerate(raw_rows):
+            if len(cells) != len(headers) or not any(_norm(cell) for cell in cells):
+                continue
+            label = _norm(cells[indexes["label"]])
+            if not label.casefold().startswith("pending cancel") and label.casefold() not in _NOC_LABELS:
+                continue
+            entries.append(HistoryEntry(
+                label=label,
+                on=parse_carrier_date(cells[indexes["on"]]),
+                controls=int(locators[index].locator(HISTORY_PDF_TRIGGER).count()),
+                row_index=index,
+            ))
+        chosen = choose_most_recent_noc(entries)
+        locators[chosen.row_index].locator(HISTORY_PDF_TRIGGER).click()
+        view = self.page.locator(HISTORY_VIEW_PDF)
+        wait = getattr(view, "wait_for", None)
+        if callable(wait):
+            try:
+                view.first.wait_for(state="visible", timeout=POLICY_SUMMARY_WAIT_MS)
+            except Exception:
+                pass
+        visible = [item for item in _each(view) if _visible(item)]
+        if len(visible) != 1:
+            raise IntakeHold("Pending Cancellation NOC in Policy History is missing or ambiguous")
+        visible[0].click()
 
     def _open_most_recent_history_noc(self) -> None:
         headers, raw_rows, locators = extract_table(self.page)
@@ -736,6 +844,21 @@ class PlaywrightNatGenNocBrowser:
         click_history_noc(locators[chosen.row_index], chosen.label)
 
     def _restore_list(self) -> None:
+        # Live: going back to the report leaves a page whose policy links no
+        # longer open anything, so the report is loaded again at its own
+        # address and must show the same rows as before.
+        goto = getattr(self.page, "goto", None)
+        if callable(goto) and self._grid is not None and _is_pending_activity_report_url(self._list_url):
+            try:
+                goto(self._list_url, wait_until="domcontentloaded", timeout=POLICY_SUMMARY_WAIT_MS)
+                self.page.wait_for_selector(PENDING_TABLE_CSS, timeout=POLICY_SUMMARY_WAIT_MS)
+            except Exception as exc:
+                raise IntakeHold("NOC PDF capture left the Pending Cancellations list") from exc
+            headers, rows, locators = extract_table(self.page)
+            if (headers, rows) != (self._grid.headers, self._grid.rows):
+                raise IntakeHold("Pending Cancellations list changed while NOCs were being pulled")
+            self._row_locators = locators
+            return
         for _ in range(4):
             if str(getattr(self.page, "url", "") or "") == self._list_url:
                 return
@@ -743,9 +866,15 @@ class PlaywrightNatGenNocBrowser:
             if not callable(go_back):
                 break
             try:
-                go_back()
+                # The live report keeps a connection open, so "load" never
+                # fires on the way back; the DOM is enough.
+                try:
+                    go_back(wait_until="domcontentloaded", timeout=POLICY_SUMMARY_WAIT_MS)
+                except TypeError:
+                    go_back()
             except Exception as exc:
-                raise IntakeHold("NOC PDF capture left the Pending Cancellations list") from exc
+                if str(getattr(self.page, "url", "") or "") != self._list_url:
+                    raise IntakeHold("NOC PDF capture left the Pending Cancellations list") from exc
         if str(getattr(self.page, "url", "") or "") != self._list_url:
             raise IntakeHold("NOC PDF capture left the Pending Cancellations list")
 
@@ -810,6 +939,19 @@ class LocalDeliveryLedger:
             return path
         self._write_new(path, content)
         return path
+
+    def first_seen(self, document_id: str) -> date | None:
+        """Processed date already recorded for this document, if any."""
+        try:
+            entry = self._load()["items"].get(document_id)
+        except Exception:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        try:
+            return date.fromisoformat(str(entry.get("processed_date") or ""))
+        except ValueError:
+            return None
 
     def pdf_ids_for_date(self, day: date) -> set[str]:
         found: set[str] = set()
@@ -951,7 +1093,7 @@ class NatGenPendingCancellationPortal:
         if self._cache_key == key and self._cache_result is not None:
             return self._cache_result
         grid = self.browser.load_pending_cancellations()
-        parsed = parse_noc_grid(grid)
+        parsed = parse_noc_grid(grid, snapshot_on=end, first_seen=self.ledger.first_seen)
         if grid.more_pages is not False:
             raise IntakeHold("Pending Cancellations list is incomplete or ambiguous")
         in_window: list[NocRow] = []
@@ -1425,6 +1567,7 @@ def _row_payload(row: NocRow, *, delivered: bool) -> dict[str, Any]:
         "reason": row.reason,
         "filename": row.filename,
         "cancel_effective_date": row.cancel_effective.isoformat(),
+        "processed_date_source": row.processed_date_source,
     }
 
 
@@ -1452,6 +1595,7 @@ def _manifest_nocs(rows, stored: dict[str, Any], skipped: set[str], holds_by_id:
             "reason": row.get("reason"),
             "filename": hold.get("held_filename") if hold and hold.get("held_filename") else row.get("filename"),
             "cancel_effective_date": row.get("cancel_effective_date"),
+            "processed_date_source": row.get("processed_date_source", LIST_SOURCE),
             "sha256": entry.get("sha256") if present else None,
             "bytes": entry.get("bytes") if present else None,
             "disposition": disposition,
@@ -1582,8 +1726,16 @@ def _push_pdf(candidates: list[bytes], blob: bytes) -> None:
     candidates.append(blob)
 
 
+# Live Policy History Forms "View" (hermes-test-01, 2026-09-30) opens a new tab
+# on /Policy/DisplayPDF.aspx?iid=... in Chrome's PDF viewer. No .pdf suffix.
+_NATGEN_DISPLAY_PDF_PATH = re.compile(r"/policy/displaypdf\.aspx$", re.IGNORECASE)
+
+
 def _url_looks_like_pdf(url: str) -> bool:
-    path = urllib.parse.urlsplit(url).path.lower()
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path.lower()
+    if _NATGEN_DISPLAY_PDF_PATH.search(path) and _allowed_pdf_url(url):
+        return True
     return path.endswith(".pdf") or "application/pdf" in url.lower()
 
 
@@ -1608,7 +1760,49 @@ def _is_natgen_app_url(url: str) -> bool:
     return True
 
 
+POLICY_SUMMARY_WAIT_MS = 20000
+HISTORY_PDF_TRIGGER = "a.pdfTrigger"
+HISTORY_VIEW_PDF = "a[id$='_btnViewPDF']"
+
+
+def _visible(locator: Any) -> bool:
+    probe = getattr(locator, "is_visible", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:
+        return False
+
+
+def extract_history_table(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[Any, ...]]:
+    table = page.locator(HISTORY_TABLE_CSS)
+    if table.count() != 1:
+        raise IntakeHold("Pending Cancellation NOC in Policy History is missing or ambiguous")
+    rows = tuple(table.locator("tr").all())
+    if not rows:
+        raise IntakeHold("Pending Cancellation NOC in Policy History is missing or ambiguous")
+    header_cells = rows[0].locator("th").all() or rows[0].locator("td").all()
+    headers = tuple(_norm(cell.inner_text()) for cell in header_cells)
+    body = rows[1:]
+    grid = tuple(tuple(_norm(cell.inner_text()) for cell in row.locator("td").all()) for row in body)
+    return headers, grid, tuple(body)
+
+
 def extract_table(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[Any, ...]]:
+    named = page.locator(PENDING_TABLE_CSS)
+    try:
+        named_count = int(named.count())
+    except Exception:
+        named_count = 0
+    if named_count == 1:
+        header_nodes = _unique_child(named, "thead").locator("th").all()
+        if not header_nodes:
+            raise IntakeHold("Pending Cancellations table is missing or ambiguous")
+        headers = tuple(_norm(node.inner_text()) for node in header_nodes)
+        row_locators = tuple(named.locator("tbody > tr").all())
+        rows = tuple(tuple(_norm(cell.inner_text()) for cell in row.locator("td").all()) for row in row_locators)
+        return headers, rows, row_locators
     tables = page.locator("table")
     if tables.count() != 1:
         raise IntakeHold("Pending Cancellations table is missing or ambiguous")
