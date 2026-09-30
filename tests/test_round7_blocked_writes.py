@@ -19,6 +19,7 @@ from robie_job_engine.chat_guard import (
     guard_chat_response,
     open_chat_job,
 )
+from robie_job_engine.chat_thread import bind_job_chat_thread
 from robie_job_engine.chat_turn_control import (
     BUSY_SESSION_REPLY,
     busy_session_should_defer,
@@ -368,11 +369,14 @@ class Round7ClarifyTests(unittest.TestCase):
                 expected={JobStatus.RUNNING},
                 error="Which account?",
             )
+            thread = "spaces/clarify/threads/book"
+            bind_job_chat_thread(store, job_id, thread)
             continued = open_chat_job(
                 db,
                 "message-account",
                 "26356199",
                 conversation_id="spaces/clarify",
+                inbound_thread_id=thread,
             )
             self.assertEqual(continued, job_id)
             self.assertIn("User reply: 26356199", store.get_job(job_id)["payload"]["text"])
