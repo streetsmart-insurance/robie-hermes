@@ -238,6 +238,10 @@ def run_guarded_email_task(
 ) -> str:
     """Run once and require independent destination evidence before completion."""
     request_text = prompt
+    from .playground_service import handle_playground_email
+    playground_reply = handle_playground_email(db_path, request_text, sender=sender, message_id=gmail_message_id, thread_id=thread_id)
+    if playground_reply is not None:
+        return playground_reply
     prompt = add_synced_context(
         prompt
         + "\n\n"
@@ -433,4 +437,4 @@ def _render_email_terminal(
             details=details,
             job_id=job_id,
         )
-    )
+            )
