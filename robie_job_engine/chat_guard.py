@@ -610,9 +610,13 @@ def _default_chat_verifiers() -> dict[str, Any]:
             # Register anyway. Reads fail closed if Secret Manager is absent.
             client = None
         from .message_verification import MessageOutcomeVerifier
-        verifiers["hermes.google_chat_task"] = MessageOutcomeVerifier(HermesChatEzlynxDestinationVerifier(
-            EzlynxApiClientReadPort(client)
-        ))
+        from .answer_only import SkipDestinationReadback
+
+        verifiers["hermes.google_chat_task"] = SkipDestinationReadback(
+            MessageOutcomeVerifier(HermesChatEzlynxDestinationVerifier(
+                EzlynxApiClientReadPort(client)
+            ))
+        )
     except Exception as exc:
         logger.exception(
             "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
@@ -916,6 +920,12 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     text = add_synced_context(text)
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    if store.get_checkpoint(job_id, "keep_chat_context") or store.get_checkpoint(
+        job_id, "clarification_reply"
+    ):
+        combined = str((job.get("payload") or {}).get("text") or "").strip()
+        if combined:
+            text = combined
     if (
         job["action_type"] == "hermes.google_chat_task"
         and job["status"] == JobStatus.RUNNING.value
@@ -947,6 +957,38 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     framing = str(dict(job.get("payload") or {}).get("task_framing") or "").strip()
     if framing:
         lines.append(framing)
+    from .answer_only import (
+        FORBIDDEN_READ_RULE,
+        is_answer_only_job,
+        purpose_built_instructions,
+    )
+
+    route = purpose_built_instructions(str(dict(job.get("payload") or {}).get("text") or text))
+    if route and route not in lines:
+        lines.append(route)
+    if is_answer_only_job(job):
+        lines.append(
+            "This is a question. Answer it in plain English. "
+            "Do not open EZLynx. Do not write a note or a document. "
+            "Do not include your reasoning or thinking."
+        )
+    from .write_verification_loop import (
+        get_locked_plan,
+        is_ezlynx_write_job,
+        locked_plan_instructions,
+    )
+
+    if is_ezlynx_write_job(job):
+        locked = get_locked_plan(store, job_id)
+        if locked:
+            lines.append(locked_plan_instructions(locked))
+        else:
+            lines.append(
+                "Before any tool or write, state a plan of exactly the write, "
+                "the target, and the values. Do not invent a value. Do not write "
+                "until that plan is locked."
+            )
+    lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
     from .runtime_env import playground_enabled
 
@@ -977,6 +1019,8 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
         "Never claim success from modal text, a local DOM value, quote data, or your own prior action. If any requested field is absent, say the action is not verified.",
         "Do not write that you identified a carrier, are Filling Policy Shell, filled, saved, or uploaded unless a destination-action checkpoint already exists. With no destination-action checkpoint and no destination-verified evidence, say you were stuck and made no verified progress.",
+        "If the request is ambiguous and does not name a client, policy, carrier, or task, stop immediately and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <what is missing>. Ask one plain-English question. Do not investigate the server, read source code, read jobs.db, or open token files.",
+        "Do not read Robie's own source, jobs.db, .hermes/google_token.json, or any token file during a job. Do not grep the server. Use the purpose-built tool named in the task.",
         "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
         "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
         "If a write is PLAYWRIGHT_BLOCKED or a modal cannot be uniquely named, stop, describe the dialog title and visible labels only (no passwords), ask Gemini for one unique field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use .first/.nth/.last.",
@@ -1167,6 +1211,26 @@ def open_chat_job(
         related_only = False
         explicit_continuation = False
     resume_context = queue.active_conversation_job(context_key)
+    from .chat_turn_control import conversation_must_start_fresh
+
+    active_for_turn = None
+    active_for_turn_id = (resume_context or {}).get("job_id")
+    if active_for_turn_id:
+        try:
+            active_for_turn = store.get_job(active_for_turn_id)
+        except KeyError:
+            active_for_turn = None
+    continue_clarification = bool(
+        active_for_turn
+        and JobStatus(active_for_turn["status"]) == JobStatus.NEEDS_CLARIFICATION
+        and not conversation_must_start_fresh(store, active_for_turn)
+    )
+    if active_for_turn and conversation_must_start_fresh(store, active_for_turn):
+        # The stopped, timed-out, or finished job must not swallow the next message.
+        queue.deactivate_conversation(context_key)
+        resume_context = None
+        related_only = False
+        explicit_continuation = False
     resume_state = dict((resume_context or {}).get("interaction_state") or {})
     if (
         resume_state.get("resume_mode") == "direct"
@@ -1174,7 +1238,36 @@ def open_chat_job(
     ):
         explicit_continuation = True
     continued_job: dict[str, Any] | None = None
-    if related_only or explicit_continuation:
+    if continue_clarification and active_for_turn is not None:
+        original = str((active_for_turn.get("payload") or {}).get("text") or "").strip()
+        reply = str(text or "").strip()
+        combined = original
+        if reply and reply not in original:
+            combined = f"{original}\n\nUser reply: {reply}".strip()
+        payload = dict(active_for_turn.get("payload") or {})
+        payload["text"] = combined
+        payload["clarification_reply"] = reply
+        store.update_payload(active_for_turn["id"], payload)
+        store.checkpoint(
+            active_for_turn["id"],
+            "clarification_reply",
+            {"message_id": message_id, "text": reply, "combined": combined},
+        )
+        store.checkpoint(
+            active_for_turn["id"],
+            "keep_chat_context",
+            {"reason": "needs_clarification"},
+        )
+        store.resume(active_for_turn["id"])
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=active_for_turn["id"],
+            message_id=message_id,
+            event_id=message_id,
+            relation="CONTINUATION",
+        )
+        continued_job = store.get_job(active_for_turn["id"])
+    elif related_only or explicit_continuation:
         current = queue.active_conversation_job(context_key)
         active_job_id = current.get("job_id") if current else None
         if is_retry_text(text):
@@ -1250,12 +1343,17 @@ def open_chat_job(
         server_payload.update(_submission_audit_payload())
     if classification.action_type == "ezlynx.overdue_submission_reports":
         server_payload.update(_overdue_submission_report_payload())
-    from .request_routing import PLAYGROUND_TASK_FRAMING
+    from .request_routing import PLAYGROUND_TASK_FRAMING, chat_turn_expects_ui
 
     framing = PLAYGROUND_TASK_FRAMING.get(classification.action_type)
     if framing:
         server_payload["task_framing"] = framing
     server_payload.update(dict(action_payload or {}))
+    server_payload["expected_ui"] = chat_turn_expects_ui(
+        text,
+        classification.action_type,
+        answer_only=bool(getattr(classification, "answer_only", False)),
+    )
     if continued_job is None:
         if is_retry_text(text):
             parked = resume_context or queue.active_conversation_job(context_key)
@@ -1299,6 +1397,7 @@ def open_chat_job(
                     "worker": classification.worker,
                     **server_payload,
                     "request_text": text,
+                    "answer_only": bool(getattr(classification, "answer_only", False)),
                 }
             ),
             idempotency_key=f"gchat:{message_id}",
@@ -1433,6 +1532,8 @@ def open_chat_job(
     if classification.hold_status == JobStatus.NEEDS_CLARIFICATION.value:
         current = store.get_job(job["id"])
         if current["status"] == JobStatus.PENDING:
+            from .answer_only import CLARIFICATION_QUESTION
+
             store.transition(
                 job["id"],
                 JobStatus.NEEDS_CLARIFICATION,
@@ -1440,6 +1541,11 @@ def open_chat_job(
                 error="request is too vague to execute safely",
                 resume_status=JobStatus.PENDING,
                 release_lease=True,
+            )
+            store.checkpoint(
+                job["id"],
+                "clarification",
+                {"question": CLARIFICATION_QUESTION, "asked": True},
             )
             return job["id"]
     # Bounded workers stay PENDING so JobEngine can claim them. Hermes chat
@@ -1573,6 +1679,20 @@ def open_chat_job(
     return job["id"]
 
 
+def guard_chat_notice(db_path: str, job_id: str | None, content: str) -> str:
+    """Keep a ceiling notice to the one line. The audit stays in the ledger."""
+    text = str(content or "").strip()
+    if not job_id:
+        return text
+    try:
+        from .post_job_audit import maybe_audit_terminal_job
+
+        maybe_audit_terminal_job(db_path, job_id)
+    except Exception:
+        logger.exception("ceiling notice left the audit in the ledger only job=%s", job_id)
+    return text
+
+
 def _post_job_audit_note(
     db_path: str,
     job_id: str,
@@ -1617,9 +1737,16 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
     if not recording:
         return ""
     if recording.get("status") == "READY" and recording.get("drive_url"):
+        from .answer_only import saved_span_sentence
+
+        start = str(recording.get("local_path") or "").strip()
+        end = str(recording.get("drive_url") or "").strip()
+        span = saved_span_sentence(start, end)
+        saved = f"\n{span}" if start and end else ""
         return (
             "\n\n🎥 Review this job recording: "
-            f"{recording['drive_url']}\n"
+            f"{recording['drive_url']}"
+            f"{saved}\n"
             "Reply in this thread with what ROBIE should correct or retry."
         )
     if recording.get("status") == "FAILED":
@@ -1773,8 +1900,26 @@ def _render_chat_terminal(
     every user gets the same shape. Internal codes are translated for
     display only -- detection on raw worker text is untouched.
     """
+    from .answer_only import is_answer_only_job
     from .end_state_report import end_state_report_enabled, render_job_end_state
 
+    forced = _unproved_field_user_reply(store, job)
+    if forced:
+        from . import status_format
+
+        ref = status_format.short_job_ref(job["id"])
+        body = forced if not ref else f"{forced}\n\n{ref}"
+        return body.strip() + "\n"
+    # A question is answered in the reply. EZLynx is not the destination.
+    if is_answer_only_job(job):
+        return render_job_end_state(
+            store, job, content, recordings=recordings, channel="chat"
+        )
+    from .write_verification_loop import write_reply_if_planned
+
+    planned_reply = write_reply_if_planned(store, job, content)
+    if planned_reply:
+        return planned_reply
     # Flag on: one end-state report scored by Jev. The old "Not verified"
     # wording is display-only and is skipped here. Deterministic verifiers
     # still ran before this render; a failed hard readback forces wrong.
@@ -1904,6 +2049,49 @@ def _render_chat_terminal(
     )
 
 
+def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
+    """The user-facing line when a note was filed and the field was not changed."""
+    note = store.get_checkpoint(job["id"], "discussion_note") or {}
+    status = str(note.get("status") or "")
+    if status not in {"filed", "posted, verifying"} and not note.get("read_back"):
+        return ""
+    title = str(note.get("discussion_title") or "").strip()
+    if not title:
+        return ""
+    from .answer_only import (
+        address_readback_proved,
+        field_change_user_reply,
+        holder_readback_proved,
+    )
+
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or "")
+    folded = text.casefold()
+    action = str(job.get("action_type") or "")
+    proof_args = {"job_id": job["id"], "db_path": str(getattr(store, "path", "") or "")}
+    address = action == "ezlynx.policy_change" or "mailing address" in folded
+    holder = action == "ezlynx.certificate" or (
+        "certificate" in folded or "certificate holder" in folded
+    )
+    if address and not holder:
+        if address_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="address")
+    if holder and not address:
+        if holder_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="holder")
+    if address and holder:
+        if "mailing address" in folded or action == "ezlynx.policy_change":
+            if address_readback_proved(proof_args):
+                return ""
+            return field_change_user_reply(title, kind="address")
+        if holder_readback_proved(proof_args):
+            return ""
+        return field_change_user_reply(title, kind="holder")
+    return ""
+
+
 def guard_chat_response(
     db_path: str,
     job_id: str | None,
@@ -1912,7 +2100,9 @@ def guard_chat_response(
     verifiers: dict[str, Any] | None = None,
     recordings: RecordingManager | None = None,
 ) -> str:
-    content = redact_text(content)
+    from .answer_only import strip_blank_saved_span
+
+    content = strip_blank_saved_span(redact_text(content))
     from .hitl import sanitize_hitl_chat_text
 
     content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
@@ -1926,6 +2116,9 @@ def guard_chat_response(
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    forced = _unproved_field_user_reply(store, job)
+    if forced:
+        content = forced
     recordings = recordings or RecordingManager(db_path)
     from .policy_setup_dispatch import is_policy_setup_honest_hitl
 
@@ -2018,6 +2211,34 @@ def guard_chat_response(
     # the ledger cannot look like progress (job 468d1575).
     from .worker_contract import sanitize_worker_response
 
+    from .answer_only import is_answer_only_job
+    from .email_guard import _strip_internal_reasoning
+
+    if is_answer_only_job(job):
+        content = _strip_internal_reasoning(content) or content
+        store.checkpoint(
+            job_id, "worker_response", sanitize_worker_response(store, job_id, content)
+        )
+        store.checkpoint(
+            job_id,
+            "answer_only_close",
+            {"reason": "answer only; no EZLynx destination readback"},
+        )
+        current = store.get_job(job_id)
+        if JobStatus(current["status"]) in {JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING}:
+            store.transition(
+                job_id,
+                JobStatus.UNVERIFIED,
+                expected={JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING},
+                error="answer only; no EZLynx destination readback",
+                release_lease=True,
+            )
+        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+        final = store.get_job(job_id)
+        if JobStatus(final["status"]) in TERMINAL_STATUSES:
+            maybe_snapshot_and_bind(db_path, job_id, phase="end")
+            final = _publish_terminal_job(db_path, store, final)
+        return _render_chat_terminal(store, final, content, recordings)
     store.checkpoint(job_id, "worker_response", sanitize_worker_response(store, job_id, content))
     if store.get_checkpoint(job_id, "action") is None:
         from .chat_destination_binding import bind_destination_for_job, claimed_from_job

@@ -39,11 +39,14 @@ Endpoints implemented (per the EZLynx Discussion API documentation):
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib import error, parse, request
+from urllib.parse import urlparse
 
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
@@ -99,11 +102,118 @@ class DiscussionApiConfig:
     username: str
     integration_group_id: str
     scope: str = "DiscussionApi openid"
+    # Live SSRobie password. Empty for the UAT vendor grant. Never logged.
+    password: str = field(default="", repr=False)
 
 
 def _default_urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
     req = request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
     return request.urlopen(req, timeout=timeout)
+
+
+# A browser User-Agent. Cloudflare 1010 rejects the default Python urllib
+# signature. Cookie values are never logged.
+_CHROME_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_BROWSER_CACHE: dict[str, Any] = {}
+_BROWSER_CACHE_SECONDS = 30.0
+
+
+def _is_token_endpoint(url: str) -> bool:
+    path = urlparse(str(url or "")).path.casefold()
+    return path.endswith("/connect/token") or path.rstrip("/").endswith("/token")
+
+
+def _cdp_port_open(timeout: float = 0.2) -> bool:
+    """True when the persistent Chrome debug port accepts a connection."""
+    from .ezlynx_portal_session import cdp_url
+
+    raw = cdp_url()
+    parsed = urlparse(raw if "://" in raw else "http://" + raw)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 9222
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def discussion_request_headers(
+    url: str,
+    *,
+    cookie_loader: Callable[[], list[dict[str, Any]]] | None = None,
+    port_open: Callable[[], bool] | None = None,
+) -> dict[str, str]:
+    """Chrome identity for Discussion API calls. The token host gets no cookies.
+
+    Cookies come from the signed-in Chrome session when that port is open.
+    Unit tests pass ``cookie_loader`` or ``port_open`` and do not attach.
+    """
+    headers = {"User-Agent": _CHROME_USER_AGENT}
+    if _is_token_endpoint(url):
+        return headers
+    headers["Accept"] = "application/json"
+    cookies = _discussion_cookies(cookie_loader=cookie_loader, port_open=port_open)
+    if not cookies:
+        return headers
+    from .ezlynx_portal_session import format_cookie_header, portal_session_headers
+
+    cookie_header = format_cookie_header(cookies)
+    if not cookie_header:
+        return headers
+    parsed = urlparse(str(url or ""))
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    headers["Cookie"] = cookie_header
+    if not origin:
+        return headers
+    try:
+        portal = portal_session_headers(cookie_header, origin, cookies)
+    except Exception:
+        headers["Origin"] = origin
+        headers["Referer"] = origin + "/"
+        return headers
+    for key, value in portal.items():
+        if key == "Content-Type":
+            continue
+        headers[key] = value
+    headers["User-Agent"] = _CHROME_USER_AGENT
+    return headers
+
+
+def _discussion_cookies(
+    *,
+    cookie_loader: Callable[[], list[dict[str, Any]]] | None,
+    port_open: Callable[[], bool] | None,
+) -> list[dict[str, Any]]:
+    if cookie_loader is not None:
+        return [row for row in (cookie_loader() or []) if isinstance(row, dict)]
+    # Pytest must not open Chrome. Callers that want the session pass a loader
+    # or port_open, which is how the live gateway attaches.
+    if port_open is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return []
+    now = time.monotonic()
+    cached_at = float(_BROWSER_CACHE.get("at") or 0)
+    if now - cached_at < _BROWSER_CACHE_SECONDS and "cookies" in _BROWSER_CACHE:
+        return list(_BROWSER_CACHE.get("cookies") or [])
+    cookies: list[dict[str, Any]] = []
+    opener = port_open or _cdp_port_open
+    try:
+        if opener():
+            from .ezlynx_portal_session import load_cdp_session_cookies
+
+            cookies = [
+                row
+                for row in (load_cdp_session_cookies() or [])
+                if isinstance(row, dict)
+            ]
+    except Exception:
+        cookies = []
+    _BROWSER_CACHE["at"] = now
+    _BROWSER_CACHE["cookies"] = cookies
+    return list(cookies)
 
 
 def reject_phone_numbers(body: str) -> str:
@@ -131,12 +241,15 @@ class DiscussionApiClient:
         config: DiscussionApiConfig,
         urlopen: Callable[..., Any] | None = None,
         clock: Callable[[], float] | None = None,
+        *,
+        session_headers: Callable[[str], dict[str, str]] | None = None,
     ) -> None:
         self._config = config
         self._urlopen = urlopen or _default_urlopen
         self._clock = clock or time.time
         self._token: str | None = None
         self._token_expires_at: float = 0.0
+        self._session_headers = session_headers or discussion_request_headers
 
     # -- authentication -------------------------------------------------
 
@@ -152,6 +265,8 @@ class DiscussionApiClient:
             "username": self._config.username,
             "integration_group_id": self._config.integration_group_id,
         }
+        if str(self._config.password or "").strip():
+            form["password"] = self._config.password
         body = self._request_json(
             "POST",
             self._config.token_endpoint,
@@ -185,6 +300,13 @@ class DiscussionApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> Any:
         headers = dict(headers)
+        try:
+            extra = self._session_headers(url)
+        except Exception:
+            extra = {}
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                headers.setdefault(key, value)
         if authenticated:
             headers["Authorization"] = f"Bearer {self.get_token()}"
         try:
@@ -371,6 +493,68 @@ def select_discussion_for_note(
     )
 
 
+def _note_body(row: Any) -> str:
+    if isinstance(row, str):
+        return row.strip()
+    if not isinstance(row, dict):
+        return ""
+    for key in ("body", "Body", "text", "Text", "noteText", "NoteText"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = _note_body(value)
+            if nested:
+                return nested
+    return ""
+
+
+def _note_id_of(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("noteId", "NoteId", "id", "Id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def iter_discussion_notes(record: Any):
+    """Yield note dicts from a discussion payload. Does not invent ids."""
+    if isinstance(record, list):
+        for item in record:
+            yield from iter_discussion_notes(item)
+        return
+    if not isinstance(record, dict):
+        return
+    body = _note_body(record)
+    if body and (
+        _note_id_of(record)
+        or any(key in record for key in ("body", "Body", "text", "Text"))
+    ):
+        yield record
+    for key in ("notes", "Notes", "items", "Items", "data", "Data"):
+        rows = record.get(key)
+        if isinstance(rows, list):
+            for row in rows:
+                yield from iter_discussion_notes(row)
+
+
+def _same_note_text(left: str, right: str) -> bool:
+    return " ".join(str(left or "").split()) == " ".join(str(right or "").split())
+
+
+def find_identical_note(record: Any, note_body: str) -> dict[str, Any] | None:
+    """The note already on this discussion whose text matches, if any."""
+    want = str(note_body or "").strip()
+    if not want:
+        return None
+    for row in iter_discussion_notes(record):
+        if _same_note_text(_note_body(row), want):
+            return row
+    return None
+
+
 def file_note_to_existing_discussion(
     client: DiscussionApiClient,
     applicant_id: str,
@@ -417,6 +601,7 @@ def file_note_to_existing_discussion(
             "discussion_id": None,
             "note_id": None,
         }
+    title = discussion_title_of(record)
     if dry_run:
         return {
             "status": "dry_run",
@@ -424,35 +609,90 @@ def file_note_to_existing_discussion(
             "reason": "dry run: note validated, nothing written",
             "applicant_id": applicant,
             "discussion_id": discussion_id,
-            "discussion_title": discussion_title_of(record),
+            "discussion_title": title,
             "note_id": None,
+        }
+    # A retry must not post the same words again. EZLynx often accepts the
+    # first write and omits the note id, which used to look like a failure.
+    already = None
+    getter = getattr(client, "get_discussion", None)
+    if callable(getter):
+        try:
+            already = find_identical_note(getter(discussion_id), text)
+        except Exception:
+            already = None
+    if already is not None:
+        existing_id = _note_id_of(already)
+        return {
+            "status": "filed",
+            "reason_code": None,
+            "reason": "identical note already on the discussion; not posted again",
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": existing_id or None,
+            "read_back": True,
+            "verified_by": "text",
+            "idempotent": True,
+            "response": already,
         }
     created = client.append_note(discussion_id, text, note_type=note_type)
     note_id = ""
     if isinstance(created, dict):
-        for key in ("noteId", "NoteId", "id", "Id"):
-            value = str(created.get(key) or "").strip()
-            if value:
-                note_id = value
-                break
-    if not note_id:
-        raise DiscussionApiError(
-            None,
-            "DiscussionApi append returned no note_id; refusing success",
-        )
-    # Fresh GET before success. Playwright/DOM is never this proof.
+        note_id = _note_id_of(created)
     from .ezlynx_api_only_writes import confirm_discussion_note
 
-    confirm_discussion_note(client, discussion_id, note_id)
+    if note_id:
+        # Fresh GET before success. Playwright/DOM is never this proof.
+        confirm_discussion_note(client, discussion_id, note_id)
+        return {
+            "status": "filed",
+            "reason_code": None,
+            "reason": "note appended to existing discussion",
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": note_id,
+            "read_back": True,
+            "verified_by": "note_id",
+            "response": created,
+        }
+    # 2xx with no id is not a failure. Read the notes back and match the text.
+    matched = None
+    if callable(getter):
+        try:
+            matched = find_identical_note(getter(discussion_id), text)
+        except Exception:
+            matched = None
+    if matched is None:
+        return {
+            "status": "posted, verifying",
+            "reason_code": None,
+            "reason": (
+                "DiscussionApi accepted the note without a note_id; "
+                "the text was not on the discussion yet"
+            ),
+            "applicant_id": applicant,
+            "discussion_id": discussion_id,
+            "discussion_title": title,
+            "note_id": None,
+            "read_back": False,
+            "verified_by": None,
+            "response": created,
+        }
+    matched_id = _note_id_of(matched)
+    if matched_id:
+        confirm_discussion_note(client, discussion_id, matched_id)
     return {
         "status": "filed",
         "reason_code": None,
-        "reason": "note appended to existing discussion",
+        "reason": "note posted and confirmed by matching the discussion text",
         "applicant_id": applicant,
         "discussion_id": discussion_id,
-        "discussion_title": discussion_title_of(record),
-        "note_id": note_id,
+        "discussion_title": title,
+        "note_id": matched_id or None,
         "read_back": True,
+        "verified_by": "text",
         "response": created,
     }
 

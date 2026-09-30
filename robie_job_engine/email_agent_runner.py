@@ -1,6 +1,15 @@
-"""Run email work on the installed chat interface; read final replies from its ledger."""
+"""Run email work on the installed chat interface; read final replies from its ledger.
+
+The inbox watcher kills this child at 930 seconds (``run_email_job``).
+The cutoff that actually stops a long email job is the ``chat`` subprocess
+timeout below: 600 seconds on the first attempt. That is the ~10 minute
+stop. ``ROBIE_EMAIL_AGENT_TIMEOUT_SECONDS`` changes it. The recovery
+attempt stays 300 seconds. This does not change ``agent.max_turns``.
+"""
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 import subprocess
 import uuid
@@ -8,6 +17,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .store import JobStore
+
+logger = logging.getLogger("robie.email_agent_runner")
+
+# First chat attempt. The 930s watcher limit is outside this process.
+DEFAULT_EMAIL_AGENT_TIMEOUT_SECONDS = 600
+RECOVERY_TIMEOUT_SECONDS = 300
 
 RECOVERY_PROMPT = (
     'The previous turn ended with malformed_function_call: that malformed tool call did not execute. '
@@ -45,6 +60,21 @@ def session_receipt(home: Path, session_id: str) -> dict:
             'content': str(row[2] or '')} if row else {}
 
 
+def email_agent_timeout_seconds(attempt: int, environ: dict | None = None) -> int:
+    """First attempt is the ~10 minute cutoff. Recovery stays shorter."""
+    settings = os.environ if environ is None else environ
+    raw = str(settings.get("ROBIE_EMAIL_AGENT_TIMEOUT_SECONDS") or "").strip()
+    try:
+        first = int(raw) if raw else DEFAULT_EMAIL_AGENT_TIMEOUT_SECONDS
+    except ValueError:
+        first = DEFAULT_EMAIL_AGENT_TIMEOUT_SECONDS
+    if first < 1:
+        first = DEFAULT_EMAIL_AGENT_TIMEOUT_SECONDS
+    if attempt == 0:
+        return first
+    return RECOVERY_TIMEOUT_SECONDS
+
+
 def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
                        job_id: str, db_path: str, runner=None) -> str:
     runner = runner or subprocess.run
@@ -68,8 +98,9 @@ def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
                 command.extend(['-q', prompt + '\n\nExecution receipt identifier: ' + nonce +
                                 '. Do not include this identifier in your final reply.'])
                 store.checkpoint(job_id, 'email_agent_invocation', {'receipt_nonce': nonce})
+            timeout_s = email_agent_timeout_seconds(attempt, env)
             result = runner(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, text=True, timeout=600 if attempt == 0 else 300,
+                            stdin=subprocess.DEVNULL, text=True, timeout=timeout_s,
                             env=env, cwd=str(cwd))
             if not session_id:
                 session_id, baseline = session_for_receipt(home, nonce)
@@ -89,13 +120,26 @@ def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
             if result.returncode or finish_reason not in {'stop', 'end_turn'}:
                 return 'ROBIE_OUTCOME_UNKNOWN: The agent ended without a complete final turn. Check saved results before retrying.'
             # Display output and separate reasoning fields are never used as the result.
-            response = receipt['content'].strip()
+            from .email_guard import _strip_internal_reasoning
+
+            response = str(_strip_internal_reasoning(receipt['content']) or "").strip()
             if not response:
                 return 'ROBIE_OUTCOME_UNKNOWN: The agent returned no final response. Check saved results before retrying.'
             return response
         except subprocess.TimeoutExpired:
             # The parent owns process-group cleanup on every return and on its deadline.
-            return 'ROBIE_OUTCOME_UNKNOWN: Email execution timed out. Check saved results before retrying.'
+            # This is the ~10 minute stop (default 600s), not the 930s watcher.
+            limit = email_agent_timeout_seconds(attempt, env)
+            reason = (
+                f"I stopped this email job after {limit} seconds. "
+                "The chat step hit its time limit."
+            )
+            logger.warning(reason)
+            return (
+                "ROBIE_OUTCOME_UNKNOWN: "
+                + reason
+                + " Check saved results before retrying."
+            )
         except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
             return 'ROBIE_OUTCOME_UNKNOWN: No trustworthy final agent receipt was available. Check saved results before retrying.'
     raise AssertionError('unreachable')

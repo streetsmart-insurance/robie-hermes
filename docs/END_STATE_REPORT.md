@@ -58,6 +58,16 @@ The Jev key is Secret Manager secret `jev-api-key` in project `streetsmart-herme
 
 The flag is off unless it is set. Setting `ROBIE_END_STATE_REPORT=1` turns the report on in that process, including when `ROBIE_ENV` is `PRODUCTION`, `PROD`, or `LIVE`. This document does not install the flag anywhere.
 
+## Write jobs (plan, readback, Jev)
+
+Chat and email jobs that change EZLynx run three steps. A question does not.
+
+1. Before any write, the model states a plan: the write, the target, and the values. That plan is locked. A note, document, or policy-setup tool refuses the write until the plan is locked. Set `ROBIE_PLAN_MODEL=1` on Test to have Gemini (`gemini-api-key`) state that plan before the agent starts. Without the flag, the model states the plan on the write tool call, and the tool locks it before the API post. The flag does not invent values.
+2. At the end, an EZLynx API readback compares each planned value. The comparison does not use the model's claim. On Test this runs because `ROBIE_EZLYNX_DISCUSSION_API=live`. `ROBIE_EZLYNX_API_READBACK=1` turns the same read on elsewhere. If the read does not run, the reply says so. It does not treat the claim as a pass.
+3. Jev scores that end state as correct, wrong, or unsure. The key is Secret Manager secret `jev-api-key`. A failed readback forces wrong. Jev does not override it.
+
+The user reply quotes the readback and Jev's score. It does not repeat the model's claim. This loop is not the `ROBIE_END_STATE_REPORT` flag.
+
 ## What is stored
 
 Each score is a row in `jev_evaluations` in the job database, plus a `jev_score` checkpoint. That is the tuning log. The API key is not stored.

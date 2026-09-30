@@ -18,8 +18,13 @@ This module is the fail-closed contract:
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+import os
+from contextlib import contextmanager
+from typing import Any, Iterator
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 EZLYNX_NOTE_DOC_API_ONLY = "EZLYNX_NOTE_DOC_API_ONLY"
@@ -511,8 +516,12 @@ def add_note_to_discussion(
     )
     if filed.get("status") != "filed":
         return filed
+    if filed.get("read_back") and str(filed.get("verified_by") or "") == "text":
+        return filed
     note_id = str(filed.get("note_id") or "").strip()
     discussion_id = str(filed.get("discussion_id") or "").strip()
+    if not note_id:
+        return filed
     confirm_discussion_note(client, discussion_id, note_id)
     filed["read_back"] = True
     return filed
@@ -550,22 +559,189 @@ def upload_document_via_api(
     }
 
 
-def _discussion_config_from_secret() -> Any:
-    from .ezlynx_api import load_ezlynx_api_config
+DISCUSSION_API_ENV = "ROBIE_EZLYNX_DISCUSSION_API"
+LIVE_DISCUSSION_API = "live"
+
+
+def discussion_api_target(environ: dict[str, str] | None = None) -> str:
+    """``live`` uses live EZLynx. Anything else follows ROBIE_ENV (Test stays UAT)."""
+    env = os.environ if environ is None else environ
+    raw = str(env.get(DISCUSSION_API_ENV) or "").strip().lower()
+    if raw in {"", "env", "uat", "default"}:
+        return "env"
+    if raw == LIVE_DISCUSSION_API:
+        return LIVE_DISCUSSION_API
+    raise RuntimeError(
+        f"{DISCUSSION_API_ENV} must be 'live' or unset. Refusing '{raw}'."
+    )
+
+
+def _login_secret_resource(ref: str, accessor: Any) -> str:
+    """Newest ENABLED version. A numeric env pin is not the password to use.
+
+    The browser login lists ENABLED versions and ignores a stale pin such as
+    ``versions/7``. This does the same. If the list call is unavailable, the
+    ``versions/latest`` alias is used instead of the pin. The value is never
+    logged.
+    """
+    from .secret_manager import _newest_enabled_resource
+
+    resource = str(ref or "").strip()
+    if "/versions/" not in resource:
+        return resource
+    newest = _newest_enabled_resource(resource, accessor)
+    pinned = resource.rsplit("/", 1)[-1]
+    chosen = str(newest or resource).rsplit("/", 1)[-1]
+    if newest and newest != resource:
+        logger.info(
+            "note tool ignoring stale login secret pin env versions/%s; using versions/%s",
+            pinned,
+            chosen,
+        )
+        return str(newest)
+    if pinned == "latest":
+        return resource
+    parent = resource.rsplit("/versions/", 1)[0]
+    logger.info(
+        "note tool ignoring stale login secret pin env versions/%s; using versions/latest",
+        pinned,
+    )
+    return parent + "/versions/latest"
+
+
+def _required_secret_value(
+    env_name: str,
+    *,
+    accessor: Any,
+    environ: dict[str, str],
+) -> str:
+    ref = str(environ.get(env_name) or "").strip()
+    if not ref:
+        raise RuntimeError(
+            f"{env_name} must be set when {DISCUSSION_API_ENV}=live. "
+            "Refusing to fall back to UAT."
+        )
+    ref = _login_secret_resource(ref, accessor)
+    try:
+        value = str(accessor.access(ref) or "").strip()
+    except Exception as exc:
+        raise RuntimeError(
+            f"{env_name} could not be read for {DISCUSSION_API_ENV}=live. "
+            "Refusing to fall back to UAT."
+        ) from exc
+    if not value:
+        raise RuntimeError(
+            f"{env_name} is empty for {DISCUSSION_API_ENV}=live. "
+            "Refusing to fall back to UAT."
+        )
+    return value
+
+
+@contextmanager
+def _secret_env(environ: dict[str, str] | None) -> Iterator[None]:
+    """Apply a caller-supplied env for secret lookups, then restore it."""
+    if environ is None:
+        yield
+        return
+    keys = (
+        "ROBIE_ENV",
+        "ROBIE_EZLYNX_API_UAT_SECRET",
+        "ROBIE_EZLYNX_API_PROD_SECRET",
+        "ROBIE_EZLYNX_USERNAME_SECRET",
+        "ROBIE_EZLYNX_PASSWORD_SECRET",
+        DISCUSSION_API_ENV,
+    )
+    previous: dict[str, str | None] = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            if key in environ:
+                os.environ[key] = str(environ[key])
+            elif key in os.environ and environ is not os.environ:
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def load_discussion_api_config(
+    *,
+    accessor: Any | None = None,
+    environ: dict[str, str] | None = None,
+) -> Any:
+    """Discussion API settings for the note tool.
+
+    ``ROBIE_EZLYNX_DISCUSSION_API=live`` uses the live EZLynx host from
+    ``ROBIE_EZLYNX_API_PROD_SECRET`` and the same SSRobie login the Test
+    browser uses (``ezlynx-username`` / ``ezlynx-password``). A missing
+    secret raises. It does not silently use UAT.
+    """
+    from .ezlynx_api import EzlynxApiConfigurationError, load_ezlynx_api_config
     from .ezlynx_discussions import DiscussionApiConfig
 
-    api_config = load_ezlynx_api_config()
-    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    return DiscussionApiConfig(
-        discussion_base_url=origin + "/DiscussionApi/",
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
+    env = dict(os.environ if environ is None else environ)
+    target = discussion_api_target(env)
+
+    def _from_api(api_config: Any, *, username: str, password: str) -> Any:
+        parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        return DiscussionApiConfig(
+            discussion_base_url=origin + "/DiscussionApi/",
+            token_endpoint=str(api_config.token_endpoint),
+            client_id=str(api_config.client_id),
+            client_secret=str(api_config.client_secret),
+            username=username,
+            integration_group_id=str(api_config.integration_group_id),
+            scope="DiscussionApi openid",
+            password=password,
+        )
+
+    if target != LIVE_DISCUSSION_API:
+        with _secret_env(environ):
+            api_config = load_ezlynx_api_config(accessor=accessor)
+        return _from_api(api_config, username=str(api_config.username), password="")
+
+    secret_reader = accessor
+    if secret_reader is None:
+        from .secret_manager import GoogleSecretManagerAccessor
+
+        secret_reader = GoogleSecretManagerAccessor()
+    try:
+        with _secret_env(environ):
+            api_config = load_ezlynx_api_config(
+                environment="PRODUCTION",
+                accessor=secret_reader,
+            )
+    except EzlynxApiConfigurationError as exc:
+        raise RuntimeError(
+            f"{DISCUSSION_API_ENV}=live could not load the live EZLynx API secret. "
+            "Refusing to fall back to UAT."
+        ) from exc
+    host = urlparse(str(api_config.token_endpoint or "")).hostname or ""
+    base = str(api_config.document_base_url or "")
+    if "uatezlynx" in host.casefold() or "uatezlynx" in base.casefold():
+        raise RuntimeError(
+            f"{DISCUSSION_API_ENV}=live but the production API secret points at UAT. "
+            "Refusing."
+        )
+    username = _required_secret_value(
+        "ROBIE_EZLYNX_USERNAME_SECRET",
+        accessor=secret_reader,
+        environ=env,
     )
+    password = _required_secret_value(
+        "ROBIE_EZLYNX_PASSWORD_SECRET",
+        accessor=secret_reader,
+        environ=env,
+    )
+    return _from_api(api_config, username=username, password=password)
+
+
+def _discussion_config_from_secret() -> Any:
+    return load_discussion_api_config()
 
 
 __all__ = [

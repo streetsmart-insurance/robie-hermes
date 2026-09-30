@@ -124,6 +124,7 @@ class RequestClassification:
     action_type: str
     worker: str
     hold_status: str | None = None
+    answer_only: bool = False
 
 
 # General-agent framing for playground Chat types. Existing EZLynx skills
@@ -145,8 +146,12 @@ PLAYGROUND_TASK_FRAMING = {
         "Do not wait on that readback to answer."
     ),
     "ezlynx.policy_change": (
-        "Task: policy change. Use the EZLynx policy-change flow. "
+        "Task: policy change. File the note with ezlynx_discussion_note on the "
+        "existing discussion title named in the request. For a mailing-address "
+        "change, use that existing title. Do not create a discussion. "
+        "Do not use Playwright Add Note or Save Note. "
         "Do not bind, take payment, or email the client. "
+        "Do not read Robie's source, jobs.db, or token files. "
         "Writes stay on the EZLynx test account only. "
         "If an EZLynx readback is available, keep it as evidence. "
         "Do not wait on that readback to answer."
@@ -159,9 +164,11 @@ PLAYGROUND_TASK_FRAMING = {
         "Do not wait on that readback to answer."
     ),
     "ezlynx.certificate": (
-        "Task: certificate request. Use the EZLynx certificate flow. "
-        "File notes and documents through the EZLynx API only. "
-        "Do not bind, take payment, or email the client. "
+        "Task: certificate request. Use ezlynx_discussion_note and "
+        "robie_job_engine.certificate_filing to draft and file the holder note "
+        "on the existing discussion. Draft only. "
+        "Do not bind, take payment, or email the client or the certificate holder. "
+        "Do not browse EZLynx by hand. Do not read Robie's source, jobs.db, or token files. "
         "Writes stay on the EZLynx test account only. "
         "If an EZLynx readback is available, keep it as evidence. "
         "Do not wait on that readback to answer."
@@ -175,6 +182,11 @@ _POLICY_CHANGE_RE = re.compile(
     r"\b(?:policy change|change the policy|change this policy|endorsements?|endorse)\b"
     r"|\b(?:change|update|endorse)\b.{0,48}\bpolic"
     r"|\bpolic\w*\b.{0,48}\b(?:change|update|endorsement)\b"
+    r"|\b(?:change|update|correct|set)\b.{0,48}\b(?:address|deductible|lienholder|mortgagee|limit|garaging)\b"
+)
+_ADDRESS_CHANGE_RE = re.compile(
+    r"\b(?:change|update|correct|set|move)\b.{0,60}\b(?:mailing address|garaging address|address)\b"
+    r"|\b(?:mailing address|garaging address)\b.{0,40}\b(?:change|update|to)\b"
 )
 _CERTIFICATE_RE = re.compile(
     r"\b(?:certificate of insurance|certificate request|cert request|certificates?|coi)\b"
@@ -244,6 +256,27 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification(
             "appsheet.qa_audit", WORKER_FOR_ACTION["appsheet.qa_audit"]
         )
+    # Vague short asks and questions win before "can you " becomes a job
+    # and before playground treats the word "quote" as an EZLynx write.
+    from .answer_only import is_informational_ask, is_vague_short_request
+
+    if is_vague_short_request(text, attachment_count=attachment_count):
+        return RequestClassification(
+            "hermes.needs_clarification",
+            WORKER_FOR_ACTION["hermes.needs_clarification"],
+            hold_status="NEEDS_CLARIFICATION",
+        )
+    if is_informational_ask(text):
+        return RequestClassification(
+            "hermes.plain_english",
+            WORKER_FOR_ACTION["hermes.plain_english"],
+            answer_only=True,
+        )
+    if _is_address_change(normalized):
+        return RequestClassification(
+            "ezlynx.policy_change",
+            WORKER_FOR_ACTION["ezlynx.policy_change"],
+        )
     playground_route = _classify_playground_ezlynx(normalized)
     if playground_route is not None:
         return playground_route
@@ -298,8 +331,13 @@ def _is_quote_request(text: str) -> bool:
     return _QUOTE_RE.search(text) is not None
 
 
+def _is_address_change(text: str) -> bool:
+    """Mailing-address and other simple address edits, playground or not."""
+    return _ADDRESS_CHANGE_RE.search(text) is not None
+
+
 def _is_policy_change_request(text: str) -> bool:
-    return _POLICY_CHANGE_RE.search(text) is not None
+    return _POLICY_CHANGE_RE.search(text) is not None or _is_address_change(text)
 
 
 def _is_certificate_request(text: str) -> bool:
@@ -389,6 +427,73 @@ def _positive_request_text(text: str) -> str:
 def _is_skill_update(text: str) -> bool:
     has_target = "skill.md" in text or " skill file" in text or " skill-file" in text
     return has_target and any(word in text for word in ("update", "edit", "write", "create"))
+
+
+_UI_DRIVING_ACTIONS = frozenset(
+    {
+        "ezlynx.commercial_auto",
+        "ezlynx.policy_setup",
+        "ezlynx.quote",
+    }
+)
+_API_ROUTE_ACTIONS = frozenset(
+    {
+        "ezlynx.policy_change",
+        "ezlynx.certificate",
+        "ezlynx.reassign",
+    }
+)
+_GENERAL_CHAT_ACTIONS = frozenset(
+    {"hermes.google_chat_task", "hermes.plain_english"}
+)
+_UI_MARKERS = (
+    "ezlynx",
+    "playwright",
+    "commercial auto",
+    "form entry",
+    "formentry",
+    "app.ezlynx",
+    "useascend.com",
+)
+_API_TEXT_MARKERS = (
+    "mailing address",
+    "certificate of insurance",
+    "discussion note",
+    "ezlynx_discussion_note",
+)
+_NEGATED_UI = re.compile(
+    r"\b(?:no|not|without|never|don't|do not)\b(?:\s+\w+){0,5}\s+"
+    r"\b(?:ezlynx|browser|playwright|chrome)\b"
+)
+
+
+def chat_turn_expects_ui(
+    text: str,
+    action_type: str,
+    *,
+    answer_only: bool = False,
+) -> bool:
+    """Whether this routed turn should drive a browser.
+
+    Called when the job is opened. The Playwright audit reads the stored
+    flag and does not look at the request text again.
+    """
+    if answer_only:
+        return False
+    action = str(action_type or "")
+    if action in _API_ROUTE_ACTIONS:
+        return False
+    if action in _UI_DRIVING_ACTIONS:
+        return True
+    if action not in _GENERAL_CHAT_ACTIONS:
+        return False
+    folded = _normalized(text)
+    if _NEGATED_UI.search(folded):
+        return False
+    if any(marker in folded for marker in _API_TEXT_MARKERS):
+        return False
+    positive = _positive_request_text(folded)
+    return any(marker in positive for marker in _UI_MARKERS)
 
 
 def _is_plain_english(text: str, attachment_count: int) -> bool:
