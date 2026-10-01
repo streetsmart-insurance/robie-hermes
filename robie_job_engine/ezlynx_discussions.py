@@ -675,15 +675,16 @@ def file_note_to_existing_discussion(
     existing discussion can be chosen the result is ``status="pending"`` and
     nothing is written. A discussion is never created and nothing is deleted.
 
-    Confirmation reads the discussion before the post and once after it.
-    The note is filed only when a second signal says the new note is ours
-    (its text, or a returned note id that is the new latest id). Live
-    EZLynx has neither: the post body has no id, and the discussion read
-    has no note text. A tight second read that still shows exactly one new
-    note, a new latest id, and the same title is the best that API can
-    give. That is reported as sent, not filed, so the job is not called
-    done. The ledger row stays sent, unconfirmed and blocks a repost. The
-    post is never repeated automatically.
+    Confirmation reads the discussion before the post, once after it, and
+    once more a moment later. The note is filed when a second signal says
+    it is ours (its text, or a returned note id that is the new latest
+    id). Live EZLynx has neither. A stable count is the confirmation that
+    API can give: exactly one new note, a new latest id, the same title,
+    and a second read that still shows that same count and id. That latest
+    id is the note id, the ledger row is confirmed, and a same-day repeat
+    asks before it posts again. A count that jumped, an unchanged latest
+    id, a changed title, or a second read that moved stays sent,
+    unconfirmed. The post is never repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
     again. A send that cannot be confirmed is stored as sent, unconfirmed
@@ -888,27 +889,24 @@ def file_note_to_existing_discussion(
             if not returned and not _payload_has_note_bodies(after_record):
                 stable_id = _stable_count_reread(getter, discussion_id, after)
                 if stable_id:
-                    _remember_observed_note_id(
+                    _remember_posted_note(
                         applicant,
                         discussion_id,
                         text,
                         document_id=doc_id,
                         note_id=stable_id,
                         ledger_path=ledger_path,
+                        source="discussion_count",
                     )
                     return _note_result(
-                        "sent",
-                        reason=(
-                            "The note was added. The discussion shows one new note, "
-                            "but its text could not be read. It was not sent again."
-                        ),
+                        "filed",
+                        reason=reason,
                         applicant=applicant,
                         discussion_id=discussion_id,
                         title=title,
                         note_id=stable_id,
-                        read_back=False,
-                        verified_by="count",
-                        confirmation=SENT_UNCONFIRMED,
+                        read_back=True,
+                        verified_by="discussion",
                         response=created,
                     )
             if _payload_has_note_bodies(after_record) and not _posted_text_matches(
@@ -1014,39 +1012,6 @@ def _stable_count_reread(
     if not same:
         return None
     return latest
-
-
-def _remember_observed_note_id(
-    applicant_id: str,
-    discussion_id: str,
-    note_text: str,
-    *,
-    document_id: str,
-    note_id: str,
-    ledger_path: Any,
-) -> None:
-    """Store the id we saw. The row stays sent, unconfirmed."""
-
-    from .discussion_note_ledger import (
-        SENT_UNCONFIRMED,
-        DiscussionNoteLedgerError,
-        record_posted_note,
-    )
-
-    try:
-        record_posted_note(
-            applicant_id,
-            discussion_id,
-            note_text=note_text,
-            document_id=document_id,
-            note_id=note_id,
-            source="discussion_count",
-            ledger_path=ledger_path,
-            refresh=True,
-            confirmation=SENT_UNCONFIRMED,
-        )
-    except DiscussionNoteLedgerError:
-        return
 
 
 def _new_note_identity(

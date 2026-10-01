@@ -495,6 +495,53 @@ class FilingGateTests(unittest.TestCase):
         self.assertEqual(deps.notes[0]["document_id"], "501")
         self.assertEqual(deps.sheets.writes, [])
 
+    def test_stable_live_note_is_filed_and_writes_the_status_row(self):
+        """A metadata-only +1 is filed, so the FAO status row is not skipped."""
+
+        from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
+        from test_discussion_note_readback import LiveShapeClient
+
+        from durable_temp import durable_temporary_directory
+
+        deps = FakeDeps()
+        client = LiveShapeClient(discussion_id="disc-1")
+        client.title = WORKFLOW["title"]
+        client.after_title = WORKFLOW["title"]
+        with durable_temporary_directory() as tmp:
+            ledger = Path(tmp) / "ledger.json"
+
+            def add_note(applicant_id, note_text, discussion_title=None, document_id=None):
+                noted = add_note_to_discussion(
+                    applicant_id,
+                    note_text,
+                    discussion_title=discussion_title,
+                    title_hint=discussion_title,
+                    discussion_client=client,
+                    document_id=document_id,
+                    ledger_path=ledger,
+                )
+                deps.notes.append(
+                    {
+                        "applicant_id": applicant_id,
+                        "text": note_text,
+                        "title": discussion_title,
+                        "document_id": document_id,
+                        "status": noted.get("status"),
+                    }
+                )
+                return noted
+
+            deps.add_note = add_note
+            result = file_with(deps, [memo_item()])
+        row = result["results"][0]
+        self.assertEqual(row["status"], "filed", result)
+        self.assertEqual(row["note_id"], "701")
+        self.assertEqual(client.posts, 1)
+        self.assertEqual(client.note_lists, 0)
+        comment = nicole_status_comment(PROGRESSIVE_MEMO_RULE)
+        written = [values for _row, values in deps.sheets.writes]
+        self.assertTrue(any(values[6] == comment for values in written), written)
+
     def test_upload_without_read_back_does_not_claim_success(self):
         deps = FakeDeps()
 

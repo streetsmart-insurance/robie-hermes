@@ -95,11 +95,12 @@ def _file(client, text="NatGen cancellation notice was added. ROBIE was here", *
     return disc.file_note_to_existing_discussion(client, APPLICANT, text, **kwargs)
 
 
-def test_textless_count_increase_is_one_new_note_and_blocks_a_repost(tmp_path):
+def test_textless_count_increase_is_filed_and_a_repeat_does_not_repost(tmp_path):
     """Live shape: empty 2xx, metadata-only read, 405 on the notes list.
 
-    Exactly one new note and a stable latest id is not a text read-back.
-    It is still one note, said once, and a repeat does not post again.
+    Exactly one new note, a new latest id, the same title, and a second
+    read that still shows them, is filed. The ledger keeps that id. A
+    same-day repeat asks first and does not post again.
     """
 
     client = LiveShapeClient()
@@ -108,13 +109,12 @@ def test_textless_count_increase_is_one_new_note_and_blocks_a_repost(tmp_path):
     assert listed.value.status == 405
 
     ledger = tmp_path / "ledger.json"
-    result = _file(client, ledger_path=ledger, document_id="824463419")
-    assert result["status"] == "sent"
+    result = _file(client, ledger_path=ledger)
+    assert result["status"] == "filed"
     assert result["note_id"] == "701"
-    assert result["read_back"] is False
-    assert result["verified_by"] == "count"
-    assert result["confirmation"] == SENT_UNCONFIRMED
-    assert "one new note" in result["reason"]
+    assert result["read_back"] is True
+    assert result["verified_by"] == "discussion"
+    assert result["reason"] == "The note was added to the discussion."
     assert "told apart" not in result["reason"]
     assert client.posts == 1
     assert client.reads == 3
@@ -122,17 +122,17 @@ def test_textless_count_increase_is_one_new_note_and_blocks_a_repost(tmp_path):
     for word in FIELD_WORDS:
         assert word not in result["reason"]
     saved = json.loads(ledger.read_text(encoding="utf-8"))
-    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
+    assert saved["notes"][0]["confirmation"] == "confirmed"
     assert saved["notes"][0]["note_id"] == "701"
 
-    again = _file(client, ledger_path=ledger, document_id="824463419")
+    again = _file(client, ledger_path=ledger)
     assert again["status"] == "already_posted"
     assert "Want me to add it again?" in again["reason"]
     assert client.posts == 1
 
-    allowed = _file(client, ledger_path=ledger, document_id="824463419", allow_repost=True)
-    assert allowed["status"] == "held"
+    allowed = _file(client, ledger_path=ledger, allow_repost=True)
     assert client.posts == 2
+    assert allowed["status"] == "held"
 
 
 def test_a_second_read_that_moves_is_not_called_ours(tmp_path):

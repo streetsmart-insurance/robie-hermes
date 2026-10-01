@@ -61,8 +61,9 @@ class LiveNoteReplyTests(unittest.TestCase):
                 "Follow up. ROBIE was here",
                 ledger_path=ledger,
             )
-            self.assertEqual(filed["status"], "sent")
-            self.assertEqual(filed["confirmation"], SENT_UNCONFIRMED)
+            self.assertEqual(filed["status"], "filed")
+            self.assertTrue(filed["read_back"])
+            self.assertEqual(filed["note_id"], "701")
             self.assertEqual(client.posts, 1)
             self.assertEqual(client.note_lists, 0)
             db = str(Path(tmp) / "jobs.db")
@@ -80,18 +81,22 @@ class LiveNoteReplyTests(unittest.TestCase):
                 job_id,
                 "discussion_note",
                 {
-                    "status": filed["status"],
+                    "status": "filed",
                     "discussion_id": filed["discussion_id"],
                     "discussion_title": TITLE,
                     "note_id": filed["note_id"],
                     "note_text": "Follow up. ROBIE was here",
                     "applicant_id": APPLICANT,
-                    "read_back": False,
-                    "verified_by": "count",
-                    "confirmation": SENT_UNCONFIRMED,
+                    "read_back": True,
+                    "verified_by": "discussion",
                     "wrote": True,
                     "reason": filed["reason"],
                 },
+            )
+            store.checkpoint(
+                job_id,
+                "discussion_note_readback",
+                {"matched": True, "note_id": filed["note_id"], "verified_by": "discussion"},
             )
             bind_job_chat_thread(store, job_id, THREAD)
             recording = _stick_recording(db, job_id)
@@ -102,18 +107,15 @@ class LiveNoteReplyTests(unittest.TestCase):
                 poster=lambda space, text, thread, posted_job: sent.append(text),
             )
             self.assertEqual(sent, [line])
-            self.assertIn(
+            self.assertEqual(
+                line,
                 f'Added the note to Buster Brown on "{TITLE}".',
-                line or "",
             )
-            self.assertIn("couldn't read its text", line or "")
-            self.assertNotIn("told apart", line or "")
-            self.assertEqual(store.get_job(job_id)["status"], JobStatus.UNVERIFIED.value)
+            self.assertNotIn("couldn't read", line or "")
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE.value)
             self.assertNotEqual(
                 RecordingStore(db).get(recording)["status"], "RECORDING"
             )
-            with self.assertRaises(RuntimeError):
-                close_unverified_without_write(store, job_id)
 
     def test_unconfirmed_hold_still_says_one_line(self):
         with durable_temporary_directory() as tmp:
@@ -172,14 +174,21 @@ class LiveNoteReplyTests(unittest.TestCase):
                 job_id,
                 "discussion_note",
                 {
-                    "status": "sent",
+                    "status": "filed",
                     "discussion_id": DISCUSSION,
                     "discussion_title": TITLE,
                     "note_id": "701",
-                    "verified_by": "count",
+                    "note_text": "Mailing address 6 to 7",
+                    "applicant_id": APPLICANT,
+                    "read_back": True,
+                    "verified_by": "discussion",
                     "wrote": True,
-                    "confirmation": SENT_UNCONFIRMED,
                 },
+            )
+            store.checkpoint(
+                job_id,
+                "discussion_note_readback",
+                {"matched": True, "note_id": "701"},
             )
             bind_job_chat_thread(store, job_id, THREAD)
             sent: list[str] = []
@@ -304,7 +313,8 @@ class LiveShapeToolTests(unittest.TestCase):
             with durable_temporary_directory() as tmp:
                 db = str(Path(tmp) / "jobs.db")
                 ledger = Path(tmp) / "ledger.json"
-                job = JobStore(db).create_job(
+                store = JobStore(db)
+                job = store.create_job(
                     "hermes.plain_english",
                     {
                         "text": "add a note to Buster Brown on follw up 1 saying Follow up",
@@ -312,7 +322,8 @@ class LiveShapeToolTests(unittest.TestCase):
                         "account_name": "Buster Brown",
                     },
                 )
-                bind_job_chat_thread(JobStore(db), job["id"], THREAD)
+                store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+                bind_job_chat_thread(store, job["id"], THREAD)
 
                 def _add(applicant_id, note_text, **kwargs):
                     return disc.file_note_to_existing_discussion(
@@ -342,21 +353,23 @@ class LiveShapeToolTests(unittest.TestCase):
                         ),
                     )
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["status"], "sent")
-                self.assertEqual(result["verified_by"], "count")
-                self.assertFalse(result["read_back"])
+                self.assertEqual(result["status"], "filed")
+                self.assertEqual(result["verified_by"], "discussion")
+                self.assertTrue(result["read_back"])
                 self.assertTrue(result["wrote"])
                 self.assertEqual(client.posts, 1)
                 self.assertEqual(client.note_lists, 0)
                 self.assertEqual(len(sent), 1)
-                self.assertIn("Added the note to Buster Brown", sent[0])
-                self.assertIn("couldn't read its text", sent[0])
+                self.assertEqual(
+                    sent[0],
+                    f'Added the note to Buster Brown on "{TITLE}".',
+                )
                 saved = JobStore(db).get_checkpoint(job["id"], "discussion_note")
                 self.assertTrue(saved["wrote"])
-                self.assertEqual(saved["status"], "sent")
+                self.assertEqual(saved["status"], "filed")
                 self.assertEqual(
                     JobStore(db).get_job(job["id"])["status"],
-                    JobStatus.UNVERIFIED.value,
+                    JobStatus.COMPLETE.value,
                 )
         finally:
             _restore_modules(previous)
