@@ -21,6 +21,9 @@ class OneShotSafety(unittest.TestCase):
         r=self.run_case();self.assertEqual('SYN-CALL',r['call_id']);self.assertEqual(['POST','GET'],[c.args[0] for c in self.request.call_args_list])
     def test_duplicate_never_dispatches(self):
         self.run_case();r=self.run_case();self.assertFalse(r['new_dispatch']);self.assertEqual(2,self.request.call_count)
+    def test_different_test_id_never_redispatches(self):
+        self.run_case();r=self.run_case(test_id="SYN-OTHER")
+        self.assertFalse(r["new_dispatch"]);self.assertEqual(2,self.request.call_count)
     def test_uncertain_post_never_retries(self):
         self.request.side_effect=TimeoutError();r=self.run_case();self.assertEqual('dispatch_unknown',r['state']);self.run_case();self.assertEqual(1,self.request.call_count)
     def test_missing_call_id_never_retries(self):
