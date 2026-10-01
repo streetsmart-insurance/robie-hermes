@@ -419,7 +419,7 @@ def retrieve_sop(
         title = str(doc.get("title") or "Procedure")
         haystack = f"{title}\n{text}".casefold()
         score = sum(1 for word in words if word in haystack)
-        if score <= 0:
+        if score <= 0 and not (include_ties and doc.get("version_review_required") is True):
             continue
         excerpt = _excerpt(text, words) or title
         modified = str(doc.get("modified") or doc.get("modifiedTime") or "")
@@ -441,6 +441,8 @@ def retrieve_sop(
             )
         )
     scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored or scored[0][0] <= 0:
+        return []
     selected = scored[: max(1, limit)]
     if include_ties and selected and selected[0][1].version_review_required:
         group = selected[0][1].version_group
