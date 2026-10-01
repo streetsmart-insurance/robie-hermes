@@ -633,6 +633,10 @@ def classify_playground_request(text: str) -> Decision:
         return Decision(LOOKUP, proposal=_base_proposal(LOOKUP, original))
     if re.match(r"^draft a cert\b", norm):
         return Decision(VAGUE, question="Which client, holder, and coverage should the certificate use?")
+    # Explicit process questions are procedure retrieval, not the broad
+    # What-is policy lookup. Hard blocks and vague/mixed edits ran first.
+    if _is_question(norm) and re.search(r"\b(?:procedure|process|sop|workflow)\b", norm) and not _WRITE_VERB.search(norm):
+        return Decision(SOP, proposal=_base_proposal(SOP, original))
     allowed = _match_allowed(original, norm)
     if allowed is not None:
         return allowed
