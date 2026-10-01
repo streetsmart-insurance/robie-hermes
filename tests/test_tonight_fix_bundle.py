@@ -2065,12 +2065,23 @@ class ProveSessionReleaseTests(unittest.TestCase):
             send.index('get("robie_job_id")'),
             send.index("conversation_job_for_event"),
         )
-        stop = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
-        stop = stop.split("async def _apply_chat_stop", 1)[1].split(
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        stop = adapter.split("async def _apply_chat_stop", 1)[1].split(
             "async def _stop_chat_queue_heartbeat", 1
         )[0]
-        self.assertIn('"robie_job_id": job_id', stop)
-        self.assertIn('"robie_delivery_kind": "stop"', stop)
+        # The stop line is posted from this handler, before the first await,
+        # and the delivery is recorded against that job id.
+        self.assertLess(
+            stop.index("_post_stop_confirmation_now"),
+            stop.index("await self._terminate_running_agent"),
+        )
+        self.assertIn('kind="stop"', stop)
+        poster = adapter.split("def _post_stop_confirmation_now", 1)[1].split(
+            "async def _apply_chat_stop", 1
+        )[0]
+        self.assertIn("record_chat_delivery", poster)
+        self.assertIn("request_agent_stop", poster)
+        self.assertIn("job_id", poster)
 
     def test_ceiling_reply_is_the_one_line_only(self):
         from robie_job_engine.chat_guard import guard_chat_notice
