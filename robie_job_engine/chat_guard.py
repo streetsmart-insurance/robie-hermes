@@ -2262,9 +2262,16 @@ def _render_chat_terminal(
         return note_reply if note_reply.endswith("\n") else note_reply + "\n"
     # A question is answered in the reply. EZLynx is not the destination.
     if is_answer_only_job(job) or dict(job.get("payload") or {}).get("answered"):
+        from .chat_turn_control import content_is_only_progress, is_refused_tool_text
+        from .turn_finalization import COULD_NOT_FINISH
         from .user_reply import format_user_reply
 
         _post_job_audit_note(str(store.path), job["id"], recordings)
+        # Tool traces are not an answer. Job 598820fc rendered them as
+        # "Answered." and the job was already COMPLETE.
+        if content_is_only_progress(content) or is_refused_tool_text(content):
+            text = COULD_NOT_FINISH
+            return text if text.endswith("\n") else text + "\n"
         answer = str(content or "").strip() or "Answered."
         if not answer.lower().startswith("answered"):
             answer = f"Answered. {answer}"
@@ -3034,8 +3041,25 @@ def _guard_chat_response_impl(
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    from .client_name_lookup import sign_out_posture
     from .user_reply import SIGN_IN_QUESTION, plain_clarify_or_sign_in
 
+    # A stuck tab can land on login while the session is still valid.
+    # Ask the user to sign in only when a fresh page does too.
+    posture = sign_out_posture(content)
+    if posture == "suppress":
+        return ""
+    if posture == "post" and JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
+        recordings = recordings or RecordingManager(db_path)
+        recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+        return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
     sign_in = plain_clarify_or_sign_in(content)
     if sign_in == SIGN_IN_QUESTION and JobStatus(job["status"]) in {
         JobStatus.PENDING,
@@ -3196,10 +3220,16 @@ def _guard_chat_response_impl(
             # The gateway's interrupt line is not the answer. Leave the job open.
             return ""
         # A clarify or a sign-in ask parks the job. It is not the lookup answer.
+        # A fresh-page probe that is still authenticated already returned above.
         if outbound_is_clarify(content) or _SIGN_IN.search(str(content or "")):
+            if sign_out_posture(content) == "suppress":
+                return ""
             return content
         if job_is_client_policy_lookup(job):
             state = named_lookup_read_state(store, job)
+            if state == "probe_ok":
+                # The stuck tab hit login. The session is still good.
+                return ""
             held = str(
                 (store.get_checkpoint(job_id, "client_name_search") or {}).get(
                     "user_line"

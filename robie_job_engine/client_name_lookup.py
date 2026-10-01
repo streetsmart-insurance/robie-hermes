@@ -324,6 +324,261 @@ def _is_auth_url(url: object) -> bool:
     return any(marker in path for marker in _AUTH_MARKERS)
 
 
+_PROBE_OVERRIDE: Callable[[], str] | None = None
+_LAST_PROBE_URL = ""
+AUTHENTICATED_PROBE_URL = "https://app.ezlynx.com/web/"
+_SIGN_OUT_CLAIM = re.compile(
+    r"signed\s+out|sign[\s-]?out|sign[\s-]?in|log[\s-]?in|/auth/account/login",
+    re.IGNORECASE,
+)
+
+
+def set_session_probe(probe: Callable[[], str] | None) -> None:
+    """Tests pin the fresh-page probe. None uses the last live probe."""
+    global _PROBE_OVERRIDE
+    _PROBE_OVERRIDE = probe
+
+
+def note_session_probe(url: str) -> None:
+    global _LAST_PROBE_URL
+    _LAST_PROBE_URL = str(url or "").strip()
+
+
+def session_probe_url() -> str:
+    if _PROBE_OVERRIDE is not None:
+        try:
+            return str(_PROBE_OVERRIDE() or "").strip()
+        except Exception:
+            return ""
+    return _LAST_PROBE_URL
+
+
+def text_claims_sign_out(text: str) -> bool:
+    return _SIGN_OUT_CLAIM.search(str(text or "")) is not None
+
+
+def sign_out_posture(text: str) -> str:
+    """How to treat a sign-out claim after a fresh-page probe.
+
+    ``ignore`` — no probe yet; the existing sign-in path decides.
+    ``suppress`` — the fresh page is still authenticated. Do not ask
+    the user to sign in. The lookup continues.
+    ``post`` — the fresh probe also landed on login. One plain line.
+    """
+    if not text_claims_sign_out(text):
+        return "ignore"
+    probe = session_probe_url()
+    if not probe:
+        return "ignore"
+    if _is_auth_url(probe):
+        return "post"
+    return "suppress"
+
+
+def _body_text(page: Any) -> str:
+    locator = getattr(page, "locator", None)
+    if not callable(locator):
+        return str(getattr(page, "body_text", "") or "")
+    try:
+        body = locator("body")
+    except Exception:
+        return ""
+    inner = getattr(body, "inner_text", None)
+    if not callable(inner):
+        return ""
+    try:
+        return str(inner() or "")
+    except TypeError:
+        try:
+            return str(inner(timeout=1000) or "")
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _page_html(page: Any) -> str:
+    content = getattr(page, "content", None)
+    if callable(content):
+        try:
+            return str(content() or "")
+        except Exception:
+            return ""
+    return str(getattr(page, "html", "") or "")
+
+
+def angular_shell_is_blank(page: Any) -> bool:
+    """True for an empty ``<app-root></app-root>`` with no body text."""
+    if _body_text(page).strip():
+        return False
+    folded = _page_html(page).casefold()
+    return "<app-root" in folded and "</app-root>" in folded
+
+
+def wait_for_angular_content(page: Any, *, seconds: float = 8.0) -> bool:
+    """Wait until the Angular shell has real text. A fake page is one shot."""
+    waiter = getattr(page, "wait_for_function", None)
+    if callable(waiter):
+        try:
+            waiter(
+                """() => {
+                  const text = (document.body && document.body.innerText || '').trim();
+                  return text.length > 0;
+                }""",
+                timeout=max(1, int(seconds * 1000)),
+            )
+        except Exception:
+            pass
+    return bool(_body_text(page).strip()) and not angular_shell_is_blank(page)
+
+
+def close_extra_ezlynx_pages(context: Any, keep: Any) -> None:
+    """Leave one EZLynx tab. Other EZLynx pages opened for the probe are closed."""
+    pages = list(getattr(context, "pages", []) or [])
+    for item in pages:
+        if item is keep:
+            continue
+        url = _page_url(item).casefold()
+        if url and "ezlynx.com" not in url:
+            continue
+        closer = getattr(item, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                continue
+
+
+def account_activity_url(applicant_id: str) -> str:
+    ident = str(applicant_id or "").strip()
+    return f"https://app.ezlynx.com/web/account/{ident}/activity"
+
+
+def open_bound_account_in_fresh_page(context: Any, applicant_id: str) -> dict[str, Any]:
+    """Open the bound account on a new tab and wait for Angular content.
+
+    A blank ``<app-root>`` is not a sign-out. A root redirect to login is
+    not a sign-out either, unless a fresh page of a known authenticated
+    route also lands on login. Extra pages are closed.
+    """
+    if context is None or not str(applicant_id or "").strip():
+        return {"opened": False, "signed_out": False, "probe_url": ""}
+    url = account_activity_url(applicant_id)
+    fresh = context.new_page()
+    goto = getattr(fresh, "goto", None)
+    if callable(goto):
+        goto(url)
+    if not wait_for_angular_content(fresh):
+        another = context.new_page()
+        again = getattr(another, "goto", None)
+        if callable(again):
+            again(url)
+        wait_for_angular_content(another)
+        closer = getattr(fresh, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+        fresh = another
+    probe = context.new_page()
+    probe_goto = getattr(probe, "goto", None)
+    if callable(probe_goto):
+        probe_goto(AUTHENTICATED_PROBE_URL)
+    probe_url = _page_url(probe)
+    note_session_probe(probe_url)
+    signed_out = _is_auth_url(probe_url)
+    probe_close = getattr(probe, "close", None)
+    if callable(probe_close):
+        try:
+            probe_close()
+        except Exception:
+            pass
+    close_extra_ezlynx_pages(context, fresh)
+    return {
+        "opened": True,
+        "signed_out": signed_out,
+        "probe_url": probe_url,
+        "url": _page_url(fresh),
+        "page": fresh,
+    }
+
+
+def assess_session_after_stuck_tab(
+    page: Any,
+    context: Any,
+    *,
+    account_url: str = "",
+) -> dict[str, Any]:
+    """A blank shell or a login landing is checked on a fresh page.
+
+    The fresh page is a known authenticated route: the bound account when
+    we have one, otherwise ``/web/``. Sign-out is reported only when that
+    page is also the login page. The extra page is closed. One EZLynx tab
+    stays.
+    """
+    if context is None:
+        url = _page_url(page)
+        return {
+            "signed_out": _is_auth_url(url),
+            "probe_url": url,
+            "page": page,
+        }
+    target = str(account_url or "").strip() or AUTHENTICATED_PROBE_URL
+    fresh = context.new_page()
+    goto = getattr(fresh, "goto", None)
+    if callable(goto):
+        goto(target)
+    wait_for_angular_content(fresh)
+    probe_url = _page_url(fresh)
+    note_session_probe(probe_url)
+    signed_out = _is_auth_url(probe_url)
+    if signed_out:
+        closer = getattr(fresh, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+        return {"signed_out": True, "probe_url": probe_url, "page": page}
+    close_extra_ezlynx_pages(context, fresh)
+    return {"signed_out": False, "probe_url": probe_url, "page": fresh}
+
+
+def install_stuck_tab_recovery(scope: dict[str, Any]) -> None:
+    """Wrap ``page.goto`` so a stuck account tab is replaced from the same context."""
+    page = scope.get("page")
+    context = scope.get("context")
+    if page is None or context is None:
+        return
+    original = getattr(page, "goto", None)
+    if not callable(original) or getattr(original, "_robie_stuck_tab", False):
+        return
+
+    def goto(url: str, *args: Any, **kwargs: Any) -> Any:
+        response = original(url, *args, **kwargs)
+        current = scope.get("page") or page
+        blank = angular_shell_is_blank(current)
+        login = _is_auth_url(_page_url(current))
+        if not blank and not login:
+            return response
+        account = ""
+        raw = str(url or "")
+        match = re.search(r"/web/account/(\d{6,})", raw, re.IGNORECASE)
+        if match:
+            account = account_activity_url(match.group(1))
+        result = assess_session_after_stuck_tab(
+            current, context, account_url=account
+        )
+        replacement = result.get("page")
+        if replacement is not None and not result.get("signed_out"):
+            scope["page"] = replacement
+        return response
+
+    goto._robie_stuck_tab = True  # type: ignore[attr-defined]
+    page.goto = goto
+
+
 def _page_url(page: Any) -> str:
     value = getattr(page, "url", "")
     if callable(value):
@@ -707,7 +962,16 @@ def _search_open_page(name: str) -> dict[str, Any]:
         return {"status": "error", "matches": []}
     page, playwright = opened
     try:
-        return read_applicant_search(page, name)
+        outcome = read_applicant_search(page, name)
+        matches = [row for row in (outcome.get("matches") or []) if isinstance(row, dict)]
+        if str(outcome.get("status") or "") == "ok" and len(matches) == 1:
+            context = getattr(page, "context", None)
+            applicant = str(matches[0].get("applicant_id") or "").strip()
+            if context is not None and applicant:
+                outcome["account_tab"] = open_bound_account_in_fresh_page(
+                    context, applicant
+                )
+        return outcome
     except Exception:
         _log_unreadable(page, name, "search failed")
         return {"status": "error", "matches": []}
@@ -1281,5 +1545,10 @@ def named_lookup_read_state(store: Any, job: dict[str, Any] | None) -> str:
             if applicant and applicant in trusted:
                 return "read"
     if saw_sign_in:
+        probe = session_probe_url()
+        # A login URL on the stuck tab is not a sign-out when a fresh page
+        # in the same context is still authenticated.
+        if probe and not _is_auth_url(probe):
+            return "probe_ok"
         return "sign_in"
     return "none"

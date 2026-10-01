@@ -520,6 +520,11 @@ try:
             "PLAYWRIGHT_BLOCKED: unique-write guard did not install"
         )
     try:
+        from robie_job_engine.client_name_lookup import install_stuck_tab_recovery
+        install_stuck_tab_recovery(scope)
+    except Exception:
+        pass
+    try:
         from robie_job_engine.gemini_field_helper import ask_gemini_unique_field
         scope["ask_gemini_unique_field"] = ask_gemini_unique_field
     except Exception:

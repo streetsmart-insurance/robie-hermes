@@ -1023,14 +1023,48 @@ _TOOL_PROGRESS_LINE = re.compile(
 )
 
 
+def _line_is_tool_trace(line: str) -> bool:
+    return _TOOL_PROGRESS_LINE.match(line.strip()) is not None
+
+
+def _line_is_heartbeat(line: str) -> bool:
+    """One Working… / thinking / iteration line. Not a sentence that mentions work."""
+    body = line.strip()
+    if not body or len(body) > 240:
+        return False
+    if _HEARTBEAT_LINE.search(body):
+        return True
+    stripped = re.sub(
+        r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+",
+        "",
+        body,
+    ).strip()
+    folded = stripped.casefold().rstrip(".… ")
+    return folded in _STATUS_ONLY
+
+
 def is_tool_progress_text(text: str) -> bool:
-    """True for a raw tool-progress bubble. It is not a reply to the person."""
+    """True for a raw tool-progress bubble. It is not a reply to the person.
+
+    A run of these lines is still progress when there are more than a handful.
+    Job 598820fc stored seven ``🎭 playwright_exec`` lines and that count used
+    to fall through as an answer.
+    """
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
-    if not lines or len(lines) > 6:
+    if not lines:
         return False
-    if sum(len(line) for line in lines) > 800:
+    return all(_line_is_tool_trace(line) for line in lines)
+
+
+def content_is_only_progress(text: str) -> bool:
+    """True when every line is a tool trace or a Working… heartbeat.
+
+    That text is never an answer and never finalizes a job by itself.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
         return False
-    return all(_TOOL_PROGRESS_LINE.match(line) for line in lines)
+    return all(_line_is_tool_trace(line) or _line_is_heartbeat(line) for line in lines)
 
 
 _HEARTBEAT_LINE = re.compile(
@@ -1056,7 +1090,11 @@ def is_progress_heartbeat_or_thinking(text: str) -> bool:
     ``⏳ Working — 6 min — iteration 21/500, clarify`` is the gateway
     talking to itself. It must not be stored as the reply or close the job.
     """
-    if is_tool_progress_text(text) or is_gateway_status_notice(text):
+    if (
+        is_tool_progress_text(text)
+        or content_is_only_progress(text)
+        or is_gateway_status_notice(text)
+    ):
         return True
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
     if not lines or len(lines) > 3:
@@ -1085,10 +1123,11 @@ def is_refused_tool_text(text: str) -> bool:
     if not body or len(body) > 2500:
         return False
     folded = body.casefold()
-    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
-    # Only the tool-refusal text handed back mid-turn is skipped here.
-    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
-        return False
+    # These are tool results handed back mid-turn, including when the tool
+    # prefixes them with PLAYWRIGHT_BLOCKED. Job 598820fc closed COMPLETE on
+    # "do not guess an EZLynx search URL" while the agent was still calling tools.
+    if "do not guess an ezlynx search url" in folded:
+        return True
     if "do not drive ezlynx screens by hand" in folded:
         return True
     if "playwright_exec is refused" in folded:
@@ -1099,6 +1138,10 @@ def is_refused_tool_text(text: str) -> bool:
         return True
     if "this action was refused before it started" in folded:
         return True
+    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
+    # Only the tool-refusal text handed back mid-turn is skipped here.
+    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
+        return False
     return False
 
 

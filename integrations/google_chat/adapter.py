@@ -1598,6 +1598,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if item.get("job_id")
             }
             JobStore(ROBIE_JOB_DB).fail_gateway_restart_orphans(exclude=active)
+            from robie_job_engine.chat_reply_outbox import ChatReplyOutbox
+
+            # A restart leaves in-flight sends in 'sending'. Requeue the ones
+            # Chat has not acknowledged. Do not post a row twice.
+            ChatReplyOutbox(ROBIE_JOB_DB).recover_orphaned_sending()
 
         try:
             await asyncio.to_thread(_fail)

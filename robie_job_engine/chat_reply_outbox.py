@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 from typing import Any
+
+logger = logging.getLogger("robie.chat_reply_outbox")
 
 from .idempotency import assert_durable_path
 from .store import JobStore, canonical_json, utc_now
@@ -86,6 +89,55 @@ class ChatReplyOutbox:
         result = dict(row)
         result["bodies"] = json.loads(result.pop("bodies_json"))
         return result
+
+    def recover_orphaned_sending(self) -> list[dict[str, str]]:
+        """Startup recovery for rows left in ``sending`` by a dead process.
+
+        A gateway restart orphans every in-flight lease, even one that has
+        not expired yet. A row that already has ``message_name`` reached
+        Chat and is marked delivered. A row with no ``message_name`` is
+        put back to ``pending`` once, and the same request id is used so a
+        send that actually landed is not posted twice.
+        """
+        now = time.time()
+        outcomes: list[dict[str, str]] = []
+        with self.store.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id, message_name, lease_until FROM chat_reply_outbox
+                   WHERE state='sending' ORDER BY created_at, id"""
+            ).fetchall()
+            for row in rows:
+                reply_id = str(row["id"])
+                message_name = str(row["message_name"] or "").strip()
+                if message_name:
+                    conn.execute(
+                        """UPDATE chat_reply_outbox
+                           SET state='delivered', lease_token=NULL, lease_until=0
+                           WHERE id=? AND state='sending'""",
+                        (reply_id,),
+                    )
+                    action = "marked_delivered"
+                    logger.info(
+                        "chat outbox startup id=%s action=%s message_name=%s",
+                        reply_id,
+                        action,
+                        message_name,
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE chat_reply_outbox
+                           SET state='pending', next_at=?, lease_token=NULL, lease_until=0
+                           WHERE id=? AND state='sending' AND message_name IS NULL""",
+                        (now, reply_id),
+                    )
+                    action = "requeued"
+                    logger.info(
+                        "chat outbox startup id=%s action=%s",
+                        reply_id,
+                        action,
+                    )
+                outcomes.append({"id": reply_id, "action": action})
+        return outcomes
 
     def due(self, *, job_id: str | None = None, limit: int = 10) -> list[str]:
         now = time.time()
