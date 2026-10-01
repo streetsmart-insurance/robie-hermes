@@ -58,6 +58,8 @@ class SopHit:
     freshness_note: str = ""
     match_score: int = 0
     content_fingerprint: str = ""
+    version_group: str = ""
+    version_review_required: bool = False
 
     @property
     def citation(self) -> str:
@@ -301,7 +303,7 @@ def _months_before(moment: datetime, months: int) -> datetime:
             day -= 1
 
 
-def collect_documents(drive: DrivePort) -> list[dict[str, Any]]:
+def collect_documents(drive: DrivePort, *, include_versions: bool = False) -> list[dict[str, Any]]:
     """List configured folders, drop excludes, and drop duplicate copies."""
     collected: list[dict[str, Any]] = []
     for label, folder_id in sop_folders():
@@ -312,7 +314,7 @@ def collect_documents(drive: DrivePort) -> list[dict[str, Any]]:
             if is_excluded_drive_file(row, folder_label=label):
                 continue
             collected.append(row)
-    return dedupe_documents(collected)
+    return collected if include_versions else dedupe_documents(collected)
 
 
 def ingest_sops(drive: DrivePort, index_path: str | None = None) -> dict[str, Any]:
@@ -321,7 +323,7 @@ def ingest_sops(drive: DrivePort, index_path: str | None = None) -> dict[str, An
     if not path:
         raise RuntimeError("ROBIE_PLAYGROUND_SOP_INDEX is not set")
     docs = []
-    for meta in collect_documents(drive):
+    for meta in collect_documents(drive, include_versions=True):
         file_id = str(meta.get("id") or "").strip()
         if not file_id:
             continue
@@ -342,6 +344,7 @@ def ingest_sops(drive: DrivePort, index_path: str | None = None) -> dict[str, An
                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }
         )
+    docs = _review_version_groups(docs)
     payload = {"schema_version": 1, "imported_at": datetime.now(timezone.utc).isoformat(),
                "documents": docs}
     target = Path(path).expanduser()
@@ -416,7 +419,7 @@ def retrieve_sop(
         title = str(doc.get("title") or "Procedure")
         haystack = f"{title}\n{text}".casefold()
         score = sum(1 for word in words if word in haystack)
-        if score <= 0:
+        if score <= 0 and not (include_ties and doc.get("version_review_required") is True):
             continue
         excerpt = _excerpt(text, words) or title
         modified = str(doc.get("modified") or doc.get("modifiedTime") or "")
@@ -432,11 +435,18 @@ def retrieve_sop(
                     freshness_note=guide_freshness_note(modified, now=now),
                     match_score=score,
                     content_fingerprint=_content_fingerprint(text),
+                    version_group=str(doc.get("version_group") or ""),
+                    version_review_required=doc.get("version_review_required") is True,
                 ),
             )
         )
     scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored or scored[0][0] <= 0:
+        return []
     selected = scored[: max(1, limit)]
+    if include_ties and selected and selected[0][1].version_review_required:
+        group = selected[0][1].version_group
+        return [hit for _, hit in scored if hit.version_group == group]
     if include_ties and selected:
         cutoff = selected[-1][0]
         selected = [item for item in scored if item[0] >= cutoff]
@@ -533,10 +543,6 @@ def _excerpt(text: str, words: list[str]) -> str:
     return ""
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def _content_fingerprint(text: str) -> str:
     """Compare complete normalized bodies, not only visible excerpts."""
     normalized = " ".join(text.casefold().split())
@@ -552,7 +558,36 @@ def ambiguous_sop_hits(hits: list[SopHit]) -> bool:
     """
     if len(hits) < 2:
         return False
+    if hits[0].version_review_required:
+        return True
     tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
     identities = {hit.content_fingerprint or _content_fingerprint(hit.excerpt)
                   for hit in tied}
     return len(identities) > 1
+
+
+def _review_version_groups(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Latest modified wins for equivalent bodies; distinct copies need review.
+
+    Different bodies are a conservative review signal, not semantic analysis.
+    Timestamp selects the displayed candidate, never policy authority.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for doc in docs:
+        key = _normalize_sop_title(str(doc.get("title") or "")) or str(doc["doc_id"])
+        groups.setdefault(key, []).append(doc)
+    result = []
+    for key, members in groups.items():
+        ranked = sorted(members, key=lambda doc: _dedupe_rank(
+            {"name": doc["title"], "modified": doc["modified"]}, 0), reverse=True)
+        bodies = {_content_fingerprint(doc["text"]) for doc in ranked}
+        if len(bodies) == 1:
+            result.append(ranked[0])
+        else:
+            for doc in ranked:
+                result.append({**doc, "version_group": key, "version_review_required": True})
+    return result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
