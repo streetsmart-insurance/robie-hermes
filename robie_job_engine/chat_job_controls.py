@@ -98,6 +98,10 @@ def plain_missing_field_question(text: str) -> str:
     field = " ".join(match.group(1).split()).strip(" .:")
     if not field:
         field = "details"
+    if re.match(r"(?i)^(which|what|who|where|when|how)\b", field) or field.endswith("?"):
+        asked = field[0].upper() + field[1:].rstrip("?")
+        asked = asked.rstrip()
+        return asked + "?"
     question = f"I need the {field} before I can do that."
     replaced = _MISSING_FIELD.sub(question, raw)
     return " ".join(replaced.split()).strip()
@@ -779,10 +783,19 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
     # The validator is talking to the model. The job stays open so it can re-plan.
     if is_plan_refusal_text(text):
         return False
-    from .chat_turn_control import is_refused_tool_text, is_tool_progress_text
+    from .chat_turn_control import (
+        is_progress_heartbeat_or_thinking,
+        is_refused_tool_text,
+        is_tool_progress_text,
+    )
 
     # A refused tool call is the model's to continue. It does not end the turn.
-    if is_tool_progress_text(text) or is_refused_tool_text(text):
+    # A heartbeat or thinking line is not the reply either.
+    if (
+        is_tool_progress_text(text)
+        or is_progress_heartbeat_or_thinking(text)
+        or is_refused_tool_text(text)
+    ):
         return False
     from .turn_finalization import model_text_is_not_final
 
@@ -825,7 +838,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
 
             if close_confirmed_note_job(store, job_id):
                 stop_recordings_for_jobs(db_path, [job_id], JobStatus.COMPLETE.value)
-                _stop_model_for_finished_turn(job_id)
+                _stop_model_for_finished_turn(job_id, db_path)
                 return True
         except Exception:
             pass
@@ -850,7 +863,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
                     JobStatus.UNVERIFIED,
                     JobStatus.CANCELLED,
                 }:
-                    _stop_model_for_finished_turn(job_id)
+                    _stop_model_for_finished_turn(job_id, db_path)
                 return True
             return False
         store.transition(
@@ -861,7 +874,7 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
             release_lease=True,
         )
         stop_recordings_for_jobs(db_path, [job_id], JobStatus.UNVERIFIED.value)
-        _stop_model_for_finished_turn(job_id)
+        _stop_model_for_finished_turn(job_id, db_path)
         return True
     if status in {JobStatus.NEEDS_CLARIFICATION, JobStatus.AWAITING_HUMAN_INPUT}:
         # Parked is not /stop. The person's answer has to be delivered.
@@ -874,16 +887,16 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         JobStatus.CANCELLED,
     }:
         stop_recordings_for_jobs(db_path, [job_id], status.value)
-        _stop_model_for_finished_turn(job_id)
+        _stop_model_for_finished_turn(job_id, db_path)
         return True
     return False
 
 
-def _stop_model_for_finished_turn(job_id: str) -> None:
-    """The turn is over. The model must not keep calling tools."""
+def _stop_model_for_finished_turn(job_id: str, db_path: str = "") -> None:
+    """The reply is out. Stop the agent and drop the session lock."""
     try:
-        from .chat_turn_control import request_agent_stop
+        from .chat_turn_control import release_finished_job_session
 
-        request_agent_stop(job_id)
+        release_finished_job_session(db_path, job_id, stop_agent=True)
     except Exception:
         return

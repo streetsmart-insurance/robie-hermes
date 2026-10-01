@@ -2527,6 +2527,50 @@ _RECORDING_KEEP_OPEN = {
 }
 
 
+def job_recorded_a_write(store: Any, job_id: str) -> bool:
+    """True when this job filed a note or uploaded a document."""
+    from .answer_only import action_claims_mutation
+    from .chat_job_controls import note_job_already_wrote
+
+    if note_job_already_wrote(store, job_id):
+        return True
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        note = {}
+    if str(note.get("status") or "") in {"filed", "sent", "posted, verifying"}:
+        return True
+    try:
+        action = store.get_checkpoint(job_id, "action") or {}
+    except Exception:
+        action = {}
+    if action_claims_mutation(action if isinstance(action, dict) else {}):
+        return True
+    for kind in ("document", "document_upload", "applicant_document"):
+        try:
+            row = store.get_checkpoint(job_id, kind) or {}
+        except Exception:
+            row = {}
+        if str((row or {}).get("document_id") or "").strip():
+            return True
+    return False
+
+
+def _release_session_if_terminal(db_path: str, job_id: str | None) -> None:
+    """A finished job does not keep renewing its session lock."""
+    if not db_path or not job_id:
+        return
+    try:
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return
+    if JobStatus(job["status"]) not in TERMINAL_STATUSES:
+        return
+    from .chat_turn_control import release_finished_job_session
+
+    release_finished_job_session(db_path, job_id, stop_agent=False)
+
+
 def _release_chat_recording(
     db_path: str,
     job_id: str | None,
@@ -2892,6 +2936,7 @@ def guard_chat_response(
         return scrub_user_reply(body)
     finally:
         _release_chat_recording(db_path, job_id, recordings)
+        _release_session_if_terminal(db_path, job_id)
 
 
 def _guard_chat_response_impl(
@@ -2908,12 +2953,28 @@ def _guard_chat_response_impl(
     from .hitl import sanitize_hitl_chat_text
 
     content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
-    from .chat_turn_control import is_refused_tool_text, is_tool_progress_text
+    from .chat_turn_control import (
+        is_gateway_status_notice,
+        is_progress_heartbeat_or_thinking,
+        is_refused_tool_text,
+        is_tool_progress_text,
+    )
 
     # A refused tool call and a raw progress line go back to the model.
     # They are not the reply, not a write, and they do not end the job.
     if is_tool_progress_text(content) or is_refused_tool_text(content):
         return ""
+    if is_gateway_status_notice(content):
+        return ""
+    # A heartbeat or thinking line is not the reply. Leave the job as it is.
+    if is_progress_heartbeat_or_thinking(content):
+        if not job_id:
+            return ""
+        return (
+            f"ROBIE Job {job_id} — RUNNING\n\n"
+            "ROBIE accepted the request and is still working. "
+            "Completion has not been claimed."
+        )
     from .turn_finalization import model_text_is_not_final
 
     # Plan text that shares the assistant message with a tool call is not
@@ -3054,12 +3115,19 @@ def _guard_chat_response_impl(
     from .answer_only import is_answer_only_job
     from .email_guard import _strip_internal_reasoning
 
-    if is_answer_only_job(job):
+    # A read-only lookup has nothing to re-read. A note or document write
+    # still goes through the destination check below.
+    if is_answer_only_job(job) and not job_recorded_a_write(store, job_id):
+        from .chat_job_controls import outbound_is_clarify
         from .chat_turn_control import is_gateway_status_notice
+        from .user_reply import _SIGN_IN
 
         if is_gateway_status_notice(content):
             # The gateway's interrupt line is not the answer. Leave the job open.
             return ""
+        # A clarify or a sign-in ask parks the job. It is not the lookup answer.
+        if outbound_is_clarify(content) or _SIGN_IN.search(str(content or "")):
+            return content
         content = _strip_internal_reasoning(content) or content
         store.checkpoint(
             job_id, "worker_response", sanitize_worker_response(store, job_id, content)

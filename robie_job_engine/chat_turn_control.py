@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -490,6 +491,110 @@ def job_is_waiting_on_user(job: dict | None) -> bool:
     return str(job.get("status") or "") in _WAITING_ON_USER
 
 
+_CHAT_ADAPTERS: weakref.WeakSet = weakref.WeakSet()
+
+
+def register_chat_adapter(adapter: Any) -> None:
+    """Remember the live Chat adapter so a finished job can drop its lock."""
+    if adapter is not None:
+        _CHAT_ADAPTERS.add(adapter)
+
+
+def release_finished_job_session(
+    db_path: str,
+    job_id: str | None,
+    *,
+    stop_agent: bool,
+) -> None:
+    """Stop the heartbeat and drop the session lock for a terminal job.
+
+    ``stop_agent`` is for the moment after the reply is already posted.
+    Cancelling the turn before that post drops the answer.
+    """
+    if not job_id:
+        return
+    if stop_agent:
+        request_agent_stop(job_id)
+    if db_path:
+        try:
+            from .chat_guard import stop_generic_chat_job_heartbeat
+
+            stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
+        except Exception:
+            pass
+    for adapter in list(_CHAT_ADAPTERS):
+        _release_adapter_job(adapter, str(job_id), cancel_turn=stop_agent)
+
+
+def _release_adapter_job(adapter: Any, job_id: str, *, cancel_turn: bool) -> None:
+    turns = getattr(adapter, "_gateway_turns", None)
+    chat_ids: list[str] = []
+    threads: list[str] = []
+    if isinstance(turns, dict):
+        for key, record in list(turns.items()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("job_id") or "") != job_id:
+                continue
+            if isinstance(key, tuple) and key:
+                chat_ids.append(str(key[0]))
+                if len(key) > 1 and key[1]:
+                    threads.append(str(key[1]))
+            if cancel_turn:
+                _cancel_turn_task(record.get("task"))
+                _cancel_turn_task(record.get("watchdog"))
+            turns.pop(key, None)
+    active = getattr(adapter, "_active_chat_job", None)
+    if isinstance(active, dict):
+        for chat_id, owner in list(active.items()):
+            if str(owner) == job_id and str(chat_id) not in chat_ids:
+                chat_ids.append(str(chat_id))
+    keys: list[str] = []
+    for chat_id in chat_ids:
+        for key in _iter_live_session_keys(adapter):
+            matched = _key_matches_chat(key, chat_id, "") or any(
+                _key_matches_chat(key, chat_id, thread) for thread in threads
+            )
+            if matched and key not in keys:
+                keys.append(key)
+    if keys:
+        _release_session_leases(adapter, keys)
+        if cancel_turn:
+            agent = None
+            for key in keys:
+                agent = _running_agent_for_key(adapter, key)
+                if agent is not None:
+                    break
+            _unblock_parked_waits(adapter, agent, keys)
+    for chat_id in chat_ids:
+        release_chat_lock(adapter, chat_id, job_id)
+
+
+def _cancel_turn_task(task: Any) -> None:
+    if task is None:
+        return
+    done = getattr(task, "done", None)
+    if callable(done):
+        try:
+            if done():
+                return
+        except Exception:
+            return
+    cancel = getattr(task, "cancel", None)
+    if not callable(cancel):
+        return
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if current is not None and task is current:
+        return
+    try:
+        cancel()
+    except Exception:
+        return
+
+
 def release_chat_lock(adapter: Any, chat_id: str, job_id: str | None) -> None:
     """Drop the in-memory chat hold as soon as the reply is out.
 
@@ -926,6 +1031,48 @@ def is_tool_progress_text(text: str) -> bool:
     if sum(len(line) for line in lines) > 800:
         return False
     return all(_TOOL_PROGRESS_LINE.match(line) for line in lines)
+
+
+_HEARTBEAT_LINE = re.compile(
+    r"\b(?:"
+    r"iteration\s+\d+\s*/\s*\d+"
+    r"|(?:working|thinking)\s*[—–\-]\s*\d+"
+    r")",
+    re.IGNORECASE,
+)
+_STATUS_ONLY = frozenset(
+    {
+        "working",
+        "still working",
+        "thinking",
+        "still thinking",
+    }
+)
+
+
+def is_progress_heartbeat_or_thinking(text: str) -> bool:
+    """True for a progress, heartbeat, or thinking line. Never a final answer.
+
+    ``⏳ Working — 6 min — iteration 21/500, clarify`` is the gateway
+    talking to itself. It must not be stored as the reply or close the job.
+    """
+    if is_tool_progress_text(text) or is_gateway_status_notice(text):
+        return True
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or len(lines) > 3:
+        return False
+    body = " ".join(lines)
+    if len(body) > 240:
+        return False
+    if _HEARTBEAT_LINE.search(body):
+        return True
+    stripped = re.sub(
+        r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+",
+        "",
+        body,
+    ).strip()
+    folded = stripped.casefold().rstrip(".… ")
+    return folded in _STATUS_ONLY
 
 
 def is_refused_tool_text(text: str) -> bool:

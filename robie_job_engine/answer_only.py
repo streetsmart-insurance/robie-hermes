@@ -509,12 +509,25 @@ def mark_answered_question(store: Any, job_id: str, answer: str) -> dict[str, An
     return store.get_job(job_id)
 
 
+def action_claims_mutation(action: dict[str, Any] | None) -> bool:
+    """True when this checkpoint is a note or document write, not a search."""
+    dest = dict((action or {}).get("destination") or {})
+    if str(dest.get("note_text") or "").strip():
+        return True
+    docs = dest.get("document_names") or []
+    return bool(docs)
+
+
 def is_answer_only_job(job: dict[str, Any] | None) -> bool:
     payload = dict((job or {}).get("payload") or {})
-    if payload.get("answer_only"):
-        return True
     if str((job or {}).get("action_type") or "").startswith("ezlynx."):
         return False
+    if payload.get("answer_only"):
+        return True
+    from .client_name_lookup import job_is_named_lookup
+
+    if job_is_named_lookup(job):
+        return True
     text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
     return is_informational_ask(str(text))
 
@@ -537,7 +550,7 @@ class SkipDestinationReadback(_outcome_verifier_type()):
         self.reader = getattr(inner, "reader", inner)
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> Any:
-        if is_answer_only_job(job):
+        if is_answer_only_job(job) and not action_claims_mutation(action):
             from .models import VerificationEvidence, VerificationResult
 
             return VerificationResult(

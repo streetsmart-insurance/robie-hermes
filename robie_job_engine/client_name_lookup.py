@@ -24,13 +24,39 @@ _NAME = re.compile(
 )
 
 
+_SEARCH_BOX = re.compile(
+    r"applicantsearch"
+    r"|(?:^|[#.\[\]\s\"'(=])search(?:$|[^a-z0-9])"
+    r"|searchbox",
+    re.IGNORECASE,
+)
+
+
 def is_readonly_client_search(method_name: str, selector: object) -> bool:
-    """True for the global applicant search box, not a form field."""
+    """True for an applicant search box on any page, not a form field.
+
+    The dashboard is not a client account page. Typing a name into its
+    search box is still a read.
+    """
     method = str(method_name or "").strip().casefold()
     if method not in {"fill", "type", "press_sequentially", "click"}:
         return False
-    text = str(selector or "").strip().casefold().replace(" ", "")
-    return "applicantsearch" in text
+    text = " ".join(str(selector or "").split())
+    if not text:
+        return False
+    compact = text.casefold().replace(" ", "")
+    if "applicantsearch" in compact:
+        return True
+    return _SEARCH_BOX.search(text) is not None
+
+
+def job_is_named_lookup(job: dict[str, Any] | None) -> bool:
+    """True when the original ask is a policy-fact lookup by client name."""
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("request_text", "text", "prompt", "original_text"):
+        if client_name_from_lookup(str(payload.get(key) or "")):
+            return True
+    return False
 
 
 def client_name_from_lookup(text: str) -> str | None:

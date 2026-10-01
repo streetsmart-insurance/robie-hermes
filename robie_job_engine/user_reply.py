@@ -13,9 +13,17 @@ logger = logging.getLogger("robie.health")
 
 STUCK_LINE = "I got stuck on that; a CSR should take a look."
 _INTERNAL_CODE = re.compile(
-    r"\b(?:ROBIE_[A-Z0-9_]+|PLAYWRIGHT_[A-Z0-9_]+|EZLYNX_[A-Z0-9_]*REFUSED)\b",
+    r"\b(?:ROBIE_[A-Z0-9_]+|PLAYWRIGHT_[A-Z0-9_]+|EZLYNX_[A-Z0-9_]*REFUSED"
+    r"|MISSING_REQUIRED_FIELD)\b",
     re.IGNORECASE,
 )
+_SIGN_IN = re.compile(r"\b(?:sign[\s-]?in|log[\s-]?in)\b", re.IGNORECASE)
+_ASKS = re.compile(r"^(?:which|what|who|where|when|how)\b", re.IGNORECASE)
+_MISSING_FIELD = re.compile(
+    r"MISSING_REQUIRED_FIELD\s*:\s*([^\n]+)",
+    re.IGNORECASE,
+)
+SIGN_IN_QUESTION = "Please sign in to EZLynx, then tell me to continue?"
 _SELECTOR = re.compile(
     r"(?:input#[A-Za-z_][\w-]*|#[A-Za-z_][\w-]*|>>|xpath=|css=|get_by_\w+)",
     re.IGNORECASE,
@@ -61,6 +69,9 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
     """
     from .answer_only import scrub_user_reply
 
+    asked = plain_clarify_or_sign_in(text)
+    if asked:
+        return asked
     raw = _strip_markers(scrub_user_reply(text).replace("\r\n", "\n"))
     if not raw or not collapse:
         return _release_internal(text, raw)
@@ -84,6 +95,35 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
         trimmed = chosen[:397].rsplit(" ", 1)[0].rstrip(".,;:")
         chosen = trimmed + "."
     return _release_internal(text, chosen)
+
+
+def plain_clarify_or_sign_in(text: str) -> str | None:
+    """One plain question when a clarify or sign-in ask still carries codes.
+
+    A clean sentence is left alone. A field marker that is already a
+    question ("which of the 62 Renewal discussions") stays that question.
+    """
+    raw = str(text or "")
+    if not _has_internal_detail(raw):
+        return None
+    logger.info(
+        "outbound reply held internal detail: %s",
+        " ".join(raw.split())[:2000],
+    )
+    if _SIGN_IN.search(raw):
+        return SIGN_IN_QUESTION
+    match = _MISSING_FIELD.search(raw)
+    if not match:
+        return None
+    field = _INTERNAL_CODE.sub("", match.group(1))
+    field = " ".join(field.split()).strip(" .:")
+    if not field or _has_internal_detail(field):
+        return None
+    if _ASKS.match(field) or field.endswith("?"):
+        asked = field[0].upper() + field[1:]
+        asked = asked.rstrip("?").rstrip()
+        return asked + "?"
+    return None
 
 
 def _has_internal_detail(text: str) -> bool:

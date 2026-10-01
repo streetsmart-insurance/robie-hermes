@@ -530,8 +530,18 @@ def _required_str(mapping: Dict[str, Any], key: str, context: str) -> str:
     return value
 
 
+def _plain_card_text(text: str) -> str:
+    """A clarify card shows one plain question. Codes stay in the health log."""
+    from robie_job_engine.user_reply import _has_internal_detail, format_user_reply
+
+    raw = str(text or "")
+    if not _has_internal_detail(raw):
+        return raw
+    return format_user_reply(raw)
+
+
 def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
-    text = _required_str(button, "text", "button")
+    text = _plain_card_text(_required_str(button, "text", "button"))
     action = _required_str(button, "action", "button")
     raw_params = button.get("parameters") or {}
     if not isinstance(raw_params, dict):
@@ -739,14 +749,14 @@ def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "textParagraph": {
                 "text": GoogleChatAdapter.format_message(
-                    _required_str(widget, "text", "widget")
+                    _plain_card_text(_required_str(widget, "text", "widget"))
                 )
             }
         }
     if widget_type == "decorated_text":
         decorated: Dict[str, Any] = {
             "text": GoogleChatAdapter.format_message(
-                _required_str(widget, "text", "widget")
+                _plain_card_text(_required_str(widget, "text", "widget"))
             ),
             "wrapText": bool(widget.get("wrap_text", True)),
         }
@@ -1049,6 +1059,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # In-flight Chat turns, keyed by (chat_id, thread_id). /stop cancels
         # the task and fails the linked job. It does not open a new job.
         self._gateway_turns: Dict[tuple, Dict[str, Any]] = {}
+        from robie_job_engine.chat_turn_control import register_chat_adapter
+
+        register_chat_adapter(self)
         # Messages that arrived while this session was busy. Drained after
         # the session guard is free. They do not interrupt the running job.
         self._robie_deferred: Dict[str, list] = {}
@@ -4835,6 +4848,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         } and not (metadata or {}).get("robie_stop_notice")
         from robie_job_engine.chat_turn_control import (
             is_gateway_status_notice,
+            is_progress_heartbeat_or_thinking,
             is_refused_tool_text,
             is_tool_progress_text,
         )
@@ -4844,6 +4858,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=None)
         if agent_reply and (
             is_tool_progress_text(str(content or ""))
+            or is_progress_heartbeat_or_thinking(str(content or ""))
             or is_refused_tool_text(str(content or ""))
         ):
             # The model gets the tool result. Chat does not, and the job stays open.
@@ -5407,12 +5422,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if not message_id:
             return SendResult(success=False, error="missing message_id")
         from robie_job_engine.chat_turn_control import (
+            is_progress_heartbeat_or_thinking,
             is_refused_tool_text,
             is_tool_progress_text,
         )
         from robie_job_engine.write_verification_loop import is_plan_refusal_text
 
-        if is_plan_refusal_text(content) or is_tool_progress_text(content) or is_refused_tool_text(content):
+        if (
+            is_plan_refusal_text(content)
+            or is_tool_progress_text(content)
+            or is_progress_heartbeat_or_thinking(content)
+            or is_refused_tool_text(content)
+        ):
             return SendResult(success=True, message_id=message_id)
         from robie_job_engine.turn_finalization import (
             current_model_job_id,
