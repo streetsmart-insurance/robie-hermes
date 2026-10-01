@@ -62,8 +62,10 @@ filing kill switch is unchanged.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
-after a successful pull. That filing stage is inert unless ``ROBIE_ENV=TEST``,
-the host is ``hermes-test-01``, and ``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1``.
+after a successful pull. Filing stays off unless
+``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1``. Test also requires
+``ROBIE_ENV=TEST`` on ``hermes-test-01``. Production files FAO only when
+that switch is on and the host is ``hermes-poc-01``.
 """
 from __future__ import annotations
 
@@ -87,7 +89,7 @@ from .gemini_ui_rescue import (
     gemini_ui_rescue_budget,
     run_named_control_step,
 )
-from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
+from .intake_core import IntakeHold, SourceArchive, SourceItem
 from .progressive_agent_context import (
     DEFAULT_AGENT_CODE,
     agent_codes_in_text,
@@ -2532,8 +2534,10 @@ class FaoCommunicationsMemoPortal:
 
 
 def connect_cdp_browser(cdp_url: str | None, *, agent_code: str) -> tuple[PlaywrightFaoMemoBrowser, Callable[[], None]]:
-    """Attach to the local Test Chrome. Exactly one FAO application tab."""
-    require_test()
+    """Attach to the local Chrome. Exactly one FAO application tab."""
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("fao")
     url = require_loopback_cdp(cdp_url or os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL)
     from playwright.sync_api import sync_playwright
 
@@ -2594,8 +2598,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="After a successful pull, file via Documents API and Notes API. "
         "This is also the default when --pull-only is omitted. Writes stay off "
-        "unless ROBIE_ENV=TEST, the host is hermes-test-01, and "
-        "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1.",
+        "unless ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1. Test also requires "
+        "ROBIE_ENV=TEST on hermes-test-01. Production files FAO only on "
+        "hermes-poc-01 with that switch on.",
     )
     parser.add_argument(
         "--output",
@@ -2654,11 +2659,16 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
     closer: Callable[[], None] | None = None
     portal: FaoCommunicationsMemoPortal | None = None
     try:
-        require_test()
+        from .document_retrieval_filing import FilingHeld, require_carrier_pull, resolve_pull_output
+
+        require_carrier_pull("fao")
         start, end, as_of = resolve_processed_window(args.start, args.end, args.as_of)
         agent_code = require_agent_code(args.agent_code)
         require_bounded_scope(FAO_SCOPE, start, end)
-        output = Path(args.output)
+        try:
+            output = resolve_pull_output(args.output, DEFAULT_QA_ROOT)
+        except FilingHeld as exc:
+            raise IntakeHold(str(exc)) from exc
         ledger = LocalDeliveryLedger(output)
         ledger.ensure_private()
         archive = SourceArchive(output / "sources")

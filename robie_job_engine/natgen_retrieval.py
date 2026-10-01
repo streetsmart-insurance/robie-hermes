@@ -117,7 +117,12 @@ def scrub_window(start: date, end: date) -> tuple[date, date]:
 
 
 def require_bounded_scope(scope: str, start: date, end: date) -> None:
-    require_test()
+    if scope == NOC_SCOPE:
+        from .document_retrieval_filing import require_carrier_pull
+
+        require_carrier_pull("natgen")
+    else:
+        require_test()
     if scope not in SCOPES or not (0 <= (end - start).days <= 31):
         raise IntakeHold("An approved NatGen scope and at most 32 inclusive days are required")
 

@@ -131,9 +131,12 @@ from robie_job_engine.ezlynx_write_scope import (
 )
 
 allowed = "220250093"
-# Unset/empty ROBIE_EZLYNX_WRITE_APPLICANT_IDS = agency-wide. A comma list
-# restricts. This proof records the mode actually compiled into the release
-# process environment; it does not perform a live EZLynx write.
+# Unset or empty ROBIE_EZLYNX_WRITE_APPLICANT_IDS allows only test account
+# 220250093. A comma list restricts writes to those ids. All clients requires
+# ROBIE_EZLYNX_WRITE_SCOPE=all plus ROBIE_PLAYGROUND=1 and its guardrails
+# (hard blocks, read-back-then-go, and the undo log). This proof records the
+# mode actually compiled into the release process environment; it does not
+# perform a live EZLynx write.
 if write_allowlist_is_unrestricted():
     assert ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
     assert require_allowed_ezlynx_write_applicant(allowed) == allowed

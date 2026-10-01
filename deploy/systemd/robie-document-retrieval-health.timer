@@ -1,0 +1,14 @@
+[Unit]
+Description=Check document retrieval health every 15 minutes
+
+[Timer]
+# Read-only. Shipped disabled so it does not page before the morning job
+# exists. Enable it with the retrieval timer, after Carlo's GO:
+#   systemctl enable --now robie-document-retrieval-health.timer
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=60s
+Unit=robie-document-retrieval-health.service
+
+[Install]
+WantedBy=timers.target

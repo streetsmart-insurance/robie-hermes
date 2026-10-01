@@ -192,6 +192,23 @@ def navigate_to_submission_route(page) -> None:
     page.wait_for_timeout(2_000)
 
 
+def session_is_logged_in_on_app_page(page) -> bool:
+    """Open the app and judge login there before calling a blank tab logged out."""
+    navigate_to_submission_route(page)
+    return authenticated(page)
+
+
+def ensure_login_form(page) -> None:
+    """Reload a blank login page and wait until the username field is visible."""
+    field = page.locator("#txtUserName")
+    try:
+        field.wait_for(state="visible", timeout=8_000)
+        return
+    except Exception:
+        page.reload(wait_until="domcontentloaded")
+    field.wait_for(state="visible", timeout=15_000)
+
+
 def main() -> int:
     from playwright.sync_api import sync_playwright
     from robie_job_engine.ezlynx_driver_gate import (
@@ -226,7 +243,7 @@ def main() -> int:
             raise
         page.set_default_timeout(20_000)
 
-        if authenticated(page):
+        if session_is_logged_in_on_app_page(page):
             print("AUTHENTICATED")
             return 0
 
@@ -247,6 +264,7 @@ def main() -> int:
             url = page.url.lower()
 
         if "/auth/account/login" in url:
+            ensure_login_form(page)
             page.locator("#txtUserName").fill(secret("ezlynx-username"))
             page.locator("#txtPassword").fill(secret("ezlynx-password"))
             page.locator("#btnLogin").click()

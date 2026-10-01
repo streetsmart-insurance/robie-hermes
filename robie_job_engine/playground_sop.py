@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,10 +56,14 @@ class SopHit:
     doc_id: str
     modified: str = ""
     freshness_note: str = ""
+    match_score: int = 0
+    content_fingerprint: str = ""
 
     @property
     def citation(self) -> str:
-        return f"{self.title} ({self.folder})"
+        identity = f"; source ID {self.doc_id}" if self.doc_id else ""
+        version = f"; modified {self.modified}" if self.modified else ""
+        return f"{self.title} ({self.folder}{identity}{version})"
 
 
 @dataclass(frozen=True)
@@ -336,10 +342,25 @@ def ingest_sops(drive: DrivePort, index_path: str | None = None) -> dict[str, An
                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }
         )
-    payload = {"documents": docs}
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
-    return {"count": len(docs), "path": path}
+    payload = {"schema_version": 1, "imported_at": datetime.now(timezone.utc).isoformat(),
+               "documents": docs}
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         prefix=".sop-index-", delete=False) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"count": len(docs), "path": str(target), "schema_version": 1}
 
 
 def load_index(index_path: str | None = None) -> list[dict[str, Any]]:
@@ -354,7 +375,26 @@ def load_index(index_path: str | None = None) -> list[dict[str, Any]]:
     docs = payload.get("documents") if isinstance(payload, dict) else None
     if not isinstance(docs, list):
         return []
-    return [item for item in docs if isinstance(item, dict)]
+    if payload.get("schema_version") not in (None, 1):
+        return []
+    validated = []
+    for item in docs:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not str(item.get("doc_id") or "").strip():
+            return []
+        digest = str(item.get("sha256") or "")
+        # Legacy indexes remain readable when no digest was recorded. A
+        # digest that is present is binding; never answer from altered text.
+        if digest and digest != hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return []
+        if payload.get("schema_version") == 1 and not digest:
+            return []
+        if text_is_excluded(text):
+            continue
+        validated.append(item)
+    return validated
 
 
 def retrieve_sop(
@@ -362,6 +402,7 @@ def retrieve_sop(
     docs: list[dict[str, Any]] | None = None,
     *,
     limit: int = 1,
+    include_ties: bool = False,
     now: datetime | None = None,
 ) -> list[SopHit]:
     """Keyword overlap. No model call. Empty when nothing loaded matches."""
@@ -389,11 +430,17 @@ def retrieve_sop(
                     doc_id=str(doc.get("doc_id") or ""),
                     modified=modified,
                     freshness_note=guide_freshness_note(modified, now=now),
+                    match_score=score,
+                    content_fingerprint=_content_fingerprint(text),
                 ),
             )
         )
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [hit for _, hit in scored[: max(1, limit)]]
+    selected = scored[: max(1, limit)]
+    if include_ties and selected:
+        cutoff = selected[-1][0]
+        selected = [item for item in scored if item[0] >= cutoff]
+    return [hit for _, hit in selected]
 
 
 def build_drive_port() -> DrivePort:
@@ -444,12 +491,20 @@ class _GoogleDrivePort:
         if mime == "application/vnd.google-apps.document":
             data = self._service.files().export(fileId=file_id, mimeType="text/plain").execute()
             if isinstance(data, bytes):
-                return data.decode("utf-8", errors="replace")
-            return str(data or "")
+                return data.decode("utf-8")
+            if not isinstance(data, str):
+                raise ValueError("SOP text response is not text")
+            return data
+        # Binary office/PDF/media files need a real format-aware extractor.
+        # Never index replacement-decoded binary bytes as procedure evidence.
+        if mime != "text/plain":
+            raise ValueError("Unsupported SOP text format")
         data = self._service.files().get_media(fileId=file_id).execute()
         if isinstance(data, bytes):
-            return data.decode("utf-8", errors="replace")
-        return str(data or "")
+            return data.decode("utf-8")
+        if not isinstance(data, str):
+            raise ValueError("SOP text response is not text")
+        return data
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -480,3 +535,24 @@ def _excerpt(text: str, words: list[str]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _content_fingerprint(text: str) -> str:
+    """Compare complete normalized bodies, not only visible excerpts."""
+    normalized = " ".join(text.casefold().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def ambiguous_sop_hits(hits: list[SopHit]) -> bool:
+    """Tied distinct full bodies require review, not a semantic conflict claim.
+
+    Hand-created legacy hits without fingerprints compare excerpts. Retrieval
+    records fingerprints from complete bodies and can retain boundary ties.
+    Different-score contradictions still require an approved-source workflow.
+    """
+    if len(hits) < 2:
+        return False
+    tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
+    identities = {hit.content_fingerprint or _content_fingerprint(hit.excerpt)
+                  for hit in tied}
+    return len(identities) > 1

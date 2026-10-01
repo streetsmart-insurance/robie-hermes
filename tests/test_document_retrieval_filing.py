@@ -124,8 +124,13 @@ class FakeDeps:
         self.uploads.append({"applicant_id": applicant_id, "filename": filename, "bytes": file_bytes})
         return {"document_id": "501", "read_back": True}
 
-    def add_note(self, applicant_id, note_text, discussion_title=None):
-        self.notes.append({"applicant_id": applicant_id, "text": note_text, "title": discussion_title})
+    def add_note(self, applicant_id, note_text, discussion_title=None, document_id=None):
+        self.notes.append({
+            "applicant_id": applicant_id,
+            "text": note_text,
+            "title": discussion_title,
+            "document_id": document_id,
+        })
         return {
             "status": "filed",
             "note_id": "77",
@@ -455,7 +460,113 @@ class FilingGateTests(unittest.TestCase):
         self.assertTrue(any(row[0] == "Progressive BOP/CGL" for row in deps.sheets.rows))
         self.assertEqual(result["results"][0]["document_id"], "501")
         self.assertEqual(result["results"][0]["note_id"], "77")
+        self.assertEqual(deps.notes[0]["document_id"], "501")
         self.assertEqual(result["results"][0]["folder_field"], "not_in_proven_document_upload")
+
+    def test_unconfirmed_note_stays_held_in_plain_english(self):
+        deps = FakeDeps()
+
+        def add_note(applicant_id, note_text, discussion_title=None, document_id=None):
+            deps.notes.append(
+                {
+                    "applicant_id": applicant_id,
+                    "text": note_text,
+                    "title": discussion_title,
+                    "document_id": document_id,
+                }
+            )
+            return {
+                "status": "held",
+                "note_id": None,
+                "read_back": False,
+                "reason": (
+                    "The note was sent, but the discussion did not show exactly one new note. "
+                    "It was not sent again."
+                ),
+            }
+
+        deps.add_note = add_note
+        result = file_with(deps, [memo_item()])
+        reason = result["results"][0]["reason"]
+        self.assertEqual(result["results"][0]["status"], "document_filed_note_held")
+        self.assertIn("not sent again", reason)
+        self.assertNotIn("note_id", reason)
+        self.assertNotIn("DiscussionApi", reason)
+        self.assertEqual(deps.notes[0]["document_id"], "501")
+        self.assertEqual(deps.sheets.writes, [])
+
+    def test_stable_live_note_is_filed_and_writes_the_status_row(self):
+        """A metadata-only +1 is filed, so the FAO status row is not skipped."""
+
+        import tempfile
+
+        from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
+
+        class LiveDiscussion:
+            """POST body empty. Discussion read is metadata only."""
+
+            def __init__(self):
+                self.posts = 0
+                self.note_lists = 0
+                self.posted = False
+                self.title = WORKFLOW["title"]
+
+            def get_discussions(self, applicant_id):
+                return [{"discussionId": "disc-1", "title": self.title, "applicantId": applicant_id}]
+
+            def get_discussion(self, discussion_id):
+                return {
+                    "discussionId": discussion_id,
+                    "title": self.title,
+                    "noteCount": 8 if self.posted else 7,
+                    "mostRecentNoteId": "701" if self.posted else "700",
+                }
+
+            def list_notes(self, discussion_id):
+                self.note_lists += 1
+                raise RuntimeError("notes list is not available")
+
+            def append_note(self, discussion_id, text, note_type="Note"):
+                self.posts += 1
+                self.posted = True
+                return {}
+
+        deps = FakeDeps()
+        client = LiveDiscussion()
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "ledger.json"
+
+            def add_note(applicant_id, note_text, discussion_title=None, document_id=None):
+                noted = add_note_to_discussion(
+                    applicant_id,
+                    note_text,
+                    discussion_title=discussion_title,
+                    title_hint=discussion_title,
+                    discussion_client=client,
+                    document_id=document_id,
+                    ledger_path=ledger,
+                )
+                deps.notes.append(
+                    {
+                        "applicant_id": applicant_id,
+                        "text": note_text,
+                        "title": discussion_title,
+                        "document_id": document_id,
+                        "status": noted.get("status"),
+                    }
+                )
+                return noted
+
+            deps.add_note = add_note
+            result = file_with(deps, [memo_item()])
+        row = result["results"][0]
+        self.assertEqual(row["status"], "filed", result)
+        self.assertEqual(row["note_id"], "701")
+        self.assertEqual(client.posts, 1)
+        self.assertEqual(client.note_lists, 0)
+        comment = nicole_status_comment(PROGRESSIVE_MEMO_RULE)
+        written = [values for _row, values in deps.sheets.writes]
+        self.assertTrue(any(values[6] == comment for values in written), written)
 
     def test_upload_without_read_back_does_not_claim_success(self):
         deps = FakeDeps()

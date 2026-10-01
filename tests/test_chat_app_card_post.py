@@ -72,6 +72,20 @@ def test_post_card_uses_cardsv2_and_originating_thread():
     assert call["messageReplyOption"] == "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
 
+def test_post_card_with_thread_key_sets_reply_option():
+    messages = FakeMessages()
+    chat_app_post.post_as_chat_app(
+        "spaces/AAA",
+        "I have Coverage A.",
+        thread_key="robie-job-abc",
+        chat=FakeClient(messages),
+    )
+    (call,) = messages.calls
+    assert call["body"]["thread"] == {"threadKey": "robie-job-abc"}
+    assert call["messageReplyOption"] == "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    assert "name" not in call["body"]["thread"]
+
+
 def test_post_card_without_thread_omits_reply_option():
     messages = FakeMessages()
     chat_app_post.post_card_as_chat_app("spaces/AAA", _card(), chat=FakeClient(messages))

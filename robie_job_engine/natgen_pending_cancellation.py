@@ -35,7 +35,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
+from .intake_core import IntakeHold, SourceArchive, SourceItem
 from .natgen_retrieval import (
     ADDITIONAL_INFO_SCOPE,
     ADDITIONAL_INFO_TODO,
@@ -1253,8 +1253,10 @@ class NatGenPendingCancellationPortal:
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightNatGenNocBrowser, Callable[[], None]]:
-    """Attach to the local Test Chrome. Exactly one NatGen application tab."""
-    require_test()
+    """Attach to the local Chrome. Exactly one NatGen application tab."""
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("natgen")
     url = require_loopback_cdp(cdp_url or os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL)
     from playwright.sync_api import sync_playwright
 
@@ -1320,7 +1322,9 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
     closer: Callable[[], None] | None = None
     portal: NatGenPendingCancellationPortal | None = None
     try:
-        require_test()
+        from .document_retrieval_filing import FilingHeld, require_carrier_pull, resolve_pull_output
+
+        require_carrier_pull("natgen")
         try:
             start = date.fromisoformat(args.start)
             end = date.fromisoformat(args.end)
@@ -1328,7 +1332,10 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
             raise IntakeHold("Process date window is missing or ambiguous") from exc
         require_bounded_scope(NOC_SCOPE, start, end)
         scrub_start, scrub_end = scrub_window(start, end)
-        output = Path(args.output)
+        try:
+            output = resolve_pull_output(args.output, DEFAULT_QA_ROOT)
+        except FilingHeld as exc:
+            raise IntakeHold(str(exc)) from exc
         ledger = LocalDeliveryLedger(output)
         ledger.ensure_private()
         archive = SourceArchive(output / "sources")

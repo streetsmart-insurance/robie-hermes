@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekday morning document retrieval (NOT enabled until Carlo's GO)
+
+[Timer]
+# 08:00 America/New_York, Monday through Friday.
+# This timer is shipped disabled. Do not enable it from the pull request.
+# After GO, Carlo (Release / Production) runs:
+#   systemctl enable --now robie-document-retrieval.timer
+OnCalendar=Mon..Fri *-*-* 08:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=robie-document-retrieval.service
+
+[Install]
+WantedBy=timers.target

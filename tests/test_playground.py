@@ -139,7 +139,7 @@ class GuardrailTests(unittest.TestCase):
             "How do we insure a truck?": "sop",
             "What's Buster Brown's phone number?": "lookup",
             "Draft a certificate for Buster Brown, holder Test Holder LLC, applicant 26356199.": "cert_draft",
-            "File a note on the existing Policy Change Request discussion for Buster Brown.": "note",
+            "File a note on the existing Policy Change Request discussion for Buster Brown saying Checked renewal.": "note",
             ADDRESS: "simple_edit",
             "Change the phone to 555-0199 for Buster Brown applicant 26356199.": "simple_edit",
             "Change the email to new@example.com for Buster Brown applicant 26356199.": "simple_edit",
@@ -194,10 +194,13 @@ class GuardrailTests(unittest.TestCase):
                         read=reader,
                     )
                     self.assertIsNotNone(replies)
-                    self.assertIn("I can't", replies[0])
+                    if _code == "untitled_note":
+                        self.assertIn("already has a title", replies[0])
+                    else:
+                        self.assertIn("I can't", replies[0])
                     self.assertIn("Practice mode", replies[0])
-                    self.assertIn("Ref: job ", replies[0])
-                    self.assertIn("Details", replies[0])
+                    self.assertNotIn("Ref: job", replies[0])
+                    self.assertNotRegex(replies[0], r"[0-9a-f]{8}-[0-9a-f]{4}-")
         self.assertEqual(writer.calls, [])
 
 
@@ -241,8 +244,7 @@ class ConfirmationTests(unittest.TestCase):
                 self.assertIn("mailing address", waiting[0])
                 self.assertIn("1 Old St", waiting[0])
                 self.assertIn("100 Test Rd", waiting[0])
-                self.assertIn("Details", waiting[0])
-                self.assertRegex(waiting[0], r"Ref: job [0-9a-f-]{36}")
+                self.assertNotIn("Ref: job", waiting[0])
                 done = handle_playground_chat(
                     db,
                     "go",
@@ -257,10 +259,10 @@ class ConfirmationTests(unittest.TestCase):
                     file_note=file_note,
                 )
             self.assertEqual(len(writer.calls), 1)
-            self.assertIn("On it", done[0])
-            self.assertIn("Done.", done[1])
-            self.assertIn("Readback: matches", done[1])
-            self.assertIn("I added a short note", done[1])
+            self.assertEqual(len(done), 1)
+            self.assertIn("Done", done[0])
+            self.assertNotIn("Readback", done[0])
+            self.assertIn("I added a short note", done[0])
             self.assertIn("Policy Change Request", notes[0])
             store = JobStore(db)
             finished = store.list_jobs_by_status({"COMPLETE"})
@@ -465,10 +467,11 @@ class ConfirmationTests(unittest.TestCase):
                     apply=stale,
                     read=still_old,
                 )
-        self.assertNotIn("Done.", done[1])
-        self.assertIn("could not confirm", done[1].casefold())
-        self.assertIn("not calling this a success", done[1].casefold())
-        self.assertIn("person needs", done[1].casefold())
+        self.assertEqual(len(done), 1)
+        self.assertNotIn("Done", done[0])
+        self.assertIn("could not confirm", done[0].casefold())
+        self.assertIn("not calling this a success", done[0].casefold())
+        self.assertIn("person needs", done[0].casefold())
 
     def test_hitl_sweeper_does_not_eat_a_playground_confirmation(self):
         reason = unanswered_hitl_kill_reason(
@@ -585,6 +588,7 @@ class CarrierAndPracticeTests(unittest.TestCase):
             applicant_id="26356199",
             discussion_title="Policy Change Request",
             new_value="checked",
+            body="Exact requested note text",
             client="Buster Brown",
             field="note",
         )
@@ -605,8 +609,8 @@ class CarrierAndPracticeTests(unittest.TestCase):
             "robie_job_engine.playground_execute.with_ezlynx_lock",
             return_value=_Lock(),
         ), mock.patch(
-            "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-            return_value={"status": "filed", "note_id": "n1"},
+            "robie_job_engine.playground_ports.PlaygroundPorts.file_note",
+            return_value="n1",
         ):
             filed = default_apply(proposal)
         self.assertTrue(filed.applied)
@@ -737,7 +741,7 @@ class DailyListAndSopTests(unittest.TestCase):
                     message_id="e1",
                 )
         self.assertIn("I can't", reply)
-        self.assertIn("Ref: job ", reply)
+        self.assertNotIn("Ref: job", reply)
 
     def test_hooks_are_in_front_of_the_agent(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")

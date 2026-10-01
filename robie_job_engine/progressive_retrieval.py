@@ -78,7 +78,12 @@ class ProgressiveRetrieval(IntakeWorker):
 
 
 def require_bounded_scope(scope: str, start: date, end: date) -> None:
-    require_test()
+    if scope == "fao_communications":
+        from .document_retrieval_filing import require_carrier_pull
+
+        require_carrier_pull("fao")
+    else:
+        require_test()
     if scope not in SCOPES or not (0 <= (end - start).days <= 31):
         raise IntakeHold("An approved Progressive scope and at most 32 inclusive days are required")
 

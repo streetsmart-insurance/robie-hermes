@@ -675,7 +675,7 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
             job_id,
             "I set up the policy. The work is done.",
         )
-        self.assertIn("FAILED", response)
+        self.assertIn("Failed.", response)
         self.assertNotIn("— COMPLETE", response)
         self.assertNotIn("I set up the policy", response)
         self.assertIn("PLAYWRIGHT_SILENT", self.store.get_job(job_id)["last_error"])

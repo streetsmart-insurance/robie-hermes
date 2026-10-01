@@ -92,6 +92,19 @@ class DocumentToolVisibilityTests(unittest.TestCase):
 
 
 class DocumentToolHandlerTests(unittest.TestCase):
+    def _live_job_kwargs(self) -> dict:
+        """A live non-write job. A write with no job id is refused."""
+        from durable_temp import durable_temporary_directory
+
+        from robie_job_engine.store import JobStore
+
+        holder = durable_temporary_directory()
+        path = holder.__enter__()
+        self.addCleanup(holder.cleanup)
+        db = str(Path(path) / "jobs.db")
+        job = JobStore(db).create_job("hermes.plain_english", {"text": "hello"})
+        return {"job_id": job["id"], "db_path": db}
+
     def _write_tmp_file(self, tmp_dir, name, data: bytes) -> str:
         path = os.path.join(str(tmp_dir), name)
         with open(path, "wb") as handle:
@@ -141,7 +154,8 @@ class DocumentToolHandlerTests(unittest.TestCase):
                         "applicant_id": "220250093",
                         "file_path": empty,
                         "document_name": "empty.pdf",
-                    }
+                    },
+                    **self._live_job_kwargs(),
                 )
                 self.assertFalse(result["ok"])
                 self.assertIn("empty", result["error"])
@@ -194,7 +208,8 @@ class DocumentToolHandlerTests(unittest.TestCase):
                             "file_path": pdf,
                             "document_name": "dec.pdf",
                             "file_content_type": "application/pdf",
-                        }
+                        },
+                        **self._live_job_kwargs(),
                     )
                 self.assertTrue(result["ok"])
                 self.assertEqual(result["document_id"], "987654321")
@@ -243,7 +258,8 @@ class DocumentToolHandlerTests(unittest.TestCase):
                             "applicant_id": "999",
                             "file_path": pdf,
                             "document_name": "dec.pdf",
-                        }
+                        },
+                        **self._live_job_kwargs(),
                     )
                 self.assertFalse(result["ok"])
                 self.assertIn("EzlynxWriteScopeError", result["error"])

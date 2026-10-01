@@ -12,6 +12,17 @@ class BrowserReadPort(Protocol):
         """Independently open the destination and return server-backed state."""
 
 
+LOCATOR_QUESTION = "Which page should I read? Send a link or the page name."
+
+
+def clarification_for_hold(error: str | None) -> str:
+    """The question a person should see when a read has nowhere to go."""
+    text = " ".join(str(error or "").casefold().split())
+    if "destination locator" in text:
+        return LOCATOR_QUESTION
+    return ""
+
+
 class BoundedBrowserReadWorker:
     """One browser-only read. No mutation, terminal, or code execution."""
 

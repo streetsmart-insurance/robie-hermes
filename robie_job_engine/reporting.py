@@ -18,6 +18,20 @@ ATTENTION_STATUSES = {
 }
 
 
+def is_answered_question_job(job: dict[str, Any]) -> bool:
+    """A question with no write. Health counts this as answered, not a failure."""
+    payload = dict(job.get("payload") or {})
+    if str(job.get("action_type") or "").startswith("ezlynx."):
+        return False
+    return bool(payload.get("answered") or payload.get("answer_only"))
+
+
+def health_status_name(job: dict[str, Any]) -> str:
+    if is_answered_question_job(job):
+        return "answered"
+    return str(job.get("status") or "UNKNOWN")
+
+
 @dataclass(frozen=True)
 class StatusDigest:
     text: str
@@ -50,9 +64,14 @@ def prepare_status_digest(
             jobs.append(job)
     counts: dict[str, int] = {}
     for job in jobs:
-        status = str(job.get("status") or "UNKNOWN")
+        status = health_status_name(job)
         counts[status] = counts.get(status, 0) + 1
-    attention = [job for job in jobs if str(job.get("status")) in ATTENTION_STATUSES]
+    attention = [
+        job
+        for job in jobs
+        if not is_answered_question_job(job)
+        and str(job.get("status")) in ATTENTION_STATUSES
+    ]
     input_tokens = sum(int(job.get("input_tokens") or 0) for job in jobs)
     output_tokens = sum(int(job.get("output_tokens") or 0) for job in jobs)
     cache_read_tokens = sum(int(job.get("cache_read_tokens") or 0) for job in jobs)

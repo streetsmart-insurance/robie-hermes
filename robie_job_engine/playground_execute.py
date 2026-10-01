@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .playground_config import (
+    BUSTER_BROWN_APPLICANT_ID,
     carrier_must_redirect,
     carrier_sink_address,
     live_writes_enabled,
@@ -140,6 +141,63 @@ def refuse_if_not_allowlisted(proposal: Proposal) -> str | None:
     return None
 
 
+# Kinds default_apply actually calls. Address, phone, email, driver, and
+# vehicle edits are not in this set: the code refuses them.
+ENABLED_WRITERS = frozenset({"note", "carrier_email", "cert_draft"})
+DISCONNECTED_WRITER_KINDS = frozenset({"simple_edit", "add_driver", "add_vehicle"})
+
+WRITER_MENU_CLAIMS = {
+    "note": "Add a note on a discussion that already has a title",
+    "carrier_email": "Email a carrier to request a policy change",
+    "cert_draft": "Draft a certificate (I create it; I don't send it)",
+}
+
+NON_WRITER_CAPABILITIES = (
+    "Answer a procedure question and name the document it came from",
+    "Remember a preference for you, your team, a client, or the agency, forget one, or tell you what I remember",
+)
+
+STAFF_STILL_HANDLES = (
+    "Address, phone, email, driver and vehicle changes: "
+    "I can't make these yet - staff still handles them."
+)
+
+_BLOCKS = (
+    "I won't delete or cancel anything. I won't bind, issue, reinstate, or non-renew. "
+    "I won't change billing, a mortgagee, premium, dates, limits, or coverage. "
+    "I won't email or text a client. I won't read our code or tokens."
+)
+
+
+def enabled_writer_names() -> frozenset[str]:
+    """Writers default_apply will call. Disconnected field writers are absent."""
+    return ENABLED_WRITERS
+
+
+def capability_menu() -> str:
+    """Help text. A claim is included only when that writer is enabled."""
+    lines = ["Here's what I can do in the Playground:", ""]
+    for item in NON_WRITER_CAPABILITIES:
+        lines.append(f"- {item}")
+    for name in ("note", "cert_draft", "carrier_email"):
+        if name in enabled_writer_names() and name in WRITER_MENU_CLAIMS:
+            lines.append(f"- {WRITER_MENU_CLAIMS[name]}")
+    lines.extend(["", STAFF_STILL_HANDLES, "", _BLOCKS, ""])
+    lines.append(
+        "Before I change anything, I tell you the client, the field, the old value, "
+        "and the new value, and I wait for you to say go."
+    )
+    lines.extend(
+        [
+            "",
+            "In a space, /stop has to mention me: @Robie /stop. Google Chat does not "
+            "send a thread reply that does not mention me. A direct message does not "
+            "need that.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def default_apply(proposal: Proposal) -> ApplyResult:
     """Live apply. Off unless ROBIE_PLAYGROUND_LIVE_WRITES is set.
 
@@ -174,20 +232,18 @@ def with_ezlynx_lock(text: str, session_for: SessionFactory | None = None):
 
 
 def _live_note(proposal: Proposal) -> ApplyResult:
+    if proposal.applicant_id != BUSTER_BROWN_APPLICANT_ID:
+        return ApplyResult(applied=False, detail="Only Buster Brown note tests are enabled.")
+    if not proposal.body.strip():
+        return ApplyResult(applied=False, detail="Exact note text is required.")
     title = proposal.discussion_title.strip()
     if not title:
         return ApplyResult(applied=False, detail="That discussion has no title, so I didn't file a note.")
-    from .ezlynx_api_only_writes import add_note_to_discussion
+    from .playground_ports import runtime_ports
 
     with with_ezlynx_lock(proposal.new_value or title):
-        filed = add_note_to_discussion(
-            proposal.applicant_id,
-            proposal.new_value or proposal.body or "Playground note",
-            discussion_title=title,
-        )
-    note_id = str((filed or {}).get("note_id") or (filed or {}).get("ezlynx_note_id") or "")
-    status = str((filed or {}).get("status") or "")
-    if status != "filed" or not note_id:
+        note_id = runtime_ports().file_note(proposal, title, proposal.body)
+    if not note_id:
         return ApplyResult(applied=False, detail="The note was not filed.")
     return ApplyResult(applied=True, detail="filed", observed=proposal.new_value, note_id=note_id)
 
