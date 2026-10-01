@@ -454,17 +454,27 @@ class AscendApiClient:
         data = response.get("data")
         return data if isinstance(data, list) else []
 
-    def resolve_user(self, name_or_email: str) -> str:
+    def resolve_user(self, name_or_email: str) -> str | None:
+        """Resolve an Ascend user id by email or name.
+
+        Returns None when no user matches. Callers must fail closed on
+        None: a previous version silently substituted a hardcoded user id
+        (Robie AI's own), which misattributed producer/account-manager on
+        agreements requested by senders who are not Ascend users
+        (e.g. jake@streetsmart.insurance). Never guess a user id.
+        """
         users = self.list_users()
         target = name_or_email.strip().lower()
+        if not target:
+            return None
         for u in users:
-            if u.get("email", "").lower() == target:
+            if str(u.get("email") or "").lower() == target:
                 return str(u.get("id"))
         for u in users:
             full_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip().lower()
             if target in full_name or full_name in target:
                 return str(u.get("id"))
-        return "3b5cc5b8-3636-4342-bd3d-9da12d2f690e"
+        return None
 
     def find_program_by_policy(self, policy_number: str) -> dict[str, Any] | None:
         """Find active or purchased program containing the given policy number.

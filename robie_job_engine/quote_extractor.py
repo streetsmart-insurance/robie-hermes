@@ -96,6 +96,10 @@ class ExtractedQuote:
     # Sender-supplied EZLynx applicant id from a clarification reply
     # (e.g. "here's the applicant link"), used to retry EZLynx enrichment.
     applicant_id_hint: Optional[str] = None
+    # Sender-supplied producer/account-manager name or email from a
+    # clarification reply (e.g. "producer: Matthew Mancina"). Resolved
+    # against Ascend users on resume; the workflow asks when unresolvable.
+    producer_hint: Optional[str] = None
 
     @property
     def total_premium_cents(self) -> int:
@@ -249,6 +253,15 @@ def _parse_applicant_id_hint(text: str) -> Optional[str]:
     m = re.search(r"ezlynx\.com[^\s]*?(\d{8,})", text, re.IGNORECASE)
     if m:
         return m.group(1)
+    return None
+
+
+def _parse_producer_answer(text: str) -> Optional[str]:
+    """Extract a producer/account-manager name or email from a reply line."""
+    m = re.search(r"(?im)^\s*(?:producer|account\s*manager)\s*:\s*(.+?)\s*$", text)
+    if m:
+        value = m.group(1).strip().strip("\"'")
+        return value or None
     return None
 
 
@@ -739,10 +752,11 @@ class QuoteExtractor:
                 quote.pure_premium_cents = quote.total_with_terrorism_cents
             quote.hitl_reasons.remove("dual_terrorism_options_present")
 
-        # 5. Carrier / insured address / primary contact answers. These fields
-        # are empty after initial extraction; they get filled when the sender
-        # answers a NEEDS_CLARIFICATION email, and create_agreement_and_file_ezlynx
-        # consumes them on resume. Never overwrite values already present.
+        # 5. Carrier / insured address / primary contact / producer answers.
+        # These fields are empty after initial extraction; they get filled
+        # when the sender answers a NEEDS_CLARIFICATION email, and
+        # create_agreement_and_file_ezlynx consumes them on resume. Never
+        # overwrite values already present.
         if not quote.carrier_identifier:
             carrier_name, carrier_identifier = _parse_carrier_answer(text)
             if carrier_identifier:
@@ -761,6 +775,10 @@ class QuoteExtractor:
             hint = _parse_applicant_id_hint(text)
             if hint:
                 quote.applicant_id_hint = hint
+        if not quote.producer_hint:
+            producer = _parse_producer_answer(text)
+            if producer:
+                quote.producer_hint = producer
 
         # Re-evaluate HITL status and dynamically synchronize remaining questions
         self._sync_hitl_questions(quote)

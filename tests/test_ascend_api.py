@@ -296,5 +296,43 @@ class AscendApiTests(unittest.TestCase):
         self.assertEqual([call[0] for call in transport.calls], ["POST", "POST", "GET", "GET"])
 
 
+class TestResolveUser(unittest.TestCase):
+    """resolve_user must fail closed: no match -> None, never a guessed id."""
+
+    def _client(self):
+        class UserTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                assert (method, path) == ("GET", "/users")
+                return {
+                    "data": [
+                        {
+                            "id": "user-robie",
+                            "first_name": "Robie",
+                            "last_name": "AI",
+                            "email": "robie@streetsmart.insurance",
+                        },
+                        {
+                            "id": "user-matthew",
+                            "first_name": "Matthew",
+                            "last_name": "Mancina",
+                            "email": "matthew@streetsmart.insurance",
+                        },
+                    ]
+                }
+
+        return AscendApiClient(UserTransport())
+
+    def test_resolve_user_returns_none_for_unknown_sender(self):
+        client = self._client()
+        self.assertIsNone(client.resolve_user("jake@streetsmart.insurance"))
+        self.assertIsNone(client.resolve_user("Nobody Here"))
+
+    def test_resolve_user_matches_email_and_name(self):
+        client = self._client()
+        self.assertEqual(client.resolve_user("robie@streetsmart.insurance"), "user-robie")
+        self.assertEqual(client.resolve_user("Matthew Mancina"), "user-matthew")
+        self.assertEqual(client.resolve_user("matthew@streetsmart.insurance"), "user-matthew")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -318,7 +318,43 @@ class AscendWorkflowManager:
             if wholesalers:
                 wholesaler_identifier = wholesalers[0].get("identifier")
 
-        # 3. Find or Create Insured. Ascend requires a mailing address and a
+        # 3. Resolve Producer & Account Manager. Never substitute: an unmatched
+        # sender used to silently become Robie AI via a hardcoded user id,
+        # misattributing the agreement. The sender is tried first, then a
+        # producer name/email from a clarification reply. No match -> ask the
+        # sender. This runs before any Ascend write so nothing is created
+        # with a guessed producer.
+        producer_id: Optional[str] = None
+        if sender_email or sender_name:
+            producer_id = client.resolve_user(sender_email or sender_name)
+        if not producer_id and quote.producer_hint:
+            producer_id = client.resolve_user(quote.producer_hint)
+        if not producer_id and not (sender_email or sender_name):
+            # System-triggered job with no sender: attribute to Robie AI itself.
+            producer_id = client.resolve_user("Robie AI")
+        if not producer_id:
+            unmatched = quote.producer_hint or sender_email or sender_name or "(unknown sender)"
+            subject = f"Need producer for Ascend agreement: {quote.insured_name or 'Insurance Quote'}"
+            body_lines = [
+                f"Hi {sender_name or 'Team'},",
+                "",
+                f"I couldn't match \"{unmatched}\" to an Ascend user, so I haven't created the agreement.",
+                "",
+                "• Who should be listed as the producer and account manager on this Ascend agreement? (Reply with the name or Ascend user email.)",
+                "",
+                "Please reply directly to this email with your answer, and I will generate the Ascend agreement and file it into EZLynx.",
+                "",
+                "Best,",
+                "Robie AI",
+            ]
+            return WorkflowResult(
+                status="NEEDS_CLARIFICATION",
+                quote=quote,
+                reply_email_subject=subject,
+                reply_email_body="\n".join(body_lines),
+            )
+
+        # 4. Find or Create Insured. Ascend requires a mailing address and a
         # primary contact for new insureds; the quote email rarely carries
         # either. Prefer values the sender supplied in a clarification reply;
         # otherwise pull both from the client's EZLynx applicant record (a
@@ -359,9 +395,6 @@ class AscendWorkflowManager:
             address=address,
             contact=contact,
         )
-
-        # 4. Resolve Producer & Account Manager
-        producer_id = client.resolve_user(sender_email or sender_name or "Robie AI")
 
         # 5. Build Create Payload
         billable_ident = quote.policy_number or f"Q-{int(time.time())}"

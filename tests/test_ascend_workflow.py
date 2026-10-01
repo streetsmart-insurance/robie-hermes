@@ -111,6 +111,19 @@ class TestQuoteExtractor(unittest.TestCase):
         )
         self.assertEqual(resolved.applicant_id_hint, "223600203")
 
+    def test_clarification_parses_producer_hint(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "Producer: Matthew Mancina"
+        )
+        self.assertEqual(resolved.producer_hint, "Matthew Mancina")
+        # "account manager" label works too
+        quote2 = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved2 = self.extractor.apply_user_clarifications(
+            quote2, "account manager: matthew@streetsmart.insurance"
+        )
+        self.assertEqual(resolved2.producer_hint, "matthew@streetsmart.insurance")
+
     def test_clarification_does_not_overwrite_existing_values(self):
         quote = ExtractedQuote(
             insured_name="Acme Hauling LLC",
@@ -398,6 +411,46 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
         self.assertEqual(res.status, "NEEDS_CLARIFICATION")
         self.assertIn("mailing address", res.reply_email_body.lower())
         self.mock_client.create_program.assert_not_called()
+
+    def test_unresolvable_sender_asks_for_producer(self):
+        # jake@streetsmart.insurance is not an Ascend user: the workflow must
+        # ask who should be producer/account-manager, not silently substitute
+        # Robie AI (the old hardcoded fallback). Nothing may be created.
+        self.mock_client.resolve_user.return_value = None
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="jake@streetsmart.insurance", sender_name="Jake Ferrara"
+        )
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("producer", res.reply_email_body.lower())
+        self.assertIn("jake@streetsmart.insurance", res.reply_email_body)
+        self.mock_client.find_or_create_insured.assert_not_called()
+        self.mock_client.create_program.assert_not_called()
+
+    def test_producer_hint_from_reply_resolves_on_resume(self):
+        # Sender still unresolvable, but the reply names a producer who is an
+        # Ascend user: the agreement proceeds with that producer.
+        def fake_resolve(name_or_email):
+            return "aaaaaaaa-1111-1111-1111-111111111111" if "matthew" in name_or_email.lower() else None
+
+        self.mock_client.resolve_user.side_effect = fake_resolve
+        quote = self._clear_quote()
+        quote.producer_hint = "Matthew Mancina"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="jake@streetsmart.insurance", sender_name="Jake Ferrara"
+        )
+        self.mock_client.create_program.assert_called_once()
+        payload = self.mock_client.create_program.call_args[0][0]
+        self.assertEqual(payload["producer_id"], "aaaaaaaa-1111-1111-1111-111111111111")
+        self.assertEqual(payload["account_manager_id"], "aaaaaaaa-1111-1111-1111-111111111111")
+
+    def test_system_job_with_no_sender_attributes_to_robie_ai(self):
+        # No sender at all (system-triggered): Robie AI may be resolved by
+        # name. Still fail closed if even that does not resolve.
+        self.mock_client.resolve_user.side_effect = lambda n: "bbbbbbbb-2222-2222-2222-222222222222" if n == "Robie AI" else None
+        res = self.manager.create_agreement_and_file_ezlynx(self._clear_quote())
+        self.mock_client.create_program.assert_called_once()
+        payload = self.mock_client.create_program.call_args[0][0]
+        self.assertEqual(payload["producer_id"], "bbbbbbbb-2222-2222-2222-222222222222")
 
     def test_partial_billables_are_an_error_not_completed(self):
         # Defense in depth: even if a worker ever reports success with fewer
