@@ -1022,6 +1022,9 @@ class JobEngine:
         if job_requires_playwright(job):
             return True
         action = str(job.get("action_type") or "")
+        # ezlynx.session_refresh is deliberately absent: its worker is the
+        # only path that completes MFA, so a logged-out session must not
+        # fail it in preflight before it runs.
         if action in {
             "browser.read",
             "ezlynx.reassign",
@@ -1029,7 +1032,6 @@ class JobEngine:
             "ezlynx.apply_label",
             "ezlynx.submission_audit",
             "ezlynx.overdue_submission_reports",
-            "ezlynx.session_refresh",
         }:
             return True
         if action == "hermes.email_task":
