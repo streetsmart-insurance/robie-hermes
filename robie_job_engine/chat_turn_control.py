@@ -938,13 +938,13 @@ def is_refused_tool_text(text: str) -> bool:
     if not body or len(body) > 2500:
         return False
     folded = body.casefold()
-    if folded.startswith("robie_blocked"):
+    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
+    # Only the tool-refusal text handed back mid-turn is skipped here.
+    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
         return False
     if "do not drive ezlynx screens by hand" in folded:
         return True
     if "playwright_exec is refused" in folded:
-        return True
-    if folded.startswith("playwright_blocked"):
         return True
     if "policy_setup_order" in folded:
         return True

@@ -4738,10 +4738,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
             job_id = self._active_turn_job_id(chat_id)
         if agent_reply and job_id and self._output_blocked(job_id):
             owns_this_send = bool(named_job) and named_job == job_id
-            # A cancelled or finished job left on the send must not eat the
-            # live turn, even when the gateway still stamps that old id.
+            # A cancelled job left on the send must not eat the live turn,
+            # even when the gateway still stamps that old id. A job that
+            # finished on its own keeps its extra prose; that prose is not
+            # handed to a different job.
             replacement = self._live_unstopped_job_id(chat_id)
-            if replacement and replacement != job_id:
+            retarget = bool(replacement and replacement != job_id)
+            if retarget and owns_this_send:
+                from robie_job_engine.chat_turn_control import job_was_explicitly_stopped
+
+                retarget = job_was_explicitly_stopped(JobStore(ROBIE_JOB_DB), job_id)
+            if retarget:
                 job_id = replacement
             elif owns_this_send and (
                 self._model_prose_held(job_id) or self._agent_reply_is_replaced(job_id)
@@ -5630,6 +5637,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         text = str(pending.get(str(job_id)) or "").strip()
         if not text:
             return
+        from robie_job_engine.user_reply import format_user_reply
+
+        text = format_user_reply(text)
         if " ".join(text.split()) == " ".join(str(just_sent or "").split()):
             pending.pop(str(job_id), None)
             return
