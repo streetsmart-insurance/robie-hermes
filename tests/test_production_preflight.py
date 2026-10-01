@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from durable_temp import durable_temporary_directory
 
@@ -29,7 +30,12 @@ from robie_job_engine.production_preflight import (
     CHECK_GATEWAY,
     CHECK_LINKS,
     CHECK_SECRETS,
+    DEFAULT_CHAT_INTAKE_FRESH_SECONDS,
     DEFAULT_CHAT_SPACE,
+    DEFAULT_GATEWAY_LOG,
+    LISTENER_CONNECTED_MARKER,
+    _read_gateway_journal,
+    _read_gateway_log_tail,
     check_cdp,
     check_chat_intake,
     check_conversation_job_links,
@@ -482,6 +488,116 @@ class ChatIntakeCheckTests(unittest.TestCase):
         self.assertNotIn("open_chat_job", SOURCE)
         self.assertNotIn("spaces.setup", SOURCE)
         self.assertNotIn("messages().create", SOURCE)
+
+    def test_max_age_stays_six_hours(self):
+        self.assertEqual(DEFAULT_CHAT_INTAKE_FRESH_SECONDS, 6 * 60 * 60)
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            _age_chat_inbound(db, hours=7)
+            result = check_chat_intake(db, journal="hermes-gateway still up\n")
+            self.assertFalse(result["ok"])
+            self.assertIn("silent", result["evidence"])
+
+    def test_idle_gateway_log_connected_is_yes(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            _age_chat_inbound(db, hours=20)
+            log = Path(tmp) / "gateway.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            log.write_text(
+                f"{stamp} [GoogleChat] Connected; inbound=pubsub\n",
+                encoding="utf-8",
+            )
+            journal = _read_gateway_journal(runner=_empty_journal, log_path=log)
+            result = check_chat_intake(db, journal=journal)
+            self.assertTrue(result["ok"])
+            self.assertIn("connected", result["evidence"].casefold())
+            self.assertIn("idle", result["evidence"].casefold())
+
+    def test_gateway_log_fatal_is_still_no(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            _age_chat_inbound(db, hours=20)
+            log = Path(tmp) / "gateway.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            log.write_text(
+                f"{stamp} [GoogleChat] Connected; inbound=pubsub\n"
+                f"{stamp} Pub/Sub reconnect failed\n",
+                encoding="utf-8",
+            )
+            journal = _read_gateway_journal(runner=_empty_journal, log_path=log)
+            result = check_chat_intake(db, journal=journal)
+            self.assertFalse(result["ok"])
+            self.assertIn("wedged", result["evidence"])
+            self.assertIn("Pub/Sub reconnect failed", result["evidence"])
+
+    def test_gateway_log_without_connected_stays_silent(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            log = Path(tmp) / "gateway.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            log.write_text(f"{stamp} hermes-gateway still up\n", encoding="utf-8")
+            journal = _read_gateway_journal(runner=_empty_journal, log_path=log)
+            result = check_chat_intake(db, journal=journal)
+            self.assertFalse(result["ok"])
+            self.assertIn("silent", result["evidence"])
+            self.assertNotIn(LISTENER_CONNECTED_MARKER, journal)
+
+    def test_connected_older_than_a_day_does_not_count(self):
+        with durable_temporary_directory() as tmp:
+            log = Path(tmp) / "gateway.log"
+            old = datetime.now(timezone.utc) - timedelta(hours=30)
+            log.write_text(
+                f"{old.strftime('%Y-%m-%d %H:%M:%S')} [GoogleChat] Connected\n",
+                encoding="utf-8",
+            )
+            text = _read_gateway_log_tail(log)
+            self.assertNotIn(LISTENER_CONNECTED_MARKER, text)
+
+    def test_tail_ignores_connected_before_the_byte_cap(self):
+        with durable_temporary_directory() as tmp:
+            log = Path(tmp) / "gateway.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            connected = f"{stamp} [GoogleChat] Connected; inbound=pubsub\n"
+            filler = ("x" * 40 + "\n") * 30
+            recent = f"{stamp} hermes-gateway still up\n"
+            log.write_text(connected + filler + recent, encoding="utf-8")
+            text = _read_gateway_log_tail(log, max_bytes=len(recent.encode()) + 20)
+            self.assertNotIn(LISTENER_CONNECTED_MARKER, text)
+            self.assertIn("still up", text)
+
+    def test_missing_gateway_log_and_failed_journal_are_empty(self):
+        def boom(_argv: list[str]) -> SimpleNamespace:
+            raise OSError("journalctl missing")
+
+        text = _read_gateway_journal(
+            runner=boom,
+            log_path=Path("/tmp/robie-no-such-gateway.log"),
+        )
+        self.assertEqual(text.strip(), "")
+
+    def test_gateway_log_path_is_configurable(self):
+        with durable_temporary_directory() as tmp:
+            log = Path(tmp) / "gateway.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            log.write_text(
+                f"{stamp} [GoogleChat] Connected; inbound=pubsub\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                DEFAULT_GATEWAY_LOG,
+                Path("/opt/streetsmart-hermes/.hermes/logs/gateway.log"),
+            )
+            with patch.dict(os.environ, {"ROBIE_PREFLIGHT_GATEWAY_LOG": str(log)}):
+                text = _read_gateway_log_tail()
+            self.assertIn(LISTENER_CONNECTED_MARKER, text)
+
+
+def _empty_journal(_argv: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(stdout="", stderr="", returncode=0)
 
 
 class FailNotifyTests(unittest.TestCase):

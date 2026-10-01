@@ -16,11 +16,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -62,6 +63,16 @@ LISTENER_STALL_MARKERS = (
     "bound Job is not awaiting human input",
     "active human-input correlation is missing",
     "conversation is not awaiting human input",
+)
+# Prod writes [GoogleChat] Connected to this file, not the systemd journal.
+DEFAULT_GATEWAY_LOG = Path("/opt/streetsmart-hermes/.hermes/logs/gateway.log")
+GATEWAY_LOG_TAIL_BYTES = 4 * 1024 * 1024
+# How far back the log tail counts. This is not the inbound freshness window.
+GATEWAY_LOG_MAX_AGE = timedelta(hours=24)
+_LOG_STAMP = re.compile(
+    r"^(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+    r"(?:[.,]\d+)?"
+    r"(?P<tz>Z|[+-]\d{2}:?\d{2})?"
 )
 
 
@@ -490,26 +501,110 @@ def classify_listener_journal(text: str) -> dict[str, Any]:
     }
 
 
+def gateway_log_path() -> Path:
+    raw = os.environ.get("ROBIE_PREFLIGHT_GATEWAY_LOG", "").strip()
+    return Path(raw) if raw else DEFAULT_GATEWAY_LOG
+
+
+def _line_timestamp(line: str) -> datetime | None:
+    match = _LOG_STAMP.match(line.strip())
+    if not match:
+        return None
+    text = match.group("stamp").replace("T", " ")
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    tz = match.group("tz") or ""
+    if tz in {"", "Z"}:
+        return parsed.replace(tzinfo=timezone.utc)
+    sign = 1 if tz[0] == "+" else -1
+    digits = tz[1:].replace(":", "")
+    hours = int(digits[:2] or "0")
+    minutes = int(digits[2:4] or "0")
+    offset = timedelta(hours=hours, minutes=minutes) * sign
+    return parsed.replace(tzinfo=timezone(offset)).astimezone(timezone.utc)
+
+
+def _bound_gateway_log(text: str, *, now: datetime | None = None) -> str:
+    """Keep the last day of a log tail. Unstamped text stays, already byte-capped."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    cutoff = clock.astimezone(timezone.utc) - GATEWAY_LOG_MAX_AGE
+    lines = text.splitlines()
+    stamped = False
+    keep = False
+    kept: list[str] = []
+    for line in lines:
+        stamp = _line_timestamp(line)
+        if stamp is not None:
+            stamped = True
+            keep = stamp >= cutoff
+        if keep:
+            kept.append(line)
+    if not stamped:
+        return text
+    return "\n".join(kept)
+
+
+def _read_gateway_log_tail(
+    path: Path | None = None,
+    *,
+    now: datetime | None = None,
+    max_bytes: int | None = None,
+) -> str:
+    """Tail of gateway.log. At most a few MB, then the last day when stamped."""
+    target = Path(path) if path is not None else gateway_log_path()
+    if not target.is_file():
+        return ""
+    limit = GATEWAY_LOG_TAIL_BYTES if max_bytes is None else max_bytes
+    if limit < 1:
+        limit = GATEWAY_LOG_TAIL_BYTES
+    size = target.stat().st_size
+    with target.open("rb") as handle:
+        if size > limit:
+            handle.seek(size - limit)
+            handle.readline()
+        raw = handle.read()
+    return _bound_gateway_log(raw.decode("utf-8", errors="replace"), now=now)
+
+
 def _read_gateway_journal(
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    log_path: Path | None = None,
+    now: datetime | None = None,
+    max_bytes: int | None = None,
 ) -> str:
+    """systemd journal plus the gateway.log tail. Either may be empty."""
     run = runner or _run
-    proc = run(
-        [
-            "journalctl",
-            "-u",
-            GATEWAY_UNIT,
-            "-n",
-            "400",
-            "--no-pager",
-            "-o",
-            "cat",
-            "--since",
-            "24 hours ago",
-        ]
-    )
-    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+    parts: list[str] = []
+    try:
+        proc = run(
+            [
+                "journalctl",
+                "-u",
+                GATEWAY_UNIT,
+                "-n",
+                "400",
+                "--no-pager",
+                "-o",
+                "cat",
+                "--since",
+                "24 hours ago",
+            ]
+        )
+        parts.append((proc.stdout or "") + "\n" + (proc.stderr or ""))
+    except Exception:
+        parts.append("")
+    try:
+        parts.append(
+            _read_gateway_log_tail(log_path, now=now, max_bytes=max_bytes)
+        )
+    except Exception:
+        parts.append("")
+    return "\n".join(parts)
 
 
 def check_chat_intake(
@@ -525,8 +620,10 @@ def check_chat_intake(
     Recent DurableChatEventQueue / Chat-job activity is yes. Recency alone is
     not the wedge signal (#26 can leave a still-fresh prior job). A stall or
     fatal marker in hermes-gateway logs is no. Idle Connected without a stall
-    is yes so a quiet morning does not page. No inbound and no Connected is
-    no: a silent listener while hermes-gateway is active.
+    is yes so a quiet morning does not page. Connected is read from the
+    systemd journal and from the tail of gateway.log. No inbound and no
+    Connected line in either place is no: a silent listener while
+    hermes-gateway is active.
     Does not @robie. Does not send a test Chat job.
     """
     clock = now or datetime.now(timezone.utc)
