@@ -1829,28 +1829,50 @@ class GoogleChatAdapter(BasePlatformAdapter):
         source = event.source
         if source is None:
             return
-        key = turn_key(source.chat_id, getattr(source, "thread_id", None))
+        from robie_job_engine.chat_job_controls import waiting_jobs_for_requester
+        from robie_job_engine.chat_thread import job_for_chat_thread, read_job_chat_thread
+
+        # The thread's job is the stop target, including one the job engine
+        # parked that never had a gateway turn. The space's top-level turn
+        # is a different job. It is not a fallback once this thread has an owner.
+        thread_id = getattr(source, "thread_id", None)
+        store = JobStore(ROBIE_JOB_DB)
+        thread_owner = job_for_chat_thread(store, thread_id) if thread_id else None
+        key = turn_key(source.chat_id, thread_id)
         record = self._gateway_turns.pop(key, None)
-        if record is None:
-            record = self._gateway_turns.pop((source.chat_id, ""), None)
+        space_key = (source.chat_id, "")
+        if record is None and thread_owner is None:
+            record = self._gateway_turns.pop(space_key, None)
+        elif record is None and thread_owner is not None:
+            space_record = self._gateway_turns.get(space_key)
+            if (
+                isinstance(space_record, dict)
+                and str(space_record.get("job_id") or "") == str(thread_owner["id"])
+            ):
+                record = self._gateway_turns.pop(space_key, None)
         job_id, idle_reply = resolve_stop_target(
             record, session_busy=session_is_busy(self, event)
         )
-        from robie_job_engine.chat_job_controls import waiting_jobs_for_requester
-        from robie_job_engine.chat_thread import job_for_chat_thread, read_job_chat_thread
+        if thread_owner is not None:
+            job_id = str(thread_owner["id"])
+            idle_reply = None
+            if (
+                isinstance(record, dict)
+                and str(record.get("job_id") or "") not in ("", job_id)
+            ):
+                self._gateway_turns[key] = record
+                record = None
 
         requester = (
             getattr(source, "user_name", None)
             or getattr(source, "user_id", None)
             or ""
         )
-        thread_id = getattr(source, "thread_id", None)
         # No await until the stop line is posted. The next message can run
         # on the first await, and it used to take this line with it.
         waiting_ids = waiting_jobs_for_requester(
             ROBIE_JOB_DB, source.chat_id, requester
         )
-        store = JobStore(ROBIE_JOB_DB)
         in_this_thread = []
         for waiting_id in waiting_ids:
             stored = read_job_chat_thread(store, waiting_id)
@@ -1861,9 +1883,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
         cancel_ids = in_this_thread if thread_id and in_this_thread else waiting_ids
         if not thread_id:
             cancel_ids = waiting_ids
-        thread_owner = None
-        if thread_id:
-            thread_owner = job_for_chat_thread(store, thread_id)
         if thread_owner is not None:
             from robie_job_engine.models import TERMINAL_STATUSES
 
@@ -1885,7 +1904,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     return
             elif owner_id not in cancel_ids:
                 cancel_ids = [owner_id]
-                job_id = job_id or owner_id
+                job_id = owner_id
                 idle_reply = None
         for waiting_id in cancel_ids:
             fail_cancelled_chat_job(store, waiting_id)
