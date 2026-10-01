@@ -1585,6 +1585,45 @@ class GoogleChatAdapter(BasePlatformAdapter):
             store=JobStore(ROBIE_JOB_DB),
         )
 
+    async def _finish_open_turn_after_ceiling(
+        self,
+        watched: Any,
+        job_id: str,
+        event: MessageEvent,
+        source: Any,
+        stop_requested: Any,
+    ) -> str:
+        """After the model turn ends, record one line if the job is still silent.
+
+        ``watched`` is the ceiling coroutine. It runs here, on the background
+        task, so the Chat slot is free for the next message.
+        """
+        from robie_job_engine.turn_finalization import finalize_turn_if_still_open
+
+        outcome = await watched
+        if outcome == "finished" and not stop_requested():
+            line = await asyncio.to_thread(
+                finalize_turn_if_still_open, ROBIE_JOB_DB, job_id
+            )
+            if line and source is not None:
+                from robie_job_engine.chat_thread import read_job_chat_thread
+
+                stored_thread = await asyncio.to_thread(
+                    read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+                )
+                await self.send(
+                    source.chat_id,
+                    line,
+                    reply_to=event.message_id,
+                    metadata={
+                        "thread_id": stored_thread
+                        or getattr(source, "thread_id", None),
+                        "robie_delivery_kind": "notice",
+                        "robie_job_id": job_id,
+                    },
+                )
+        return str(outcome or "")
+
     async def _run_gateway_turn_with_ceiling(self, job_id: str, event: MessageEvent) -> None:
         """Start one Chat turn and return so the next message can be read.
 
@@ -1604,8 +1643,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         source = event.source
         try:
             from robie_job_engine.chat_guard import install_chat_outcome_poster
+            from robie_job_engine.turn_finalization import install_tool_call_text_guard
 
             install_chat_outcome_poster(self.post_outcome_sync)
+            install_tool_call_text_guard()
         except Exception:
             logger.debug("[GoogleChat] outcome poster was not installed", exc_info=True)
         key = turn_key(
@@ -1675,44 +1716,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         current["task"] = agent
 
-        async def _watch_and_close_silence() -> str:
-            from robie_job_engine.turn_finalization import (
-                finalize_turn_if_still_open,
-                install_tool_call_text_guard,
-            )
-
-            install_tool_call_text_guard()
-            outcome = await watch_turn_ceiling(
-                agent,
-                limit=limit,
-                on_timeout=on_timeout,
-                stop_requested=stop_requested,
-            )
-            if outcome == "finished" and not stop_requested():
-                line = await asyncio.to_thread(
-                    finalize_turn_if_still_open, ROBIE_JOB_DB, job_id
-                )
-                if line and source is not None:
-                    from robie_job_engine.chat_thread import read_job_chat_thread
-
-                    stored_thread = await asyncio.to_thread(
-                        read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
-                    )
-                    await self.send(
-                        source.chat_id,
-                        line,
-                        reply_to=event.message_id,
-                        metadata={
-                            "thread_id": stored_thread
-                            or getattr(source, "thread_id", None),
-                            "robie_delivery_kind": "notice",
-                            "robie_job_id": job_id,
-                        },
-                    )
-            return outcome
-
         watchdog = asyncio.create_task(
-            _watch_and_close_silence(),
+            self._finish_open_turn_after_ceiling(
+                watch_turn_ceiling(
+                    agent,
+                    limit=limit,
+                    on_timeout=on_timeout,
+                    stop_requested=stop_requested,
+                ),
+                job_id,
+                event,
+                source,
+                stop_requested,
+            ),
             name=f"robie-turn-ceiling:{job_id}",
         )
         current["watchdog"] = watchdog
