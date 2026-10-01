@@ -1,0 +1,27 @@
+[Unit]
+Description=ROBIE Test SSRobie CDP keep-alive (hermes-test-01)
+After=network-online.target robie-ezlynx-browser-test.service
+Wants=network-online.target robie-ezlynx-browser-test.service
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+Environment=HOME=/opt/streetsmart-hermes-test
+WorkingDirectory=/opt/streetsmart-hermes-test/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes-test/current
+Environment=ROBIE_PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=TEST
+ExecCondition=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.test_ssrobie_keepalive --json
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes-test/.hermes
+
+[Install]
+WantedBy=multi-user.target
