@@ -221,7 +221,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         return JobEngine(self.store, workers, verifiers, recordings=self.recordings)
 
     def test_every_executable_skill_has_complete_contract(self):
-        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 20)
+        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 21)
         for action_type, contract in EXECUTABLE_SKILL_CONTRACTS.items():
             contract.validate()
             expected_policy = (
@@ -237,6 +237,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                     "daily_verification_digest",
                     "meeting.synthesis.weekly",
                     "staff.fun.monthly",
+                    "policy_change_confirmation",
                 }
                 else "REQUIRED"
             )
