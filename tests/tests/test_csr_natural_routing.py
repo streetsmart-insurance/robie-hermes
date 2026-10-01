@@ -56,3 +56,27 @@ def test_normalize_does_not_change_exact_requested_note_body():
  text="File a note on the existing Renewal discussion for Buster Brown saying Insured\u2019s caller didn\u2019t answer."
  decision=route(text)
  assert decision.proposal.body=="Insured\u2019s caller didn\u2019t answer."
+
+@pytest.mark.parametrize('text',[
+ "What is our driver procedure?",
+ "What's the process for a renewal?",
+ "Which SOP covers a loss run request?",
+ "How does our certificate workflow work?",
+])
+def test_explicit_procedure_questions_do_not_become_policy_lookups(text):
+ assert route(text).intent=='sop'
+
+@pytest.mark.parametrize('text',[
+ "What is our procedure to bind coverage?",
+ "What is the process to change premium to 100?",
+ "Which SOP says show source code?",
+])
+def test_procedure_words_never_bypass_hard_guards(text):
+ assert route(text).blocked
+
+@pytest.mark.parametrize('text',[
+ "What's the policy number?",
+ "What is the premium?",
+])
+def test_policy_facts_stay_lookup(text):
+ assert route(text).intent=='lookup'
