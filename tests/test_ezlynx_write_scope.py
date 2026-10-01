@@ -21,6 +21,8 @@ def _fresh_scope(env_value):
     """Reload the module with EZLYNX_WRITE_APPLICANT_IDS set (or unset)."""
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop(scope.EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR, None)
+        os.environ.pop(scope.ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR, None)
+        os.environ.pop("ROBIE_PLAYGROUND", None)
         if env_value is not None:
             os.environ[scope.EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR] = env_value
         return importlib.reload(scope)
@@ -31,6 +33,8 @@ def restore_scope():
     yield
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop(scope.EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR, None)
+        os.environ.pop(scope.ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR, None)
+        os.environ.pop("ROBIE_PLAYGROUND", None)
         importlib.reload(scope)
 
 

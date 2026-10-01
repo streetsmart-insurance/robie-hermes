@@ -25,6 +25,12 @@ def _lock_path() -> Path:
 
 @contextmanager
 def exclusive_session(timeout_seconds: float = 210) -> Iterator[None]:
+    # Cross-VM ownership is checked before the local lock. The flock still
+    # serializes jobs on one host; the metadata lease prevents Test and Prod
+    # from driving the shared SSRobie login at the same time.
+    from .ezlynx_driver_gate import require_driver_in
+
+    require_driver_in()
     path = _lock_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("a+", encoding="utf-8") as handle:

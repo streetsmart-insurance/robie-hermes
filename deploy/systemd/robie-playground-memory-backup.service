@@ -1,0 +1,47 @@
+# Test host only. This pull request does not install or enable this unit.
+# Host: hermes-test-01. Do not copy it to hermes-poc-01.
+# ConditionHost refuses to start on any other machine.
+#
+# The memory file is playground_memory.db next to jobs.db. The process
+# runs as streetsmart-hermes-test, so that user owns the file. The
+# backup code sets mode 0640. Auth is the VM attached service account.
+# Do not put a key file in the environment.
+#
+#   install -d /etc/systemd/system
+#   install -m 0644 deploy/systemd/robie-playground-memory-backup.service \
+#     /etc/systemd/system/robie-playground-memory-backup.service
+#   install -m 0644 deploy/systemd/robie-playground-memory-backup.timer \
+#     /etc/systemd/system/robie-playground-memory-backup.timer
+#   systemctl daemon-reload
+#   systemctl enable --now robie-playground-memory-backup.timer
+#
+# Leave ROBIE_PLAYGROUND_MEMORY_BUCKET empty and the run prints a skip
+# line and uploads nothing. Production uses a different file, user, and
+# bucket. See docs/PLAYGROUND_TEST_RUNBOOK.md. Do not point this unit
+# at the Production bucket.
+
+[Unit]
+Description=Back up the Playground memory database
+After=network-online.target
+Wants=network-online.target
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+UMask=0027
+WorkingDirectory=/opt/streetsmart-hermes-test/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes-test/current
+Environment=ROBIE_ENV=TEST
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+EnvironmentFile=-/etc/streetsmart-hermes/robie-playground.env
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.playground_memory_backup
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes-test/robie-job-engine/data
+
+[Install]
+WantedBy=multi-user.target

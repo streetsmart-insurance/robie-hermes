@@ -3036,6 +3036,34 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
                     event = replace(event, text=text)
 
+            from robie_job_engine.playground_service import handle_playground_chat
+
+            if event.source is not None:
+                playground_replies = await asyncio.to_thread(
+                    handle_playground_chat,
+                    ROBIE_JOB_DB,
+                    text,
+                    conversation_id=event.source.chat_id,
+                    thread_id=getattr(event.source, "thread_id", None),
+                    message_id=event.message_id,
+                    requested_by=(
+                        getattr(event.source, "user_name", None)
+                        or getattr(event.source, "user_id", None)
+                        or "Google Chat user"
+                    ),
+                )
+                if playground_replies is not None:
+                    for reply_text in playground_replies:
+                        await self.send(
+                            event.source.chat_id,
+                            reply_text,
+                            reply_to=event.message_id,
+                            metadata={
+                                "thread_id": getattr(event.source, "thread_id", None)
+                            },
+                        )
+                    return
+
             from robie_job_engine.chat_turn_control import is_stop_command
 
             if is_stop_command(text) and event.source is not None:
@@ -5798,3 +5826,4 @@ def register(ctx) -> None:
             "space/thread."
         ),
     )
+

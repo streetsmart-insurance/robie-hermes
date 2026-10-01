@@ -50,7 +50,11 @@ jobs:
             --project=streetsmart-hermes-poc \
             --zone=us-east1-b \
             --tunnel-through-iap \
-            --command="sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/releases/current \
+              ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1 ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION \
+              /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+              -m robie_job_engine.ezlynx_driver_gate check && \
+              sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
               /opt/streetsmart-hermes/releases/current/scripts/check_ezlynx_session.py \
               --json ${PROBE_FLAG}")
           STATUS=$?
