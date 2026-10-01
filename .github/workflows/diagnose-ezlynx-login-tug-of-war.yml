@@ -1,0 +1,80 @@
+name: Diagnose EZLynx login tug-of-war (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_EZLYNX_LOGIN_TUG_OF_WAR
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  production:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_EZLYNX_LOGIN_TUG_OF_WAR'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Collect fixed-window Production evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          gcloud compute scp --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            scripts/diagnose_ezlynx_login_tug_of_war.py \
+            hermes-poc-01:/var/tmp/diagnose_ezlynx_login_tug_of_war.py
+          gcloud compute ssh hermes-poc-01 --project=streetsmart-hermes-poc --zone=us-east1-b \
+            --tunnel-through-iap --command="sudo python3 /var/tmp/diagnose_ezlynx_login_tug_of_war.py \
+              --environment PRODUCTION --since 2026-09-30T21:30:00Z --until 2026-10-01T11:15:00Z \
+              --profile-root /opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx" \
+            > "${RUNNER_TEMP}/production.json"
+          python3 -m json.tool "${RUNNER_TEMP}/production.json" >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ezlynx-login-forensics-production
+          path: ${{ runner.temp }}/production.json
+          if-no-files-found: error
+          retention-days: 30
+
+  test:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_EZLYNX_LOGIN_TUG_OF_WAR'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Collect fixed-window Test evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          gcloud compute scp --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            scripts/diagnose_ezlynx_login_tug_of_war.py \
+            hermes-test-01:/var/tmp/diagnose_ezlynx_login_tug_of_war.py
+          gcloud compute ssh hermes-test-01 --project=streetsmart-hermes-poc --zone=us-east1-b \
+            --tunnel-through-iap --command="sudo python3 /var/tmp/diagnose_ezlynx_login_tug_of_war.py \
+              --environment TEST --since 2026-10-01T10:30:00Z --until 2026-10-01T12:15:00Z \
+              --profile-root /opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx" \
+            > "${RUNNER_TEMP}/test.json"
+          python3 -m json.tool "${RUNNER_TEMP}/test.json" >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ezlynx-login-forensics-test
+          path: ${{ runner.temp }}/test.json
+          if-no-files-found: error
+          retention-days: 30
