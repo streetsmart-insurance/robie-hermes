@@ -37,6 +37,13 @@ class Safety(unittest.TestCase):
   for dt in [datetime(2026,10,3,15,tzinfo=timezone.utc),datetime(2026,10,1,22,tzinfo=timezone.utc)]:
    self.now=dt
    with self.assertRaises(Refused):self.start()
+ def test_reviewed_unrestricted_hours_still_requires_approval(self):
+  self.plan=replace(self.plan,unrestricted_hours=True)
+  with self.assertRaises(Refused):self.start()
+  self.now=datetime(2026,10,3,23,tzinfo=timezone.utc);self.grant=replace(self.grant,plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.start()
+ def test_unrestricted_hours_cannot_remove_cooldown(self):
+  self.plan=replace(self.plan,unrestricted_hours=True);self.grant=replace(self.grant,plan_digest=self.plan.digest());self.start();self.plan=replace(self.plan,campaign="SYN-2");self.grant=replace(self.grant,evidence_id="SYN-2",plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,"cooldown"):self.start()
  def test_window_timezone(self):
   self.c.window=Window('America/Los_Angeles',9,17)
   with self.assertRaises(Refused):self.start()
