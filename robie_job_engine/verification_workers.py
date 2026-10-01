@@ -52,6 +52,10 @@ from datetime import date, datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gmail_report_ingestion as ing  # noqa: E402
 try:
+    from . import carrier_channel_routing as _routing  # noqa: E402
+except ImportError:  # pragma: no cover - script mode
+    import carrier_channel_routing as _routing  # noqa: E402
+try:
     from . import mortgagee_enrichment as menc  # noqa: E402
 except ImportError:  # script-style: python robie_job_engine/verification_workers.py
     import mortgagee_enrichment as menc  # noqa: E402
@@ -362,7 +366,13 @@ def _dept(item: WorkItem) -> str:
 
 
 def plan_4247(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
-    """Manual renewal: most urgent first; Progressive BOR download check."""
+    """Manual renewal: most urgent first; Progressive BOR download check.
+
+    Channel comes from carrier_channel_routing (Carlo 2026-09-15: EZLynx
+    directory for identity, packaged JSON for channel). Never hardcode
+    "portal" — NJCRIB assigned-risk carriers are EMAIL_ASK_PORTAL.
+    Every plan names the policy number and expiration date.
+    """
     exp = parse_csv_date(item.expiration_date)
     if exp is None:
         return (ActionPlan("verify",
@@ -376,25 +386,50 @@ def plan_4247(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
                            target=item.carrier),
                 "blocked", "already expired — needs review")
     carrier = item.carrier or "carrier"
+    pol_ref = f"Policy {item.policy_number}" if item.policy_number else "policy"
+    acct = f" ({item.account_name})" if item.account_name else ""
+    exp_txt = f"Expires {exp.isoformat()} ({days} days)"
     if "progressive" in carrier.casefold():
         # Carlo 2026-09-14: Progressive manuals are BOR takeovers — the
         # renewal should download automatically.
         return (ActionPlan("verify",
-                           "Progressive BOR takeover — check whether the renewal downloaded into "
-                           "EZLynx. If downloaded: done via download. If not: chase it.",
+                           f"Progressive BOR takeover — check whether the renewal downloaded into "
+                           f"EZLynx. If downloaded: done via download. If not: chase it. "
+                           f"{pol_ref}{acct}. {exp_txt}.",
                            target=carrier, due=today.isoformat()),
                 "due_now", f"expires in {days}d — check EZLynx download first")
-    return (ActionPlan("portal",
-                       f"Pull renewal packet from {carrier} portal; if missing, email then call. "
-                       f"Expires in {days} days.",
-                       target=carrier, due=today.isoformat()),
+    route = _routing.route_carrier(carrier)
+    channel = str(route.get("channel") or "EMAIL").upper()
+    if channel == "PORTAL":
+        portal_url = str(route.get("portal_url") or "").strip()
+        url_txt = f" ({portal_url})" if portal_url else ""
+        return (ActionPlan("portal",
+                           f"Pull renewal packet for {pol_ref}{acct} from {carrier} portal{url_txt}; "
+                           f"if missing, email then call. {exp_txt}.",
+                           target=carrier, due=today.isoformat()),
+                "due_now", f"expires in {days}d — renewal packet needed")
+    # EMAIL or EMAIL_ASK_PORTAL: email the underwriter first.
+    email = str(route.get("underwriter_email") or "").strip()
+    email_txt = email if email else "underwriter"
+    ask_portal = "; ask if a self-service portal is available" if channel == "EMAIL_ASK_PORTAL" else ""
+    kind = "email"
+    return (ActionPlan(kind,
+                       f"Email {email_txt} for the renewal packet for {pol_ref}{acct}{ask_portal}; "
+                       f"if no reply in 2 business days, call. {exp_txt}.",
+                       target=email_txt, due=today.isoformat()),
             "due_now", f"expires in {days}d — renewal packet needed")
 
 
 def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str]:
-    """Audit: day-30 entry, follow-ups every 3-5 business days, day-45 enforce."""
+    """Audit: day-30 entry, follow-ups every 3-5 business days, day-45 enforce.
+
+    Channel and phone come from carrier_channel_routing. Every plan names
+    the policy number so the caller has it in hand.
+    """
     renewal = parse_csv_date(entry.renewal_date)
     carrier = entry.carrier or "carrier"
+    pol_ref = f"Policy {entry.policy_number}" if entry.policy_number else "policy"
+    acct = f" ({entry.account_name})" if entry.account_name else ""
     if renewal is None:
         return (ActionPlan("verify",
                            "Renewal date unreadable — confirm the renewed term in EZLynx",
@@ -403,8 +438,8 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
     days_since = (today - renewal).days
     if days_since >= 45 and not entry.escalated:
         return (ActionPlan("escalate",
-                           f"Day {days_since}: ENFORCE — call the carrier audit desk directly, cite "
-                           "non-compliance surcharge risk, log the escalation",
+                           f"Day {days_since}: ENFORCE — call the carrier audit desk directly for "
+                           f"{pol_ref}{acct}, cite non-compliance surcharge risk, log the escalation",
                            target=carrier, due=today.isoformat()),
                 "due_now", f"day {days_since} — escalation due")
     if entry.last_follow_up:
@@ -416,18 +451,36 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
                                f"{entry.next_due or 'per cadence'}",
                                target=carrier, due=entry.next_due),
                     "waiting", f"waiting — next follow-up {entry.next_due or 'due'}")
-    pie = "pie" in carrier.casefold()
-    if pie:
+    route = _routing.route_carrier(carrier)
+    channel = str(route.get("channel") or "EMAIL").upper()
+    phone = str(route.get("phone") or "").strip()
+    phone_label = str(route.get("phone_label") or "").strip()
+    day_txt = f"day {days_since} — audit papers outstanding"
+    if phone:
+        who = f"{carrier} {phone_label} {phone}".strip() if phone_label else f"{carrier} {phone}"
         return (ActionPlan("call",
-                           "Pie Insurance Partner Support 855-965-1840 — ask for the final payroll "
-                           "audit statement; have it emailed to robie@streetsmart.insurance",
-                           target="Pie Insurance 855-965-1840", due=today.isoformat()),
-                "due_now", f"day {days_since} — audit papers outstanding")
-    return (ActionPlan("portal",
-                       f"Check {carrier} portal for the final payroll audit statement; "
-                       "then email, then call. Request it at robie@streetsmart.insurance",
-                       target=carrier, due=today.isoformat()),
-            "due_now", f"day {days_since} — audit papers outstanding")
+                           f"{who} — ask for the final payroll audit statement for {pol_ref}{acct}; "
+                           f"have it emailed to robie@streetsmart.insurance",
+                           target=who, due=today.isoformat()),
+                "due_now", day_txt)
+    if channel == "PORTAL":
+        portal_url = str(route.get("portal_url") or "").strip()
+        url_txt = f" ({portal_url})" if portal_url else ""
+        return (ActionPlan("portal",
+                           f"Check {carrier} portal{url_txt} for the final payroll audit statement "
+                           f"for {pol_ref}{acct}; then email, then call. "
+                           f"Request it at robie@streetsmart.insurance",
+                           target=carrier, due=today.isoformat()),
+                "due_now", day_txt)
+    # EMAIL / EMAIL_ASK_PORTAL: email first, then call.
+    email = str(route.get("underwriter_email") or "").strip() or "underwriter"
+    ask_portal = "; ask if a portal download is available" if channel == "EMAIL_ASK_PORTAL" else ""
+    return (ActionPlan("email",
+                       f"Email {email} for the final payroll audit statement for {pol_ref}{acct}"
+                       f"{ask_portal}; if no reply in 2 business days, call. "
+                       f"Request it at robie@streetsmart.insurance",
+                       target=email, due=today.isoformat()),
+            "due_now", day_txt)
 
 
 def plan_4372(

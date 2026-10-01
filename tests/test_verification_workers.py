@@ -234,7 +234,7 @@ class ManualRenewal4247WorkerTests(unittest.TestCase):
                 "Department": "Commercial Lines",
                 "Policy Effective Date": eff,
                 "Policy Expiration Date": exp_soon,
-                "Master Company": "Test Carrier",
+                "Master Company": "Travelers",
             },
             {
                 "Policy Number": "POL-4247-002",
@@ -349,3 +349,64 @@ class DigestShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanAPlusRegressionTests(unittest.TestCase):
+    """2026-09-26: plans must use carrier_channel_routing (never hardcode
+    portal), name the policy number, and use the phone directory."""
+
+    def test_4247_njcrib_routes_to_email_not_portal(self):
+        item = vw.WorkItem(
+            key="k", report_id="4247", policy_number="6S60UB-A442372-6-26",
+            account_name="EZ Slide Garage Doors", department="Commercial Lines",
+            carrier="NJCRIB - Hartford Assigned Risk",
+            producer="", csr="",
+            expiration_date=(DAY + timedelta(days=45)).strftime("%m/%d/%Y"),
+        )
+        action, status, reason = vw.plan_4247(item, DAY)
+        self.assertEqual(action.kind, "email")
+        self.assertIn("assignedrisk@hartford.com", action.detail)
+        self.assertIn("6S60UB-A442372-6-26", action.detail)
+        self.assertIn("EZ Slide Garage Doors", action.detail)
+        self.assertIn("portal is available", action.detail)
+
+    def test_4247_portal_carrier_names_policy_and_url(self):
+        item = vw.WorkItem(
+            key="k", report_id="4247", policy_number="TRAV-123",
+            account_name="Acme Corp", department="Commercial Lines",
+            carrier="Travelers", producer="", csr="",
+            expiration_date=(DAY + timedelta(days=35)).strftime("%m/%d/%Y"),
+        )
+        action, status, reason = vw.plan_4247(item, DAY)
+        self.assertEqual(action.kind, "portal")
+        self.assertIn("TRAV-123", action.detail)
+        self.assertIn("Acme Corp", action.detail)
+        self.assertIn("travelers.com", action.detail)
+
+    def test_4246_pie_uses_phone_directory_and_policy_number(self):
+        entry = vw.AuditQueueEntry(
+            key="k", policy_number="WC PI 2905651-001",
+            account_name="V & I Pro Group LLC", department="Commercial Lines",
+            carrier="Pie Insurance",
+            renewal_date=(DAY - timedelta(days=35)).strftime("%Y-%m-%d"),
+            first_seen=DAY.isoformat(),
+        )
+        action, status, reason = vw.plan_4246(entry, DAY)
+        self.assertEqual(action.kind, "call")
+        self.assertIn("855-965-1840", action.detail)
+        self.assertIn("WC PI 2905651-001", action.detail)
+        self.assertIn("V & I Pro Group LLC", action.detail)
+
+    def test_4246_njcrib_routes_to_email_not_portal(self):
+        entry = vw.AuditQueueEntry(
+            key="k", policy_number="WC5-33S-381868-015",
+            account_name="Central Jersey Tree Services LLC",
+            department="Commercial Lines",
+            carrier="NJCRIB - Liberty Assigned Risk",
+            renewal_date=(DAY - timedelta(days=33)).strftime("%Y-%m-%d"),
+            first_seen=DAY.isoformat(),
+        )
+        action, status, reason = vw.plan_4246(entry, DAY)
+        self.assertEqual(action.kind, "email")
+        self.assertIn("assignedrisk@libertymutual.com", action.detail)
+        self.assertIn("WC5-33S-381868-015", action.detail)
