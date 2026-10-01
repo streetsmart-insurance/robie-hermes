@@ -31,3 +31,12 @@ real reads. No arbitrary fallback schema or successful-empty claim is used.
 The old Production label dispatcher is not changed. Voice/caller identity,
 account cost, exact speech and live DiscussionApi note adapter are unproved.
 Do not enable the Production label watch or live flags based on this replay.
+
+## Hours decision, October 1
+
+Carlo's authenticated conversation explicitly leaves Robie Call and Robie
+lead follow-up unrestricted by weekday/hours. Those two routes require
+unrestricted_hours=True in the reviewed Plan digest. Client outreach stays
+under the explicit weekday window. This exception changes only hours: the
+24h phone cooldown, single-use client approval and script/destination binding
+remain. No live execution is authorized by this policy decision.
