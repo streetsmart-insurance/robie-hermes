@@ -91,7 +91,6 @@ def auth_events(since: str, until: str) -> list[str]:
     rc, out = run(
         [
             "journalctl",
-            "_SYSTEMD_UNIT=ssh.service",
             "--since",
             since,
             "--until",
@@ -103,7 +102,10 @@ def auth_events(since: str, until: str) -> list[str]:
     )
     if rc not in (0, 1):
         return [f"ssh journal exit {rc}"]
-    wanted = re.compile(r"(?i)(accepted publickey|session opened|session closed|sudo|command)")
+    wanted = re.compile(
+        r"(?i)(accepted publickey|session opened|session closed|sudo|command|"
+        r"re_auth_ezlynx|ezlynx_login_bootstrap)"
+    )
     return [sanitize(line) for line in out.splitlines() if wanted.search(line)][-300:]
 
 
