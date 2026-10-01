@@ -7,10 +7,13 @@ Wants=network-online.target robie-ezlynx-browser.service
 Type=oneshot
 User=streetsmart-hermes
 Group=streetsmart-hermes
-WorkingDirectory=/opt/streetsmart-hermes/robie-job-engine
-Environment=PYTHONPATH=/opt/streetsmart-hermes/robie-job-engine
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION
 EnvironmentFile=/etc/streetsmart-hermes/robie-ezlynx.env
+ExecCondition=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
 ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_session
 NoNewPrivileges=true
 PrivateTmp=true
