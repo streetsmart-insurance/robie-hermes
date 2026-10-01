@@ -403,7 +403,8 @@ def _start(
     if decision.intent == "sop":
         hits = retrieve_sop(text, sop_docs, limit=2, include_ties=True)
         if ambiguous_sop_hits(hits):
-            tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
+            tied = (hits if hits[0].version_review_required else
+                    [hit for hit in hits if hit.match_score == hits[0].match_score])
             sources = "; ".join(hit.citation for hit in tied[:3])
             remaining = f"; and {len(tied) - 3} more" if len(tied) > 3 else ""
             question = (f"{len(tied)} procedure sources match this question with different text: "
