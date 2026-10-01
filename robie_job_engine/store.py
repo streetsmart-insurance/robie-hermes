@@ -666,7 +666,17 @@ class JobStore:
             job = self.get_job(job_id, conn=conn)
         if status in TERMINAL_STATUSES:
             self._stop_capture([job_id])
+            self._release_turn_lock(job_id)
         return job
+
+    def _release_turn_lock(self, job_id: str) -> None:
+        """A terminal job does not keep the Chat turn lock."""
+        try:
+            from .chat_turn_control import release_finished_job_session
+
+            release_finished_job_session(self.path, job_id, stop_agent=False)
+        except Exception:
+            logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
 
     def _stop_capture(self, job_ids: list[str]) -> None:
         """A terminal job writes the browser_capture stop file."""

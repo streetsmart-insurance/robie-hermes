@@ -17,7 +17,10 @@ _INTERNAL_CODE = re.compile(
     r"|MISSING_REQUIRED_FIELD)\b",
     re.IGNORECASE,
 )
-_SIGN_IN = re.compile(r"\b(?:sign[\s-]?in|log[\s-]?in)\b", re.IGNORECASE)
+_SIGN_IN = re.compile(
+    r"\b(?:sign[\s-]?in|log[\s-]?in)\b|/auth/account/login",
+    re.IGNORECASE,
+)
 _ASKS = re.compile(r"^(?:which|what|who|where|when|how)\b", re.IGNORECASE)
 _INFO_REQUEST = re.compile(
     r"\b(?:please\s+(?:provide|tell|give|send|share|specify|confirm|name)"
@@ -140,7 +143,7 @@ def plain_clarify_or_sign_in(text: str) -> str | None:
         "outbound reply held internal detail: %s",
         " ".join(raw.split())[:2000],
     )
-    if _SIGN_IN.search(raw):
+    if _SIGN_IN.search(raw) or "/auth/account/login" in raw.casefold():
         return SIGN_IN_QUESTION
     match = _MISSING_FIELD.search(raw)
     if not match:

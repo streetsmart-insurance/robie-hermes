@@ -364,6 +364,20 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
             )
 
             score_confirmed_discussion_note(JobStore(db_path), job_id, report)
+        if (
+            str(report.get("status") or "") == "filed"
+            and report.get("read_back")
+            and report.get("note_id")
+            and report.get("wrote")
+            and not report.get("idempotent")
+        ):
+            from robie_job_engine.turn_finalization import record_turn_write
+
+            record_turn_write(
+                JobStore(db_path),
+                job_id,
+                note_id=str(report.get("note_id") or ""),
+            )
     except Exception:
         return
 

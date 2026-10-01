@@ -3034,6 +3034,27 @@ def _guard_chat_response_impl(
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    from .user_reply import SIGN_IN_QUESTION, plain_clarify_or_sign_in
+
+    sign_in = plain_clarify_or_sign_in(content)
+    if sign_in == SIGN_IN_QUESTION and JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
+        recordings = recordings or RecordingManager(db_path)
+        recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+        return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
+    from .chat_job_controls import outbound_is_clarify
+    from .turn_finalization import model_generation_is_running
+
+    # The model's question for this generation is the reply. Do not close
+    # the job underneath it.
+    if model_generation_is_running(job_id) and outbound_is_clarify(content):
+        return content if str(content).endswith("\n") else str(content).rstrip() + "\n"
     forced = _unproved_field_user_reply(store, job)
     if forced:
         _leave_partial_note_unverified(store, job_id)

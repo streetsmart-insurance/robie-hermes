@@ -195,6 +195,7 @@ _CERTIFICATE_RE = re.compile(
 _DISCUSSION_NOTE_RE = re.compile(
     r"\b(?:add|file|post|leave)\s+(?:a\s+)?note\b"
 )
+_NOTE_BODY_SPLIT = re.compile(r"\b(?:saying|that)\b|:\s")
 
 
 def _normalized(text: str) -> str:
@@ -276,12 +277,13 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
             WORKER_FOR_ACTION["hermes.plain_english"],
             answer_only=True,
         )
-    if _is_address_change(normalized):
+    instruction = _routing_instruction(normalized)
+    if _is_address_change(instruction):
         return RequestClassification(
             "ezlynx.policy_change",
             WORKER_FOR_ACTION["ezlynx.policy_change"],
         )
-    playground_route = _classify_playground_ezlynx(normalized)
+    playground_route = _classify_playground_ezlynx(instruction)
     if playground_route is not None:
         return playground_route
     if _is_discussion_note_request(normalized):
@@ -336,6 +338,19 @@ def _is_commercial_auto_from_quote(text: str) -> bool:
     return "commercial auto" in text and "quote" in text
 
 
+def _routing_instruction(text: str) -> str:
+    """The requested action. Words inside the note body are not the action."""
+    raw = str(text or "")
+    match = _DISCUSSION_NOTE_RE.search(raw)
+    if not match:
+        return raw
+    tail = raw[match.end():]
+    body = _NOTE_BODY_SPLIT.search(tail)
+    if body:
+        return raw[: match.end() + body.start()]
+    return raw[: match.end()]
+
+
 def _is_quote_request(text: str) -> bool:
     return _QUOTE_RE.search(text) is not None
 
@@ -356,13 +371,15 @@ def _is_certificate_request(text: str) -> bool:
 def _is_discussion_note_request(text: str) -> bool:
     """A plain 'add a note' is a discussion write, not a freeform chat task.
 
-    Certificate and policy-change routes already file their own note.
+    Certificate and policy-change words inside the note body do not change
+    the action. Those routes win only when the request itself asks for them.
     """
     if not _DISCUSSION_NOTE_RE.search(text or ""):
         return False
-    if _is_address_change(text) or _is_policy_change_request(text):
+    instruction = _routing_instruction(text)
+    if _is_address_change(instruction) or _is_policy_change_request(instruction):
         return False
-    if _is_certificate_request(text):
+    if _is_certificate_request(instruction):
         return False
     return True
 

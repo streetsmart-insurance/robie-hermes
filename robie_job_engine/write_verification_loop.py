@@ -222,8 +222,28 @@ def _loads_object(text: str) -> dict[str, Any] | None:
     return data
 
 
+def _numeric_applicant_id(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if text.isdigit():
+        return text
+    return ""
+
+
+def bound_applicant_id(job: Mapping[str, Any] | None) -> str:
+    """The account id this job's name search already bound. A name is not an id."""
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("applicant_id", "ezlynx_applicant_id", "account_id"):
+        found = _numeric_applicant_id(payload.get(key))
+        if found:
+            return found
+    return ""
+
+
 def _normalize_target(target_raw: Any) -> dict[str, str]:
-    """A string target is an account id, a policy number, or a discussion."""
+    """A string target is an account id, a policy number, or a discussion.
+
+    ``applicant_id`` is digits only. A person's name is not an account id.
+    """
     if isinstance(target_raw, str):
         text = " ".join(target_raw.split()).strip()
         if not text:
@@ -236,11 +256,45 @@ def _normalize_target(target_raw: Any) -> dict[str, str]:
         return {"discussion": text}
     if not isinstance(target_raw, Mapping):
         return {}
-    return {
-        key: " ".join(str(target_raw.get(key) or "").split()).strip()
-        for key in _TARGET_KEYS
-        if str(target_raw.get(key) or "").strip()
-    }
+    target: dict[str, str] = {}
+    for key in _TARGET_KEYS:
+        text = " ".join(str(target_raw.get(key) or "").split()).strip()
+        if not text:
+            continue
+        if key == "applicant_id" and not text.isdigit():
+            continue
+        target[key] = text
+    return target
+
+
+def plan_with_bound_applicant(
+    raw: str | Mapping[str, Any] | None,
+    job: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """A locked-ready plan whose applicant id came from the name search."""
+    data = raw if isinstance(raw, Mapping) else _plan_object(raw, repair=True)
+    bound = bind_plan_applicant(data, job)
+    if bound is None:
+        return None
+    try:
+        return _validated_statement(bound)
+    except ValueError:
+        return None
+
+
+def bind_plan_applicant(statement: Mapping[str, Any] | None, job: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Use the id from the name search. Never keep a name in ``applicant_id``."""
+    if not isinstance(statement, Mapping):
+        return None
+    data = dict(statement)
+    target = _normalize_target(data.get("target"))
+    if not _numeric_applicant_id(target.get("applicant_id")):
+        target.pop("applicant_id", None)
+        bound = bound_applicant_id(job)
+        if bound:
+            target["applicant_id"] = bound
+    data["target"] = target
+    return data
 
 
 def _clean_values(values_raw: Any) -> dict[str, Any]:
@@ -348,7 +402,7 @@ def coerce_tool_plan(statement: Any, args: Mapping[str, Any] | None = None) -> A
         title = " ".join(str(tool_args.get("title_hint") or "").split()).strip()
         if title:
             target = {"discussion": title}
-            applicant = " ".join(str(tool_args.get("applicant_id") or "").split()).strip()
+            applicant = _numeric_applicant_id(tool_args.get("applicant_id"))
             if applicant:
                 target["applicant_id"] = applicant
             data["target"] = target
@@ -407,7 +461,7 @@ def lock_stated_plan(store: Any, job: Mapping[str, Any], statement: Mapping[str,
     existing = get_locked_plan(store, job_id)
     if existing is not None:
         return existing
-    clean = _validated_statement(statement)
+    clean = _validated_statement(bind_plan_applicant(statement, job) or statement)
     record = {
         "locked": True,
         "source": "model",
@@ -455,6 +509,7 @@ def prepare_write_plan(
         if retried:
             raw = retried
         statement = parse_model_plan(raw)
+    statement = plan_with_bound_applicant(statement if statement is not None else raw, job)
     if statement is None:
         return remember_unlocked_plan(store, job, str(raw or ""))
     return lock_stated_plan(store, job, statement)

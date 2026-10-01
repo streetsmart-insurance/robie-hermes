@@ -1642,10 +1642,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         outcome = await watched
         if outcome == "finished" and not stop_requested():
+            from robie_job_engine.turn_finalization import (
+                finish_model_generation,
+                generation_settle_seconds,
+                model_generation_is_running,
+                wait_for_generation_delivery,
+            )
+
+            if model_generation_is_running(job_id) and not stop_requested():
+                delivered = await asyncio.to_thread(
+                    wait_for_generation_delivery,
+                    job_id,
+                    generation_settle_seconds(),
+                )
+                if not delivered:
+                    finish_model_generation(job_id)
+            if stop_requested() or model_generation_is_running(job_id):
+                return str(outcome or "")
+            finish_model_generation(job_id)
             line = await asyncio.to_thread(
                 visible_fallback_line, ROBIE_JOB_DB, job_id
             )
             sent = False
+            result = None
             if line and source is not None:
                 from robie_job_engine.chat_thread import read_job_chat_thread
 
@@ -1665,6 +1684,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 sent = bool(getattr(result, "success", False))
             if line and sent:
+                posted_id = str(getattr(result, "message_id", "") or "")
+
+                def _record_close_post() -> None:
+                    store = JobStore(ROBIE_JOB_DB)
+                    store.checkpoint(
+                        job_id,
+                        "chat_outcome_sent",
+                        {"text": line, "posted": True},
+                    )
+                    if posted_id:
+                        from robie_job_engine.chat_turn_control import (
+                            record_chat_delivery,
+                        )
+
+                        record_chat_delivery(
+                            store, job_id, posted_id, line, "notice"
+                        )
+
+                await asyncio.to_thread(_record_close_post)
                 await asyncio.to_thread(
                     close_turn_after_visible_line, ROBIE_JOB_DB, job_id, line
                 )
@@ -1705,6 +1743,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "job_id": job_id,
             "watchdog": None,
         }
+        os.environ["ROBIE_CURRENT_JOB_ID"] = str(job_id)
+        os.environ["ROBIE_JOB_ID"] = str(job_id)
+        from robie_job_engine.turn_finalization import begin_model_generation
+
+        begin_model_generation(job_id)
         limit = gateway_max_turn_seconds()
         try:
             from robie_job_engine.chat_turn_control import chat_turn_keeps_context
@@ -5045,6 +5088,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
         from robie_job_engine.user_reply import format_user_reply
 
         content = format_user_reply(content)
+        if agent_reply and job_id:
+            from robie_job_engine.turn_finalization import (
+                engine_question_already_sent,
+                note_generation_delivered,
+                suppress_model_reply,
+            )
+
+            reply_store = JobStore(ROBIE_JOB_DB)
+            if suppress_model_reply(reply_store, job_id, content):
+                if engine_question_already_sent(reply_store, job_id):
+                    note_generation_delivered(job_id)
+                return SendResult(success=True, message_id=None)
         thread_spec = self._thread_spec_for_outbound(
             chat_id,
             metadata,
@@ -5221,6 +5276,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if getattr(last_result, "success", False):
                 if agent_reply and job_id and self._agent_reply_is_replaced(job_id):
                     self._mark_sole_reply_sent(job_id)
+                if agent_reply and job_id:
+                    from robie_job_engine.turn_finalization import (
+                        note_generation_delivered,
+                    )
+
+                    note_generation_delivered(job_id)
                 await self._finish_sent_reply(
                     chat_id,
                     job_id,
@@ -5516,8 +5577,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # model's paragraph into it is the top-level "note added" message.
             # The one allowed line goes out through send(), on the stored thread.
             return SendResult(success=True, message_id=message_id)
-        from robie_job_engine.user_reply import format_user_reply
+        from robie_job_engine.turn_finalization import (
+            current_model_job_id,
+            reply_claims_a_write,
+        )
+        from robie_job_engine.user_reply import format_user_reply, plain_clarify_or_sign_in
 
+        edit_job = (
+            current_model_job_id()
+            or self._active_turn_job_id(chat_id)
+            or self._live_chat_job_id(chat_id)
+        )
+        # A final reply, including a sign-in ask, is created in the job's
+        # thread. Patching it would leave it on the top-level thinking card.
+        if edit_job:
+            return await self.send(
+                chat_id,
+                content,
+                metadata={"robie_job_id": edit_job},
+            )
+        if reply_claims_a_write(content) or plain_clarify_or_sign_in(content):
+            return SendResult(success=True, message_id=message_id)
         content = format_user_reply(content)
         # Google Chat caps message text at 4096; we use 4000 elsewhere.
         if len(content) > _MAX_TEXT_LENGTH:

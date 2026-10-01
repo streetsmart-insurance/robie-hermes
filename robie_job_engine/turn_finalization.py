@@ -24,6 +24,7 @@ are not mid-turn tool narration.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from typing import Any
 
@@ -32,7 +33,14 @@ COULD_NOT_FINISH = "I couldn't finish that; a CSR should take a look."
 _LOCK = threading.Lock()
 _TOOL_TEXT: dict[str, set[str]] = {}
 _TOOL_MESSAGE_OPEN: set[str] = set()
+_OPEN_GENERATION: dict[str, int] = {}
+_GENERATION_DELIVERED: dict[str, threading.Event] = {}
 _INSTALLED = False
+_WRITE_CLAIM = re.compile(
+    r"\b(?:has been filed|been filed|note has been|discussion note has been|"
+    r"i (?:filed|posted|saved|added) (?:the|that|a) note|note id\s*\d+)\b",
+    re.IGNORECASE,
+)
 
 
 def _norm(text: str) -> str:
@@ -107,9 +115,145 @@ def clear_tool_call_text(job_id: str | None) -> None:
         _TOOL_MESSAGE_OPEN.discard(str(job_id))
 
 
+def begin_model_generation(job_id: str | None) -> int:
+    """This turn's model generation is running. A close waits for it."""
+    if not job_id:
+        return 0
+    with _LOCK:
+        key = str(job_id)
+        generation = int(_OPEN_GENERATION.get(key, 0)) + 1
+        _OPEN_GENERATION[key] = generation
+        _GENERATION_DELIVERED[key] = threading.Event()
+        return generation
+
+
+def current_model_generation(job_id: str | None) -> int:
+    if not job_id:
+        return 0
+    with _LOCK:
+        return int(_OPEN_GENERATION.get(str(job_id), 0))
+
+
+def model_generation_is_running(job_id: str | None) -> bool:
+    if not job_id:
+        return False
+    with _LOCK:
+        return str(job_id) in _OPEN_GENERATION
+
+
+def finish_model_generation(job_id: str | None, generation: int | None = None) -> None:
+    """The generation has delivered, or it ended with nothing left to send."""
+    if not job_id:
+        return
+    with _LOCK:
+        key = str(job_id)
+        if generation is not None and int(_OPEN_GENERATION.get(key, 0)) != int(generation):
+            return
+        _OPEN_GENERATION.pop(key, None)
+        event = _GENERATION_DELIVERED.get(key)
+        if event is not None:
+            event.set()
+
+
+def note_generation_delivered(job_id: str | None) -> None:
+    """The current generation posted its line. The fallback close must not replace it."""
+    finish_model_generation(job_id)
+
+
+def wait_for_generation_delivery(job_id: str | None, timeout: float) -> bool:
+    """True when this generation posted before the timeout."""
+    if not job_id:
+        return False
+    with _LOCK:
+        event = _GENERATION_DELIVERED.get(str(job_id))
+    if event is None:
+        return False
+    return bool(event.wait(timeout))
+
+
+def generation_settle_seconds() -> float:
+    raw = str(os.environ.get("ROBIE_GENERATION_SETTLE_SECONDS") or "").strip()
+    if not raw:
+        return 20.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 20.0
+
+
+def reply_claims_a_write(text: str) -> bool:
+    """True when the model says a note or other write was saved."""
+    return bool(_WRITE_CLAIM.search(" ".join(str(text or "").split())))
+
+
+def confirmed_write_this_turn(store: Any, job_id: str | None) -> bool:
+    """True only for a write this job confirmed during the current generation.
+
+    A ledger match from an earlier day is not a write this turn.
+    """
+    if store is None or not job_id:
+        return False
+    try:
+        log = store.get_checkpoint(job_id, "turn_write_log") or {}
+    except Exception:
+        return False
+    if not isinstance(log, dict) or not log.get("confirmed"):
+        return False
+    logged = int(log.get("generation") or 0)
+    current = current_model_generation(job_id)
+    if current and logged and logged != current:
+        return False
+    return True
+
+
+def engine_question_already_sent(store: Any, job_id: str | None) -> bool:
+    """True when this turn already posted the engine's clarify or duplicate question."""
+    if store is None or not job_id:
+        return False
+    try:
+        sent = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
+    except Exception:
+        sent = {}
+    text = " ".join(str((sent or {}).get("text") or "").split())
+    if not text:
+        return False
+    from .chat_job_controls import outbound_is_clarify
+
+    folded = text.casefold()
+    if "already added that note" in folded or "want me to add it again" in folded:
+        return True
+    return outbound_is_clarify(text)
+
+
+def suppress_model_reply(store: Any, job_id: str | None, text: str) -> bool:
+    """Drop the model's own send when the engine already asked, or the save is unproved."""
+    if engine_question_already_sent(store, job_id):
+        return True
+    if reply_claims_a_write(text) and not confirmed_write_this_turn(store, job_id):
+        return True
+    return False
+
+
+def record_turn_write(store: Any, job_id: str | None, *, note_id: str = "") -> None:
+    """Remember that this generation confirmed a write. The model may then say so."""
+    if store is None or not job_id:
+        return
+    store.checkpoint(
+        job_id,
+        "turn_write_log",
+        {
+            "confirmed": True,
+            "note_id": str(note_id or "").strip(),
+            "generation": current_model_generation(job_id),
+        },
+    )
+
+
 def visible_fallback_line(db_path: str, job_id: str | None) -> str | None:
     """The line a silent turn still owes the user. This does not close the job."""
     if not db_path or not job_id:
+        return None
+    if model_generation_is_running(job_id):
         return None
     from .models import JobStatus
     from .store import JobStore
@@ -131,6 +275,8 @@ def close_turn_after_visible_line(db_path: str, job_id: str | None, line: str) -
     """The line is already on its way. Only then may the job become terminal."""
     shown = " ".join(str(line or "").split()).strip()
     if not db_path or not job_id or not shown:
+        return
+    if model_generation_is_running(job_id):
         return
     from .models import JobStatus
     from .store import JobStore
