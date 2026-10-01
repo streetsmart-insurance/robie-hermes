@@ -60,3 +60,12 @@ def test_handler_holds_imported_conflicting_versions_even_when_scores_differ():
  from durable_temp import durable_temporary_directory
  with durable_temporary_directory() as directory:
   _handler_hold_case(Path(directory))
+
+
+def test_unmatched_sibling_is_retained_for_version_review(tmp_path):
+ with patch('robie_job_engine.playground_sop.collect_documents',return_value=metadata()):
+  ingest_sops(Drive(),str(tmp_path/'index.json'))
+ docs=load_index(str(tmp_path/'index.json'))
+ hits=retrieve_sop('manager',docs,limit=2,include_ties=True)
+ assert {hit.doc_id for hit in hits}=={'new','old'} and ambiguous_sop_hits(hits)
+ assert retrieve_sop('unrelatedword',docs,include_ties=True)==[]
