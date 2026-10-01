@@ -13,7 +13,9 @@ from robie_job_engine.bland_test_one_shot import payload,dispatch_once,TestCallR
 
 class OneShotSafety(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name);self.path.chmod(0o700)
+        # Exercise the explicitly forbidden /tmp path on every platform;
+        # macOS defaults tempfile to /var/folders, which is a different path.
+        self.tmp=tempfile.TemporaryDirectory(dir='/tmp');self.path=Path(self.tmp.name);self.path.chmod(0o700)
         # Tests may use a private temp directory; the production contract refuses
         # /tmp explicitly, so use an isolated home-directory test location.
         self.home=tempfile.TemporaryDirectory(dir=str(Path.home()),prefix='bland-proof-');self.root=Path(self.home.name);self.root.chmod(0o700)
