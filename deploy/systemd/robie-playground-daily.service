@@ -1,0 +1,42 @@
+# Test host only. This pull request does not install or enable this unit.
+# Host: hermes-test-01. Do not copy it to hermes-poc-01.
+# ConditionHost refuses to start on any other machine.
+#
+#   install -d /etc/systemd/system
+#   install -m 0644 deploy/systemd/robie-playground-daily.service \
+#     /etc/systemd/system/robie-playground-daily.service
+#   install -m 0644 deploy/systemd/robie-playground-daily.timer \
+#     /etc/systemd/system/robie-playground-daily.timer
+#   systemctl daemon-reload
+#   systemctl enable --now robie-playground-daily.timer
+#
+# The Playground flag and the Chat space id live in
+# /etc/streetsmart-hermes/robie-playground.env. Leave the flag unset and
+# this timer sends nothing.
+
+[Unit]
+Description=Send Carlo the Playground change list
+After=network-online.target
+Wants=network-online.target
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes-test/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes-test/current
+Environment=ROBIE_ENV=TEST
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+EnvironmentFile=-/etc/streetsmart-hermes/robie-playground.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.playground_daily
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes-test/robie-job-engine/data
+
+[Install]
+WantedBy=multi-user.target
