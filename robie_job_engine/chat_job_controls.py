@@ -122,8 +122,18 @@ def outbound_is_clarify(raw: str, cleaned: str = "") -> bool:
     return True
 
 
-def mark_job_waiting_for_user(store: Any, job_id: str, question: str = "") -> bool:
-    """Park a live job so the next message answers it instead of busy-defer."""
+def mark_job_waiting_for_user(
+    store: Any,
+    job_id: str,
+    question: str = "",
+    *,
+    from_unverified: bool = False,
+) -> bool:
+    """Park a live job so the next message answers it instead of busy-defer.
+
+    A repeat-note question may also pull a job back from UNVERIFIED. That
+    status was a premature "reply sent", and the yes or no still has to land.
+    """
     if not job_id or store is None:
         return False
     try:
@@ -131,13 +141,6 @@ def mark_job_waiting_for_user(store: Any, job_id: str, question: str = "") -> bo
     except Exception:
         return False
     status = JobStatus(job["status"])
-    if status in {
-        JobStatus.COMPLETE,
-        JobStatus.UNVERIFIED,
-        JobStatus.FAILED,
-        JobStatus.CANCELLED,
-    }:
-        return False
     prompt = str(question or "").strip()[:500]
     if status in {JobStatus.NEEDS_CLARIFICATION, JobStatus.AWAITING_HUMAN_INPUT}:
         store.checkpoint(job_id, "clarification", {"question": prompt, "asked": True})
@@ -145,6 +148,27 @@ def mark_job_waiting_for_user(store: Any, job_id: str, question: str = "") -> bo
             job_id, "keep_chat_context", {"reason": "needs_clarification"}
         )
         return True
+    if status == JobStatus.UNVERIFIED and from_unverified:
+        store.transition(
+            job_id,
+            JobStatus.NEEDS_CLARIFICATION,
+            expected={JobStatus.UNVERIFIED},
+            error="waiting on the user",
+            resume_status=JobStatus.PENDING,
+            release_lease=True,
+        )
+        store.checkpoint(job_id, "clarification", {"question": prompt, "asked": True})
+        store.checkpoint(
+            job_id, "keep_chat_context", {"reason": "needs_clarification"}
+        )
+        return True
+    if status in {
+        JobStatus.COMPLETE,
+        JobStatus.UNVERIFIED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    }:
+        return False
     if status not in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING}:
         return False
     store.transition(
@@ -158,6 +182,58 @@ def mark_job_waiting_for_user(store: Any, job_id: str, question: str = "") -> bo
     store.checkpoint(job_id, "clarification", {"question": prompt, "asked": True})
     store.checkpoint(job_id, "keep_chat_context", {"reason": "needs_clarification"})
     return True
+
+
+def repeat_note_question(store: Any, job_id: str) -> str:
+    """The ledger question, when this job already has that note."""
+    if not job_id or store is None:
+        return ""
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return ""
+    if str(note.get("status") or "") != "already_posted":
+        return ""
+    return " ".join(str(note.get("reason") or "").split())
+
+
+def note_reply_is_pending(store: Any, job_id: str) -> bool:
+    """True while the note tool is in flight and the model must not finish the job."""
+    if not job_id or store is None:
+        return False
+    try:
+        row = store.get_checkpoint(job_id, "discussion_note_pending") or {}
+    except Exception:
+        return False
+    return bool(row.get("open"))
+
+
+def dedupe_note_revival(
+    store: Any,
+    job: dict[str, Any] | None,
+    text: str,
+    inbound_thread_id: str | None = None,
+) -> str:
+    """How an inbound message may touch a repeat-note job.
+
+    ``yes`` and ``no`` are allowed only inside that job's thread. Anything
+    else, including a later unrelated message, must not reopen the job.
+    """
+    if not job or store is None:
+        return ""
+    job_id = str(job.get("id") or "")
+    if not repeat_note_question(store, job_id):
+        return ""
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    stored = read_job_chat_thread(store, job_id)
+    in_thread = bool(inbound and stored and inbound == stored)
+    if in_thread and explicit_note_decline(text):
+        return "no"
+    if in_thread and explicit_note_repost(text):
+        return "yes"
+    return "block"
 
 
 def _parse_stamp(value: Any) -> datetime | None:
@@ -262,12 +338,7 @@ def close_declined_note_repost(store: Any, job_id: str, text: str) -> str | None
         return None
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
-    if status not in {
-        JobStatus.COMPLETE,
-        JobStatus.FAILED,
-        JobStatus.UNVERIFIED,
-        JobStatus.CANCELLED,
-    }:
+    if status not in {JobStatus.COMPLETE, JobStatus.CANCELLED, JobStatus.FAILED}:
         store.transition(
             job_id,
             JobStatus.CANCELLED,
@@ -344,6 +415,14 @@ def note_repost_confirmed_by_reply(store: Any, job_id: str, text: str) -> bool:
         return False
     if str(note.get("status") or "") != "already_posted":
         return False
+    try:
+        prior = store.get_checkpoint(job_id, "note_repost_confirmed") or {}
+    except Exception:
+        prior = {}
+    if prior.get("used"):
+        return False
+    if prior:
+        return True
     store.checkpoint(job_id, "note_repost_confirmed", {"text": " ".join(str(text).split())})
     return True
 
@@ -633,6 +712,18 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         job = store.get_job(job_id)
     except Exception:
         return False
+    if note_reply_is_pending(store, job_id) and not repeat_note_question(store, job_id):
+        return False
+    question = repeat_note_question(store, job_id)
+    if question and mark_job_waiting_for_user(
+        store, job_id, question, from_unverified=True
+    ):
+        try:
+            parked = str(store.get_job(job_id).get("status") or "")
+        except Exception:
+            parked = JobStatus.NEEDS_CLARIFICATION.value
+        stop_recordings_for_jobs(db_path, [job_id], parked)
+        return True
     status = JobStatus(job["status"])
     if status in {JobStatus.RUNNING, JobStatus.VERIFYING}:
         try:
@@ -654,13 +745,15 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
         stop_recordings_for_jobs(db_path, [job_id], JobStatus.UNVERIFIED.value)
         _stop_model_for_finished_turn(job_id)
         return True
+    if status in {JobStatus.NEEDS_CLARIFICATION, JobStatus.AWAITING_HUMAN_INPUT}:
+        # Parked is not /stop. The person's answer has to be delivered.
+        stop_recordings_for_jobs(db_path, [job_id], status.value)
+        return True
     if status in {
         JobStatus.COMPLETE,
         JobStatus.FAILED,
         JobStatus.UNVERIFIED,
         JobStatus.CANCELLED,
-        JobStatus.NEEDS_CLARIFICATION,
-        JobStatus.AWAITING_HUMAN_INPUT,
     }:
         stop_recordings_for_jobs(db_path, [job_id], status.value)
         _stop_model_for_finished_turn(job_id)

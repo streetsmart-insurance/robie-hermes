@@ -1723,6 +1723,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if cancel_ids:
             job_id = job_id or cancel_ids[0]
             idle_reply = None
+        self._forget_stopped_chat_job(source.chat_id, job_id)
+        for waiting_id in cancel_ids:
+            self._forget_stopped_chat_job(source.chat_id, waiting_id)
         if idle_reply:
             await self.send(
                 source.chat_id,
@@ -4207,12 +4210,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     "[GoogleChat] could not remember question job=%s", job_id, exc_info=True
                 )
 
-    def _active_turn_job_id(self, chat_id: str | None) -> str | None:
-        """The job this turn is still running. A released lock is not active."""
+    def _output_blocked(self, job_id: str | None) -> str | None:
+        if not job_id:
+            return None
+        try:
+            from robie_job_engine.chat_turn_control import agent_output_blocked
+
+            return agent_output_blocked(job_id, JobStore(ROBIE_JOB_DB))
+        except Exception:
+            return None
+
+    def _forget_stopped_chat_job(self, chat_id: str | None, job_id: str | None) -> None:
+        """A /stop must not leave that job attached to the next message."""
+        if not chat_id:
+            return
+        active = getattr(self, "_active_chat_job", None)
+        if isinstance(active, dict):
+            current = str(active.get(chat_id) or "")
+            if not job_id or current == str(job_id):
+                active.pop(str(chat_id), None)
+        sticky = getattr(self, "_reply_job_by_chat", None)
+        if isinstance(sticky, dict):
+            current = str(sticky.get(chat_id) or "")
+            if not job_id or current == str(job_id):
+                sticky.pop(str(chat_id), None)
+
+    def _live_unstopped_job_id(self, chat_id: str | None) -> str | None:
+        """The turn that is still allowed to speak. A cancelled job is not it."""
         if not chat_id:
             return None
         mapped = str((getattr(self, "_active_chat_job", None) or {}).get(chat_id) or "").strip()
-        if mapped:
+        if mapped and not self._output_blocked(mapped):
             return mapped
         turns = getattr(self, "_gateway_turns", None)
         if isinstance(turns, dict):
@@ -4222,9 +4250,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if not isinstance(record, dict):
                     continue
                 found = str(record.get("job_id") or "").strip()
-                if found:
+                if found and not self._output_blocked(found):
                     return found
         return None
+
+    def _active_turn_job_id(self, chat_id: str | None) -> str | None:
+        """The job this turn is still running. A released lock is not active."""
+        return self._live_unstopped_job_id(chat_id)
 
     def _question_only_job_id(self, chat_id: str | None) -> str | None:
         """The instant question answer may send without an active turn."""
@@ -4329,6 +4361,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug("[GoogleChat] could not tell if the model text is replaced", exc_info=True)
             return False
+
+    def _model_prose_held(self, job_id: str | None) -> bool:
+        """True when this turn already posted its one line, or the note tool is still running.
+
+        A send that has not posted yet still goes through the guard, which
+        rewrites a repeat note into the ledger question. Dropping that send
+        would hide the question.
+        """
+        if not job_id:
+            return False
+        if self._sole_reply_already_sent(job_id):
+            return True
+        try:
+            store = JobStore(ROBIE_JOB_DB)
+            from robie_job_engine.chat_job_controls import note_reply_is_pending
+
+            if note_reply_is_pending(store, job_id):
+                return True
+            sent = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
+        except Exception:
+            logger.debug("[GoogleChat] could not tell if model text is held", exc_info=True)
+            return False
+        return bool(str(sent.get("text") or "").strip())
 
     async def _bind_inbound_job_thread(self, event: MessageEvent, job_id: str | None) -> None:
         """When the user replied inside a thread, keep that thread on the job."""
@@ -4486,6 +4541,16 @@ class GoogleChatAdapter(BasePlatformAdapter):
         } and not (metadata or {}).get("robie_stop_notice")
         if agent_reply and not job_id:
             job_id = self._active_turn_job_id(chat_id)
+        if agent_reply and job_id and self._output_blocked(job_id):
+            # A cancelled job left on the space must not eat the live turn.
+            replacement = self._live_unstopped_job_id(chat_id)
+            if replacement and replacement != job_id:
+                job_id = replacement
+        if agent_reply and job_id and self._model_prose_held(job_id):
+            # The ledger question or the readback line is the only outbound
+            # text. The model's paragraph is not posted, at top level or
+            # in the thread.
+            return SendResult(success=True, message_id=None)
         if agent_reply and not job_id:
             question_job = self._question_only_job_id(chat_id)
             if question_job:
@@ -4966,14 +5031,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         if is_plan_refusal_text(content):
             return SendResult(success=True, message_id=message_id)
-        live_job = self._live_chat_job_id(chat_id)
-        if live_job and self._agent_reply_is_replaced(live_job):
-            # Streaming the model's final text would post it in whatever
-            # thread the bubble was opened in. The one allowed line goes
-            # out through send(), on the job's stored thread.
-            if self._sole_reply_already_sent(live_job):
-                return SendResult(success=True, message_id=message_id)
-            return await self.send(chat_id, content)
+        live_job = self._live_chat_job_id(chat_id) or self._active_turn_job_id(chat_id)
+        if live_job and (
+            self._model_prose_held(live_job) or self._agent_reply_is_replaced(live_job)
+        ):
+            # The progress bubble was opened at the top level. Patching the
+            # model's paragraph into it is the top-level "note added" message.
+            # The one allowed line goes out through send(), on the stored thread.
+            return SendResult(success=True, message_id=message_id)
         from robie_job_engine.user_reply import format_user_reply
 
         content = format_user_reply(content)

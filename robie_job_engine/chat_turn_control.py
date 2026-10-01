@@ -167,6 +167,14 @@ def request_agent_stop(job_id: str | None) -> None:
         _ABORTED_JOBS.add(str(job_id))
 
 
+def clear_agent_stop(job_id: str | None) -> None:
+    """A user reply starts a new turn. The previous turn's stop does not apply."""
+    if not job_id:
+        return
+    with _PROC_LOCK:
+        _ABORTED_JOBS.discard(str(job_id))
+
+
 def agent_stop_requested(job_id: str | None) -> bool:
     if not job_id:
         return False

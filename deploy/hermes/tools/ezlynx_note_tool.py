@@ -188,6 +188,36 @@ def _file_note(args: dict) -> dict:
     }
 
 
+def _note_job(kwargs: dict) -> tuple[str, str]:
+    import os
+
+    job_id = str(
+        (kwargs or {}).get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(
+        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
+    return job_id, db_path
+
+
+def _set_note_pending(kwargs: dict, open_write: bool) -> None:
+    """While the note tool is running, a model send must not end the job."""
+    job_id, db_path = _note_job(kwargs)
+    if not job_id or not db_path:
+        return
+    try:
+        from robie_job_engine.store import JobStore
+
+        JobStore(db_path).checkpoint(
+            job_id, "discussion_note_pending", {"open": bool(open_write)}
+        )
+    except Exception:
+        return
+
+
 def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
     import os
 
@@ -275,9 +305,11 @@ def ezlynx_discussion_note_handler(args: dict, **kwargs):
     repeat = refuse_repeat_note_post(args, kwargs)
     if repeat:
         return tool_error(repeat)
+    _set_note_pending(kwargs, True)
     try:
         report = _file_note({**(args or {}), **(kwargs or {})})
     except Exception as exc:  # noqa: BLE001 - tool boundary
+        _set_note_pending(kwargs, False)
         message = f"{type(exc).__name__}: {exc}"
         _remember_note_tool_failure(kwargs, message)
         return tool_error(
@@ -315,7 +347,9 @@ def _publish_note_outcome(kwargs: dict) -> None:
             job_id,
             poster=(kwargs or {}).get("outcome_poster"),
         )
+        _set_note_pending(kwargs, False)
     except Exception:
+        _set_note_pending(kwargs, False)
         return
 
 

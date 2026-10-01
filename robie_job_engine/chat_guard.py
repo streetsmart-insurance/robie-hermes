@@ -1344,6 +1344,57 @@ def open_chat_job(
     ):
         explicit_continuation = True
     continued_job: dict[str, Any] | None = None
+    revival = ""
+    if active_for_turn is not None:
+        from .chat_job_controls import dedupe_note_revival
+
+        revival = dedupe_note_revival(
+            store, active_for_turn, text, inbound_thread_id
+        )
+    if revival == "block":
+        # A parked or unverified repeat-note job is not a continuation of
+        # the next message. Leave it waiting and open a new job.
+        queue.deactivate_conversation(context_key)
+        related_only = False
+        explicit_continuation = False
+        continue_clarification = False
+        active_for_turn = None
+        resume_context = None
+    elif revival == "no" and not continue_clarification and active_for_turn is not None:
+        from .chat_job_controls import close_declined_note_repost
+
+        close_declined_note_repost(store, active_for_turn["id"], text)
+        return active_for_turn["id"]
+    elif revival == "yes" and not continue_clarification and active_for_turn is not None:
+        from .chat_job_controls import (
+            mark_job_waiting_for_user,
+            note_repost_confirmed_by_reply,
+            repeat_note_question,
+        )
+        from .chat_turn_control import clear_agent_stop
+
+        dedupe_id = active_for_turn["id"]
+        clear_agent_stop(dedupe_id)
+        note_repost_confirmed_by_reply(store, dedupe_id, text)
+        if JobStatus(active_for_turn["status"]) == JobStatus.UNVERIFIED:
+            mark_job_waiting_for_user(
+                store,
+                dedupe_id,
+                repeat_note_question(store, dedupe_id),
+                from_unverified=True,
+            )
+        clear_agent_stop(dedupe_id)
+        resumed = store.get_job(dedupe_id)
+        if JobStatus(resumed["status"]) in WAITING_STATUSES:
+            store.resume(dedupe_id)
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=dedupe_id,
+            message_id=message_id,
+            event_id=message_id,
+            relation="CONTINUATION",
+        )
+        return dedupe_id
     if continue_clarification and active_for_turn is not None:
         original = str((active_for_turn.get("payload") or {}).get("text") or "").strip()
         reply = str(text or "").strip()
@@ -1374,6 +1425,9 @@ def open_chat_job(
             "keep_chat_context",
             {"reason": "needs_clarification"},
         )
+        from .chat_turn_control import clear_agent_stop
+
+        clear_agent_stop(active_for_turn["id"])
         store.resume(active_for_turn["id"])
         queue.link_conversation_job(
             conversation_id=context_key,
@@ -1405,45 +1459,65 @@ def open_chat_job(
             if is_retry_text(text) and _apply_explicit_retry(store, active_job):
                 return active_job_id
             active_job = store.get_job(active_job_id)
+        skip_bind = False
         if JobStatus(active_job["status"]) in WAITING_STATUSES:
-            store.resume(active_job_id)
+            from .chat_job_controls import dedupe_note_revival
+
+            if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
+                queue.deactivate_conversation(context_key)
+                related_only = False
+                explicit_continuation = False
+                skip_bind = True
+            else:
+                store.resume(active_job_id)
         elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
-            target = (
-                JobStatus.VERIFYING
-                if store.get_checkpoint(active_job_id, "action")
-                else JobStatus.PENDING
-            )
-            store.transition(
+            from .chat_job_controls import dedupe_note_revival
+            from .chat_turn_control import clear_agent_stop
+
+            if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
+                queue.deactivate_conversation(context_key)
+                related_only = False
+                explicit_continuation = False
+                skip_bind = True
+            else:
+                clear_agent_stop(active_job_id)
+                target = (
+                    JobStatus.VERIFYING
+                    if store.get_checkpoint(active_job_id, "action")
+                    else JobStatus.PENDING
+                )
+                store.transition(
+                    active_job_id,
+                    target,
+                    expected={JobStatus.UNVERIFIED},
+                    error=None,
+                    release_lease=True,
+                )
+        if not skip_bind:
+            store.checkpoint(
                 active_job_id,
-                target,
-                expected={JobStatus.UNVERIFIED},
-                error=None,
-                release_lease=True,
+                f"continuation:{message_id}",
+                {
+                    "message_id": message_id,
+                    "text": text,
+                    "requested_by": requested_by or "Google Chat user",
+                    "related_only": related_only,
+                },
             )
-        store.checkpoint(
-            active_job_id,
-            f"continuation:{message_id}",
-            {
-                "message_id": message_id,
-                "text": text,
-                "requested_by": requested_by or "Google Chat user",
-                "related_only": related_only,
-            },
-        )
-        queue.link_conversation_job(
-            conversation_id=context_key,
-            job_id=active_job_id,
-            message_id=message_id,
-            event_id=message_id,
-            relation=(
-                "CORRECTION"
-                if classification.action_type in BOUNDED_ENGINE_ACTIONS
-                else "CONTINUATION"
-            ),
-        )
-        if related_only:
-            return active_job_id
-        continued_job = store.get_job(active_job_id)
+            queue.link_conversation_job(
+                conversation_id=context_key,
+                job_id=active_job_id,
+                message_id=message_id,
+                event_id=message_id,
+                relation=(
+                    "CORRECTION"
+                    if classification.action_type in BOUNDED_ENGINE_ACTIONS
+                    else "CONTINUATION"
+                ),
+            )
+            if related_only:
+                return active_job_id
+            continued_job = store.get_job(active_job_id)
     server_payload: dict[str, Any] = {}
     if classification.action_type == "drive.skill_sync":
         from .skill_sync import ALLOWED_FOLDERS, EXCLUDED_FOLDERS, skill_sync_root
@@ -2529,7 +2603,7 @@ def publish_discussion_note_outcome(
             return None
         from .chat_job_controls import mark_job_waiting_for_user
 
-        mark_job_waiting_for_user(store, job_id, line)
+        mark_job_waiting_for_user(store, job_id, line, from_unverified=True)
     elif status == "filed":
         from .post_job_audit import api_readback_confirms_write
 
@@ -2671,7 +2745,9 @@ def _guard_chat_response_impl(
         if question:
             from .chat_job_controls import mark_job_waiting_for_user
 
-            mark_job_waiting_for_user(store, job_id, question)
+            mark_job_waiting_for_user(
+                store, job_id, question, from_unverified=True
+            )
             recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
             return question if question.endswith("\n") else question + "\n"
     if close_confirmed_note_job(store, job_id):
