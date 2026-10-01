@@ -1685,6 +1685,76 @@ class GoogleChatAdapter(BasePlatformAdapter):
         except Exception:
             logger.exception("[GoogleChat] could not close session history")
 
+    def _post_stop_confirmation_now(
+        self,
+        chat_id: str,
+        text: str,
+        thread_id: str | None,
+        job_id: str | None,
+        *,
+        kind: str,
+    ) -> None:
+        """Post the stop line before the event loop can run anything else.
+
+        ``send()`` awaits, and the next Chat message can start in that gap.
+        This posts on the current call stack, into this job's thread, and
+        does not attach the stopped job to the space.
+        """
+        from robie_job_engine.chat_turn_control import (
+            record_chat_delivery,
+            request_agent_stop,
+        )
+        from robie_job_engine.user_reply import format_user_reply
+
+        if job_id:
+            request_agent_stop(str(job_id))
+        line = format_user_reply(str(text or ""))
+        if not chat_id or not line:
+            logger.info("[GoogleChat] stop confirmation had nothing to post")
+            return
+        api = getattr(self, "_chat_api", None)
+        if api is None:
+            logger.info(
+                "[GoogleChat] stop confirmation was not posted chat=%s", chat_id
+            )
+            return
+        body: Dict[str, Any] = {"text": line}
+        kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
+        thread_name = str(thread_id or "").strip()
+        if thread_name:
+            body["thread"] = {"name": thread_name}
+            kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        try:
+            resp = (
+                api.spaces()
+                .messages()
+                .create(**kwargs)
+                .execute(http=self._new_authed_http())
+            )
+        except Exception:
+            logger.exception(
+                "[GoogleChat] stop confirmation was not posted job=%s",
+                job_id or "",
+            )
+            return
+        message_id = ""
+        if isinstance(resp, dict):
+            message_id = str(resp.get("name") or "").strip()
+        if not job_id or not message_id:
+            return
+        try:
+            record_chat_delivery(
+                JobStore(ROBIE_JOB_DB),
+                str(job_id),
+                message_id,
+                line,
+                kind,
+            )
+        except Exception:
+            logger.exception(
+                "[GoogleChat] could not record stop delivery job=%s", job_id
+            )
+
     async def _apply_chat_stop(self, event: MessageEvent) -> None:
         """Skip job creation, stop the running agent, fail the linked job."""
         from robie_job_engine.chat_turn_control import (
@@ -1715,13 +1785,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             or ""
         )
         thread_id = getattr(source, "thread_id", None)
-        waiting_ids = await asyncio.to_thread(
-            waiting_jobs_for_requester, ROBIE_JOB_DB, source.chat_id, requester
+        # No await until the stop line is posted. The next message can run
+        # on the first await, and it used to take this line with it.
+        waiting_ids = waiting_jobs_for_requester(
+            ROBIE_JOB_DB, source.chat_id, requester
         )
         store = JobStore(ROBIE_JOB_DB)
         in_this_thread = []
         for waiting_id in waiting_ids:
-            stored = await asyncio.to_thread(read_job_chat_thread, store, waiting_id)
+            stored = read_job_chat_thread(store, waiting_id)
             if thread_id and stored == thread_id:
                 in_this_thread.append(waiting_id)
         # Top-level /stop cancels every waiting job for this person in the
@@ -1731,9 +1803,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             cancel_ids = waiting_ids
         thread_owner = None
         if thread_id:
-            thread_owner = await asyncio.to_thread(
-                job_for_chat_thread, store, thread_id
-            )
+            thread_owner = job_for_chat_thread(store, thread_id)
         if thread_owner is not None:
             from robie_job_engine.models import TERMINAL_STATUSES
 
@@ -1744,16 +1814,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     bool(job_id) and str(job_id) != owner_id
                 )
                 if not other_live:
-                    await self.send(
+                    self._post_stop_confirmation_now(
                         source.chat_id,
                         ALREADY_FINISHED_REPLY,
-                        reply_to=event.message_id,
-                        metadata={
-                            "thread_id": thread_id,
-                            "robie_stop_notice": True,
-                            "robie_delivery_kind": "stop",
-                            "robie_job_id": owner_id,
-                        },
+                        thread_id,
+                        owner_id,
+                        kind="stop",
                     )
                     return
             elif owner_id not in cancel_ids:
@@ -1761,7 +1827,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 job_id = job_id or owner_id
                 idle_reply = None
         for waiting_id in cancel_ids:
-            await asyncio.to_thread(fail_cancelled_chat_job, store, waiting_id)
+            fail_cancelled_chat_job(store, waiting_id)
         if cancel_ids:
             job_id = job_id or cancel_ids[0]
             idle_reply = None
@@ -1769,17 +1835,32 @@ class GoogleChatAdapter(BasePlatformAdapter):
         for waiting_id in cancel_ids:
             self._forget_stopped_chat_job(source.chat_id, waiting_id)
         if idle_reply:
-            await self.send(
+            self._post_stop_confirmation_now(
                 source.chat_id,
                 idle_reply,
-                reply_to=event.message_id,
-                metadata={
-                    "thread_id": getattr(source, "thread_id", None),
-                    "robie_stop_notice": True,
-                    "robie_delivery_kind": "idle_stop",
-                },
+                getattr(source, "thread_id", None),
+                None,
+                kind="idle_stop",
             )
             return
+        if job_id and job_id not in cancel_ids:
+            reply = fail_cancelled_chat_job(JobStore(ROBIE_JOB_DB), job_id)
+        elif cancel_ids:
+            from robie_job_engine.chat_turn_control import stop_reply_line
+
+            reply = stop_reply_line(cancel_ids[0])
+        else:
+            reply = NOTHING_RUNNING_REPLY
+        stop_thread = getattr(source, "thread_id", None)
+        if cancel_ids:
+            stop_thread = read_job_chat_thread(store, cancel_ids[0]) or stop_thread
+        self._post_stop_confirmation_now(
+            source.chat_id,
+            reply,
+            stop_thread,
+            job_id,
+            kind="stop",
+        )
         await self._terminate_running_agent(event, job_id, reason="/stop")
         task = (record or {}).get("task")
         if task is not None and task is not asyncio.current_task():
@@ -1793,33 +1874,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
             and not getattr(watchdog, "done", lambda: True)()
         ):
             watchdog.cancel()
-        if job_id and job_id not in cancel_ids:
-            reply = await asyncio.to_thread(
-                fail_cancelled_chat_job, JobStore(ROBIE_JOB_DB), job_id
-            )
-        elif cancel_ids:
-            from robie_job_engine.chat_turn_control import stop_reply_line
-
-            reply = stop_reply_line(cancel_ids[0])
-        else:
-            reply = NOTHING_RUNNING_REPLY
-        stop_thread = getattr(source, "thread_id", None)
-        if cancel_ids:
-            stop_thread = (
-                await asyncio.to_thread(read_job_chat_thread, store, cancel_ids[0])
-                or stop_thread
-            )
-        await self.send(
-            source.chat_id,
-            reply,
-            reply_to=event.message_id,
-            metadata={
-                "thread_id": stop_thread,
-                "robie_stop_notice": True,
-                "robie_delivery_kind": "stop",
-                "robie_job_id": job_id,
-            },
-        )
 
     @staticmethod
     async def _stop_chat_queue_heartbeat(task: asyncio.Task) -> None:
@@ -4303,19 +4357,30 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return None
 
     def _forget_stopped_chat_job(self, chat_id: str | None, job_id: str | None) -> None:
-        """A /stop must not leave that job attached to the next message."""
+        """Drop this job, and any already-stopped job, off the space map.
+
+        The map is one slot per space. A finished job left in that slot
+        makes the next send look like it belongs to that job. A different
+        live job is left in place.
+        """
         if not chat_id:
             return
-        active = getattr(self, "_active_chat_job", None)
-        if isinstance(active, dict):
-            current = str(active.get(chat_id) or "")
-            if not job_id or current == str(job_id):
-                active.pop(str(chat_id), None)
-        sticky = getattr(self, "_reply_job_by_chat", None)
-        if isinstance(sticky, dict):
-            current = str(sticky.get(chat_id) or "")
-            if not job_id or current == str(job_id):
-                sticky.pop(str(chat_id), None)
+
+        def _drop(mapping: Any) -> None:
+            if not isinstance(mapping, dict):
+                return
+            current = str(mapping.get(chat_id) or "")
+            if not current:
+                return
+            if (
+                not job_id
+                or current == str(job_id)
+                or self._output_blocked(current)
+            ):
+                mapping.pop(str(chat_id), None)
+
+        _drop(getattr(self, "_active_chat_job", None))
+        _drop(getattr(self, "_reply_job_by_chat", None))
 
     def _job_can_still_speak(self, job_id: str | None) -> bool:
         """A finished turn, or one that already posted its line, is not live."""
@@ -4699,7 +4764,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         job_owns_thread = bool(job_id) and delivery_kind != "idle_stop"
         if delivery_kind != "idle_stop" and not thread_job_id:
             mapped = self._active_chat_job.get(chat_id)
-            if mapped:
+            if mapped and not self._output_blocked(mapped):
                 thread_job_id = mapped
                 job_owns_thread = True
             else:
@@ -4711,9 +4776,20 @@ class GoogleChatAdapter(BasePlatformAdapter):
             from robie_job_engine.chat_turn_control import agent_output_blocked
 
             blocked = agent_output_blocked(job_id, JobStore(ROBIE_JOB_DB))
-            if blocked:
+            # Only the job this send names. A stopped job left on the space
+            # map must not refuse a different job's reply.
+            named = str((metadata or {}).get("robie_job_id") or "").strip()
+            if blocked and named and named == job_id:
                 logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
                 return SendResult(success=False, error=blocked)
+            if blocked:
+                # The job id was copied from the space, not named by this
+                # send. Do not refuse some other job under that id.
+                logger.info(
+                    "[GoogleChat] dropping send tied to a stopped job job=%s",
+                    job_id,
+                )
+                return SendResult(success=True, message_id=None)
         outbound_raw = str(content or "")
         content = redact_text(content)
         if delivery_kind == "idle_stop":
