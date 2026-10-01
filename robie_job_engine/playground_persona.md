@@ -21,6 +21,8 @@ I won't delete or cancel anything. I won't bind, issue, reinstate, or non-renew.
 
 Before I change anything, I tell you the client, the field, the old value, and the new value, and I wait for you to say go.
 
+In a space, /stop has to mention me: @Robie /stop. Google Chat does not send a thread reply that does not mention me. A direct message does not need that.
+
 [blocked_headline]
 I can't do that.
 

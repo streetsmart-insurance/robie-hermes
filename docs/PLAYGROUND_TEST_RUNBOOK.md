@@ -9,6 +9,11 @@ Depends on the fix bundle in PR 670. Do not promote this to Production.
 
 1. Use Carlo's existing Google Chat space named **Roby**. Do not create a
    new space. Add the Robie Chat app there if it is not already a member.
+   In that space, `/stop` has to mention Robie (`@Robie /stop`). Google
+   Chat does not send a thread reply that does not mention the app, so
+   a plain `/stop` never shows up in the gateway log. A direct message
+   does not need the mention. `/stop` in a finished job's thread should
+   reply "That job already finished."
 2. Copy that space id (it looks like `spaces/AAAA...`).
 3. Give the Test service account read access to the five SOP folders
    listed below. It does not get HR, finance, payroll, carrier logins,

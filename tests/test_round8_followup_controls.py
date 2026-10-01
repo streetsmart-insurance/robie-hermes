@@ -29,7 +29,7 @@ from robie_job_engine.chat_job_controls import (
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.chat_thread import bind_job_chat_thread
 from robie_job_engine.chat_turn_control import (
-    NOTHING_RUNNING_REPLY,
+    ALREADY_FINISHED_REPLY,
     busy_session_should_defer,
     fail_cancelled_chat_job,
     stop_reply_line,
@@ -321,7 +321,7 @@ class WaitingJobTests(unittest.TestCase):
             self.assertIsNone(waiting_job_to_cancel(db, "spaces/finished"))
             self.assertEqual(
                 fail_cancelled_chat_job(store, finished["id"]),
-                NOTHING_RUNNING_REPLY,
+                ALREADY_FINISHED_REPLY,
             )
             self.assertIsNone(store.get_checkpoint(finished["id"], "cancelled"))
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")

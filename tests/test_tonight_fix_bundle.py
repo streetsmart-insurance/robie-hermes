@@ -50,6 +50,7 @@ from robie_job_engine.chat_turn_control import (
     STOPPED_OUTPUT,
     _abandon_timed_out_gateway_turn,
     agent_output_blocked,
+    ALREADY_FINISHED_REPLY,
     NOTHING_RUNNING_REPLY,
     fail_cancelled_chat_job,
     fresh_turn_history,
@@ -1797,7 +1798,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
             self.assertEqual(resolve_stop_target(None, session_busy=False)[1], NOTHING_RUNNING_REPLY)
             self.assertIsNone(resolve_stop_target(None, session_busy=False)[0])
             reply = fail_cancelled_chat_job(store, job["id"])
-            self.assertEqual(reply, NOTHING_RUNNING_REPLY)
+            self.assertEqual(reply, ALREADY_FINISHED_REPLY)
             self.assertEqual(store.get_job(job["id"])["status"], JobStatus.FAILED.value)
             self.assertIsNone(store.get_checkpoint(job["id"], "cancelled"))
             self.assertIsNone(store.get_checkpoint(job["id"], "agent_abort"))

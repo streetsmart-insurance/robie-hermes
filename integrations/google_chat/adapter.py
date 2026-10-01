@@ -281,6 +281,15 @@ ROBIE_JOB_DB = os.environ.get(
 logger = logging.getLogger("gateway.platforms.google_chat")
 
 
+def _log_inbound_drop(reason: str) -> None:
+    """One INFO line when an inbound event is not dispatched.
+
+    The reason is a fixed phrase. The message body, sender, and text
+    are not logged.
+    """
+    logger.info("[GoogleChat] dropping inbound event: %s", reason)
+
+
 # Regex validating Pub/Sub subscription path format.
 _SUBSCRIPTION_PATH_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/subscriptions/(?P<sub>[^/]+)$"
@@ -1679,6 +1688,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def _apply_chat_stop(self, event: MessageEvent) -> None:
         """Skip job creation, stop the running agent, fail the linked job."""
         from robie_job_engine.chat_turn_control import (
+            ALREADY_FINISHED_REPLY,
             NOTHING_RUNNING_REPLY,
             fail_cancelled_chat_job,
             resolve_stop_target,
@@ -1697,7 +1707,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             record, session_busy=session_is_busy(self, event)
         )
         from robie_job_engine.chat_job_controls import waiting_jobs_for_requester
-        from robie_job_engine.chat_thread import read_job_chat_thread
+        from robie_job_engine.chat_thread import job_for_chat_thread, read_job_chat_thread
 
         requester = (
             getattr(source, "user_name", None)
@@ -1719,6 +1729,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
         cancel_ids = in_this_thread if thread_id and in_this_thread else waiting_ids
         if not thread_id:
             cancel_ids = waiting_ids
+        thread_owner = None
+        if thread_id:
+            thread_owner = await asyncio.to_thread(
+                job_for_chat_thread, store, thread_id
+            )
+        if thread_owner is not None:
+            from robie_job_engine.models import TERMINAL_STATUSES
+
+            owner_id = str(thread_owner["id"])
+            owner_status = JobStatus(thread_owner["status"])
+            if owner_status in TERMINAL_STATUSES:
+                other_live = bool(in_this_thread) or (
+                    bool(job_id) and str(job_id) != owner_id
+                )
+                if not other_live:
+                    await self.send(
+                        source.chat_id,
+                        ALREADY_FINISHED_REPLY,
+                        reply_to=event.message_id,
+                        metadata={
+                            "thread_id": thread_id,
+                            "robie_stop_notice": True,
+                            "robie_delivery_kind": "stop",
+                            "robie_job_id": owner_id,
+                        },
+                    )
+                    return
+            elif owner_id not in cancel_ids:
+                cancel_ids = [owner_id]
+                job_id = job_id or owner_id
+                idle_reply = None
         for waiting_id in cancel_ids:
             await asyncio.to_thread(fail_cancelled_chat_job, store, waiting_id)
         if cancel_ids:
@@ -2370,8 +2411,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """Detect Pub/Sub envelope format and return ``(message, space, format_name)``.
 
         Three known formats are accepted. Returns ``None`` when the envelope
-        is unrecognized, is a non-MESSAGE event, or otherwise should be
-        silently dropped.
+        is unrecognized or is a non-MESSAGE event. Each of those drops is
+        logged at INFO with a short reason and no message body.
 
         Format 1 — Workspace Add-ons (canonical, ce-type-driven)::
 
@@ -2411,6 +2452,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # flow through here.
         if isinstance(envelope.get("message"), dict):
             if envelope.get("type", "") != "MESSAGE":
+                _log_inbound_drop("not a message")
                 return None
             msg = envelope["message"]
             space = envelope.get("space") or msg.get("space") or {}
@@ -2421,6 +2463,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # direct GCP credentials.
         if "event_type" in envelope or "sender_email" in envelope:
             if envelope.get("event_type", "MESSAGE") != "MESSAGE":
+                _log_inbound_drop("not a message")
                 return None
             sender_email = (envelope.get("sender_email") or "").strip()
             sender_display = (
@@ -2473,6 +2516,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             }
             return msg, space, "relay_flat"
 
+        _log_inbound_drop("unrecognized envelope")
         return None
 
     def _on_pubsub_message(self, message: Any) -> None:
@@ -2560,10 +2604,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # --- Message events ---
             extracted = self._extract_message_payload(envelope, ce_type)
             if extracted is None:
-                logger.debug(
-                    "[GoogleChat] Envelope did not match a known message format; "
-                    "ce-type=%s, keys=%s", ce_type, list(envelope.keys())
-                )
                 message.ack()
                 return
 
@@ -2573,6 +2613,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             # Self-filter: drop bot-sourced messages (own replies and other bots).
             if sender_type == "BOT":
+                _log_inbound_drop("sender is a bot")
                 message.ack()
                 return
 
@@ -2820,6 +2861,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         msg, space, _fmt = extracted
         sender = msg.get("sender") or {}
         if sender.get("type") == "BOT":
+            _log_inbound_drop("sender is a bot")
             return {}
 
         msg_name = msg.get("name") or ""
@@ -2878,6 +2920,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         try:
             event = await self._build_message_event(msg, envelope)
             if event is None:
+                _log_inbound_drop("message could not be read")
                 return
 
             # Short-circuit /setup-files before the agent dispatch.
@@ -4684,14 +4727,16 @@ class GoogleChatAdapter(BasePlatformAdapter):
         elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "stop":
             from robie_job_engine.chat_guard import guard_chat_notice
             from robie_job_engine.chat_turn_control import (
+                ALREADY_FINISHED_REPLY,
                 NOTHING_RUNNING_REPLY,
                 stop_reply_line,
             )
 
             # One fixed line. The post-job audit, including any tool-mismatch
-            # note, stays in the ledger and is not sent. A job that already
-            # finished keeps Nothing is running right now.
-            if job_id and str(content or "").strip() != NOTHING_RUNNING_REPLY:
+            # note, stays in the ledger and is not sent. A finished job's
+            # thread keeps "That job already finished."
+            kept = str(content or "").strip()
+            if job_id and kept not in {NOTHING_RUNNING_REPLY, ALREADY_FINISHED_REPLY}:
                 content = stop_reply_line(job_id)
             content = guard_chat_notice(ROBIE_JOB_DB, job_id, content)
         elif (metadata or {}).get("robie_stop_notice") and delivery_kind == "ceiling":
@@ -6674,6 +6719,8 @@ def register(ctx) -> None:
             "search space history, list space members, or manage spaces. Do "
             "not promise to perform these actions; explain that you can only "
             "read messages sent directly to you and respond in the same "
-            "space/thread."
+            "space/thread. In a group space that means the message must "
+            "@mention you. /stop in a thread has to be @Robie /stop. A "
+            "direct message does not need the mention."
         ),
     )

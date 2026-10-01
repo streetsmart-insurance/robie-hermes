@@ -9,6 +9,7 @@ is stored for the next send.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 CHAT_THREAD_KIND = "chat_thread"
@@ -28,6 +29,78 @@ def thread_resource_name(value: Any) -> str | None:
 def job_thread_key(job_id: str) -> str:
     """Stable threadKey so every first-send for this job opens the same thread."""
     return f"robie-job-{str(job_id).strip()}"
+
+
+def job_for_chat_thread(store: Any, thread_name: Any) -> dict[str, Any] | None:
+    """The job this thread belongs to, including one that already finished.
+
+    A live job wins when the same thread was bound more than once. The
+    lookup is the stored thread name, not the conversation's active link.
+    """
+    from .models import TERMINAL_STATUSES, JobStatus
+
+    name = thread_resource_name(thread_name)
+    if not name:
+        return None
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _take(job_id: str) -> None:
+        if not job_id or job_id in seen:
+            return
+        seen.add(job_id)
+        try:
+            found.append(store.get_job(job_id))
+        except Exception:
+            return
+
+    try:
+        with store.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id, data_json FROM checkpoints
+                   WHERE kind=?
+                   ORDER BY created_at DESC""",
+                (CHAT_THREAD_KIND,),
+            ).fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        try:
+            data = json.loads(row["data_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if thread_resource_name(data.get("thread_name")) != name:
+            continue
+        _take(str(row["job_id"] or ""))
+    if not found:
+        try:
+            with store.connect() as conn:
+                payload_rows = conn.execute(
+                    """SELECT id, payload_json FROM jobs
+                       WHERE payload_json LIKE ?
+                       ORDER BY updated_at DESC
+                       LIMIT 40""",
+                    (f"%{name}%",),
+                ).fetchall()
+        except Exception:
+            payload_rows = []
+        for row in payload_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            stored = thread_resource_name(
+                payload.get("thread_id") or payload.get("thread_name")
+            )
+            if stored != name:
+                continue
+            _take(str(row["id"] or ""))
+    if not found:
+        return None
+    live = [
+        job for job in found if JobStatus(job["status"]) not in TERMINAL_STATUSES
+    ]
+    return live[0] if live else found[0]
 
 
 def read_job_chat_thread(store: Any, job_id: str) -> str | None:

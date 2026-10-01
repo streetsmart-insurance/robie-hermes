@@ -420,6 +420,7 @@ STOPPED_OUTPUT = (
 
 BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
 NOTHING_RUNNING_REPLY = "Nothing is running right now."
+ALREADY_FINISHED_REPLY = "That job already finished."
 
 
 def stop_reply_line(job_id: str) -> str:
@@ -1374,17 +1375,18 @@ async def terminate_gateway_agent(
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
-    """Mark the linked running job FAILED/cancelled. Does not open a new job.
+    """Mark the linked running job CANCELLED. Does not open a new job.
 
-    A job that is already finished is left untouched. /stop with nothing
-    running must not add a cancelled checkpoint or replay that job's answer.
+    A job that is already finished is left untouched and answered with
+    ``ALREADY_FINISHED_REPLY``. An empty job id is "nothing is running":
+    that path must not add a cancelled checkpoint or replay an answer.
     """
     if not job_id:
         return NOTHING_RUNNING_REPLY
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
-        return NOTHING_RUNNING_REPLY
+        return ALREADY_FINISHED_REPLY
     reply = stop_reply_line(job_id)
     store.transition(
         job_id,

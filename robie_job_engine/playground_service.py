@@ -1103,6 +1103,16 @@ def _stop(
         {JobStatus.AWAITING_HUMAN_INPUT, JobStatus.RUNNING, JobStatus.PENDING, JobStatus.NEEDS_CLARIFICATION},
     )
     if pending is None:
+        from .chat_thread import job_for_chat_thread
+        from .chat_turn_control import ALREADY_FINISHED_REPLY, fail_cancelled_chat_job
+        from .models import TERMINAL_STATUSES
+        from .user_reply import format_user_reply
+
+        owner = job_for_chat_thread(store, thread_id) if thread_id else None
+        if owner is not None:
+            if JobStatus(owner["status"]) in TERMINAL_STATUSES:
+                return ALREADY_FINISHED_REPLY
+            return format_user_reply(fail_cancelled_chat_job(store, str(owner["id"])))
         opened = store.create_job(
             PLAYGROUND_ACTION,
             {"playground": True, "conversation_id": conversation_id, "thread_id": thread_id, "text": "stop"},

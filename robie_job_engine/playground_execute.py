@@ -187,6 +187,14 @@ def capability_menu() -> str:
         "Before I change anything, I tell you the client, the field, the old value, "
         "and the new value, and I wait for you to say go."
     )
+    lines.extend(
+        [
+            "",
+            "In a space, /stop has to mention me: @Robie /stop. Google Chat does not "
+            "send a thread reply that does not mention me. A direct message does not "
+            "need that.",
+        ]
+    )
     return "\n".join(lines)
 
 
