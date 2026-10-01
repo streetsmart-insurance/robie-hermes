@@ -35,7 +35,7 @@ jobs:
             hermes-poc-01:/var/tmp/diagnose_ezlynx_login_tug_of_war.py
           gcloud compute ssh hermes-poc-01 --project=streetsmart-hermes-poc --zone=us-east1-b \
             --tunnel-through-iap --command="sudo python3 /var/tmp/diagnose_ezlynx_login_tug_of_war.py \
-              --environment PRODUCTION --since 2026-09-30T21:30:00Z --until 2026-10-01T11:15:00Z \
+              --environment PRODUCTION --since 2026-09-30T21:30:00Z --until 2026-10-01T12:15:00Z \
               --profile-root /opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx" \
             > "${RUNNER_TEMP}/production.json"
           python3 -m json.tool "${RUNNER_TEMP}/production.json" >/dev/null
