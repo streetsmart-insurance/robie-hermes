@@ -56,10 +56,13 @@ class SopHit:
     doc_id: str
     modified: str = ""
     freshness_note: str = ""
+    match_score: int = 0
 
     @property
     def citation(self) -> str:
-        return f"{self.title} ({self.folder})"
+        identity = f"; source ID {self.doc_id}" if self.doc_id else ""
+        version = f"; modified {self.modified}" if self.modified else ""
+        return f"{self.title} ({self.folder}{identity}{version})"
 
 
 @dataclass(frozen=True)
@@ -425,6 +428,7 @@ def retrieve_sop(
                     doc_id=str(doc.get("doc_id") or ""),
                     modified=modified,
                     freshness_note=guide_freshness_note(modified, now=now),
+                    match_score=score,
                 ),
             )
         )
@@ -516,3 +520,16 @@ def _excerpt(text: str, words: list[str]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def ambiguous_sop_hits(hits: list[SopHit]) -> bool:
+    """Tied distinct excerpts require review. Ranking is not authority.
+
+    This detects retrieval ambiguity, not every semantic contradiction.
+    Different-score conflicts need a reviewed/versioned SOP workflow too.
+    """
+    if len(hits) < 2 or hits[0].match_score != hits[1].match_score:
+        return False
+    first = " ".join(hits[0].excerpt.casefold().split())
+    second = " ".join(hits[1].excerpt.casefold().split())
+    return first != second
