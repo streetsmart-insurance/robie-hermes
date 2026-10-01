@@ -666,6 +666,17 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
     stopped = agent_output_blocked(bound_job_id, note_store)
     if stopped:
         return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: {stopped}"))
+    if job is not None and note_store is not None:
+        try:
+            from robie_job_engine.client_name_lookup import (
+                refuse_named_lookup_navigation,
+            )
+
+            blocked_nav = refuse_named_lookup_navigation(note_store, job, code)
+        except Exception:
+            blocked_nav = None
+        if blocked_nav:
+            return _finish(tool_error(blocked_nav))
     try:
         from robie_job_engine.chat_turn_control import refuse_hand_driven_ezlynx
 

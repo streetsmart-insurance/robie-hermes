@@ -1004,6 +1004,11 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         and job["status"] == JobStatus.RUNNING.value
     ):
         start_generic_chat_job_heartbeat(db_path, job_id)
+    if JobStatus(job["status"]) in {JobStatus.PENDING, JobStatus.RUNNING}:
+        from .client_name_lookup import prepare_named_client_lookup
+
+        prepare_named_client_lookup(store, job_id)
+        job = store.get_job(job_id)
     if job["status"] == JobStatus.FAILED:
         if is_action_gate_refusal(job):
             return (
@@ -1039,12 +1044,34 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     route = purpose_built_instructions(str(dict(job.get("payload") or {}).get("text") or text))
     if route and route not in lines:
         lines.append(route)
-    if is_answer_only_job(job):
+    from .client_name_lookup import job_is_client_policy_lookup
+
+    client_lookup = job_is_client_policy_lookup(job)
+    if is_answer_only_job(job) and not client_lookup:
         lines.append(
             "This is a question. Answer it in plain English. "
             "Do not open EZLynx. Do not write a note or a document. "
             "Do not include your reasoning or thinking."
         )
+    elif client_lookup:
+        held = str(
+            (store.get_checkpoint(job_id, "client_name_search") or {}).get("user_line")
+            or ""
+        ).strip()
+        if held:
+            lines.append(
+                "The client search already ran. Do not open EZLynx. "
+                "Do not guess an applicant id or an EZLynx URL. "
+                f"Reply with exactly: {held}"
+            )
+        else:
+            lines.append(
+                "This is a read-only client lookup. Open only the applicant id "
+                "this job bound from its applicant search or from the user's "
+                "message. Do not guess an EZLynx URL. Do not take an applicant "
+                "id from docs, runbooks, memory, or an earlier chat. Do not "
+                "write a note or a document."
+            )
     from .write_verification_loop import (
         get_locked_plan,
         is_ezlynx_write_job,
@@ -1089,7 +1116,6 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     lines.extend([
         "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), you MUST execute it by calling the 'playwright_exec' tool directly. Do not output text claiming 'playwright_exec is unavailable' or simulating error messages without having actually executed the tool. Do not use generic terminal/bash commands for browser automation.",
         "When the user request provides every field the job schema requires, do not re-prompt with a generic 'Ready to proceed?' confirmation — proceed directly to execution. This does not relax clarify/HITL for genuinely ambiguous or conflicting fields, for any request affecting an already-bound policy (renewal, endorsement, cancellation, reassignment) regardless of field completeness, or for any case where the target account/applicant can't be resolved to exactly one match. Every action remains subject to independent post-job verification — destination evidence and structured playwright_exec proof — before COMPLETE is authorized; skipping the pre-execution prompt does not skip or weaken that check in any way.",
-        "When navigating to an EZLynx account, try the direct URL (e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct navigation does not find the applicant or stays on a listing page, use the global search bar to locate the applicant.",
         "EZLynx notes and documents are API-only. File notes with ezlynx_discussion_note (DiscussionApi add_note_to_discussion / file_note_to_existing_discussion). Upload files with ezlynx_document_upload (DocumentApi). Never use playwright_exec, a file chooser, Add Note, or Save Note to write notes or documents to EZLynx. Playwright is for forms and portals only. COMPLETE is refused without a DiscussionApi note_id or DocumentApi document_id.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested) through those APIs, not the browser.",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
@@ -1105,6 +1131,13 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Do not emit ROBIE_BLOCKED for a completed action, a general question, or an ordinary explanation.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
+    if not client_lookup:
+        lines.append(
+            "When navigating to an EZLynx account, try the direct URL "
+            "(e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct "
+            "navigation does not find the applicant or stays on a listing page, "
+            "use the global search bar to locate the applicant."
+        )
     payload = dict(job.get("payload") or {})
     payload.setdefault("action_type", job.get("action_type"))
     lines.extend(account_nav_contract_lines(text, payload))
@@ -3116,11 +3149,17 @@ def _guard_chat_response_impl(
     from .email_guard import _strip_internal_reasoning
 
     # A read-only lookup has nothing to re-read. A note or document write
-    # still goes through the destination check below.
+    # still goes through the destination check below. A named client's
+    # policy number is COMPLETE only after this job loaded that account.
     if is_answer_only_job(job) and not job_recorded_a_write(store, job_id):
         from .chat_job_controls import outbound_is_clarify
         from .chat_turn_control import is_gateway_status_notice
-        from .user_reply import _SIGN_IN
+        from .client_name_lookup import (
+            LOOKUP_MISS,
+            job_is_client_policy_lookup,
+            named_lookup_read_state,
+        )
+        from .user_reply import SIGN_IN_QUESTION, _SIGN_IN
 
         if is_gateway_status_notice(content):
             # The gateway's interrupt line is not the answer. Leave the job open.
@@ -3128,6 +3167,48 @@ def _guard_chat_response_impl(
         # A clarify or a sign-in ask parks the job. It is not the lookup answer.
         if outbound_is_clarify(content) or _SIGN_IN.search(str(content or "")):
             return content
+        if job_is_client_policy_lookup(job):
+            state = named_lookup_read_state(store, job)
+            held = str(
+                (store.get_checkpoint(job_id, "client_name_search") or {}).get(
+                    "user_line"
+                )
+                or ""
+            ).strip()
+            if state != "read":
+                if state == "sign_in":
+                    line = SIGN_IN_QUESTION
+                elif held:
+                    line = held
+                else:
+                    line = LOOKUP_MISS
+                if line.endswith("?"):
+                    return line if line.endswith("\n") else line + "\n"
+                current = store.get_job(job_id)
+                if JobStatus(current["status"]) in {
+                    JobStatus.RUNNING,
+                    JobStatus.PENDING,
+                    JobStatus.VERIFYING,
+                }:
+                    store.transition(
+                        job_id,
+                        JobStatus.UNVERIFIED,
+                        expected={JobStatus(current["status"])},
+                        error="named lookup had no successful EZLynx read",
+                        release_lease=True,
+                    )
+                recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+                store.checkpoint(
+                    job_id,
+                    "worker_response",
+                    sanitize_worker_response(store, job_id, line),
+                )
+                store.checkpoint(
+                    job_id,
+                    "answer_only_close",
+                    {"reason": "no_ezlynx_read", "wrote": False},
+                )
+                return line if line.endswith("\n") else line + "\n"
         content = _strip_internal_reasoning(content) or content
         store.checkpoint(
             job_id, "worker_response", sanitize_worker_response(store, job_id, content)

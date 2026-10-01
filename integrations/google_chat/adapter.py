@@ -1522,6 +1522,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # google_chat_task worker that would sit in RUNNING / still working.
             await self._send_clarification_if_needed(job_id, event)
             return
+        if job_id:
+            from robie_job_engine.client_name_lookup import pending_named_lookup_line
+
+            # The name search already chose the line. Do not let the model
+            # pick an applicant id or guess an EZLynx URL.
+            held = await asyncio.to_thread(
+                pending_named_lookup_line, ROBIE_JOB_DB, job_id
+            )
+            if held and event.source is not None:
+                await self.send(
+                    event.source.chat_id,
+                    held,
+                    reply_to=event.message_id,
+                    metadata={
+                        "thread_id": getattr(event.source, "thread_id", None),
+                        "robie_job_id": job_id,
+                    },
+                )
+                return
         if not job_id:
             await self._begin_fresh_chat_turn(event)
             self._allow_next_thinking_card(

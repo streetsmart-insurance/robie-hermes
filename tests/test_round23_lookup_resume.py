@@ -169,6 +169,32 @@ class LookupResumeTests(unittest.TestCase):
                         store.get_job(job_id)["status"], JobStatus.RUNNING.value
                     )
                     self.assertIsNone(agent_output_blocked(job_id, store))
+                    from robie_job_engine.playwright_observability import (
+                        record_playwright_exec,
+                    )
+
+                    payload = dict(store.get_job(job_id).get("payload") or {})
+                    payload["applicant_id"] = "26356199"
+                    store.update_payload(job_id, payload)
+                    store.checkpoint(
+                        job_id,
+                        "client_name_search",
+                        {
+                            "resolved": True,
+                            "source": "search",
+                            "applicant_ids": ["26356199"],
+                            "user_line": "",
+                        },
+                    )
+                    record_playwright_exec(
+                        "page.goto('https://app.ezlynx.com/web/account/26356199/policies')",
+                        {
+                            "url": "https://app.ezlynx.com/web/account/26356199/policies"
+                        },
+                        job_id=job_id,
+                        db_path=db,
+                        status="ok",
+                    )
                     final = asyncio.run(
                         chat.send(SPACE, ANSWER, metadata={"robie_job_id": job_id})
                     )
