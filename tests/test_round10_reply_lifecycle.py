@@ -470,7 +470,7 @@ class PrefixAndThreadTests(unittest.TestCase):
                 any(text == STOPPED_AFTER_TEN_MINUTES for text in _outbound_text(chat))
             )
             ceiling = chat._chat_api.messages.calls[2]
-            self.assertEqual(ceiling["messageReplyOption"], "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")
+            self.assertEqual(ceiling["messageReplyOption"], "REPLY_MESSAGE_OR_FAIL")
             self.assertEqual(ceiling["body"]["thread"]["name"], THREAD)
 
             posted: list[str] = []
@@ -554,7 +554,7 @@ class PrefixAndThreadTests(unittest.TestCase):
                     )
                 )
             call = chat._chat_api.messages.calls[0]
-            self.assertEqual(call["messageReplyOption"], "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD")
+            self.assertEqual(call["messageReplyOption"], "REPLY_MESSAGE_OR_FAIL")
             self.assertEqual(call["body"]["thread"], {"name": THREAD})
             text = call["body"]["text"]
             self.assertEqual(text, 'Added the note to Buster Brown on "follw up 1".')

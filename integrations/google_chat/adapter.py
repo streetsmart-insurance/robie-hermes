@@ -2476,6 +2476,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Recover executable Chat work that was committed before a previous
         # gateway or worker restart. This task does not delay connection.
         self._ensure_chat_queue_drain()
+        # Recover transport receipts, never replay the underlying Job/action.
+        self._ensure_reply_recovery()
 
         self._mark_connected()
         logger.info(
@@ -2493,6 +2495,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Clean shutdown: stop accepting new messages, wait in-flight, close clients."""
         self._shutting_down = True
+        recovery = getattr(self, "_reply_recovery_task", None)
+        if recovery and not recovery.done():
+            recovery.cancel()
+            try:
+                await recovery
+            except asyncio.CancelledError:
+                pass
         if self._chat_queue_drain_task and not self._chat_queue_drain_task.done():
             self._chat_queue_drain_task.cancel()
             try:
@@ -5071,6 +5080,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 typing_msg_name = None
             patched_typing = False
 
+            durable_reply_id = None
+            if job_id and thread_spec and delivery_kind != "busy":
+                from robie_job_engine.chat_reply_outbox import ChatReplyOutbox
+                from robie_job_engine.chat_job_controls import outbound_is_clarify
+
+                # Commit every chunk before the first HTTP request. Recoveries
+                # retain this exact envelope even if the space's active job changes.
+                outbox = await asyncio.to_thread(ChatReplyOutbox, ROBIE_JOB_DB)
+                saved_kind = delivery_kind
+                if (metadata or {}).get("robie_stop_notice"):
+                    saved_kind = "stop_notice"
+                elif outbound_is_clarify(outbound_raw, content):
+                    saved_kind = "clarify"
+                durable_reply_id = await asyncio.to_thread(
+                    outbox.prepare,
+                    job_id, chat_id, saved_kind,
+                    [{"text": chunk, "thread": dict(thread_spec)} for chunk in chunks],
+                )
+
             for idx, chunk in enumerate(chunks):
                 body: Dict[str, Any] = {"text": chunk}
                 # Only set thread on new-message create path. Patch inherits
@@ -5079,7 +5107,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if thread_spec and creating_new:
                     body["thread"] = dict(thread_spec)
                 try:
-                    if idx == 0 and typing_msg_name:
+                    if durable_reply_id:
+                        result = await self._deliver_durable_reply(durable_reply_id)
+                        if not result.success:
+                            return result
+                        last_result = result
+                        break
+                    elif idx == 0 and typing_msg_name:
                         result = await self._patch_message(typing_msg_name, body)
                         patched_typing = True
                     else:
@@ -5125,7 +5159,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                                 "[GoogleChat] Rate limit hit %d times on chat; throttling",
                                 self._rate_limit_hits[chat_id],
                             )
-                        self._record_undelivered_reply(job_id, str(content or ""), 429)
+                        self._record_undelivered_reply(
+                            job_id, str(content or ""), 429, reply_id=durable_reply_id
+                        )
                         return SendResult(
                             success=False,
                             error="chat quota exceeded",
@@ -5744,25 +5780,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         return AuthorizedHttp(self._credentials, http=httplib2.Http(timeout=30))
 
-    def _record_undelivered_reply(self, job_id: str | None, text: str, status: int) -> None:
+    def _record_undelivered_reply(
+        self, job_id: str | None, text: str, status: int, *, reply_id: str | None = None,
+    ) -> None:
         """Remember a reply Chat did not accept. The job must not end silent."""
         logger.error(
             "[GoogleChat] reply was not delivered job=%s status=%s",
             job_id or "",
             status,
         )
-        pending = getattr(self, "_pending_replies", None)
-        if not isinstance(pending, dict):
-            pending = {}
-            self._pending_replies = pending
         from robie_job_engine.turn_finalization import model_text_is_not_final
 
         # Plan text that shared a message with a tool call is not the reply.
         tool_text = bool(
             job_id and model_text_is_not_final(str(job_id), str(text or ""))
         )
-        if job_id and text and not tool_text:
-            pending[str(job_id)] = str(text)
         if job_id:
             try:
                 store = JobStore(ROBIE_JOB_DB)
@@ -5773,6 +5805,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         "status": int(status or 0),
                         "text": str(text or "")[:2000],
                         "posted": False,
+                        "reply_id": reply_id,
                     },
                 )
                 already = store.get_checkpoint(str(job_id), "worker_response")
@@ -5831,29 +5864,77 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
     async def _flush_pending_reply(self, chat_id: str, job_id: str | None, just_sent: str) -> None:
-        """Post the line a 429 held, once a later send succeeds."""
-        pending = getattr(self, "_pending_replies", None)
-        if not isinstance(pending, dict) or not job_id:
-            return
-        text = str(pending.get(str(job_id)) or "").strip()
-        if not text:
-            return
-        from robie_job_engine.user_reply import format_user_reply
+        """Compatibility wake-up; the background drainer also runs without input."""
+        if job_id:
+            await self._recover_pending_replies(job_id=job_id)
 
-        text = format_user_reply(text)
-        if " ".join(text.split()) == " ".join(str(just_sent or "").split()):
-            pending.pop(str(job_id), None)
-            return
-        try:
-            await self._create_message(chat_id, {"text": text}, job_id=job_id)
-        except Exception:
-            logger.exception(
-                "[GoogleChat] held reply was not posted on the next send job=%s",
-                job_id,
+    def _ensure_reply_recovery(self) -> None:
+        task = getattr(self, "_reply_recovery_task", None)
+        if task is None or task.done():
+            self._reply_recovery_task = asyncio.create_task(
+                self._reply_recovery_loop(), name="robie-chat-reply-recovery"
             )
-            return
-        pending.pop(str(job_id), None)
-        logger.info("[GoogleChat] held reply posted job=%s", job_id)
+
+    async def _reply_recovery_loop(self) -> None:
+        while not self._shutting_down:
+            try:
+                await self._recover_pending_replies()
+            except Exception:
+                logger.exception("[GoogleChat] reply recovery scan failed")
+            await asyncio.sleep(5)
+
+    async def _recover_pending_replies(self, *, job_id: str | None = None) -> None:
+        from robie_job_engine.chat_reply_outbox import ChatReplyOutbox
+
+        outbox = await asyncio.to_thread(ChatReplyOutbox, ROBIE_JOB_DB)
+        for reply_id in await asyncio.to_thread(outbox.due, job_id=job_id):
+            try:
+                await self._deliver_durable_reply(reply_id)
+            except Exception:
+                # The durable row retains status/backoff. No raw reply in logs.
+                logger.warning("[GoogleChat] reply recovery deferred id=%s", reply_id)
+
+    async def _deliver_durable_reply(self, reply_id: str) -> SendResult:
+        from robie_job_engine.chat_reply_outbox import ChatReplyOutbox
+
+        outbox = await asyncio.to_thread(ChatReplyOutbox, ROBIE_JOB_DB)
+        row = await asyncio.to_thread(outbox.claim, reply_id)
+        if row is None:
+            row = await asyncio.to_thread(outbox.get, reply_id)
+            return SendResult(
+                success=row["state"] == "delivered", message_id=row["message_name"],
+                error=None if row["state"] == "delivered" else "reply delivery pending or held",
+                retryable=row["state"] in {"pending", "sending"},
+            )
+        accepted = False
+        try:
+            for index in range(row["next_chunk"], len(row["bodies"])):
+                if await asyncio.to_thread(outbox.cancelled, row):
+                    await asyncio.to_thread(outbox.suppress, row)
+                    return SendResult(success=False, error="reply superseded or stopped")
+                accepted = False
+                result = await self._create_message(
+                    row["chat_id"], row["bodies"][index], job_id=row["job_id"],
+                    request_id=outbox.request_id(row, index),
+                )
+                if not result.success or not result.message_id:
+                    raise RuntimeError("Chat did not return a delivery receipt")
+                accepted = True
+                if not await asyncio.to_thread(outbox.delivered_chunk, row, index, result.message_id):
+                    return SendResult(success=False, error="reply delivery lease changed", retryable=True)
+            return result
+        except asyncio.CancelledError:
+            # A thread-based HTTP call may still be executing. Leave the lease;
+            # its expiry and the same server ID make restart recovery safe.
+            raise
+        except Exception as exc:
+            if accepted:
+                # Server accepted, but receipt commit failed. Retain the lease
+                # and recover with the same server ID after it expires.
+                raise
+            status = getattr(getattr(exc, "resp", None), "status", 0) or 0
+            await asyncio.to_thread(outbox.fail, row, status, _is_retryable_error(exc))
+            raise
 
     async def _call_with_retry(
         self,
@@ -5920,6 +6001,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _create_message(
         self, chat_id: str, body: Dict[str, Any], job_id: str | None = None,
+        *, request_id: str | None = None,
     ) -> SendResult:
         """POST spaces/{space}/messages via REST, returning SendResult.
 
@@ -5935,10 +6017,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         from robie_job_engine.user_reply import format_user_reply
 
-        if isinstance(body.get("text"), str):
+        if not request_id and isinstance(body.get("text"), str):
             body = dict(body)
             body["text"] = format_user_reply(body["text"], collapse=False)
         kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
+        if request_id:
+            # Stable across attempts, chunks, concurrent drainers and restarts.
+            # https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create
+            kwargs.update(requestId=request_id, messageId="client-" + request_id)
         thread_meta = body.get("thread") or {}
         if thread_meta.get("name") or thread_meta.get("threadKey"):
             # FALLBACK_TO_NEW_THREAD: try the requested thread; if Chat
@@ -5948,6 +6034,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # but possible. Required for both thread.name and threadKey —
             # the default option ignores both.
             kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+            if request_id:
+                kwargs["messageReplyOption"] = "REPLY_MESSAGE_OR_FAIL"
 
         def _do_create() -> Dict[str, Any]:
             return (
@@ -5957,7 +6045,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 .execute(http=self._new_authed_http())
             )
 
-        resp = await self._call_with_retry(_do_create, op_name="messages.create")
+        try:
+            resp = await self._call_with_retry(_do_create, op_name="messages.create")
+        except Exception as exc:
+            if not request_id or getattr(getattr(exc, "resp", None), "status", None) != 409:
+                raise
+            # Do not equate a collision with delivery. Read the named message
+            # and require the stored text and original thread to match.
+            def _read_existing():
+                return self._chat_api.spaces().messages().get(
+                    name=f"{chat_id}/messages/client-{request_id}"
+                ).execute(http=self._new_authed_http())
+
+            resp = await self._call_with_retry(_read_existing, op_name="messages.get")
+            observed_thread = resp.get("thread") or {}
+            if resp.get("text") != body.get("text") or any(
+                observed_thread.get(key) != value for key, value in thread_meta.items()
+            ):
+                raise ValueError("Chat delivery ID collision did not match original reply") from exc
         # Track outbound destination thread in the persistent count store
         # so a future user "Reply in thread" on the bot's message resolves
         # to a known thread (prev_count >= 1 → side thread). Without
