@@ -57,6 +57,7 @@ class SopHit:
     modified: str = ""
     freshness_note: str = ""
     match_score: int = 0
+    content_fingerprint: str = ""
 
     @property
     def citation(self) -> str:
@@ -401,6 +402,7 @@ def retrieve_sop(
     docs: list[dict[str, Any]] | None = None,
     *,
     limit: int = 1,
+    include_ties: bool = False,
     now: datetime | None = None,
 ) -> list[SopHit]:
     """Keyword overlap. No model call. Empty when nothing loaded matches."""
@@ -429,11 +431,16 @@ def retrieve_sop(
                     modified=modified,
                     freshness_note=guide_freshness_note(modified, now=now),
                     match_score=score,
+                    content_fingerprint=_content_fingerprint(text),
                 ),
             )
         )
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [hit for _, hit in scored[: max(1, limit)]]
+    selected = scored[: max(1, limit)]
+    if include_ties and selected:
+        cutoff = selected[-1][0]
+        selected = [item for item in scored if item[0] >= cutoff]
+    return [hit for _, hit in selected]
 
 
 def build_drive_port() -> DrivePort:
@@ -522,14 +529,22 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-def ambiguous_sop_hits(hits: list[SopHit]) -> bool:
-    """Tied distinct excerpts require review. Ranking is not authority.
+def _content_fingerprint(text: str) -> str:
+    """Compare complete normalized bodies, not only visible excerpts."""
+    normalized = " ".join(text.casefold().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    This detects retrieval ambiguity, not every semantic contradiction.
-    Different-score conflicts need a reviewed/versioned SOP workflow too.
+
+def ambiguous_sop_hits(hits: list[SopHit]) -> bool:
+    """Tied distinct full bodies require review, not a semantic conflict claim.
+
+    Hand-created legacy hits without fingerprints compare excerpts. Retrieval
+    records fingerprints from complete bodies and can retain boundary ties.
+    Different-score contradictions still require an approved-source workflow.
     """
-    if len(hits) < 2 or hits[0].match_score != hits[1].match_score:
+    if len(hits) < 2:
         return False
-    first = " ".join(hits[0].excerpt.casefold().split())
-    second = " ".join(hits[1].excerpt.casefold().split())
-    return first != second
+    tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
+    identities = {hit.content_fingerprint or _content_fingerprint(hit.excerpt)
+                  for hit in tied}
+    return len(identities) > 1
