@@ -56,6 +56,7 @@ class MessageMaintenanceTests(unittest.TestCase):
                     pass
             adapter._maintain_chat_queue_lease=heartbeat
             adapter._stop_chat_queue_heartbeat=stop
+            adapter._sweep_stuck_processing_cards=AsyncMock()
             adapter.send=AsyncMock(return_value=SimpleNamespace(success=True))
             adapter._fail_queued_job=Mock(side_effect=AssertionError('must not fail queued job'))
             original_defer=queue.defer_until_available

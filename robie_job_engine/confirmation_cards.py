@@ -613,6 +613,50 @@ def _log_confirmation_click(
     )
 
 
+INACTIVE_CARD_TEXT = "This card is no longer active."
+
+
+def already_decided_text(record: Mapping[str, Any]) -> str:
+    """Plain-English line for a click that did not change the decision."""
+    status = str((record or {}).get("status") or "").strip().lower()
+    if status == "approved":
+        return (
+            "This request was already approved. The extra click changed nothing."
+        )
+    if status == "rejected":
+        return (
+            "This request was already rejected. The extra click changed nothing."
+        )
+    if status == "expired":
+        return "This request already expired. The extra click changed nothing."
+    return "This request was already decided. The extra click changed nothing."
+
+
+def text_for_card_update(db_path: str, payload: Mapping[str, Any], proposed: str) -> str:
+    """Re-read the confirmation immediately before the Chat card update.
+
+    A sentence that claims this click approved or rejected is kept only
+    when the stored status still says that. Any other terminal status
+    becomes the already-decided sentence, so the card is not left on
+    Processing and does not announce a decision that lost the race.
+
+    Read-only. A missing database, table, or row leaves ``proposed``
+    unchanged and creates no schema.
+    """
+    token = _click_parameters(payload).get("decision_token", "")
+    confirmation_id = confirmations.peek_confirmation_id(token)
+    if not confirmation_id:
+        return proposed
+    status = confirmations.read_confirmation_status(db_path, confirmation_id)
+    if not status or status == "PENDING":
+        return proposed
+    if status == "APPROVED" and str(proposed or "").startswith("Approved."):
+        return proposed
+    if status == "REJECTED" and str(proposed or "").startswith("Rejected."):
+        return proposed
+    return already_decided_text({"status": status})
+
+
 def resolve_confirmation_click(
     store: Any,
     payload: Mapping[str, Any],
@@ -705,10 +749,7 @@ def resolve_confirmation_click(
                 status="ALREADY_DECIDED",
                 decided=False,
                 confirmation_id=confirmation_id,
-                message=(
-                    f"This request was already {str(record['status']).lower()}; "
-                    "the second click changed nothing."
-                ),
+                message=already_decided_text(record),
             ))
         return finish(ConfirmationClickResult(
             status="INVALID",

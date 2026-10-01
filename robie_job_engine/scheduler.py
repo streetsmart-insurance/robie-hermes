@@ -111,6 +111,13 @@ def run_once(db_path: str) -> dict[str, int]:
                     pass
     except Exception:
         pass
+    stuck_processing_cards = 0
+    try:
+        from .stuck_processing_cards import run_stuck_processing_sweep
+
+        stuck_processing_cards = run_stuck_processing_sweep(db_path)
+    except Exception:
+        pass
     expired_contexts = DurableChatEventQueue(db_path).expire_inactive_conversations(
         inactivity_minutes=int(os.environ.get("ROBIE_DM_CONTEXT_TTL_MINUTES", "120"))
     )
@@ -158,6 +165,7 @@ def run_once(db_path: str) -> dict[str, int]:
         "created": created,
         "executed": executed,
         "dashboard_synced": synced,
+        "stuck_processing_cards": stuck_processing_cards,
     }
 
 

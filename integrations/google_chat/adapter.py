@@ -1713,11 +1713,40 @@ class GoogleChatAdapter(BasePlatformAdapter):
         except asyncio.CancelledError:
             pass
 
+    async def _sweep_stuck_processing_cards(self) -> None:
+        """Patch Approve cards left on Processing longer than the age gate.
+
+        Uses this gateway's Chat client, the same one that replaces a
+        card after a click. A failure here does not stop the queue drain.
+        """
+        try:
+            from robie_job_engine.stuck_processing_cards import (
+                mark_processing_card_cleared,
+                stuck_processing_actions,
+            )
+            db_path = _gateway_job_db_path(self)
+            actions = await asyncio.to_thread(stuck_processing_actions, db_path)
+            for action in actions:
+                try:
+                    await self._patch_message(action["message_name"], action["body"])
+                except Exception:
+                    logger.warning(
+                        "[GoogleChat] stuck processing card patch failed ref=%s",
+                        str(action.get("confirmation_id") or "-")[:8],
+                    )
+                    continue
+                await asyncio.to_thread(
+                    mark_processing_card_cleared, db_path, action["message_name"]
+                )
+        except Exception:
+            logger.debug("[GoogleChat] stuck processing sweep failed", exc_info=True)
+
     async def _drain_chat_queue(self) -> None:
         """Execute committed bounded Jobs outside the Pub/Sub ACK coroutine."""
         from robie_job_engine.chat_guard import require_message_execution_available
         queue = await asyncio.to_thread(self._durable_chat_queue)
         lease_seconds = max(60, int(os.getenv("ROBIE_CHAT_QUEUE_LEASE_SECONDS", "1800")))
+        await self._sweep_stuck_processing_cards()
         while not self._shutting_down:
             item = await asyncio.to_thread(
                 queue.claim_next,
@@ -1735,7 +1764,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         self._chat_queue_wakeup.wait(), timeout=30.0
                     )
                 except asyncio.TimeoutError:
-                    pass
+                    await self._sweep_stuck_processing_cards()
                 continue
             event_id = item["event_id"]
             payload = item["payload"]
@@ -2537,9 +2566,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
         bridge has already replaced the buttons with a processing card, so
         an unknown action, an unreadable token, or a confirmation id missing
         from this gateway's database is patched to "This card is no longer active."
-        rather than left on "Processing". A clarify or decision click routed
-        here still updates the card, including the expired-question reply
-        after in-memory clarify state is gone.
+        rather than left on "Processing". A confirmation that is already
+        approved, rejected, or expired is patched with the already-decided
+        sentence. Before that patch (and before UPDATE_MESSAGE), the
+        confirmation is read again so a lost race cannot claim a new
+        decision or leave the card on Processing. A clarify or decision
+        click routed here still updates the card, including the
+        expired-question reply after in-memory clarify state is gone.
         """
         payload = _card_event_payload(envelope)
         if payload is None:
@@ -2567,6 +2600,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # gateway cannot act on is marked inactive instead of acked silently,
         # because the bridge already replaced its buttons with "Processing".
         inactive = False
+        confirmation_id = ""
         if action == "hermes_clarify":
             # In-memory clarify state expires, so a late click on our own
             # card must still reach the "expired" reply. Ownership is the
@@ -2624,12 +2658,36 @@ class GoogleChatAdapter(BasePlatformAdapter):
             inactive = True
 
         response = "That action is no longer available."
+        # Owned Approve/Reject clicks only. A missing id must not open the
+        # job database or create a processing row.
+        if action == "robie_confirmation_decision" and not inactive and confirmation_id:
+            try:
+                from robie_job_engine.stuck_processing_cards import note_processing_card
+                noted = _card_event_payload(payload) or {}
+                noted_message = noted.get("message") or payload.get("message") or {}
+                noted_name = (
+                    str(noted_message.get("name") or "")
+                    if isinstance(noted_message, dict)
+                    else ""
+                )
+                if noted_name:
+                    note_processing_card(
+                        _gateway_job_db_path(self),
+                        message_name=noted_name,
+                        confirmation_id=confirmation_id,
+                    )
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] could not record processing card",
+                    exc_info=True,
+                )
 
         try:
             if inactive:
                 # Never call a resolver for a click this gateway does not
                 # own: a missing id must not create schema or rows here.
-                response = "This card is no longer active."
+                from robie_job_engine.confirmation_cards import INACTIVE_CARD_TEXT
+                response = INACTIVE_CARD_TEXT
             elif action == "hermes_clarify":
                 clarify_id = parameters.get("clarify_id", "").strip()
                 choice = parameters.get("choice", "").strip()
@@ -2672,16 +2730,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 # idempotently. dispatch_http_event wraps a real reply in
                 # UPDATE_MESSAGE so the answered card is replaced.
                 from robie_job_engine.confirmation_cards import (
+                    already_decided_text,
                     resolve_confirmation_click,
                 )
+                from robie_job_engine.confirmations import read_confirmation_status
                 from robie_job_engine.store import JobStore
-                click = resolve_confirmation_click(
-                    JobStore(_gateway_job_db_path(self)), payload
-                )
-                response = click.message
+                db_path = _gateway_job_db_path(self)
+                status = read_confirmation_status(db_path, confirmation_id)
+                if status and status != "PENDING":
+                    response = already_decided_text({"status": status})
+                else:
+                    click = resolve_confirmation_click(JobStore(db_path), payload)
+                    response = click.message
         except Exception:
             logger.exception("[GoogleChat] Card action failed (%s)", action or "unknown")
             response = "ROBIE could not record that choice safely. The Job remains paused."
+
+        if action == "robie_confirmation_decision" and not inactive:
+            # Re-read after the decision and before any card update. A
+            # status that does not match the sentence we were about to
+            # send becomes the already-decided line instead of leaving
+            # the bridge's Processing card in place.
+            try:
+                from robie_job_engine.confirmation_cards import text_for_card_update
+                response = text_for_card_update(
+                    _gateway_job_db_path(self), payload, response
+                )
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] confirmation re-read before card update failed",
+                    exc_info=True,
+                )
 
         if notify:
             # Normalize the envelope first: Workspace Add-on card clicks carry
@@ -2700,13 +2779,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
             patched = False
             if message_name and hasattr(self, "_patch_message"):
                 try:
+                    from robie_job_engine.stuck_processing_cards import terminal_patch_body
                     await self._patch_message(
                         message_name,
-                        {"text": f"✓ {response}", "cardsV2": []},
+                        terminal_patch_body(response),
                     )
                     patched = True
                 except Exception:
                     logger.debug("[GoogleChat] Could not patch card message in-place", exc_info=True)
+            if patched and action == "robie_confirmation_decision" and message_name:
+                try:
+                    from robie_job_engine.stuck_processing_cards import clear_processing_card
+                    clear_processing_card(_gateway_job_db_path(self), message_name)
+                except Exception:
+                    logger.debug(
+                        "[GoogleChat] could not clear processing card",
+                        exc_info=True,
+                    )
 
             if not patched and chat_id:
                 body: Dict[str, Any] = {"text": response}
@@ -2724,6 +2813,36 @@ class GoogleChatAdapter(BasePlatformAdapter):
             response = await self._handle_card_event(envelope, notify=False)
             if response is None:
                 return {}
+            # Final re-read before UPDATE_MESSAGE. The bridge already
+            # showed Processing; this response is what replaces it.
+            card_payload = _card_event_payload(envelope) or {}
+            try:
+                from robie_job_engine.confirmation_cards import (
+                    canonical_card_action,
+                    text_for_card_update,
+                )
+                from robie_job_engine.stuck_processing_cards import clear_processing_card
+                raw_action = str(
+                    (card_payload.get("common") or {}).get("invokedFunction")
+                    or ((card_payload.get("action") or {}).get("actionMethodName"))
+                    or ""
+                ).strip()
+                if canonical_card_action(raw_action) == "robie_confirmation_decision":
+                    db_path = _gateway_job_db_path(self)
+                    response = text_for_card_update(db_path, card_payload, response)
+                    event_message = card_payload.get("message") or {}
+                    message_name = (
+                        str(event_message.get("name") or "")
+                        if isinstance(event_message, dict)
+                        else ""
+                    )
+                    if message_name:
+                        clear_processing_card(db_path, message_name)
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] confirmation re-read before UPDATE_MESSAGE failed",
+                    exc_info=True,
+                )
             return {
                 "actionResponse": {
                     "type": "UPDATE_MESSAGE",

@@ -223,6 +223,45 @@ def has_confirmation(db_path: str, confirmation_id: str) -> bool:
         conn.close()
 
 
+def read_confirmation_status(db_path: str, confirmation_id: str) -> str:
+    """Return the stored status, or "" when the row or table is absent.
+
+    Read-only, same rules as ``has_confirmation``: never creates schema.
+    Used to re-read a card click before the Chat update so a lost race
+    cannot claim a fresh decision.
+    """
+    confirmation_id = str(confirmation_id or "").strip()
+    if not confirmation_id:
+        return ""
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.is_file():
+        return ""
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return ""
+    try:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("plan_confirmations",),
+        ).fetchone()
+        if present is None:
+            return ""
+        row = conn.execute(
+            "SELECT status FROM plan_confirmations WHERE id = ?",
+            (confirmation_id,),
+        ).fetchone()
+        if row is None:
+            return ""
+        return str(row[0] or "").strip()
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+
+
 def peek_confirmation_id(token: str) -> str:
     """Read the confirmation id from an rbd1 token without checking the HMAC.
 
@@ -517,13 +556,25 @@ def _decide(
                 f"{row['status']}; only PENDING confirmations can be decided"
             )
         now = _utc_now()
-        conn.execute(
+        # Compare-and-set: a second click that passed the read above must
+        # not overwrite the decision that won the race.
+        updated = conn.execute(
             """UPDATE plan_confirmations
                SET status = ?, decided_by = ?, decided_at = ?,
                    decision_reason = ?
-               WHERE id = ?""",
+               WHERE id = ? AND status = 'PENDING'""",
             (new_status, decided_by, now, str(reason or ""), confirmation_id),
         )
+        if updated.rowcount != 1:
+            current = conn.execute(
+                "SELECT status FROM plan_confirmations WHERE id = ?",
+                (confirmation_id,),
+            ).fetchone()
+            seen = str(current["status"]) if current is not None else "UNKNOWN"
+            raise ValueError(
+                f"confirmation {confirmation_id!r} is already {seen}; "
+                "only PENDING confirmations can be decided"
+            )
         # Append-only audit of the approval decision (H4). Lives in the same
         # transaction as the status flip, so the audit row commits or rolls
         # back with the decision itself.

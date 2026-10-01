@@ -336,6 +336,37 @@ def post_card_as_chat_app(
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
 
 
+def patch_message_as_chat_app(
+    message_name: str,
+    body: dict[str, Any],
+    *,
+    chat: Any | None = None,
+) -> dict[str, Any]:
+    """PATCH spaces.messages as the Chat APP. Used by the processing-card sweeper.
+
+    Same identity as ``post_card_as_chat_app``. The patch clears or replaces
+    cardsV2 when the body carries it, so a Processing card can become a
+    terminal line with no buttons.
+    """
+    name = str(message_name or "").strip()
+    if not name.startswith("spaces/") or "/messages/" not in name:
+        raise ValueError("Chat patch needs a spaces/.../messages/... name")
+    if not isinstance(body, dict):
+        raise ValueError("Chat patch body must be an object")
+    client = chat if chat is not None else _chat_app_client()
+    patch_body = {key: value for key, value in body.items() if key != "thread"}
+    fields: list[str] = []
+    if "text" in patch_body:
+        fields.append("text")
+    if "cardsV2" in patch_body:
+        fields.append("cardsV2")
+    update_mask = ",".join(fields) or "text"
+    result = client.spaces().messages().patch(
+        name=name, updateMask=update_mask, body=patch_body
+    ).execute()
+    return {"name": result.get("name") or name}
+
+
 def maybe_post_audit_as_chat_app(job: dict[str, Any], message: str) -> dict[str, Any] | None:
     target = conversation_target(job)
     if target is None:
