@@ -675,12 +675,15 @@ def file_note_to_existing_discussion(
     existing discussion can be chosen the result is ``status="pending"`` and
     nothing is written. A discussion is never created and nothing is deleted.
 
-    Confirmation reads the discussion before the post and once after it. A
-    count that rose by one is not enough to call the note filed: the live
-    read has no note text, so another note in that gap looks the same. The
-    note is filed only when a second signal says the new note is ours (its
-    text, or a returned note id that is the new latest id). Anything else
-    stays held. The post is never repeated automatically.
+    Confirmation reads the discussion before the post and once after it.
+    The note is filed only when a second signal says the new note is ours
+    (its text, or a returned note id that is the new latest id). Live
+    EZLynx has neither: the post body has no id, and the discussion read
+    has no note text. A tight second read that still shows exactly one new
+    note, a new latest id, and the same title is the best that API can
+    give. That is reported as sent, not filed, so the job is not called
+    done. The ledger row stays sent, unconfirmed and blocks a repost. The
+    post is never repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
     again. A send that cannot be confirmed is stored as sent, unconfirmed
@@ -881,6 +884,33 @@ def file_note_to_existing_discussion(
             )
         identity = _new_note_identity(after_record, after, text, created)
         if identity is None:
+            returned = _note_id_of(created) if isinstance(created, dict) else ""
+            if not returned and not _payload_has_note_bodies(after_record):
+                stable_id = _stable_count_reread(getter, discussion_id, after)
+                if stable_id:
+                    _remember_observed_note_id(
+                        applicant,
+                        discussion_id,
+                        text,
+                        document_id=doc_id,
+                        note_id=stable_id,
+                        ledger_path=ledger_path,
+                    )
+                    return _note_result(
+                        "sent",
+                        reason=(
+                            "The note was added. The discussion shows one new note, "
+                            "but its text could not be read. It was not sent again."
+                        ),
+                        applicant=applicant,
+                        discussion_id=discussion_id,
+                        title=title,
+                        note_id=stable_id,
+                        read_back=False,
+                        verified_by="count",
+                        confirmation=SENT_UNCONFIRMED,
+                        response=created,
+                    )
             if _payload_has_note_bodies(after_record) and not _posted_text_matches(
                 after_record, text
             ):
@@ -956,6 +986,67 @@ def file_note_to_existing_discussion(
         verified_by="note_id",
         response=created,
     )
+
+
+def _stable_count_reread(
+    getter: Any, discussion_id: str, after: dict[str, Any]
+) -> str | None:
+    """Latest id when a second read still shows the same one new note.
+
+    Live reads have no note text. A second read that moved, failed, or
+    grew a note body is not this signal.
+    """
+
+    try:
+        record = getter(discussion_id)
+    except Exception:
+        return None
+    if _payload_has_note_bodies(record):
+        return None
+    again = discussion_note_snapshot(record)
+    latest = str(again.get("most_recent_note_id") or "")
+    same = (
+        again.get("note_count") == after.get("note_count")
+        and bool(latest)
+        and latest == str(after.get("most_recent_note_id") or "")
+        and str(again.get("title") or "") == str(after.get("title") or "")
+    )
+    if not same:
+        return None
+    return latest
+
+
+def _remember_observed_note_id(
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    *,
+    document_id: str,
+    note_id: str,
+    ledger_path: Any,
+) -> None:
+    """Store the id we saw. The row stays sent, unconfirmed."""
+
+    from .discussion_note_ledger import (
+        SENT_UNCONFIRMED,
+        DiscussionNoteLedgerError,
+        record_posted_note,
+    )
+
+    try:
+        record_posted_note(
+            applicant_id,
+            discussion_id,
+            note_text=note_text,
+            document_id=document_id,
+            note_id=note_id,
+            source="discussion_count",
+            ledger_path=ledger_path,
+            refresh=True,
+            confirmation=SENT_UNCONFIRMED,
+        )
+    except DiscussionNoteLedgerError:
+        return
 
 
 def _new_note_identity(

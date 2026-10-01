@@ -2360,11 +2360,23 @@ def _discussion_note_user_reply(store: JobStore, job: dict[str, Any]) -> str:
 
     name = _account_display_name(job)
     title = " ".join(str(note.get("discussion_title") or "").split()).strip() or "the discussion"
+    if str(note.get("verified_by") or "") == "count" or str(note.get("status") or "") == "sent":
+        return _count_note_user_line(name, title)
     if api_readback_confirms_write(store, job["id"]):
         sentence = f'Added the note to {name} on "{title}".'
     else:
         sentence = "I couldn't confirm that landed, please check."
     return sentence
+
+
+def _count_note_user_line(name: str, title: str) -> str:
+    """One line when the discussion gained one note and its text could not be read."""
+    who = " ".join(str(name or "").split()).strip() or "the account"
+    heading = " ".join(str(title or "").split()).strip() or "the discussion"
+    return (
+        f'Added the note to {who} on "{heading}". '
+        "I couldn't read its text to double-check."
+    )
 
 
 def _merge_discussion_note_destination(store: JobStore, job_id: str) -> None:
@@ -2401,7 +2413,10 @@ def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
     """The user-facing line when a note was filed and the field was not changed."""
     note = store.get_checkpoint(job["id"], "discussion_note") or {}
     status = str(note.get("status") or "")
-    if status not in {"filed", "posted, verifying"} and not note.get("read_back"):
+    if (
+        status not in {"filed", "posted, verifying", "sent"}
+        and not note.get("read_back")
+    ):
         return ""
     title = str(note.get("discussion_title") or "").strip()
     if not title:
@@ -2492,6 +2507,10 @@ def agent_reply_is_replaced(store: Any, job_id: str | None) -> bool:
         return False
     status = str(note.get("status") or "")
     if status == "already_posted" and str(note.get("reason") or "").strip():
+        return True
+    if status == "sent":
+        return True
+    if status == "held" and str(note.get("reason") or "").strip():
         return True
     if status != "filed":
         return False
@@ -2633,6 +2652,24 @@ def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
     return True
 
 
+def _leave_spoken_note_unverified(store: JobStore, job_id: str, error: str) -> None:
+    """The user has the one line. The note is not called done."""
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status == JobStatus.PENDING:
+        store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        status = JobStatus.RUNNING
+    if status in {JobStatus.RUNNING, JobStatus.VERIFYING}:
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={status},
+            error=error,
+            release_lease=True,
+        )
+    _stop_job_recording(store, job_id, JobStatus.UNVERIFIED.value)
+
+
 def publish_discussion_note_outcome(
     db_path: str,
     job_id: str,
@@ -2661,17 +2698,53 @@ def publish_discussion_note_outcome(
     elif status == "filed":
         from .post_job_audit import api_readback_confirms_write
 
-        if not api_readback_confirms_write(store, job_id):
+        if str(note.get("verified_by") or "") == "count":
+            job = store.get_job(job_id)
+            unproved = _unproved_field_user_reply(store, job)
+            if unproved:
+                _leave_partial_note_unverified(store, job_id)
+                line = unproved
+            else:
+                line = _count_note_user_line(
+                    _account_display_name(job),
+                    str(note.get("discussion_title") or ""),
+                )
+                _leave_spoken_note_unverified(
+                    store, job_id, "the note was added, but its text could not be read"
+                )
+        elif not api_readback_confirms_write(store, job_id):
             return None
+        else:
+            job = store.get_job(job_id)
+            unproved = _unproved_field_user_reply(store, job)
+            if unproved:
+                _leave_partial_note_unverified(store, job_id)
+                line = unproved
+            else:
+                if not close_confirmed_note_job(store, job_id):
+                    return None
+                line = _discussion_note_user_reply(store, store.get_job(job_id))
+    elif status in {"sent", "held"}:
         job = store.get_job(job_id)
-        unproved = _unproved_field_user_reply(store, job)
+        unproved = _unproved_field_user_reply(store, job) if status == "sent" else ""
         if unproved:
             _leave_partial_note_unverified(store, job_id)
             line = unproved
+        elif status == "sent" or str(note.get("verified_by") or "") == "count":
+            line = _count_note_user_line(
+                _account_display_name(job),
+                str(note.get("discussion_title") or ""),
+            )
+            _leave_spoken_note_unverified(
+                store, job_id, "the note was added, but its text could not be read"
+            )
         else:
-            if not close_confirmed_note_job(store, job_id):
+            line = " ".join(str(note.get("reason") or "").split())
+            if not line:
                 return None
-            line = _discussion_note_user_reply(store, store.get_job(job_id))
+            _leave_spoken_note_unverified(
+                store, job_id, "the note could not be confirmed"
+            )
     else:
         return None
     line = " ".join(str(line or "").split()).strip()

@@ -95,8 +95,12 @@ def _file(client, text="NatGen cancellation notice was added. ROBIE was here", *
     return disc.file_note_to_existing_discussion(client, APPLICANT, text, **kwargs)
 
 
-def test_textless_count_increase_is_not_filed_and_blocks_a_repost(tmp_path):
-    """A count of +1 with no note text is not proof the new note is ours."""
+def test_textless_count_increase_is_one_new_note_and_blocks_a_repost(tmp_path):
+    """Live shape: empty 2xx, metadata-only read, 405 on the notes list.
+
+    Exactly one new note and a stable latest id is not a text read-back.
+    It is still one note, said once, and a repeat does not post again.
+    """
 
     client = LiveShapeClient()
     with pytest.raises(disc.DiscussionApiError) as listed:
@@ -105,21 +109,21 @@ def test_textless_count_increase_is_not_filed_and_blocks_a_repost(tmp_path):
 
     ledger = tmp_path / "ledger.json"
     result = _file(client, ledger_path=ledger, document_id="824463419")
-    assert result["status"] == "held"
-    assert result["note_id"] is None
+    assert result["status"] == "sent"
+    assert result["note_id"] == "701"
     assert result["read_back"] is False
-    assert result["verified_by"] is None
+    assert result["verified_by"] == "count"
     assert result["confirmation"] == SENT_UNCONFIRMED
-    assert "not sent again" in result["reason"]
-    assert "told apart" in result["reason"]
+    assert "one new note" in result["reason"]
+    assert "told apart" not in result["reason"]
     assert client.posts == 1
-    assert client.reads == 2
+    assert client.reads == 3
     assert client.note_lists == 1  # the explicit 405 check above, not the filer
     for word in FIELD_WORDS:
         assert word not in result["reason"]
     saved = json.loads(ledger.read_text(encoding="utf-8"))
     assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
-    assert saved["notes"][0]["note_id"] == ""
+    assert saved["notes"][0]["note_id"] == "701"
 
     again = _file(client, ledger_path=ledger, document_id="824463419")
     assert again["status"] == "already_posted"
@@ -129,6 +133,36 @@ def test_textless_count_increase_is_not_filed_and_blocks_a_repost(tmp_path):
     allowed = _file(client, ledger_path=ledger, document_id="824463419", allow_repost=True)
     assert allowed["status"] == "held"
     assert client.posts == 2
+
+
+def test_a_second_read_that_moves_is_not_called_ours(tmp_path):
+    """Another note landing before the tight re-read is not marked sent."""
+
+    class Moving(LiveShapeClient):
+        def get_discussion(self, discussion_id):
+            self.reads += 1
+            latest = self.after_latest if self.posted else self.latest
+            count = self.after_count if self.posted else self.note_count
+            title = self.after_title if self.posted else self.title
+            if self.reads >= 3:
+                latest = "999"
+                count = (self.after_count or 0) + 1
+            return {
+                "discussionId": discussion_id,
+                "applicantId": APPLICANT,
+                "title": title,
+                "noteCount": count,
+                "mostRecentNoteId": latest,
+            }
+
+    client = Moving()
+    result = _file(client, ledger_path=tmp_path / "ledger.json")
+    assert result["status"] == "held"
+    assert result["note_id"] is None
+    assert result["verified_by"] is None
+    assert "told apart" in result["reason"]
+    assert client.posts == 1
+    assert client.note_lists == 0
 
 
 def test_returned_note_id_that_matches_the_latest_note_is_filed(tmp_path):

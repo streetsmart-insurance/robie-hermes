@@ -690,7 +690,11 @@ def refuse_repeat_note_post(
     if not record:
         return None
     data = dict(record.get("data") or {})
-    if str(data.get("status") or "") not in _NOTE_POSTED:
+    status = str(data.get("status") or "")
+    posted = status in _NOTE_POSTED or status == "sent" or (
+        status == "held" and str(data.get("confirmation") or "") == "sent, unconfirmed"
+    )
+    if not posted:
         return None
     if not _same_utc_day(record.get("created_at")):
         return None

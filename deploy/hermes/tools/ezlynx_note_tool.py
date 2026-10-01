@@ -158,8 +158,54 @@ def _file_note(args: dict) -> dict:
             "read_back": False,
             "verified_by": None,
             "reason": filed.get("reason"),
+            "confirmation": filed.get("confirmation"),
+            "wrote": False,
+            "idempotent": bool(filed.get("idempotent")),
             "do_not_repost": False,
             "instruction": "Do not post again unless the user explicitly says yes.",
+        }
+    if status == "sent":
+        return {
+            "ok": True,
+            "status": "sent",
+            "note_id": filed.get("note_id"),
+            "discussion_id": filed.get("discussion_id"),
+            "discussion_title": filed.get("discussion_title"),
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "read_back": False,
+            "verified_by": "count",
+            "reason": filed.get("reason"),
+            "confirmation": filed.get("confirmation"),
+            "wrote": True,
+            "do_not_repost": True,
+            "instruction": (
+                "The user was already told. Do not post again and do not add your own summary."
+            ),
+        }
+    if status == "held":
+        from robie_job_engine.discussion_note_ledger import SENT_UNCONFIRMED
+
+        wrote = str(filed.get("confirmation") or "") == SENT_UNCONFIRMED
+        return {
+            "ok": False,
+            "status": "held",
+            "note_id": filed.get("note_id"),
+            "discussion_id": filed.get("discussion_id"),
+            "discussion_title": filed.get("discussion_title"),
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "read_back": False,
+            "verified_by": filed.get("verified_by"),
+            "reason": filed.get("reason"),
+            "confirmation": filed.get("confirmation"),
+            "wrote": wrote,
+            "do_not_repost": wrote,
+            "instruction": (
+                "Do not post this note again."
+                if wrote
+                else "The note was not sent. Do not try a different screen."
+            ),
         }
     if status not in {"filed", "posted, verifying"}:
         reason = str(filed.get("reason") or "").strip()
@@ -179,6 +225,9 @@ def _file_note(args: dict) -> dict:
         "read_back": bool(filed.get("read_back")),
         "verified_by": filed.get("verified_by"),
         "reason": filed.get("reason"),
+        "confirmation": filed.get("confirmation"),
+        "wrote": not bool(filed.get("idempotent")),
+        "idempotent": bool(filed.get("idempotent")),
         "do_not_repost": posted,
         "instruction": (
             "Do not post this note again."
@@ -277,6 +326,9 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
                 "read_back": bool(report.get("read_back")),
                 "verified_by": report.get("verified_by"),
                 "reason": report.get("reason"),
+                "confirmation": report.get("confirmation"),
+                "wrote": bool(report.get("wrote")),
+                "idempotent": bool(report.get("idempotent")),
             },
         )
         if report.get("read_back") and report.get("note_id"):

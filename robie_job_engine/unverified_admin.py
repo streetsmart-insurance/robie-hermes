@@ -9,7 +9,11 @@ from .chat_job_controls import stop_recordings_for_jobs
 
 
 def job_has_external_write(store, job: dict) -> bool:
-    """True when this job already filed a note, uploaded a file, or proved a write."""
+    """True when this job already filed a note, uploaded a file, or proved a write.
+
+    A checkpoint that only copied an earlier note's id, because this ask
+    matched a note already on the ledger, is not a write.
+    """
     from .write_verification_loop import write_landed
 
     if write_landed(store, job):
@@ -17,11 +21,21 @@ def job_has_external_write(store, job: dict) -> bool:
     job_id = str(job.get("id") or "")
     if not job_id:
         return False
+    failed = store.get_checkpoint(job_id, "ezlynx_note_tool_failed") or {}
+    if "the note was sent, but" in str(failed.get("error") or "").casefold():
+        return True
     note = store.get_checkpoint(job_id, "discussion_note") or {}
-    if str(note.get("note_id") or "").strip():
+    status = str(note.get("status") or "")
+    matched_prior = status == "already_posted" or bool(note.get("idempotent"))
+    if note.get("wrote") is True:
         return True
-    if str(note.get("status") or "") in {"filed", "posted, verifying", "sent"}:
-        return True
+    if not matched_prior:
+        if str(note.get("note_id") or "").strip():
+            return True
+        if status in {"filed", "posted, verifying", "sent"}:
+            return True
+        if str(note.get("confirmation") or "") == "sent, unconfirmed":
+            return True
     for kind in ("document_upload", "uploaded_document", "ezlynx_document"):
         document = store.get_checkpoint(job_id, kind) or {}
         if document.get("document_id") or document.get("read_back"):

@@ -2435,10 +2435,12 @@ class Round6ConversationTests(unittest.TestCase):
             first = file_note_to_existing_discussion(
                 client, "220250093", body, title_hint=title, ledger_path=ledger
             )
-            self.assertEqual(first["status"], "held")
+            # No note text and no returned id. A stable +1 is sent, not filed.
+            self.assertEqual(first["status"], "sent")
+            self.assertNotEqual(first["status"], "filed")
             self.assertFalse(first["read_back"])
-            self.assertIsNone(first["note_id"])
-            self.assertNotEqual(first.get("verified_by"), "discussion")
+            self.assertEqual(first["note_id"], "new-note")
+            self.assertEqual(first.get("verified_by"), "count")
             self.assertEqual(first["discussion_title"], title)
             self.assertEqual(client.appended, 1)
             self.assertNotIn("note_id", str(first.get("reason") or ""))
