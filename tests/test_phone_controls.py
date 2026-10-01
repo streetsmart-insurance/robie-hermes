@@ -20,8 +20,9 @@ class Safety(unittest.TestCase):
  def start(self):return self.c.start(self.plan,'SYN-GRANT')
  def detail(self):return {'call_id':'SYN-CALL-1','ended_at':self.now.isoformat(),'outcome':'voicemail_no_message'}
  def note(self):
-  detail=self.detail();body=f"Call ended {detail['ended_at']}. Call ID: SYN-CALL-1. Outcome: voicemail_no_message."
-  self.notes.find.return_value=None;self.notes.append.return_value='SYN-NOTE';self.notes.read.return_value={'applicant_id':'SYN-APP','discussion_id':'SYN-DISC','body':body}
+  detail=self.detail()
+  self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'SYN-NOTE'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'SYN-NOTE','noteCount':1,'lastModified':self.now.isoformat()}
   return self.c.finish(self.plan,'SYN-CALL-1',detail)
  def test_exact_script_gate(self):
   self.grant=replace(self.grant,plan_digest='WRONG')
@@ -96,8 +97,30 @@ class Safety(unittest.TestCase):
   self.start()
   with self.assertRaises(Refused):self.c.finish(replace(self.plan,applicant_id='WRONG'),'SYN-CALL-1',self.detail())
  def test_note_readback_mismatch(self):
-  self.start();self.notes.find.return_value='SYN-NOTE';self.notes.read.return_value={}
+  self.start();self.notes.find.return_value='SYN-NOTE';self.notes.lookup_discussion.return_value={'LastNoteId':'OTHER','noteCount':1,'lastModified':self.now.isoformat()}
   with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+ def test_note_id_matches_fresh_discussion_without_requiring_text(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'42'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'42','NoteCount':4,'LastModified':'2026-10-01T15:00:00Z'}
+  self.notes.list_notes.side_effect=AssertionError('HTTP 405')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'42'},result)
+  self.notes.list_notes.assert_not_called();self.notes.read.assert_not_called()
+ def test_note_text_is_compared_only_when_the_lookup_has_it(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'42','body':'different'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'42','noteCount':1,'lastModified':self.now.isoformat()}
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+ def test_dry_run_note_is_plain_english_and_not_a_call(self):
+  self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'SYN-NOTE'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'SYN-NOTE','noteCount':1,'lastModified':self.now.isoformat()}
+  result=self.c.finish(self.plan,None,{'outcome':'dry_run','test_id':'dry-2026-10-01'})
+  body=self.notes.append.call_args.args[2]
+  self.assertEqual('Robie phone Test: dry run only, no call placed. Ref: dry-2026-10-01.',body)
+  self.assertNotIn('Call ended',body);self.assertNotIn('Call ID',body)
+  self.assertEqual('SYN-NOTE',result['note_id']);self.dispatch.assert_not_called()
+ def test_call_ended_note_requires_an_accepted_dispatch(self):
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-FAKE',self.detail())
+  self.notes.append.assert_not_called()
  def test_unresolved_note_holds_new_campaign(self):
   self.start();self.notes.find.return_value=None;self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2',target='+15555550125');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
   with self.assertRaisesRegex(Refused,'note'):self.start()

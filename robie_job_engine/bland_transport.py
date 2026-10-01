@@ -75,6 +75,16 @@ def get_call(
     )
 
 
+def authorize_live_call(
+    *,
+    execute: bool,
+    env: Mapping[str, str] | None = None,
+    hostname: str | None = None,
+) -> None:
+    """Refuse unless every live-call gate passes. Does not open a socket."""
+    _authorize(execute=execute, env=env, hostname=hostname)
+
+
 def _authorize(*, execute: bool, env: Mapping[str, str] | None, hostname: str | None) -> None:
     if execute is not True:
         raise BlandTransportRefused("execute must be true")

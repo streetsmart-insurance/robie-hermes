@@ -18,13 +18,18 @@ class ReplayDispatch:
         if not body['phone_number'].startswith('+155555501'):raise Refused('synthetic number only')
         call_id=f'SYN-CALL-{len(self.calls)+1}';self.calls.append((call_id,body));return {'call_id':call_id}
 class ReplayNotes:
-    def __init__(self):self.records={}
+    def __init__(self):self.records={};self.latest={}
     def find(self,call_id,applicant,discussion):
         for k,r in self.records.items():
             if r['call_id']==call_id and r['applicant_id']==applicant and r['discussion_id']==discussion:return k
     def append(self,applicant,discussion,body,call_id):
-        k=f'SYN-NOTE-{len(self.records)+1}';self.records[k]={'applicant_id':applicant,'discussion_id':discussion,'body':body,'call_id':call_id};return k
-    def read(self,k):return {a:b for a,b in self.records[k].items() if a!='call_id'}
+        k=f'SYN-NOTE-{len(self.records)+1}';self.records[k]={'applicant_id':applicant,'discussion_id':discussion,'body':body,'call_id':call_id}
+        self.latest[discussion]=k
+        return {'noteId':k}
+    def lookup_discussion(self,applicant,discussion):
+        latest=self.latest.get(discussion,'')
+        return {'LastNoteId':latest,'noteCount':1 if latest else 0,'lastModified':'2026-10-01T15:00:00+00:00'}
+    def list_notes(self,*args):raise AssertionError('notes list is HTTP 405')
 
 def replay(root,hostname):
     if hostname.split('.')[0]!='hermes-test-01':raise Refused('Test host only')

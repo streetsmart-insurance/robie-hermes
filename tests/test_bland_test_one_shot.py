@@ -1,6 +1,7 @@
 """Synthetic only. No call, credential access or remote traffic."""
 from datetime import date, datetime, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,6 +49,18 @@ class OneShotSafety(unittest.TestCase):
             main()
         printed=json.loads(buf.getvalue())
         self.assertTrue(printed['dry_run']);self.assertEqual('SYN-VOICE',printed['payload']['voice']);self.assertEqual(1,printed['payload']['max_duration'])
+    def test_execute_refuses_before_any_secret_read_when_live_flag_is_off(self):
+        def urlopen(*args,**kwargs):
+            raise AssertionError('secret or network read')
+        argv=['prog','--voice-id','SYN-VOICE','--test-id','dry','--approved-day','2026-10-01','--state-dir',str(self.root),'--execute']
+        for flag in ('0', None):
+            env={'ROBIE_ENV':'TEST'}
+            if flag is None:env.pop('ROBIE_PHONE_LIVE_CALLS',None)
+            else:env['ROBIE_PHONE_LIVE_CALLS']=flag
+            with patch('sys.argv',argv), patch('urllib.request.urlopen',urlopen), patch('socket.gethostname',return_value='hermes-test-01'), patch.dict(os.environ,env,clear=False):
+                os.environ.pop('ROBIE_PHONE_LIVE_CALLS',None) if flag is None else None
+                with self.assertRaises(TestCallRefused):
+                    main()
     def test_extra_retry_voicemail_or_recipient_refused(self):
         for k,v in [('retry',{'wait':10}),('phone_number','+15555550123'),('record',True),('voicemail',{'action':'leave_message'})]:
             with self.assertRaises(TestCallRefused):self.run_case(body=dict(self.body,**{k:v}))

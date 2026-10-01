@@ -20,6 +20,47 @@ def _require_call_bounds(plan):
     if type(plan.max_duration_minutes) is not int or plan.max_duration_minutes>1 or plan.max_duration_minutes<1:
         raise Refused('max duration must be one minute')
 
+_LAST_NOTE_KEYS=('LastNoteId','lastNoteId','mostRecentNoteId','MostRecentNoteId')
+_NOTE_COUNT_KEYS=('noteCount','NoteCount','note_count')
+_NOTE_MODIFIED_KEYS=('lastModified','LastModified','last-modified','last_modified')
+_NOTE_TEXT_KEYS=('body','note','text','noteText','lastNoteText')
+_CREATED_NOTE_KEYS=('note_id','noteId','NoteId','id','Id')
+CALL_OUTCOMES=('human_reached','voicemail_no_message','voicemail_message_left','no_answer','busy','failed','screener_declined')
+DRY_OUTCOMES=('dry_run','no_call')
+
+def _created_note_id(result):
+    if isinstance(result,str) and result.strip():return result.strip()
+    if isinstance(result,dict):
+        for key in _CREATED_NOTE_KEYS:
+            value=result.get(key)
+            if isinstance(value,str) and value.strip():return value.strip()
+    raise Refused('append response did not include a note id')
+
+def _lookup_value(snapshot, keys):
+    if not isinstance(snapshot,dict):return None
+    for key in keys:
+        if key in snapshot:return snapshot.get(key)
+    return None
+
+def _latest_note_id(snapshot):
+    value=_lookup_value(snapshot,_LAST_NOTE_KEYS)
+    if not isinstance(value,str) or not value.strip():raise Refused('discussion lookup missing latest note id')
+    return value.strip()
+
+def _note_texts(created, snapshot):
+    texts=[]
+    for source in (created, snapshot):
+        if not isinstance(source,dict):continue
+        for key in _NOTE_TEXT_KEYS:
+            if key not in source:continue
+            value=source.get(key)
+            if value is None:continue
+            texts.append(value)
+    return texts
+
+def dry_run_note(test_id):
+    return f"Robie phone Test: dry run only, no call placed. Ref: {test_id}."
+
 def fingerprint(value):
     return sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
@@ -136,29 +177,55 @@ class Controls:
             except sqlite3.IntegrityError:return {'status':'already_claimed','dispatch':False}
         return self._send(plan,2)
     def finish(self,plan,call_id,detail):
-        # Read-back port is required for notes; no UI note write is supported.
-        if detail.get('call_id')!=call_id or not detail.get('ended_at') or detail.get('outcome') not in ('human_reached','voicemail_no_message','voicemail_message_left','no_answer','busy','failed','screener_declined'):raise Refused('terminal call evidence required')
+        # Read-back is the created note id against a fresh discussion lookup.
+        # GET .../notes is HTTP 405, so this path never lists notes.
+        outcome=detail.get('outcome')
+        if outcome in DRY_OUTCOMES:
+            if call_id or detail.get('call_id'):raise Refused('dry run must not carry a call id')
+            test_id=str(detail.get('test_id') or '').strip()
+            if not test_id:raise Refused('dry run test id required')
+            body=dry_run_note(test_id)
+            if 'Call ended' in body or 'Call ID' in body:raise Refused('dry run note must not look like a call')
+            with self.db() as c:
+                row=c.execute('SELECT digest FROM campaigns WHERE id=?',(plan.campaign,)).fetchone()
+                if row and row[0]!=plan.digest():raise Refused('note destination changed')
+            return self._file_note(plan,'dry-run:'+test_id,body)
+        if not isinstance(call_id,str) or not call_id.strip():raise Refused('real dispatch call id required')
+        if detail.get('call_id')!=call_id or not detail.get('ended_at') or outcome not in CALL_OUTCOMES:raise Refused('terminal call evidence required')
         ended=datetime.fromisoformat(detail['ended_at'])
         if ended.tzinfo is None or ended>self.clock():raise Refused('valid ended timestamp required')
         with self.db() as c:
-            if not c.execute('SELECT 1 FROM attempts WHERE campaign=? AND call_id=?',(plan.campaign,call_id)).fetchone():raise Refused('call not bound to campaign')
+            attempt=c.execute('SELECT status FROM attempts WHERE campaign=? AND call_id=?',(plan.campaign,call_id)).fetchone()
+            if not attempt or attempt[0]!='accepted':raise Refused('real dispatch required')
             row=c.execute('SELECT digest FROM campaigns WHERE id=?',(plan.campaign,)).fetchone()
             if row[0]!=plan.digest():raise Refused('note destination changed')
-            body=f"Call ended {detail['ended_at']}. Call ID: {call_id}. Outcome: {detail['outcome']}."
-            c.execute('INSERT OR IGNORE INTO notes VALUES(?,?,?,?,?,NULL)',(call_id,plan.applicant_id,plan.discussion_id,body,'pending'))
-            row=c.execute('SELECT status,note_id FROM notes WHERE call_id=?',(call_id,)).fetchone()
+        # Only an accepted dispatch may use the call-ended line.
+        body=f"Call ended {detail['ended_at']}. Call ID: {call_id}. Outcome: {outcome}."
+        return self._file_note(plan,call_id,body)
+    def _file_note(self,plan,note_key,body):
+        with self.db() as c:
+            c.execute('INSERT OR IGNORE INTO notes VALUES(?,?,?,?,?,NULL)',(note_key,plan.applicant_id,plan.discussion_id,body,'pending'))
+            row=c.execute('SELECT status,note_id FROM notes WHERE call_id=?',(note_key,)).fetchone()
             if row[0]=='verified':return {'status':'verified','note_id':row[1]}
-        # Lookup first makes reconciliation after an ambiguous note POST safe.
-        found=self.notes.find(call_id,plan.applicant_id,plan.discussion_id)
+        # Lookup by the id we already stored. Never list the discussion's notes.
+        found=self.notes.find(note_key,plan.applicant_id,plan.discussion_id)
+        created=found
         if not found:
             with self.db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                state=c.execute('SELECT status FROM notes WHERE call_id=?',(call_id,)).fetchone()[0]
+                state=c.execute('SELECT status FROM notes WHERE call_id=?',(note_key,)).fetchone()[0]
                 if state!='pending':return {'status':'note_unknown','note_id':None}
-                c.execute('UPDATE notes SET status=? WHERE call_id=?',('posting',call_id))
-            try:found=self.notes.append(plan.applicant_id,plan.discussion_id,body,call_id)
+                c.execute('UPDATE notes SET status=? WHERE call_id=?',('posting',note_key))
+            try:created=self.notes.append(plan.applicant_id,plan.discussion_id,body,note_key)
             except Exception:return {'status':'note_unknown','note_id':None}
-        read=self.notes.read(found)
-        if read!={'applicant_id':plan.applicant_id,'discussion_id':plan.discussion_id,'body':body}:raise Refused('note readback mismatch')
-        with self.db() as c:c.execute('UPDATE notes SET status=?,note_id=? WHERE call_id=?',('verified',found,call_id))
-        return {'status':'verified','note_id':found}
+        note_id=_created_note_id(created)
+        snapshot=self.notes.lookup_discussion(plan.applicant_id,plan.discussion_id)
+        if _latest_note_id(snapshot)!=note_id:raise Refused('note readback mismatch')
+        count=_lookup_value(snapshot,_NOTE_COUNT_KEYS)
+        if count is not None and (type(count) is not int or count<1):raise Refused('note readback mismatch')
+        modified=_lookup_value(snapshot,_NOTE_MODIFIED_KEYS)
+        if modified is not None and (not isinstance(modified,str) or not modified.strip()):raise Refused('note readback mismatch')
+        for text in _note_texts(created,snapshot):
+            if text!=body:raise Refused('note readback mismatch')
+        with self.db() as c:c.execute('UPDATE notes SET status=?,note_id=? WHERE call_id=?',('verified',note_id,note_key))
+        return {'status':'verified','note_id':note_id}

@@ -6,13 +6,14 @@ before dispatch; HTTP ambiguity never retries. No retry/voicemail/SMS/webhook.
 from __future__ import annotations
 from datetime import date, datetime
 import json
+import os
 from pathlib import Path
 import sqlite3
 import socket
 import urllib.request
 from zoneinfo import ZoneInfo
 
-from .bland_transport import get_call, post_call
+from .bland_transport import BlandTransportRefused, authorize_live_call, get_call, post_call
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -120,7 +121,13 @@ def main():
     body=payload(target=TARGET,voice_id=args.voice_id,caller_id=CALLER)
     if not args.execute:
         print(json.dumps({'dry_run':True,'payload':body}));return
-    if socket.gethostname().split('.')[0]!='hermes-test-01':raise TestCallRefused('Test host only')
+    # Gates first. A refused execute must not read the Bland key.
+    try:
+        authorize_live_call(execute=True, env=os.environ, hostname=socket.gethostname())
+    except BlandTransportRefused as exc:
+        raise TestCallRefused(str(exc)) from None
+    if eastern_today() != args.approved_day:
+        raise TestCallRefused('test permission is limited to its approved day')
     # VM identity needs separately authorized secret access; no IAM mutation here.
     meta=urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',headers={'Metadata-Flavor':'Google'})
     with urllib.request.urlopen(meta,timeout=10) as response: token=json.load(response)['access_token']
