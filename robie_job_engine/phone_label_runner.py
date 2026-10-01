@@ -46,6 +46,7 @@ class LabelRunner:
         if plan.campaign!=identity:raise Refused('campaign must bind source note and route')
         if kind in ('client_followup','client_outreach') and plan.audience!='client':raise Refused('client label requires reviewed client route')
         if kind=='robie_call' and plan.audience not in ('carrier','finance','client'):raise Refused('unsupported call audience')
+        if plan.unrestricted_hours != (kind in ('robie_call','client_followup')):raise Refused('hours policy differs from reviewed route')
         # No notes read as instructions. No arbitrary phone overrides.
         return {'route':kind,'label':label,'plan_digest':plan.digest(),'approval_required':True,'campaign':identity}
     def preview(self,card,plan):
