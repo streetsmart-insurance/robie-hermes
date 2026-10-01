@@ -119,3 +119,30 @@ class EzlynxLoginSecretVersionTests(TestCase):
             request={"name": "versions/6"}
         )
 
+
+
+class EzlynxLoginIdentityTests(TestCase):
+    @staticmethod
+    def load_bootstrap():
+        module_path = Path(__file__).resolve().parents[1] / "ezlynx_login_bootstrap.py"
+        spec = importlib.util.spec_from_file_location("test_login_identity_bootstrap", module_path)
+        bootstrap = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(bootstrap)
+        return bootstrap
+
+    def test_default_pair_unchanged_and_jimmy_pair_fixed(self):
+        bootstrap = self.load_bootstrap()
+        self.assertEqual(
+            bootstrap.credential_secret_names("ssrobie"),
+            ("ezlynx-username", "ezlynx-password"),
+        )
+        self.assertEqual(
+            bootstrap.credential_secret_names("jimmy1"),
+            ("ezlynx-jimmy1-username", "ezlynx-jimmy1-password"),
+        )
+
+    def test_unknown_identity_cannot_select_arbitrary_secret(self):
+        bootstrap = self.load_bootstrap()
+        with self.assertRaises(KeyError):
+            bootstrap.credential_secret_names("custom-secret-name")

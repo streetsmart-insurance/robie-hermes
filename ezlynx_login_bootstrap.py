@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import os
 import re
@@ -18,6 +19,16 @@ AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
 SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
 INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
+LOGIN_IDENTITIES = {
+    "ssrobie": ("ezlynx-username", "ezlynx-password"),
+    "jimmy1": ("ezlynx-jimmy1-username", "ezlynx-jimmy1-password"),
+}
+
+
+def credential_secret_names(identity: str) -> tuple[str, str]:
+    """Select a fixed pair of Secret Manager names, never arbitrary user input."""
+    return LOGIN_IDENTITIES[identity]
+
 
 
 def secret(name: str) -> str:
@@ -192,7 +203,7 @@ def navigate_to_submission_route(page) -> None:
     page.wait_for_timeout(2_000)
 
 
-def main() -> int:
+def main(identity: str = "ssrobie") -> int:
     from playwright.sync_api import sync_playwright
     from robie_job_engine.ezlynx_driver_gate import (
         EzlynxDriverGateRefused,
@@ -205,6 +216,7 @@ def main() -> int:
         print(str(exc))
         return 28
 
+    username_secret, password_secret = credential_secret_names(identity)
     try:
         # Verify the OAuth identity before retrieving credentials or requesting
         # an MFA message. Carlo's mailbox must never be used as a fallback.
@@ -247,8 +259,14 @@ def main() -> int:
             url = page.url.lower()
 
         if "/auth/account/login" in url:
-            page.locator("#txtUserName").fill(secret("ezlynx-username"))
-            page.locator("#txtPassword").fill(secret("ezlynx-password"))
+            # Resolve the selected pair only on the login route. Fail closed
+            # before changing the page if either secret is absent or empty.
+            username = secret(username_secret)
+            password = secret(password_secret)
+            if not username or not password:
+                raise RuntimeError(f"Missing EZLynx credentials for identity {identity}")
+            page.locator("#txtUserName").fill(username)
+            page.locator("#txtPassword").fill(password)
             page.locator("#btnLogin").click()
             page.wait_for_load_state("domcontentloaded")
             page.wait_for_timeout(2_000)
@@ -311,4 +329,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="Restore the persistent EZLynx browser session")
+    parser.add_argument("--identity", choices=tuple(LOGIN_IDENTITIES), default="ssrobie")
+    args = parser.parse_args()
+    raise SystemExit(main(identity=args.identity))
