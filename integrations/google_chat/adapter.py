@@ -1037,6 +1037,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._dedup = MessageDeduplicator()
         self._pubsub_ack = PubSubAckCoordinator(self._dedup)
         self._typing_messages: Dict[str, str] = {}
+        # True while a consumed thinking card must keep ``_keep_typing`` from
+        # posting another one. Cleared when the next inbound turn starts.
+        self._typing_hold: Dict[str, bool] = {}
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
@@ -1505,6 +1508,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return
         if not job_id:
             await self._begin_fresh_chat_turn(event)
+            self._allow_next_thinking_card(
+                getattr(getattr(event, "source", None), "chat_id", None)
+            )
             await self.handle_message(event)
             return
         try:
@@ -1618,6 +1624,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             if not chat_turn_keeps_context(ROBIE_JOB_DB, job_id):
                 await self._begin_fresh_chat_turn(event)
+            self._allow_next_thinking_card(
+                getattr(source, "chat_id", None)
+            )
             await self.handle_message(event)
         except Exception:
             current = self._gateway_turns.get(key)
@@ -1665,13 +1674,45 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
 
         current["task"] = agent
-        watchdog = asyncio.create_task(
-            watch_turn_ceiling(
+
+        async def _watch_and_close_silence() -> str:
+            from robie_job_engine.turn_finalization import (
+                finalize_turn_if_still_open,
+                install_tool_call_text_guard,
+            )
+
+            install_tool_call_text_guard()
+            outcome = await watch_turn_ceiling(
                 agent,
                 limit=limit,
                 on_timeout=on_timeout,
                 stop_requested=stop_requested,
-            ),
+            )
+            if outcome == "finished" and not stop_requested():
+                line = await asyncio.to_thread(
+                    finalize_turn_if_still_open, ROBIE_JOB_DB, job_id
+                )
+                if line and source is not None:
+                    from robie_job_engine.chat_thread import read_job_chat_thread
+
+                    stored_thread = await asyncio.to_thread(
+                        read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+                    )
+                    await self.send(
+                        source.chat_id,
+                        line,
+                        reply_to=event.message_id,
+                        metadata={
+                            "thread_id": stored_thread
+                            or getattr(source, "thread_id", None),
+                            "robie_delivery_kind": "notice",
+                            "robie_job_id": job_id,
+                        },
+                    )
+            return outcome
+
+        watchdog = asyncio.create_task(
+            _watch_and_close_silence(),
             name=f"robie-turn-ceiling:{job_id}",
         )
         current["watchdog"] = watchdog
@@ -1769,6 +1810,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         source = event.source
         if source is None:
             return
+        # A stop can leave the previous turn's consumed thinking card in the
+        # space slot. Release it before the next message can run.
+        self._allow_next_thinking_card(source.chat_id)
         key = turn_key(source.chat_id, getattr(source, "thread_id", None))
         record = self._gateway_turns.pop(key, None)
         if record is None:
@@ -3435,6 +3479,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 ):
                     return
                 await self._begin_fresh_chat_turn(event)
+                self._allow_next_thinking_card(
+                    getattr(getattr(event, "source", None), "chat_id", None)
+                )
                 await self.handle_message(event)
                 return
         # Test AND Production: operational bounded work goes through
@@ -4733,6 +4780,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         ):
             # The model gets the tool result. Chat does not, and the job stays open.
             return SendResult(success=True, message_id=None)
+        from robie_job_engine.turn_finalization import (
+            current_model_job_id,
+            model_text_is_not_final,
+        )
+
+        tool_text_job = job_id or current_model_job_id() or self._active_turn_job_id(chat_id)
+        if agent_reply and model_text_is_not_final(tool_text_job, str(content or "")):
+            # The assistant message still has tool calls. This text is not the reply.
+            return SendResult(success=True, message_id=None)
         named_job = str((metadata or {}).get("robie_job_id") or "").strip()
         if agent_reply and not job_id:
             job_id = self._active_turn_job_id(chat_id)
@@ -4963,7 +5019,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # the safety-net stop_typing would then delete and tombstone.
             # Cleared in on_processing_complete.
             if patched_typing:
-                self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+                self._mark_typing_card_consumed(chat_id)
             delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
             if (
                 job_id
@@ -5284,6 +5340,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         if is_plan_refusal_text(content) or is_tool_progress_text(content) or is_refused_tool_text(content):
             return SendResult(success=True, message_id=message_id)
+        from robie_job_engine.turn_finalization import (
+            current_model_job_id,
+            model_text_is_not_final,
+        )
+
+        tool_text_job = current_model_job_id() or self._active_turn_job_id(chat_id)
+        if model_text_is_not_final(tool_text_job, content):
+            return SendResult(success=True, message_id=message_id)
         if self._edit_would_land_on_a_finished_turn(chat_id):
             # The progress bubble was opened at the top level. Patching the
             # model's paragraph into it is the top-level "note added" message.
@@ -5564,7 +5628,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if not isinstance(pending, dict):
             pending = {}
             self._pending_replies = pending
-        if job_id and text:
+        from robie_job_engine.turn_finalization import model_text_is_not_final
+
+        # Plan text that shared a message with a tool call is not the reply.
+        tool_text = bool(
+            job_id and model_text_is_not_final(str(job_id), str(text or ""))
+        )
+        if job_id and text and not tool_text:
             pending[str(job_id)] = str(text)
         if job_id:
             try:
@@ -5580,7 +5650,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 already = store.get_checkpoint(str(job_id), "worker_response")
                 sent = store.get_checkpoint(str(job_id), "chat_outcome_sent") or {}
-                if not already and not str(sent.get("text") or "").strip():
+                if (
+                    not tool_text
+                    and not already
+                    and not str(sent.get("text") or "").strip()
+                ):
                     from robie_job_engine.worker_contract import sanitize_worker_response
 
                     store.checkpoint(
@@ -5783,6 +5857,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
         return SendResult(success=True, message_id=resp.get("name"))
 
+    def _mark_typing_card_consumed(self, chat_id: str) -> None:
+        """The thinking card was patched. Hold it so this turn does not post another."""
+        self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+        hold = getattr(self, "_typing_hold", None)
+        if not isinstance(hold, dict):
+            hold = {}
+            self._typing_hold = hold
+        hold[chat_id] = True
+
+    def _allow_next_thinking_card(self, chat_id: str | None) -> None:
+        """The next inbound turn may post its own thinking card."""
+        if not chat_id:
+            return
+        hold = getattr(self, "_typing_hold", None)
+        if isinstance(hold, dict):
+            hold.pop(str(chat_id), None)
+
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
         """Post a visible 'Hermes is thinking…' marker message.
 
@@ -5817,7 +5908,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the task runs to completion and the msg_id lands in the slot
         regardless.
         """
-        # Already have a card (real msg_id, sentinel, or in-flight) — bail.
+        # A consumed card belongs to the previous turn. While that turn still
+        # holds it, ``_keep_typing`` must not post a second card. Once the
+        # next inbound message starts, the hold is released: a stop used to
+        # leave the sentinel in the space slot, so the next turn skipped the
+        # thinking card and posted its first line as a new top-level message.
+        if self._typing_messages.get(chat_id) == _TYPING_CONSUMED_SENTINEL:
+            hold = getattr(self, "_typing_hold", None)
+            if isinstance(hold, dict) and hold.get(chat_id):
+                return
+            self._typing_messages.pop(chat_id, None)
+        # Already have a card (real msg_id or in-flight) — bail.
         if chat_id in self._typing_messages:
             return
         if chat_id in self._typing_card_inflight:
@@ -6031,7 +6132,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._typing_messages.pop(chat_id, None)
         try:
             result = await self._patch_message(current, {"text": text})
-            self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+            self._mark_typing_card_consumed(chat_id)
             return result
         except HttpError as exc:
             status = getattr(getattr(exc, "resp", None), "status", None)

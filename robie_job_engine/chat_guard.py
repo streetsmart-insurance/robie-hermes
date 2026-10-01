@@ -2914,6 +2914,12 @@ def _guard_chat_response_impl(
     # They are not the reply, not a write, and they do not end the job.
     if is_tool_progress_text(content) or is_refused_tool_text(content):
         return ""
+    from .turn_finalization import model_text_is_not_final
+
+    # Plan text that shares the assistant message with a tool call is not
+    # the reply. It does not bind a destination, verify, or close.
+    if model_text_is_not_final(job_id, content):
+        return ""
     if not job_id:
         if _looks_like_unbound_policy_success(content):
             return (

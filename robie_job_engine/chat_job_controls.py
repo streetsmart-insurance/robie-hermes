@@ -784,6 +784,11 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
     # A refused tool call is the model's to continue. It does not end the turn.
     if is_tool_progress_text(text) or is_refused_tool_text(text):
         return False
+    from .turn_finalization import model_text_is_not_final
+
+    # Text from an assistant message that still has tool calls is not the reply.
+    if model_text_is_not_final(job_id, text):
+        return False
     if outbound_is_clarify(text):
         store = JobStore(db_path)
         if mark_job_waiting_for_user(store, job_id, text):
