@@ -1040,6 +1040,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # True while a consumed thinking card must keep ``_keep_typing`` from
         # posting another one. Cleared when the next inbound turn starts.
         self._typing_hold: Dict[str, bool] = {}
+        # Set when a stop clears the slot, so a late typing tick from that
+        # stop cannot put a card back. The next inbound message clears it.
+        self._typing_drop: Dict[str, bool] = {}
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
@@ -1826,9 +1829,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
         source = event.source
         if source is None:
             return
-        # A stop can leave the previous turn's consumed thinking card in the
-        # space slot. Release it before the next message can run.
-        self._allow_next_thinking_card(source.chat_id)
         key = turn_key(source.chat_id, getattr(source, "thread_id", None))
         record = self._gateway_turns.pop(key, None)
         if record is None:
@@ -1881,6 +1881,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         owner_id,
                         kind="stop",
                     )
+                    self._clear_space_typing(source.chat_id)
                     return
             elif owner_id not in cancel_ids:
                 cancel_ids = [owner_id]
@@ -1902,6 +1903,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 None,
                 kind="idle_stop",
             )
+            self._clear_space_typing(source.chat_id)
             return
         if job_id and job_id not in cancel_ids:
             reply = fail_cancelled_chat_job(JobStore(ROBIE_JOB_DB), job_id)
@@ -1921,6 +1923,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             job_id,
             kind="stop",
         )
+        # Before the first await. The next message can run there, and it
+        # needs an empty typing slot of its own.
+        self._clear_space_typing(source.chat_id)
         await self._terminate_running_agent(event, job_id, reason="/stop")
         task = (record or {}).get("task")
         if task is not None and task is not asyncio.current_task():
@@ -4532,12 +4537,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
         from robie_job_engine.user_reply import format_user_reply
 
         body: Dict[str, Any] = {"text": format_user_reply(text)}
+        from robie_job_engine.chat_thread import job_thread_key, remember_created_thread
+
         if thread_name:
             body["thread"] = {"name": thread_name}
+        elif job_id:
+            # No thread stored yet. Same threadKey the thinking card uses,
+            # so this line joins that card instead of starting a bare topic.
+            body["thread"] = {"threadKey": job_thread_key(str(job_id))}
         kwargs: Dict[str, Any] = {"parent": space, "body": body}
-        if thread_name:
+        if body.get("thread"):
             kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
-        api.spaces().messages().create(**kwargs).execute(http=self._new_authed_http())
+        resp = api.spaces().messages().create(**kwargs).execute(http=self._new_authed_http())
+        if job_id and not thread_name and isinstance(resp, dict):
+            try:
+                remember_created_thread(JobStore(ROBIE_JOB_DB), str(job_id), resp)
+            except Exception:
+                logger.debug(
+                    "[GoogleChat] could not store outcome thread job=%s",
+                    job_id,
+                    exc_info=True,
+                )
         self._mark_sole_reply_sent(job_id)
         self._remember_reply_job(space, job_id)
         return True
@@ -4955,7 +4975,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error="empty message")
 
             last_result: Optional[SendResult] = None
-            typing_msg_name = self._typing_messages.pop(chat_id, None)
+            # A stop line is its own message. It must not patch the space's
+            # thinking card or leave that card marked used for the next turn.
+            stop_outcome = delivery_kind in {"stop", "idle_stop"}
+            if stop_outcome:
+                typing_msg_name = None
+            else:
+                typing_msg_name = self._typing_messages.pop(chat_id, None)
             # Treat any earlier sentinel as "no real card to patch" — defensive.
             if typing_msg_name == _TYPING_CONSUMED_SENTINEL:
                 typing_msg_name = None
@@ -5034,7 +5060,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # typing_task.cancel() lands) does not post a fresh marker that
             # the safety-net stop_typing would then delete and tombstone.
             # Cleared in on_processing_complete.
-            if patched_typing:
+            if patched_typing and not stop_outcome:
                 self._mark_typing_card_consumed(chat_id)
             delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
             if (
@@ -5882,6 +5908,26 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._typing_hold = hold
         hold[chat_id] = True
 
+    def _clear_space_typing(self, chat_id: str | None) -> None:
+        """A stop is done. This space's thinking card must not survive it.
+
+        The slot, the hold, and any card that stop's own typing tick is
+        still creating are dropped. The next message posts a new card.
+        """
+        if not chat_id:
+            return
+        messages = getattr(self, "_typing_messages", None)
+        if isinstance(messages, dict):
+            messages.pop(chat_id, None)
+        hold = getattr(self, "_typing_hold", None)
+        if isinstance(hold, dict):
+            hold.pop(chat_id, None)
+        dropped = getattr(self, "_typing_drop", None)
+        if not isinstance(dropped, dict):
+            dropped = {}
+            self._typing_drop = dropped
+        dropped[chat_id] = True
+
     def _allow_next_thinking_card(self, chat_id: str | None) -> None:
         """The next inbound turn may post its own thinking card."""
         if not chat_id:
@@ -5889,6 +5935,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         hold = getattr(self, "_typing_hold", None)
         if isinstance(hold, dict):
             hold.pop(str(chat_id), None)
+        dropped = getattr(self, "_typing_drop", None)
+        if isinstance(dropped, dict):
+            dropped.pop(str(chat_id), None)
+        messages = getattr(self, "_typing_messages", None)
+        if isinstance(messages, dict):
+            messages.pop(str(chat_id), None)
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
         """Post a visible 'Hermes is thinking…' marker message.
@@ -5924,6 +5976,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the task runs to completion and the msg_id lands in the slot
         regardless.
         """
+        # A stop cleared this space. A typing tick still running for that
+        # stop must not create a card the next message would inherit.
+        dropped = getattr(self, "_typing_drop", None)
+        if isinstance(dropped, dict) and dropped.get(chat_id):
+            return
         # A consumed card belongs to the previous turn. While that turn still
         # holds it, ``_keep_typing`` must not post a second card. Once the
         # next inbound message starts, the hold is released: a stop used to
@@ -5993,6 +6050,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         async def _create_and_record() -> None:
             try:
                 result = await self._create_message(chat_id, body, job_id=job_id)
+                dropped_now = getattr(self, "_typing_drop", None)
+                if isinstance(dropped_now, dict) and dropped_now.get(chat_id):
+                    return
                 if result.success and result.message_id:
                     # Only overwrite the slot if nothing else has claimed it
                     # in the meantime (e.g. send() racing ahead of us).

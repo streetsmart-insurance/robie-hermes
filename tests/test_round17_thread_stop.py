@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
 
-from robie_job_engine.chat_thread import bind_job_chat_thread
+from robie_job_engine.chat_thread import bind_job_chat_thread, job_thread_key, read_job_chat_thread
 from robie_job_engine.chat_turn_control import ALREADY_FINISHED_REPLY, NOTHING_RUNNING_REPLY
 from robie_job_engine.models import JobStatus
 from robie_job_engine.playground_execute import capability_menu
@@ -177,6 +177,99 @@ class ThreadStopTests(unittest.TestCase):
             self.assertEqual(store.get_job(job["id"])["status"], JobStatus.CANCELLED.value)
             self.assertIn("Stopped.", replies[0])
             self.assertNotEqual(replies[0], ALREADY_FINISHED_REPLY)
+
+
+class StopTypingTests(unittest.TestCase):
+    def test_finished_stop_leaves_the_next_message_its_own_thinking_card(self):
+        adapter = _adapter_module()
+        question = "I already added that note at 5:28 AM ET. Want me to add it again?"
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            finished = _terminal(store, JobStatus.UNVERIFIED)
+            repeat = store.create_job(
+                "hermes.google_chat_task",
+                {
+                    "text": "add that mailing note again for Buster Brown",
+                    "conversation_id": SPACE,
+                    "requested_by": "Carlo",
+                },
+            )
+            repeat_id = repeat["id"]
+            chat = _chat(db)
+            chat.config = type("Cfg", (), {"typing_status_text": "Robie is thinking…"})()
+            chat._typing_card_inflight = {}
+            chat._orphan_typing_messages = {}
+            chat._typing_hold = {}
+            card_id = "spaces/ROBY/messages/thinking"
+            chat._typing_messages[SPACE] = card_id
+            chat._typing_hold[SPACE] = True
+
+            async def _noop(*args, **kwargs):
+                del args, kwargs
+
+            chat._terminate_running_agent = _noop
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                stopped = asyncio.run(
+                    chat.send(
+                        SPACE,
+                        "That job already finished.",
+                        metadata={
+                            "thread_id": THREAD,
+                            "robie_job_id": finished,
+                            "robie_delivery_kind": "stop",
+                            "robie_stop_notice": True,
+                        },
+                    )
+                )
+            self.assertTrue(stopped.success)
+            self.assertEqual(chat._typing_messages.get(SPACE), card_id)
+            self.assertNotEqual(
+                chat._typing_messages.get(SPACE), adapter._TYPING_CONSUMED_SENTINEL
+            )
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                asyncio.run(chat._apply_chat_stop(_Event(THREAD, "@Robie /stop")))
+            texts = _outbound_text(chat)
+            self.assertIn("That job already finished.", texts)
+            stop_call = next(
+                call
+                for call in chat._chat_api.messages.calls
+                if (call.get("body") or {}).get("text") == "That job already finished."
+                and ((call.get("body") or {}).get("thread") or {}).get("name") == THREAD
+            )
+            self.assertEqual(
+                ((stop_call.get("body") or {}).get("thread") or {}).get("name"),
+                THREAD,
+            )
+            self.assertNotIn(SPACE, chat._typing_messages)
+            self.assertFalse((getattr(chat, "_typing_hold", None) or {}).get(SPACE))
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                asyncio.run(chat.send_typing(SPACE, metadata={"robie_job_id": repeat_id}))
+            self.assertNotIn(SPACE, chat._typing_messages)
+            before_next = len(chat._chat_api.messages.calls)
+            chat._allow_next_thinking_card(SPACE)
+            chat._active_chat_job[SPACE] = repeat_id
+            with patch.object(adapter, "ROBIE_JOB_DB", db):
+                asyncio.run(chat.send_typing(SPACE, metadata={"robie_job_id": repeat_id}))
+                chat.post_outcome_sync(SPACE, question, None, repeat_id)
+            card = chat._chat_api.messages.calls[before_next]
+            question_call = chat._chat_api.messages.calls[before_next + 1]
+            card_key = ((card.get("body") or {}).get("thread") or {}).get("threadKey")
+            question_key = (
+                (question_call.get("body") or {}).get("thread") or {}
+            ).get("threadKey")
+            self.assertEqual(card_key, job_thread_key(repeat_id))
+            self.assertEqual(question_key, card_key)
+            self.assertTrue(
+                str((card.get("body") or {}).get("text") or "").casefold().startswith("robie is")
+            )
+            self.assertIn(
+                "Want me to add it again?",
+                (question_call.get("body") or {}).get("text") or "",
+            )
+            self.assertTrue(read_job_chat_thread(store, repeat_id))
+            self.assertEqual(store.get_job(finished)["status"], JobStatus.UNVERIFIED.value)
+            self.assertIsNone(store.get_checkpoint(finished, "cancelled"))
 
 
 class InboundDropTests(unittest.TestCase):
