@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,10 @@ from zoneinfo import ZoneInfo
 
 LEDGER_VERSION = 1
 LEDGER_FILENAME = "discussion-note-ledger.json"
+PROD_LEDGER_PATH = Path(
+    "/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json"
+)
+_PRODUCTION_ENVS = frozenset({"PRODUCTION", "PROD", "LIVE"})
 
 # Notes that already posted on hermes-test-01 on 2026-09-30. DiscussionApi
 # accepted each post and returned no note id. Recording them here does not
@@ -125,14 +130,30 @@ def known_posted_notes() -> list[dict[str, Any]]:
     return rows
 
 
+def _is_production_process() -> bool:
+    env_name = str(os.environ.get("ROBIE_ENV") or "").strip().upper()
+    if env_name in _PRODUCTION_ENVS:
+        return True
+    host = socket.gethostname().split(".")[0].strip().lower()
+    return host == "hermes-poc-01"
+
+
 def default_ledger_path() -> Path:
-    """Where accepted notes are remembered. Tests never use the repo tree."""
+    """Where accepted notes are remembered. Tests never use the repo tree.
+
+    Production always uses the ledger next to the job database on
+    hermes-poc-01. A missing file is not created here.
+    """
 
     override = str(os.environ.get("ROBIE_DISCUSSION_NOTE_LEDGER") or "").strip()
+    if _under_automated_test():
+        if override:
+            return Path(override)
+        return _isolated_test_ledger_path()
+    if _is_production_process():
+        return PROD_LEDGER_PATH
     if override:
         return Path(override)
-    if _under_automated_test():
-        return _isolated_test_ledger_path()
     db = str(os.environ.get("ROBIE_JOB_DB") or "").strip()
     if db:
         return Path(db).expanduser().resolve().parent / LEDGER_FILENAME
@@ -392,8 +413,15 @@ def note_still_blocks_repost(
 
 
 def record_known_posted_notes(ledger_path: Path | str | None = None) -> list[dict[str, Any]]:
-    """Copy the six already-posted notes into the ledger file. Does not post."""
+    """Copy the six already-posted notes into the ledger file. Does not post.
 
+    Production never does this. Those six notes were accepted on Test.
+    """
+
+    if _is_production_process():
+        raise DiscussionNoteLedgerError(
+            "Known Test notes are not copied onto Production. Nothing was written."
+        )
     recorded = []
     for row in known_posted_notes():
         recorded.append(
@@ -641,7 +669,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--note-id", default="")
     args = parser.parse_args(argv)
     if args.record_known:
-        rows = record_known_posted_notes(args.ledger)
+        try:
+            rows = record_known_posted_notes(args.ledger)
+        except DiscussionNoteLedgerError as exc:
+            print(json.dumps({"recorded": 0, "posted": False, "error": str(exc)}))
+            return 2
         print(json.dumps({"recorded": len(rows), "posted": False}))
         return 0
     if not args.applicant or not args.discussion or not (args.document_id or args.note_text):

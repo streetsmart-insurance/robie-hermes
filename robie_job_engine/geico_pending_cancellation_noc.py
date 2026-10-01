@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
+from .intake_core import IntakeHold, SourceArchive, SourceItem
 
 
 PROCESS = "geico"
@@ -155,6 +155,16 @@ class NoticeOpenObservation:
 
 
 def refuse_production_host() -> None:
+    """Refuse a hermes-poc host unless Geico Production filing is enabled.
+
+    The kill switch and the FAO/NatGen/Geico allowlist are the only way
+    through. Every other Geico check stays in place.
+    """
+
+    from .document_retrieval_filing import live_filing_decision
+
+    if live_filing_decision(os.environ, socket.gethostname(), "geico").allowed:
+        return
     raw = f"{socket.gethostname()} {socket.getfqdn()}".lower()
     labels = [label for label in re.split(r"[\s.]+", raw) if label]
     if any(label == "hermes-poc-01" or label.startswith("hermes-poc") for label in labels):
@@ -1178,7 +1188,9 @@ def run_pull(
     the dated QA pack on both a matched pull and a later hold. A hold before
     that capture does not invent a screenshot.
     """
-    require_test()
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("geico")
     refuse_production_host()
     if not isinstance(as_of, date):
         raise IntakeHold("Pending Cancellations as-of date is missing or ambiguous")
@@ -1385,8 +1397,10 @@ def run_pull(
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightGeicoNocBrowser, Callable[[], None]]:
-    """Attach to the local Test Chrome. Exactly one Gateway application tab."""
-    require_test()
+    """Attach to the local Chrome. Exactly one Gateway application tab."""
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("geico")
     refuse_production_host()
     require_hermes_test_host()
     url = require_loopback_cdp(cdp_url or os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL)
@@ -1439,7 +1453,15 @@ def require_list_url(url: str) -> str:
 
 
 def require_hermes_test_host() -> None:
-    """Live packs are produced on hermes-test-01. Fixture runs inject a browser."""
+    """Live packs are produced on hermes-test-01. Fixture runs inject a browser.
+
+    hermes-poc-01 is accepted only when Geico Production filing is enabled.
+    """
+
+    from .document_retrieval_filing import live_filing_decision
+
+    if live_filing_decision(os.environ, socket.gethostname(), "geico").allowed:
+        return
     raw = f"{socket.gethostname()} {socket.getfqdn()}".lower()
     labels = [label for label in re.split(r"[\s.]+", raw) if label]
     if HERMES_TEST_HOST not in labels:
@@ -1737,13 +1759,19 @@ def main(
     closer: Callable[[], None] | None = None
     pack: Path | None = None
     try:
-        require_test()
+        from .document_retrieval_filing import FilingHeld, require_carrier_pull, resolve_pull_output
+
+        require_carrier_pull("geico")
         refuse_production_host()
         try:
             as_of = date.fromisoformat(args.as_of)
         except ValueError as exc:
             raise IntakeHold("Pending Cancellations as-of date is missing or ambiguous") from exc
-        pack = qa_pack_dir(Path(args.output_root), as_of)
+        try:
+            output_root = resolve_pull_output(args.output_root, DEFAULT_OUTPUT_ROOT)
+        except FilingHeld as exc:
+            raise IntakeHold(str(exc)) from exc
+        pack = qa_pack_dir(output_root, as_of)
         stamped = run_ts or datetime.now(_EASTERN).isoformat()
         if browser_factory is None:
             require_hermes_test_host()

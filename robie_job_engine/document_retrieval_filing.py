@@ -3,9 +3,11 @@
 Pull workers download a portal document, then call :func:`file_carrier_batch`.
 Progressive FAO memos use :func:`file_progressive_memos`.
 
-Live EZLynx writes stay off unless ``ROBIE_ENV=TEST``, the hostname is
-``hermes-test-01``, and ``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1``. Production
-is refused. No timer is installed here.
+Live EZLynx writes stay off unless the kill switch
+``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1`` is set. Test still requires
+``ROBIE_ENV=TEST`` on ``hermes-test-01``. Production (``hermes-poc-01``)
+files only FAO, NatGen, and Geico, and only when that same switch is on.
+Progressive BOP stays blocked. The switch defaults off.
 
 Documents go through :func:`robie_job_engine.ezlynx_api_only_writes.upload_document_via_api`.
 Notes go through :func:`robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion`
@@ -48,6 +50,10 @@ KILL_SWITCH_ENV = "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX"
 TEST_FILING_HOST = "hermes-test-01"
 PRODUCTION_HOSTS = frozenset({"hermes-poc-01"})
 PRODUCTION_ENVS = frozenset({"PRODUCTION", "PROD", "LIVE"})
+# Production filing keys. Progressive BOP is not in this set.
+PROD_FILING_CARRIERS = frozenset({"fao", "natgen", "geico"})
+TEST_OPT_PREFIX = "/opt/streetsmart-hermes-test/"
+PROD_OPT_PREFIX = "/opt/streetsmart-hermes/"
 STATUS_SHEET_ID = "1HL6Uw5nAJjZ3qtCleUzXUtOC_xmhFPmy0LPbz89v7vw"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 ROBIE_SIGNATURE = "ROBIE was here"
@@ -220,26 +226,142 @@ def require_retrieval_window(start: date, end: date, *, as_of: date) -> None:
         )
 
 
-def live_filing_decision(environ: Mapping[str, str], hostname: str) -> FilingDecision:
-    """Kill switch. Default is off. Production never files."""
+def _env_name(environ: Mapping[str, str]) -> str:
+    return str(environ.get("ROBIE_ENV") or "").strip().upper()
 
-    env_name = str(environ.get("ROBIE_ENV") or "").strip().upper()
-    host = str(hostname or "").split(".")[0].strip().lower()
+
+def _host_label(hostname: str) -> str:
+    return str(hostname or "").split(".")[0].strip().lower()
+
+
+def kill_switch_on(environ: Mapping[str, str]) -> bool:
+    """True only for the digit 1. Unset, empty, and false stay off."""
+
+    return str(environ.get(KILL_SWITCH_ENV) or "").strip() == "1"
+
+
+def is_production_target(environ: Mapping[str, str], hostname: str) -> bool:
+    return _env_name(environ) in PRODUCTION_ENVS or _host_label(hostname) in PRODUCTION_HOSTS
+
+
+def live_filing_decision(
+    environ: Mapping[str, str],
+    hostname: str,
+    carrier: str | None = None,
+) -> FilingDecision:
+    """Kill switch. Default is off.
+
+    Test still files only on hermes-test-01 with the switch on. Production
+    files one allowlisted carrier (FAO, NatGen, or Geico) only when the same
+    switch is on and the host is hermes-poc-01. BOP is never allowlisted.
+    """
+
+    env_name = _env_name(environ)
+    host = _host_label(hostname)
     if env_name in PRODUCTION_ENVS or host in PRODUCTION_HOSTS:
+        key = str(carrier or "").strip().lower()
+        if key not in PROD_FILING_CARRIERS:
+            return FilingDecision(
+                False,
+                "Production document retrieval does not file this carrier. "
+                "Progressive BOP stays blocked.",
+            )
+        if env_name not in PRODUCTION_ENVS or host not in PRODUCTION_HOSTS:
+            return FilingDecision(
+                False,
+                "Production filing requires ROBIE_ENV=PRODUCTION on hermes-poc-01.",
+            )
+        if not kill_switch_on(environ):
+            return FilingDecision(
+                False,
+                f"{KILL_SWITCH_ENV} is off. Production files nothing.",
+            )
         return FilingDecision(
-            False,
-            "Production document retrieval filing is disabled. No Production timer is installed.",
+            True,
+            "Production filing is enabled for this carrier on hermes-poc-01.",
         )
     if env_name != "TEST":
         return FilingDecision(False, "Document retrieval filing requires ROBIE_ENV=TEST.")
     if host != TEST_FILING_HOST:
         return FilingDecision(False, "Live EZLynx filing runs only on hermes-test-01.")
-    if str(environ.get(KILL_SWITCH_ENV) or "").strip() != "1":
+    if not kill_switch_on(environ):
         return FilingDecision(
             False,
             f"{KILL_SWITCH_ENV} is off. No EZLynx write was attempted.",
         )
     return FilingDecision(True, "Test filing is enabled on hermes-test-01.")
+
+
+def require_carrier_pull(carrier: str) -> None:
+    """Test pulls stay on ROBIE_ENV=TEST. Production pulls use the filing gate.
+
+    An allowlisted carrier may pull on hermes-poc-01 only when Production
+    filing is enabled. Every other case still holds with the Test-only message.
+    """
+
+    from .intake_core import require_test
+
+    if _env_name(os.environ) == "TEST":
+        return
+    if live_filing_decision(os.environ, socket.gethostname(), carrier).allowed:
+        return
+    require_test()
+
+
+def prod_ledger_path() -> Path:
+    from .discussion_note_ledger import PROD_LEDGER_PATH
+
+    return PROD_LEDGER_PATH
+
+
+def require_prod_discussion_ledger() -> Path:
+    """Hold when the Production note ledger is missing or cannot be written.
+
+    This does not create the file and does not record known Test notes.
+    """
+
+    ledger = prod_ledger_path()
+    place = str(ledger)
+    if not ledger.is_file():
+        raise FilingHeld(
+            f"The Production discussion-note ledger is missing ({place}). Nothing was filed."
+        )
+    if not os.access(ledger, os.W_OK) or not os.access(ledger.parent, os.W_OK):
+        raise FilingHeld(
+            f"The Production discussion-note ledger is not writable ({place}). Nothing was filed."
+        )
+    return ledger
+
+
+def resolve_pull_output(
+    given: str | None,
+    test_default: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+    hostname: str | None = None,
+) -> Path:
+    """Test keeps the folder it was given. Production does not use the Test tree."""
+
+    env = os.environ if environ is None else environ
+    host = socket.gethostname() if hostname is None else hostname
+    text = str(given or "").strip()
+    default_text = str(test_default)
+    if not is_production_target(env, host):
+        if not text:
+            raise FilingHeld("An output folder is required. Nothing was pulled.")
+        return Path(text)
+    if not text or text == default_text:
+        if default_text.startswith(TEST_OPT_PREFIX):
+            return Path(PROD_OPT_PREFIX + default_text[len(TEST_OPT_PREFIX):])
+        raise FilingHeld(
+            "Production needs an output folder under /opt/streetsmart-hermes/. Nothing was pulled."
+        )
+    if text.startswith(TEST_OPT_PREFIX) or "streetsmart-hermes-test" in text:
+        raise FilingHeld(
+            "That output folder is the Test path under /opt/streetsmart-hermes-test. "
+            "Production needs a folder under /opt/streetsmart-hermes/. Nothing was pulled."
+        )
+    return Path(text)
 
 
 def status_tab_title(day: date) -> str:
@@ -284,13 +406,65 @@ def review_task_payload(
     )
 
 
-def filing_note(rule: FilingRule, processed_on: date) -> str:
-    """Short plain-English note. No policy digits, so a long policy cannot look like a phone number."""
+def _without_phone_numbers(text: str) -> str:
+    """Drop dialable digit runs so a file name can sit in a discussion note."""
 
-    text = (
-        f"{rule.note_label} dated {sheet_date_text(processed_on)} was added to the "
-        f"{rule.folder} folder. {ROBIE_SIGNATURE}"
-    )
+    from .ezlynx_discussions import _PHONE_LIKE
+
+    cleaned = " ".join(str(text or "").split())
+
+    def shorten(match: re.Match[str]) -> str:
+        digits = re.sub(r"\D", "", match.group(0))
+        return f"ending in {digits[-4:]}" if len(digits) >= 4 else "on file"
+
+    cleaned = _PHONE_LIKE.sub(shorten, cleaned)
+    try:
+        reject_phone_numbers(cleaned)
+    except Exception:
+        return "on file"
+    return cleaned or "on file"
+
+
+def _note_document_identity(policy_number: str, filename: str) -> str:
+    """Policy and file name, so two documents on the same day are not one note."""
+
+    parts: list[str] = []
+    policy = str(policy_number or "").strip()
+    if policy:
+        parts.append(f"policy {_display_policy(policy)}")
+    stem = Path(str(filename or "")).stem.strip()
+    if stem:
+        safe = _without_phone_numbers(stem)
+        if safe and safe != "on file":
+            parts.append(f"file {safe}")
+        elif safe:
+            parts.append("file on file")
+    return ", ".join(parts)
+
+
+def filing_note(
+    rule: FilingRule,
+    processed_on: date,
+    *,
+    policy_number: str = "",
+    filename: str = "",
+) -> str:
+    """Short plain-English note. A phone-like policy is shortened to its last four.
+
+    The policy and file name are included when the caller has them, so a second
+    document for the same carrier and date is not the same note as the first.
+    The same document produces the same sentence and is still treated as a repeat.
+    """
+
+    identity = _note_document_identity(policy_number, filename)
+    dated = f"{rule.note_label} dated {sheet_date_text(processed_on)}"
+    if identity:
+        text = (
+            f"{dated} for {identity} was added to the "
+            f"{rule.folder} folder. {ROBIE_SIGNATURE}"
+        )
+    else:
+        text = f"{dated} was added to the {rule.folder} folder. {ROBIE_SIGNATURE}"
     reject_phone_numbers(text)
     if not text.endswith(ROBIE_SIGNATURE):
         raise FilingHeld("note must end with ROBIE was here")
@@ -743,7 +917,9 @@ def _file_one(
         )
     if mode == "note":
         try:
-            note_text = filing_note(rule, processed_on)
+            note_text = filing_note(
+                rule, processed_on, policy_number=policy_number, filename=filename
+            )
             noted = _post_discussion_note(
                 deps, applicant_id, note_text, rule.workflow_title, document_id
             )
@@ -1093,6 +1269,23 @@ def _file_test_account_batch(
     return batch
 
 
+def carrier_key_for_rule(rule: FilingRule) -> str:
+    """``fao``, ``natgen``, ``geico``, or ``bop`` when ``rule`` is one of the constants."""
+
+    for key, known in CARRIER_RULES.items():
+        if known is rule:
+            return key
+    return ""
+
+
+def active_carrier_rules(environ: Mapping[str, str], hostname: str) -> dict[str, FilingRule]:
+    """Production's command list is the allowlist. BOP is not on it."""
+
+    if is_production_target(environ, hostname):
+        return dict(PROD_CARRIER_RULES)
+    return dict(CARRIER_RULES)
+
+
 def file_carrier_batch(
     items: Sequence[Mapping[str, Any]],
     *,
@@ -1107,9 +1300,14 @@ def file_carrier_batch(
 
     env = os.environ if environ is None else environ
     host = socket.gethostname() if hostname is None else hostname
-    decision = live_filing_decision(env, host)
+    decision = live_filing_decision(env, host, carrier_key_for_rule(rule))
     if not decision.allowed:
         return _batch("disabled", decision.reason)
+    if is_production_target(env, host):
+        try:
+            require_prod_discussion_ledger()
+        except FilingHeld as exc:
+            return _batch("held", str(exc))
     try:
         test_applicant = test_applicant_override(env, host)
     except FilingHeld as exc:
@@ -1390,6 +1588,10 @@ CARRIER_RULES = {
     "geico": GEICO_NOC_RULE,
     "natgen": NATGEN_NOC_RULE,
 }
+# Production command list. BOP is excluded here, not only by skipping a run.
+PROD_CARRIER_RULES = {
+    key: rule for key, rule in CARRIER_RULES.items() if key in PROD_FILING_CARRIERS
+}
 _INSURED_KEYS = ("insured_name", "named_insured", "insured", "client")
 
 
@@ -1439,14 +1641,16 @@ def pack_filing_items(output_dir: str | Path) -> list[dict[str, Any]]:
 def main(argv: Sequence[str] | None = None) -> int:
     """File pulled PDFs from one carrier's QA packs through the shared API path.
 
-    Every gate above still applies: the kill switch, the Test host, and (for
-    the Buster Brown test) the Test-only applicant override.
+    Every gate above still applies: the kill switch, the host, and (for
+    the Buster Brown test) the Test-only applicant override. On Production
+    the carrier list is FAO, NatGen, and Geico.
     """
 
     import argparse
 
+    rules = active_carrier_rules(os.environ, socket.gethostname())
     parser = argparse.ArgumentParser(description=main.__doc__)
-    parser.add_argument("--carrier", required=True, choices=sorted(CARRIER_RULES))
+    parser.add_argument("--carrier", required=True, choices=sorted(rules))
     parser.add_argument("--output-dir", required=True, help="pull output folder holding <date>/manifest.json")
     parser.add_argument("--list-only", action="store_true", help="print the items and file nothing")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1454,7 +1658,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.list_only:
         print(json.dumps({"status": "listed", "count": len(items), "items": items}, indent=2))
         return 0
-    result = file_carrier_batch(items, rule=CARRIER_RULES[args.carrier])
+    result = file_carrier_batch(items, rule=rules[args.carrier])
     print(json.dumps(result, indent=2, default=str))
     return 0 if result.get("status") in {"filed", "skipped_duplicate", "empty", "filed_no_workflow"} else 2
 
