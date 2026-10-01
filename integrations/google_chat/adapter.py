@@ -4701,7 +4701,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         elif delivery_kind in {"hard_block", "notice"}:
             content = str(content or "")
         else:
-            content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
+            # The post-job check can re-read EZLynx. It must not run on the
+            # gateway loop, or the next Chat message, including /stop, waits
+            # behind that session.
+            content = await asyncio.to_thread(
+                guard_chat_response, ROBIE_JOB_DB, job_id, content
+            )
         from robie_job_engine.user_reply import format_user_reply
 
         content = format_user_reply(content)

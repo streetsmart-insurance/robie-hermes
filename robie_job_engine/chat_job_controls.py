@@ -664,9 +664,10 @@ def refuse_repeat_note_post(
     args: dict[str, Any] | None,
     kwargs: dict[str, Any] | None,
 ) -> str | None:
-    """Refuse a second successful discussion-note post for this step today.
+    """Refuse another discussion-note post once this job has already written one.
 
-    No job context means a unit call, and the write is unchanged.
+    An explicit yes that has not been used yet may post once. No job context
+    means a unit call, and the write is unchanged.
     """
     import os
 
@@ -690,25 +691,41 @@ def refuse_repeat_note_post(
     if not record:
         return None
     data = dict(record.get("data") or {})
-    status = str(data.get("status") or "")
-    posted = status in _NOTE_POSTED or status == "sent" or (
-        status == "held" and str(data.get("confirmation") or "") == "sent, unconfirmed"
-    )
-    if not posted:
+    if not note_checkpoint_already_wrote(data):
         return None
-    if not _same_utc_day(record.get("created_at")):
+    try:
+        allowance = store.get_checkpoint(job_id, "note_repost_confirmed") or {}
+    except Exception:
+        allowance = {}
+    if allowance and not allowance.get("used"):
         return None
-    step = discussion_note_step_id(store, job_id, args)
-    prior = str(data.get("step_id") or "")
-    same_step = bool(prior) and prior == step
-    prior_note = " ".join(str(data.get("request_note") or data.get("note_text") or "").casefold().split())
-    this_note = " ".join(str((args or {}).get("note_text") or "").casefold().split())
-    same_text = bool(this_note) and this_note == prior_note
-    if same_step or same_text or (prior.startswith("plan:") and prior == step):
-        return REPEAT_NOTE_REFUSAL
-    if prior.startswith("plan:") and step.startswith("plan:") and prior == step:
-        return REPEAT_NOTE_REFUSAL
-    return None
+    return REPEAT_NOTE_REFUSAL
+
+
+def note_checkpoint_already_wrote(data: dict[str, Any] | None) -> bool:
+    """True when this job already sent a note. A matched older note is not a write."""
+    row = dict(data or {})
+    status = str(row.get("status") or "")
+    if status == "already_posted":
+        return False
+    if status in _NOTE_POSTED or status == "sent":
+        return True
+    if status == "held" and str(row.get("confirmation") or "") == "sent, unconfirmed":
+        return True
+    return bool(row.get("wrote") is True and status not in {"", "pending"})
+
+
+def note_job_already_wrote(store: Any, job_id: str) -> bool:
+    """True when this job's discussion-note checkpoint records a real write."""
+    if not job_id or store is None:
+        return False
+    try:
+        record = store.get_checkpoint_record(job_id, "discussion_note") or {}
+    except Exception:
+        return False
+    if not record:
+        return False
+    return note_checkpoint_already_wrote(dict(record.get("data") or {}))
 
 
 def stop_recordings_for_jobs(db_path: str, job_ids: list[str], status: str) -> None:

@@ -1125,16 +1125,82 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     return text + "\n".join(lines)
 
 
+_ROUTING_TERMINAL = {
+    JobStatus.UNVERIFIED,
+    JobStatus.COMPLETE,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+}
+
+
+def _inbound_in_job_thread(
+    store: JobStore, job: dict[str, Any] | None, inbound_thread_id: str | None
+) -> bool:
+    """True only when this message is inside the thread stored on the job."""
+    if not job:
+        return False
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound:
+        return False
+    stored = read_job_chat_thread(store, str(job.get("id") or ""))
+    return bool(stored and inbound == stored)
+
+
+def _live_job_owning_thread(
+    store: JobStore, conversation_id: str, inbound_thread_id: str | None
+) -> dict[str, Any] | None:
+    """The open job this thread belongs to, when it is not the active link."""
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound or not str(conversation_id or "").strip():
+        return None
+    try:
+        with store.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id FROM conversation_job_links
+                   WHERE conversation_id=?
+                   ORDER BY created_at DESC LIMIT 30""",
+                (str(conversation_id),),
+            ).fetchall()
+    except Exception:
+        return None
+    seen: set[str] = set()
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        if read_job_chat_thread(store, job_id) != inbound:
+            continue
+        try:
+            job = store.get_job(job_id)
+        except Exception:
+            continue
+        if JobStatus(job["status"]) in _ROUTING_TERMINAL:
+            continue
+        return job
+    return None
+
+
 def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
-    """Checkpoint RETRY. Return a refusal reason, or None after an allowed resume.
+    """Checkpoint RETRY. Return a refusal reason, or None when the job may resume.
 
-    AWAITING_HUMAN_INPUT is left for the existing resume path. FAILED and
-    UNVERIFIED are re-opened only when leftover_retry_hold_reason allows it
-    (playground on, younger than 24 hours).
+    A finished job stays finished. Chat never moves UNVERIFIED, COMPLETE,
+    FAILED, or CANCELLED back to PENDING. AWAITING_HUMAN_INPUT is left for
+    the existing resume path.
     """
-    from .engine import leftover_retry_hold_reason, resume_terminal_for_playground_retry
+    from .engine import leftover_retry_hold_reason
 
+    status = JobStatus(job["status"])
     reason = leftover_retry_hold_reason(job)
+    if status in _ROUTING_TERMINAL:
+        reason = reason or (
+            "This job is already finished. Chat cannot reopen it. "
+            "Start a new request."
+        )
     store.checkpoint(
         job["id"],
         "leftover_retry",
@@ -1142,9 +1208,6 @@ def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
     )
     if reason:
         return reason
-    status = JobStatus(job["status"])
-    if status in {JobStatus.FAILED, JobStatus.UNVERIFIED}:
-        resume_terminal_for_playground_retry(store, job)
     return None
 
 
@@ -1463,53 +1526,55 @@ def open_chat_job(
         if not active_job_id:
             return None
         active_job = store.get_job(active_job_id)
-        would_resume = (
-            explicit_continuation
-            or JobStatus(active_job["status"]) in WAITING_STATUSES
-        )
-        if would_resume:
-            refused = apply_action_gate(store, active_job, text=text)
-            if refused is not None:
-                return refused["id"]
-        if would_resume:
-            if is_retry_text(text) and _apply_explicit_retry(store, active_job):
+        threaded = _live_job_owning_thread(store, context_key, inbound_thread_id)
+        if threaded is not None and str(threaded.get("id") or "") != str(active_job_id):
+            active_job = threaded
+            active_job_id = str(threaded["id"])
+        status = JobStatus(active_job["status"])
+        in_thread = _inbound_in_job_thread(store, active_job, inbound_thread_id)
+        # A finished job stays finished. An unrelated top-level message opens
+        # a new job. A reply in the job's thread, or an explicit continuation
+        # of a job that is still open, may still bind.
+        unrelated_top_level = not in_thread and not explicit_continuation
+        if status in _ROUTING_TERMINAL or unrelated_top_level:
+            if status in _ROUTING_TERMINAL and is_retry_text(text):
+                _apply_explicit_retry(store, active_job)
                 return active_job_id
-            active_job = store.get_job(active_job_id)
-        skip_bind = False
-        if JobStatus(active_job["status"]) in WAITING_STATUSES:
-            from .chat_job_controls import dedupe_note_revival
+            queue.deactivate_conversation(context_key)
+            related_only = False
+            explicit_continuation = False
+            resume_context = None
+            active_job_id = None
+        skip_bind = active_job_id is None
+        if active_job_id:
+            would_resume = (
+                explicit_continuation
+                or JobStatus(active_job["status"]) in WAITING_STATUSES
+            )
+            if would_resume:
+                refused = apply_action_gate(store, active_job, text=text)
+                if refused is not None:
+                    return refused["id"]
+            if would_resume:
+                if is_retry_text(text) and _apply_explicit_retry(store, active_job):
+                    return active_job_id
+                active_job = store.get_job(active_job_id)
+            if JobStatus(active_job["status"]) in WAITING_STATUSES:
+                from .chat_job_controls import dedupe_note_revival
 
-            if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
+                if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
+                    queue.deactivate_conversation(context_key)
+                    related_only = False
+                    explicit_continuation = False
+                    skip_bind = True
+                else:
+                    store.resume(active_job_id)
+            elif JobStatus(active_job["status"]) in _ROUTING_TERMINAL:
                 queue.deactivate_conversation(context_key)
                 related_only = False
                 explicit_continuation = False
                 skip_bind = True
-            else:
-                store.resume(active_job_id)
-        elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
-            from .chat_job_controls import dedupe_note_revival
-            from .chat_turn_control import clear_agent_stop
-
-            if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
-                queue.deactivate_conversation(context_key)
-                related_only = False
-                explicit_continuation = False
-                skip_bind = True
-            else:
-                clear_agent_stop(active_job_id)
-                target = (
-                    JobStatus.VERIFYING
-                    if store.get_checkpoint(active_job_id, "action")
-                    else JobStatus.PENDING
-                )
-                store.transition(
-                    active_job_id,
-                    target,
-                    expected={JobStatus.UNVERIFIED},
-                    error=None,
-                    release_lease=True,
-                )
-        if not skip_bind:
+        if active_job_id and not skip_bind:
             store.checkpoint(
                 active_job_id,
                 f"continuation:{message_id}",
@@ -3013,6 +3078,13 @@ def _guard_chat_response_impl(
     registry = dict(verifiers or _default_chat_verifiers())
     verifier = registry.get(job["action_type"])
     if action and verifier:
+        from .chat_job_controls import note_job_already_wrote
+
+        if note_job_already_wrote(store, job_id):
+            # The note already left. Do not run the engine again from Chat:
+            # that re-reads EZLynx on this turn and freezes the gateway loop.
+            line = _discussion_note_user_reply(store, store.get_job(job_id)) or content
+            return line if str(line).endswith("\n") else str(line) + "\n"
         from .engine import JobEngine
 
         if JobStatus(job["status"]) == JobStatus.RUNNING:

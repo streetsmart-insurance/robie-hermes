@@ -251,7 +251,7 @@ class PlaygroundRetryTests(unittest.TestCase):
             self.assertNotIn(LEFTOVER_RETRY_REFUSED, note.split("\nDetails")[0])
             self.assertIn(f"Technical detail: {LEFTOVER_RETRY_REFUSED}", note)
 
-    def test_test_playground_reruns_a_recent_failure(self):
+    def test_playground_does_not_reopen_a_recent_failure(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = self._failed(db, "spaces/retry-on")
@@ -264,7 +264,8 @@ class PlaygroundRetryTests(unittest.TestCase):
                 )
             job = JobStore(db).get_job(job_id)
             self.assertEqual(retried, job_id)
-            self.assertIn(job["status"], {JobStatus.PENDING.value, JobStatus.RUNNING.value})
+            self.assertEqual(job["status"], JobStatus.FAILED.value)
+            self.assertTrue(JobStore(db).get_checkpoint(job_id, "leftover_retry")["refused"])
 
     def test_playground_refuses_a_failure_older_than_24_hours(self):
         with durable_temporary_directory() as tmp:
@@ -302,7 +303,7 @@ class PlaygroundRetryTests(unittest.TestCase):
                     self.assertEqual(retried, job_id)
                     self.assertEqual(JobStore(db).get_job(job_id)["status"], "FAILED")
 
-    def test_flag_on_reruns_a_recent_failure_on_production(self):
+    def test_playground_does_not_reopen_a_recent_failure_on_production(self):
         for env in ("PRODUCTION", "PROD", "LIVE"):
             with self.subTest(env=env):
                 with durable_temporary_directory() as tmp:
@@ -319,9 +320,9 @@ class PlaygroundRetryTests(unittest.TestCase):
                     job = JobStore(db).get_job(job_id)
                     self.assertIsNone(reason)
                     self.assertEqual(retried, job_id)
-                    self.assertIn(
-                        job["status"],
-                        {JobStatus.PENDING.value, JobStatus.RUNNING.value},
+                    self.assertEqual(job["status"], JobStatus.FAILED.value)
+                    self.assertTrue(
+                        JobStore(db).get_checkpoint(job_id, "leftover_retry")["refused"]
                     )
 
     def test_playground_finds_a_failed_job_after_the_link_is_cleared(self):
@@ -337,10 +338,8 @@ class PlaygroundRetryTests(unittest.TestCase):
                     conversation_id="spaces/retry-cleared",
                 )
             self.assertEqual(retried, job_id)
-            self.assertIn(
-                JobStore(db).get_job(job_id)["status"],
-                {JobStatus.PENDING.value, JobStatus.RUNNING.value},
-            )
+            self.assertEqual(JobStore(db).get_job(job_id)["status"], JobStatus.FAILED.value)
+            self.assertTrue(JobStore(db).get_checkpoint(job_id, "leftover_retry")["refused"])
 
 
 class PlaygroundRoutingTests(unittest.TestCase):
