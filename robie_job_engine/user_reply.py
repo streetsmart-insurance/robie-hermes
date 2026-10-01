@@ -73,6 +73,12 @@ def which_client_list_text(text: str) -> str | None:
     folded = " ".join(raw.split()).casefold()
     if "i found more than one" in folded and folded.endswith("which one should i use?"):
         return raw
+    if (
+        folded.startswith("i didn't find an account named ")
+        and "other account" in folded
+        and folded.endswith("which one, or none?")
+    ):
+        return raw
     return None
 
 

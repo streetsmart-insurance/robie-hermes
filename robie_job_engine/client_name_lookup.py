@@ -119,8 +119,57 @@ def client_name_from_lookup(text: str) -> str | None:
     return name or None
 
 
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
+def _display_name(name: str) -> str:
+    who = " ".join(str(name or "").split())
+    return who.title() if who else ""
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Letters only, so punctuation and a middle initial do not change the name."""
+    folded = str(name or "").casefold().replace("-", " ")
+    folded = re.sub(r"[^a-z0-9\s]", "", folded)
+    tokens = [token for token in folded.split() if token and token not in _NAME_SUFFIXES]
+    if len(tokens) >= 3:
+        middle = [token for token in tokens[1:-1] if len(token) != 1]
+        tokens = [tokens[0], *middle, tokens[-1]]
+    return tokens
+
+
+def account_name_matches(searched: str, account_name: str) -> bool:
+    """True when this account's own name is the person who was searched."""
+    left = _name_tokens(searched)
+    right = _name_tokens(account_name)
+    if not left or not right:
+        return False
+    return left == right or sorted(left) == sorted(right)
+
+
+def _split_name_matches(
+    searched: str, matches: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Account-name hits first. The rest are linked contacts on other accounts."""
+    named: list[dict[str, Any]] = []
+    linked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in matches:
+        if not isinstance(row, dict):
+            continue
+        applicant = str(row.get("applicant_id") or "").strip()
+        if not applicant or applicant in seen:
+            continue
+        seen.add(applicant)
+        if account_name_matches(searched, str(row.get("name") or "")):
+            named.append(row)
+        else:
+            linked.append(row)
+    return named, linked
+
+
 def which_client_question(name: str, matches: list[dict[str, Any]]) -> str:
-    """A numbered list so the person can tell the accounts apart."""
+    """A numbered list of accounts whose own name is the person searched."""
     titled = _titled_name(name)
     lines = [f"I found more than one {titled}."]
     for index, row in enumerate(matches[:5], start=1):
@@ -129,9 +178,30 @@ def which_client_question(name: str, matches: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def linked_accounts_question(name: str, matches: list[dict[str, Any]]) -> str:
+    """One line. These accounts are not named the person who was searched."""
+    titled = _titled_name(name)
+    shown = list(matches[:5])
+    count = len(shown)
+    noun = "account" if count == 1 else "accounts"
+    bits: list[str] = []
+    for index, row in enumerate(shown, start=1):
+        who = _display_name(str(row.get("name") or ""))
+        applicant = str(row.get("applicant_id") or "").strip()
+        if who:
+            bits.append(f"{index}. {who} (account {applicant})")
+        elif applicant:
+            bits.append(f"{index}. account {applicant}")
+    listed = " ".join(bits)
+    return (
+        f"I didn't find an account named {titled}, but the name shows up on "
+        f"{count} other {noun}: {listed} Which one, or none?"
+    )
+
+
 def _match_phrase(row: dict[str, Any]) -> str:
     """Name, place, and account id. No field names and no internal codes."""
-    who = " ".join(str(row.get("name") or "").split())
+    who = _display_name(str(row.get("name") or ""))
     address = " ".join(str(row.get("address") or "").split())
     city = " ".join(str(row.get("city") or "").split())
     place = address
@@ -161,16 +231,23 @@ def bind_named_client(
     name: str,
     matches: list[dict[str, Any]],
 ) -> str:
-    """Bind one client and answer. Several matches ask which one."""
+    """Bind one client and answer. Several account names ask which one."""
     who = " ".join(str(name or "").split())
     titled = who.title() if who else "That client"
+    named, linked = _split_name_matches(who, matches)
+    if len(named) > 1:
+        return which_client_question(name, named)
+    if len(named) == 1:
+        matches = named
+    elif linked:
+        return linked_accounts_question(name, linked)
+    else:
+        return f"I couldn't find a client named {titled}."
     ids: list[str] = []
     for row in matches:
         applicant = str((row or {}).get("applicant_id") or "").strip()
         if applicant and applicant not in ids:
             ids.append(applicant)
-    if len(ids) > 1:
-        return which_client_question(name, matches)
     if len(ids) != 1:
         return f"I couldn't find a client named {titled}."
     job = store.get_job(job_id)
@@ -691,6 +768,7 @@ def _remember_search(
     candidates: list[str] | None = None,
     matches: list[dict[str, Any]] | None = None,
     reasked: bool = False,
+    list_kind: str = "",
 ) -> None:
     stored = [
         _stored_match(row)
@@ -709,6 +787,7 @@ def _remember_search(
             "candidates": list(candidates or []),
             "matches": stored[:5],
             "reasked": bool(reasked),
+            "list_kind": list_kind,
         },
     )
 
@@ -729,7 +808,7 @@ def prepare_named_client_lookup(
         return None
     note = _search_note(store, job_id)
     if note.get("resolved"):
-        if str(note.get("source") or "") == "several":
+        if str(note.get("source") or "") in {"several", "linked"}:
             return _consume_client_choice(store, job_id)
         return str(note.get("user_line") or "").strip() or None
     name = ""
@@ -765,11 +844,6 @@ def prepare_named_client_lookup(
         outcome = {"status": "error", "matches": []}
     status = str(outcome.get("status") or "error").casefold()
     matches = [row for row in (outcome.get("matches") or []) if isinstance(row, dict)]
-    ids: list[str] = []
-    for row in matches:
-        applicant = str(row.get("applicant_id") or "").strip()
-        if applicant and applicant not in ids:
-            ids.append(applicant)
     titled = _titled_name(name)
     if status == "sign_in":
         from .user_reply import SIGN_IN_QUESTION
@@ -793,8 +867,25 @@ def prepare_named_client_lookup(
             name=name,
         )
         return LOOKUP_MISS
-    if len(ids) > 1:
-        shown = [_stored_match(row) for row in matches if str(row.get("applicant_id") or "").strip()]
+    named, linked = _split_name_matches(name, matches)
+    if len(named) == 1:
+        applicant = str(named[0].get("applicant_id") or "").strip()
+        job = store.get_job(job_id)
+        payload = dict(job.get("payload") or {})
+        payload["applicant_id"] = applicant
+        payload["client_name"] = name
+        store.update_payload(job_id, payload)
+        _remember_search(
+            store,
+            job_id,
+            source="search",
+            applicant_ids=[applicant],
+            name=name,
+            matches=[_stored_match(named[0])],
+        )
+        return None
+    if len(named) > 1:
+        shown = [_stored_match(row) for row in named[:5]]
         line = which_client_question(name, shown)
         _remember_search(
             store,
@@ -803,34 +894,36 @@ def prepare_named_client_lookup(
             applicant_ids=[],
             user_line=line,
             name=name,
-            candidates=ids,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
             matches=shown,
+            list_kind="named",
         )
         return line
-    if len(ids) != 1:
-        line = f"I couldn't find a client named {titled}."
+    if linked:
+        shown = [_stored_match(row) for row in linked[:5]]
+        line = linked_accounts_question(name, shown)
         _remember_search(
             store,
             job_id,
-            source="none",
+            source="linked",
             applicant_ids=[],
             user_line=line,
             name=name,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
+            matches=shown,
+            list_kind="linked",
         )
         return line
-    job = store.get_job(job_id)
-    payload = dict(job.get("payload") or {})
-    payload["applicant_id"] = ids[0]
-    payload["client_name"] = name
-    store.update_payload(job_id, payload)
+    line = f"I couldn't find a client named {titled}."
     _remember_search(
         store,
         job_id,
-        source="search",
-        applicant_ids=ids,
+        source="none",
+        applicant_ids=[],
+        user_line=line,
         name=name,
     )
-    return None
+    return line
 
 
 _CHOICE_SKIP = {
@@ -999,10 +1092,13 @@ def _bind_chosen_match(
     applicant = str(chosen.get("applicant_id") or "").strip()
     payload = dict(job.get("payload") or {})
     payload["applicant_id"] = applicant
-    if name:
+    account_name = str(chosen.get("name") or "").strip()
+    if account_name and not account_name_matches(name, account_name):
+        payload["client_name"] = _display_name(account_name)
+    elif name:
         payload["client_name"] = name
-    elif str(chosen.get("name") or "").strip():
-        payload["client_name"] = str(chosen.get("name") or "").strip()
+    elif account_name:
+        payload["client_name"] = account_name
     store.update_payload(job_id, payload)
     _remember_search(
         store,
@@ -1023,14 +1119,38 @@ def _bind_chosen_match(
         store.resume(job_id)
 
 
+_NONE_REPLIES = {
+    "none",
+    "neither",
+    "no",
+    "no thanks",
+    "none of them",
+    "none of these",
+    "neither of them",
+}
+
+
+def _reply_is_none(text: str) -> bool:
+    folded = " ".join(str(text or "").casefold().split()).strip(" .,!?")
+    return folded in _NONE_REPLIES
+
+
+def _open_choice_question(name: str, matches: list[dict[str, str]], kind: str) -> str:
+    if kind == "linked":
+        return linked_accounts_question(name, matches)
+    return which_client_question(name, matches)
+
+
 def _consume_client_choice(store: Any, job_id: str) -> str | None:
     """Bind one saved match from the reply, or ask once more.
 
     None means the model may run. A returned line is the question to send
-    instead. Stop does not bind and does not ask again.
+    instead. Stop does not bind and does not ask again. "None" declines the
+    other accounts and does not bind one of them.
     """
     note = _search_note(store, job_id)
-    if str(note.get("source") or "") != "several":
+    source = str(note.get("source") or "")
+    if source not in {"several", "linked"}:
         return str(note.get("user_line") or "").strip() or None
     if list(note.get("applicant_ids") or []):
         return None
@@ -1043,24 +1163,37 @@ def _consume_client_choice(store: Any, job_id: str) -> str | None:
         return None
     matches = _displayed_matches(note)
     name = str(note.get("name") or "")
+    kind = str(note.get("list_kind") or "") or ("linked" if source == "linked" else "named")
+    if kind == "linked" and _reply_is_none(reply):
+        line = f"I couldn't find a client named {_titled_name(name)}."
+        _remember_search(
+            store,
+            job_id,
+            source="none",
+            applicant_ids=[],
+            user_line=line,
+            name=name,
+        )
+        return line
     index = _select_match_index(reply, matches) if matches else None
     if index is not None:
         _bind_chosen_match(store, job_id, job, name=name, chosen=matches[index])
         return None
     if note.get("reasked"):
-        return question or which_client_question(name, matches)
-    line = which_client_question(name, matches)
+        return question or _open_choice_question(name, matches, kind)
+    line = _open_choice_question(name, matches, kind)
     ids = [str(row.get("applicant_id") or "") for row in matches if row.get("applicant_id")]
     _remember_search(
         store,
         job_id,
-        source="several",
+        source=source,
         applicant_ids=[],
         user_line=line,
         name=name,
         candidates=list(note.get("candidates") or ids),
         matches=matches,
         reasked=True,
+        list_kind=kind,
     )
     return line
 
@@ -1081,7 +1214,7 @@ def pending_named_lookup_line(db_path: str, job_id: str | None) -> str:
         note = _search_note(store, job_id)
     except Exception:
         return ""
-    if str(note.get("source") or "") == "several":
+    if str(note.get("source") or "") in {"several", "linked"}:
         return str(_consume_client_choice(store, job_id) or "").strip()
     return str(note.get("user_line") or "").strip()
 
