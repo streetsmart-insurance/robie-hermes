@@ -909,6 +909,72 @@ def is_gateway_status_notice(text: str) -> bool:
     return _GATEWAY_STATUS_NOTICE.search(body) is not None
 
 
+_TOOL_PROGRESS_LINE = re.compile(
+    r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)?"
+    r"(?:playwright_exec|ezlynx_discussion_note|ezlynx_document_upload|"
+    r"web_search|terminal|execute_code|read_file|gemini_unique_field)\b"
+    r"(?:\s*[:：].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
+    re.IGNORECASE,
+)
+
+
+def is_tool_progress_text(text: str) -> bool:
+    """True for a raw tool-progress bubble. It is not a reply to the person."""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or len(lines) > 6:
+        return False
+    if sum(len(line) for line in lines) > 800:
+        return False
+    return all(_TOOL_PROGRESS_LINE.match(line) for line in lines)
+
+
+def is_refused_tool_text(text: str) -> bool:
+    """True when this text is a tool refusal handed back to the model.
+
+    A worker's final ``ROBIE_BLOCKED:`` line is not this. That line still
+    parks the job. A refused tool call does not.
+    """
+    body = " ".join(str(text or "").split())
+    if not body or len(body) > 2500:
+        return False
+    folded = body.casefold()
+    if folded.startswith("robie_blocked"):
+        return False
+    if "do not drive ezlynx screens by hand" in folded:
+        return True
+    if "playwright_exec is refused" in folded:
+        return True
+    if folded.startswith("playwright_blocked"):
+        return True
+    if "policy_setup_order" in folded:
+        return True
+    if "ezlynx_write_scope_refused" in folded:
+        return True
+    if "this action was refused before it started" in folded:
+        return True
+    return False
+
+
+def job_was_explicitly_stopped(store: Any, job_id: str | None) -> bool:
+    """True for /stop, a cancel, or the time ceiling. A normal finish is not a stop."""
+    if not job_id or store is None:
+        return False
+    try:
+        job = store.get_job(job_id)
+    except Exception:
+        return False
+    status = str((job or {}).get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return True
+    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+        try:
+            if store.get_checkpoint(job_id, kind):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
     """Refuse another send or tool call after /stop or the time ceiling."""
     if not job_id:

@@ -4718,22 +4718,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "hard_block",
             "notice",
         } and not (metadata or {}).get("robie_stop_notice")
-        from robie_job_engine.chat_turn_control import is_gateway_status_notice
+        from robie_job_engine.chat_turn_control import (
+            is_gateway_status_notice,
+            is_refused_tool_text,
+            is_tool_progress_text,
+        )
 
         if agent_reply and is_gateway_status_notice(str(content or "")):
             # "Interrupting current task" is the gateway, not the answer.
             return SendResult(success=True, message_id=None)
+        if agent_reply and (
+            is_tool_progress_text(str(content or ""))
+            or is_refused_tool_text(str(content or ""))
+        ):
+            # The model gets the tool result. Chat does not, and the job stays open.
+            return SendResult(success=True, message_id=None)
+        named_job = str((metadata or {}).get("robie_job_id") or "").strip()
         if agent_reply and not job_id:
             job_id = self._active_turn_job_id(chat_id)
         if agent_reply and job_id and self._output_blocked(job_id):
-            if self._model_prose_held(job_id) or self._agent_reply_is_replaced(job_id):
-                # This turn already posted its one line. Do not hang the
-                # model's summary on an older job that is still open.
-                return SendResult(success=True, message_id=None)
-            # A cancelled job left on the space must not eat the live turn.
+            owns_this_send = bool(named_job) and named_job == job_id
+            # A cancelled or finished job left on the send must not eat the
+            # live turn, even when the gateway still stamps that old id.
             replacement = self._live_unstopped_job_id(chat_id)
             if replacement and replacement != job_id:
                 job_id = replacement
+            elif owns_this_send and (
+                self._model_prose_held(job_id) or self._agent_reply_is_replaced(job_id)
+            ):
+                # This turn already posted its one line. Do not hang the
+                # model's summary on an older job that is still open.
+                return SendResult(success=True, message_id=None)
         if agent_reply and job_id and self._model_prose_held(job_id):
             # The ledger question or the readback line is the only outbound
             # text. The model's paragraph is not posted, at top level or
@@ -4773,23 +4788,35 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     thread_job_id = cron_job
                     job_owns_thread = False
         if not (metadata or {}).get("robie_stop_notice") and job_id:
-            from robie_job_engine.chat_turn_control import agent_output_blocked
+            from robie_job_engine.chat_turn_control import (
+                agent_output_blocked,
+                job_was_explicitly_stopped,
+            )
 
             blocked = agent_output_blocked(job_id, JobStore(ROBIE_JOB_DB))
-            # Only the job this send names. A stopped job left on the space
-            # map must not refuse a different job's reply.
-            named = str((metadata or {}).get("robie_job_id") or "").strip()
+            # Suppression is this job's only. A send that does not name the
+            # job does not inherit its stop, and a normal finish is not a stop.
+            named = named_job
             if blocked and named and named == job_id:
-                logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
-                return SendResult(success=False, error=blocked)
-            if blocked:
-                # The job id was copied from the space, not named by this
-                # send. Do not refuse some other job under that id.
+                if job_was_explicitly_stopped(JobStore(ROBIE_JOB_DB), job_id):
+                    logger.info("[GoogleChat] refusing send after stop job=%s", job_id)
+                    return SendResult(success=False, error=blocked)
                 logger.info(
-                    "[GoogleChat] dropping send tied to a stopped job job=%s",
+                    "[GoogleChat] dropping extra send after the job finished job=%s",
                     job_id,
                 )
                 return SendResult(success=True, message_id=None)
+            if blocked and (not named or named != job_id):
+                replacement = self._live_unstopped_job_id(chat_id)
+                if replacement and replacement != job_id:
+                    job_id = replacement
+                    thread_job_id = job_id
+                else:
+                    logger.info(
+                        "[GoogleChat] dropping send with no live job chat=%s",
+                        chat_id,
+                    )
+                    return SendResult(success=True, message_id=None)
         outbound_raw = str(content or "")
         content = redact_text(content)
         if delivery_kind == "idle_stop":
@@ -4876,8 +4903,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             chat_id, body, job_id=thread_job_id
                         )
                     last_result = result
-                except HttpError as exc:
+                except Exception as exc:
                     status = getattr(getattr(exc, "resp", None), "status", None)
+                    if status != 429 and not isinstance(exc, HttpError):
+                        raise
                     if status == 403:
                         self._set_fatal_error(
                             code="chat_forbidden",
@@ -4912,7 +4941,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
                                 "[GoogleChat] Rate limit hit %d times on chat; throttling",
                                 self._rate_limit_hits[chat_id],
                             )
-                        raise
+                        self._record_undelivered_reply(job_id, str(content or ""), 429)
+                        return SendResult(
+                            success=False,
+                            error="chat quota exceeded",
+                            retryable=True,
+                        )
                     raise
             if last_result is None:
                 return SendResult(success=False, error="empty message")
@@ -4977,6 +5011,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     content,
                     metadata,
                 )
+            if getattr(last_result, "success", False):
+                await self._flush_pending_reply(chat_id, job_id, str(content or ""))
             return last_result
         finally:
             self.resume_typing_for_chat(chat_id)
@@ -5233,9 +5269,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         if not message_id:
             return SendResult(success=False, error="missing message_id")
+        from robie_job_engine.chat_turn_control import (
+            is_refused_tool_text,
+            is_tool_progress_text,
+        )
         from robie_job_engine.write_verification_loop import is_plan_refusal_text
 
-        if is_plan_refusal_text(content):
+        if is_plan_refusal_text(content) or is_tool_progress_text(content) or is_refused_tool_text(content):
             return SendResult(success=True, message_id=message_id)
         if self._edit_would_land_on_a_finished_turn(chat_id):
             # The progress bubble was opened at the top level. Patching the
@@ -5506,6 +5546,104 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         return AuthorizedHttp(self._credentials, http=httplib2.Http(timeout=30))
 
+    def _record_undelivered_reply(self, job_id: str | None, text: str, status: int) -> None:
+        """Remember a reply Chat did not accept. The job must not end silent."""
+        logger.error(
+            "[GoogleChat] reply was not delivered job=%s status=%s",
+            job_id or "",
+            status,
+        )
+        pending = getattr(self, "_pending_replies", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._pending_replies = pending
+        if job_id and text:
+            pending[str(job_id)] = str(text)
+        if job_id:
+            try:
+                store = JobStore(ROBIE_JOB_DB)
+                store.checkpoint(
+                    str(job_id),
+                    "chat_delivery_failed",
+                    {
+                        "status": int(status or 0),
+                        "text": str(text or "")[:2000],
+                        "posted": False,
+                    },
+                )
+                already = store.get_checkpoint(str(job_id), "worker_response")
+                sent = store.get_checkpoint(str(job_id), "chat_outcome_sent") or {}
+                if not already and not str(sent.get("text") or "").strip():
+                    from robie_job_engine.worker_contract import sanitize_worker_response
+
+                    store.checkpoint(
+                        str(job_id),
+                        "worker_response",
+                        sanitize_worker_response(store, str(job_id), str(text or "")[:2000]),
+                    )
+            except Exception:
+                logger.exception(
+                    "[GoogleChat] could not record undelivered reply job=%s",
+                    job_id,
+                )
+        self._flag_health_undelivered(job_id, status)
+
+    def _flag_health_undelivered(self, job_id: str | None, status: int) -> None:
+        """One line in the health space. A failed flag is logged, not hidden."""
+        space = os.environ.get("ROBIE_HEALTH_CHAT_SPACE", "").strip()
+        if not space:
+            logger.info(
+                "[GoogleChat] health flag skipped; ROBIE_HEALTH_CHAT_SPACE is unset job=%s",
+                job_id or "",
+            )
+            return
+        line = (
+            f"A Chat reply was not delivered after retries (HTTP {status}). "
+            f"Job {job_id or 'unknown'}."
+        )
+        api = getattr(self, "_chat_api", None)
+        if api is None:
+            logger.info("[GoogleChat] health flag was not posted job=%s", job_id or "")
+            return
+        try:
+            (
+                api.spaces()
+                .messages()
+                .create(parent=space, body={"text": line})
+                .execute(http=self._new_authed_http())
+            )
+        except Exception:
+            logger.exception(
+                "[GoogleChat] health flag was not posted job=%s", job_id or ""
+            )
+            return
+        logger.info(
+            "[GoogleChat] health flag posted for undelivered reply job=%s",
+            job_id or "",
+        )
+
+    async def _flush_pending_reply(self, chat_id: str, job_id: str | None, just_sent: str) -> None:
+        """Post the line a 429 held, once a later send succeeds."""
+        pending = getattr(self, "_pending_replies", None)
+        if not isinstance(pending, dict) or not job_id:
+            return
+        text = str(pending.get(str(job_id)) or "").strip()
+        if not text:
+            return
+        if " ".join(text.split()) == " ".join(str(just_sent or "").split()):
+            pending.pop(str(job_id), None)
+            return
+        try:
+            await self._create_message(chat_id, {"text": text}, job_id=job_id)
+        except Exception:
+            logger.exception(
+                "[GoogleChat] held reply was not posted on the next send job=%s",
+                job_id,
+            )
+            return
+        pending.pop(str(job_id), None)
+        logger.info("[GoogleChat] held reply posted job=%s", job_id)
+
     async def _call_with_retry(
         self,
         sync_fn: Callable[[], Any],
@@ -5526,13 +5664,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
         last_exc: Optional[BaseException] = None
         for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
             try:
-                return await asyncio.to_thread(sync_fn)
+                result = await asyncio.to_thread(sync_fn)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 last_exc = exc
                 retryable = _is_retryable_error(exc)
+                status = getattr(getattr(exc, "resp", None), "status", None)
                 if not retryable or attempt >= _RETRY_MAX_ATTEMPTS:
+                    logger.warning(
+                        "[GoogleChat] %s outcome: failed after %d/%d status=%s",
+                        op_name,
+                        attempt,
+                        _RETRY_MAX_ATTEMPTS,
+                        status if status is not None else type(exc).__name__,
+                    )
                     raise
                 jitter = delay * _RETRY_JITTER * random.random()
                 wait = min(delay + jitter, _RETRY_MAX_DELAY + _RETRY_JITTER)
@@ -5547,6 +5693,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 except asyncio.CancelledError:
                     raise
                 delay = min(delay * 2, _RETRY_MAX_DELAY)
+                continue
+            if attempt > 1:
+                logger.info(
+                    "[GoogleChat] %s outcome: ok after %d/%d",
+                    op_name,
+                    attempt,
+                    _RETRY_MAX_ATTEMPTS,
+                )
+            return result
         # Defensive — the loop above always either returns or re-raises.
         if last_exc is not None:
             raise last_exc

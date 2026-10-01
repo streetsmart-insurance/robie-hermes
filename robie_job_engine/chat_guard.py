@@ -2908,6 +2908,12 @@ def _guard_chat_response_impl(
     from .hitl import sanitize_hitl_chat_text
 
     content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
+    from .chat_turn_control import is_refused_tool_text, is_tool_progress_text
+
+    # A refused tool call and a raw progress line go back to the model.
+    # They are not the reply, not a write, and they do not end the job.
+    if is_tool_progress_text(content) or is_refused_tool_text(content):
+        return ""
     if not job_id:
         if _looks_like_unbound_policy_success(content):
             return (

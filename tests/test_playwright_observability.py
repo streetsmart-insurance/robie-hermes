@@ -122,7 +122,7 @@ class ZeroToolRowFailClosedTests(unittest.TestCase):
                 {"ok": False, "error": "PLAYWRIGHT_BLOCKED: runner died"},
             )
             finished = JobStore(db).list_playwright_exec(job_id)
-            self.assertEqual(finished[0]["status"], "error")
+            self.assertEqual(finished[0]["status"], "refused")
             self.assertIn("PLAYWRIGHT_BLOCKED", finished[0]["result"]["error"])
 
     def test_conversation_only_chat_does_not_require_playwright_rows(self):

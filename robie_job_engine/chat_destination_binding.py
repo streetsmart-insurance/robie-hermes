@@ -274,6 +274,42 @@ def read_exec_rows(store: Any, job_id: str) -> list[dict[str, Any]]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+_WRITE_CALL = re.compile(
+    r"\.(?:click|dblclick|fill|type|press|check|uncheck|select_option|set_input_files)\s*\(",
+    re.IGNORECASE,
+)
+_REFUSED_EXEC = re.compile(
+    r"PLAYWRIGHT_BLOCKED|do not drive ezlynx screens by hand|"
+    r"playwright_exec is refused|POLICY_SETUP_ORDER|EZLYNX_WRITE_SCOPE_REFUSED|"
+    r"refused before it started|No Playwright code provided",
+    re.IGNORECASE,
+)
+
+
+def _row_blob(row: dict[str, Any]) -> str:
+    code = str(row.get("code_preview") or "")
+    result = row.get("result_json")
+    if result is None:
+        result = row.get("result")
+    if not isinstance(result, str):
+        try:
+            result = json.dumps(result or "")
+        except Exception:
+            result = str(result or "")
+    return f"{code}\n{result}"
+
+
+def row_claims_ezlynx_write(row: dict[str, Any]) -> bool:
+    """A refused call and a read-only navigation are not an EZLynx write."""
+    status = str(row.get("status") or "").casefold()
+    blob = _row_blob(row)
+    if status in {"refused", "blocked"}:
+        return False
+    if status != "ok" and _REFUSED_EXEC.search(blob):
+        return False
+    return _WRITE_CALL.search(str(row.get("code_preview") or "")) is not None
+
+
 def bind_destination_for_job(
     store: Any, job: dict[str, Any], claimed: dict[str, Any] | None = None
 ) -> DestinationBinding:
@@ -281,10 +317,18 @@ def bind_destination_for_job(
 
     Writes nothing when the binding is refused — a refused binding must
     leave the job exactly as verifiable (or not) as it already was, so a
-    later run can try again with better evidence.
+    later run can try again with better evidence. A refused tool call and
+    a read-only page open are not a write, so they do not become one.
     """
     job_id = job["id"]
-    binding = derive_destination(read_exec_rows(store, job_id), claimed)
+    rows = [
+        row for row in read_exec_rows(store, job_id) if row_claims_ezlynx_write(row)
+    ]
+    if not rows:
+        return DestinationBinding(
+            refusal="read-only or refused browser activity is not a write"
+        )
+    binding = derive_destination(rows, claimed)
     if not binding.bindable:
         return binding
 
