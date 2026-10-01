@@ -687,6 +687,7 @@ def process_inbox():
                 prompt=item["text"], run_agent=run_agent_task,
                 attachment_names=tuple(name for name, _ in item["attachments"]),
                 thread_id=item["thread_id"],
+                sender=item["sender"],
                 run_agent_with_context=lambda prompt, job_id, db_path, item=item: run_email_job(
                     prompt, job_id, db_path, sender=item["sender"], subject=item["subject"],
                     body=item["body"], attachments=item["attachments"], thread_id=item["thread_id"]),

@@ -4,6 +4,23 @@ Carlo 2026-09-17: Robie must read and write notes/documents for any
 applicant agency-wide when running as the automation identity. Bind,
 cancel, coverage change, and money moves stay blocked by other guards.
 
+## All clients
+
+Default is closed. Opening every real applicant is an explicit setting:
+
+```
+ROBIE_EZLYNX_WRITE_SCOPE=all
+```
+
+`ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*` means the same request. It is honored
+only while the Playground is on and its hard blocks, read-back-then-go,
+and undo log are active. If those are not active, Robie uses the id list,
+or test account `220250093` when that list is empty. This does not allow
+bind, delete, billing, coverage changes, or email or text to a client.
+
+The Prod flip, later, after QA, is `ROBIE_PLAYGROUND=1` together with
+`ROBIE_EZLYNX_WRITE_SCOPE=all`. This pull request does not set it.
+
 ## Ops flip
 
 The compiled allowlist is read once at process start from
