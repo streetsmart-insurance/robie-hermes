@@ -1,0 +1,42 @@
+[Unit]
+Description=ROBIE daily 4359 liveness publisher (PolicyApi verdicts to Google Sheet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+# Live release pointer. Re-pin or flip only through the normal release process.
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_4359_LIVENESS_MODE=live
+# Sheet that receives the "4359-Liveness" tab. Defaults to the 4359 roster
+# spreadsheet the weekly nag worker already reads; set this env file value to
+# point at a different sheet before first deploy.
+Environment=ROBIE_4359_LIVENESS_SPREADSHEET_ID=
+Environment=ROBIE_4359_LIVENESS_TAB=4359-Liveness
+# Optional overrides (report mailbox, freshness bar, sender domains).
+# Values in this file win over the Environment= defaults above.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-4359.env
+# EZLynx API client credentials for the PolicyApi liveness gate (names only;
+# values live in Secret Manager / this env file on the box).
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+# Keyless-delegated Gmail service account used to READ the daily 4359 CSV
+# from the report mailbox.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+# Ensure the evidence directory exists and is service-owned
+# (ProtectSystem=strict keeps /opt read-only otherwise).
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0750 /opt/streetsmart-hermes/robie-job-engine/data/4359-liveness-publisher
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.publish_4359_liveness --evidence-out /opt/streetsmart-hermes/robie-job-engine/data/4359-liveness-publisher/evidence-latest.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data/4359-liveness-publisher
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target
