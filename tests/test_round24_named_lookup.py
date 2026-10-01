@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -559,6 +561,13 @@ class SearchBoxTests(unittest.TestCase):
         def _sync_playwright():
             return _Playwright()
 
+        # The regression runner does not install Playwright. Seed the module
+        # the real searcher imports, and refuse a sync start on the loop.
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = _sync_playwright
+        playwright_mod = types.ModuleType("playwright")
+        playwright_mod.sync_api = sync_api
+
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             store = JobStore(db)
@@ -568,7 +577,10 @@ class SearchBoxTests(unittest.TestCase):
                 asyncio.get_running_loop()
                 return prepare_named_client_lookup(store, job_id)
 
-            with patch("playwright.sync_api.sync_playwright", _sync_playwright):
+            with patch.dict(
+                sys.modules,
+                {"playwright": playwright_mod, "playwright.sync_api": sync_api},
+            ):
                 line = asyncio.run(_from_the_loop())
             payload = store.get_job(job_id)["payload"]
             self.assertIsNone(line)
