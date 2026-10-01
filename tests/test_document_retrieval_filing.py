@@ -498,16 +498,42 @@ class FilingGateTests(unittest.TestCase):
     def test_stable_live_note_is_filed_and_writes_the_status_row(self):
         """A metadata-only +1 is filed, so the FAO status row is not skipped."""
 
-        from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
-        from test_discussion_note_readback import LiveShapeClient
+        import tempfile
 
-        from durable_temp import durable_temporary_directory
+        from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
+
+        class LiveDiscussion:
+            """POST body empty. Discussion read is metadata only."""
+
+            def __init__(self):
+                self.posts = 0
+                self.note_lists = 0
+                self.posted = False
+                self.title = WORKFLOW["title"]
+
+            def get_discussions(self, applicant_id):
+                return [{"discussionId": "disc-1", "title": self.title, "applicantId": applicant_id}]
+
+            def get_discussion(self, discussion_id):
+                return {
+                    "discussionId": discussion_id,
+                    "title": self.title,
+                    "noteCount": 8 if self.posted else 7,
+                    "mostRecentNoteId": "701" if self.posted else "700",
+                }
+
+            def list_notes(self, discussion_id):
+                self.note_lists += 1
+                raise RuntimeError("notes list is not available")
+
+            def append_note(self, discussion_id, text, note_type="Note"):
+                self.posts += 1
+                self.posted = True
+                return {}
 
         deps = FakeDeps()
-        client = LiveShapeClient(discussion_id="disc-1")
-        client.title = WORKFLOW["title"]
-        client.after_title = WORKFLOW["title"]
-        with durable_temporary_directory() as tmp:
+        client = LiveDiscussion()
+        with tempfile.TemporaryDirectory() as tmp:
             ledger = Path(tmp) / "ledger.json"
 
             def add_note(applicant_id, note_text, discussion_title=None, document_id=None):
