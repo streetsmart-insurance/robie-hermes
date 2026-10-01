@@ -26,6 +26,16 @@ def snapshot(db_path: str | Path, *, limit: int = 50) -> dict[str, Any]:
         # One read transaction keeps counts and detail rows consistent.
         conn.execute('BEGIN')
         counts = {r['status']: r['n'] for r in conn.execute('SELECT status,count(*) n FROM jobs GROUP BY status')}
+        completion = conn.execute("""SELECT count(*) AS complete_jobs,
+            sum(CASE WHEN e.verified=1 AND e.authoritative=1 THEN 1 ELSE 0 END) AS with_evidence
+            FROM jobs j LEFT JOIN verification_evidence e ON e.id=(
+                SELECT max(v.id) FROM verification_evidence v WHERE v.job_id=j.id)
+            WHERE j.status='COMPLETE'""").fetchone()
+        complete_jobs = int(completion['complete_jobs'])
+        complete_with_evidence = int(completion['with_evidence'] or 0)
+        attention = {status: counts.get(status, 0) for status in (
+            'AWAITING_HUMAN_INPUT', 'NEEDS_CLARIFICATION', 'NEEDS_AUTH',
+            'NEEDS_SKILL', 'PAUSED', 'FAILED', 'UNVERIFIED')}
         rows = conn.execute('''SELECT id,action_type,status,attempt_count,
             verification_count,created_at,updated_at,next_wakeup_at,
             CASE WHEN lease_owner IS NULL THEN 0 ELSE 1 END leased
@@ -49,6 +59,12 @@ def snapshot(db_path: str | Path, *, limit: int = 50) -> dict[str, Any]:
         conn.rollback()
         return {'read_only': True, 'execution_available': False,
                 'approval_available': False, 'counts_by_status': counts,
+                 'completion_evidence': {
+                    'complete_jobs': complete_jobs,
+                    'with_latest_authoritative_verified_evidence': complete_with_evidence,
+                    'without_latest_authoritative_verified_evidence': complete_jobs - complete_with_evidence,
+                    'useful_work_count_verified': False},
+                'attention_counts_by_status': attention,
                 'total_jobs': sum(counts.values()), 'shown_jobs': len(items),
                 'truncated': sum(counts.values()) > len(items), 'jobs': items}
     finally:
