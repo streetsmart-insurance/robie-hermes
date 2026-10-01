@@ -491,12 +491,20 @@ class _GoogleDrivePort:
         if mime == "application/vnd.google-apps.document":
             data = self._service.files().export(fileId=file_id, mimeType="text/plain").execute()
             if isinstance(data, bytes):
-                return data.decode("utf-8", errors="replace")
-            return str(data or "")
+                return data.decode("utf-8")
+            if not isinstance(data, str):
+                raise ValueError("SOP text response is not text")
+            return data
+        # Binary office/PDF/media files need a real format-aware extractor.
+        # Never index replacement-decoded binary bytes as procedure evidence.
+        if mime != "text/plain":
+            raise ValueError("Unsupported SOP text format")
         data = self._service.files().get_media(fileId=file_id).execute()
         if isinstance(data, bytes):
-            return data.decode("utf-8", errors="replace")
-        return str(data or "")
+            return data.decode("utf-8")
+        if not isinstance(data, str):
+            raise ValueError("SOP text response is not text")
+        return data
 
 
 def main(argv: list[str] | None = None) -> int:
