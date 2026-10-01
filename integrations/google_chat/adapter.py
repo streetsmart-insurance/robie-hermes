@@ -541,7 +541,7 @@ def _plain_card_text(text: str) -> str:
 
 
 def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
-    text = _plain_card_text(_required_str(button, "text", "button"))
+    text = _required_str(button, "text", "button")
     action = _required_str(button, "action", "button")
     raw_params = button.get("parameters") or {}
     if not isinstance(raw_params, dict):
