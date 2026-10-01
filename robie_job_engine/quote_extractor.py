@@ -88,6 +88,15 @@ class ExtractedQuote:
     raw_text: str = ""
     sub_policies: list[dict[str, Any]] = field(default_factory=list)
 
+    # Insured location/contact for Ascend new-insured creation. Resolved from
+    # the client's EZLynx applicant record when available, otherwise captured
+    # from the sender's clarification reply. Ascend requires both.
+    mailing_address: dict[str, Any] = field(default_factory=dict)
+    primary_contact: dict[str, Any] = field(default_factory=dict)
+    # Sender-supplied EZLynx applicant id from a clarification reply
+    # (e.g. "here's the applicant link"), used to retry EZLynx enrichment.
+    applicant_id_hint: Optional[str] = None
+
     @property
     def total_premium_cents(self) -> int:
         return (
@@ -135,6 +144,112 @@ def _parse_percentage(pct_str: str) -> Optional[float]:
         return round(val / 100.0, 4) if val > 1.0 else round(val, 4)
     except (ValueError, TypeError):
         return None
+
+
+# Ascend carrier identifiers look like "nautilus_insurance_company_scottsdale_916e26":
+# lowercase, underscore-separated, at least three segments.
+CARRIER_IDENTIFIER_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}\b")
+
+
+def _parse_carrier_answer(text: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (carrier_name, carrier_identifier) parsed from a clarification reply.
+
+    Only fills values the caller passes in as empty; a wrong parse fails closed
+    downstream (search finds nothing / billable 422s) rather than inventing data.
+    """
+    name: Optional[str] = None
+    identifier: Optional[str] = None
+    m = re.search(
+        r"(?:carrier(?:\s+name)?|insurance\s+company)\s*(?:is|:|=)\s*"
+        r"([A-Za-z][A-Za-z0-9 .&'\-]{2,60})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        name = m.group(1).strip().split("\n")[0].strip(" .")
+    ident = CARRIER_IDENTIFIER_RE.search(text)
+    if ident:
+        identifier = ident.group(0)
+    return name, identifier
+
+
+def _parse_address_answer(text: str) -> dict[str, str]:
+    """Parse a US mailing address from a clarification reply into Ascend keys.
+
+    Accepts "123 Main St, Freehold, NJ 07728" on one line or split across two
+    lines. Returns {} unless street, city, state, and zip are all found.
+    """
+    one_line = " ".join(text.split())
+    m = re.search(
+        r"(\d[\w\s.#\-]*?)\s*,?\s+([A-Za-z][A-Za-z .'\-]*?)\s*,\s*([A-Z]{2})\s+(\d{5})(?:-(\d{4}))?",
+        one_line,
+    )
+    if not m:
+        return {}
+    street, city, state, zip5 = m.group(1).strip(), m.group(2).strip(), m.group(3), m.group(4)
+    # Guard against grabbing a fragment of a longer sentence as the street.
+    if len(street) > 60 or len(city) > 40:
+        return {}
+    return {
+        "mailing_address_street_one": street,
+        "mailing_address_city": city,
+        "mailing_address_state": state,
+        "mailing_address_zip_code": zip5,
+    }
+
+
+def _parse_contact_answer(text: str) -> dict[str, str]:
+    """Parse a primary contact (name, email, phone) from a clarification reply.
+
+    Requires at least a name cue or an email address; returns {} otherwise.
+    """
+    contact: dict[str, str] = {}
+    email_m = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", text)
+    if email_m:
+        contact["email"] = email_m.group(0)
+    phone_m = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
+    if phone_m:
+        contact["phone"] = re.sub(r"\D", "", phone_m.group(0))
+    name_m = re.search(
+        r"(?:primary\s+)?contact(?:\s+name)?\s*(?:is|:|=)\s*"
+        r"([A-Za-z][A-Za-z'\-]*(?:\s+[A-Za-z][A-Za-z'\-]*){0,3})",
+        text,
+        re.IGNORECASE,
+    )
+    if name_m:
+        full = name_m.group(1).strip().split("\n")[0].strip()
+        parts = full.split()
+        if parts:
+            contact["first_name"] = parts[0]
+            if len(parts) > 1:
+                contact["last_name"] = " ".join(parts[1:])
+    elif email_m:
+        # "Mike Fingerhut <mjfingerhut@gmail.com>" shape
+        pair_m = re.search(
+            r"([A-Za-z][A-Za-z'\-]*)\s+([A-Za-z][A-Za-z'\-]*)\s*<" + re.escape(email_m.group(0)) + r">",
+            text,
+        )
+        if pair_m:
+            contact["first_name"] = pair_m.group(1)
+            contact["last_name"] = pair_m.group(2)
+    if not contact.get("first_name") and not contact.get("email"):
+        return {}
+    return contact
+
+
+def _parse_applicant_id_hint(text: str) -> Optional[str]:
+    """Extract an EZLynx applicant id from a clarification reply, if present."""
+    m = re.search(
+        r"(?:applicant(?:\s*id)?|applicantId)\s*[:#=]?\s*(\d{6,})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+    m = re.search(r"ezlynx\.com[^\s]*?(\d{8,})", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
 
 
 def strip_email_reply_history(text: str) -> str:
@@ -623,6 +738,29 @@ class QuoteExtractor:
             if quote.total_with_terrorism_cents:
                 quote.pure_premium_cents = quote.total_with_terrorism_cents
             quote.hitl_reasons.remove("dual_terrorism_options_present")
+
+        # 5. Carrier / insured address / primary contact answers. These fields
+        # are empty after initial extraction; they get filled when the sender
+        # answers a NEEDS_CLARIFICATION email, and create_agreement_and_file_ezlynx
+        # consumes them on resume. Never overwrite values already present.
+        if not quote.carrier_identifier:
+            carrier_name, carrier_identifier = _parse_carrier_answer(text)
+            if carrier_identifier:
+                quote.carrier_identifier = carrier_identifier
+            elif carrier_name and not quote.carrier_name:
+                quote.carrier_name = carrier_name
+        if not quote.mailing_address:
+            address = _parse_address_answer(text)
+            if address:
+                quote.mailing_address = address
+        if not quote.primary_contact:
+            contact = _parse_contact_answer(text)
+            if contact:
+                quote.primary_contact = contact
+        if not quote.applicant_id_hint:
+            hint = _parse_applicant_id_hint(text)
+            if hint:
+                quote.applicant_id_hint = hint
 
         # Re-evaluate HITL status and dynamically synchronize remaining questions
         self._sync_hitl_questions(quote)

@@ -29,6 +29,76 @@ from robie_job_engine.quote_extractor import ExtractedQuote, QuoteExtractor
 logger = logging.getLogger(__name__)
 
 
+def _resolve_insured_from_ezlynx(
+    applicant_id: Optional[str],
+    insured_name: str,
+) -> tuple[Optional[dict[str, str]], Optional[dict[str, str]]]:
+    """Pull the client's mailing address + primary contact from EZLynx.
+
+    Ascend rejects new-insured creation without a mailing address and an
+    insured_contacts entry, and the quote email rarely carries either. The
+    client's EZLynx applicant record is the authoritative source.
+
+    Returns (address, contact) dicts, or (None, None) when nothing usable
+    was found. Address keys are Ascend's mailing_address_* fields; contact
+    keys are first_name/last_name/email/phone.
+    """
+    try:
+        import os
+        import sys
+
+        for extra_path in (
+            "/opt/renewal-automation-system",
+            "/opt/renewal-automation-system/venv/lib/python3.12/site-packages",
+            "/opt/renewal-automation-system/venv/lib/python3.11/site-packages",
+        ):
+            if os.path.exists(extra_path) and extra_path not in sys.path:
+                sys.path.append(extra_path)
+        from src.ezlynx.api_client import EZLynxApiClient
+    except Exception as exc:
+        logger.warning("EZLynx applicant lookup unavailable; cannot enrich insured: %s", exc)
+        return None, None
+    try:
+        client = EZLynxApiClient()
+        app: Optional[dict[str, Any]] = None
+        if applicant_id:
+            res = client.get_applicant(str(applicant_id))
+            if res.get("status") == "success":
+                app = res.get("applicant") or {}
+        if not app and insured_name and insured_name != "Named Insured":
+            for hit in client.search_applicants(insured_name) or []:
+                aid = hit.get("applicant_id") or hit.get("Id")
+                if not aid:
+                    continue
+                res = client.get_applicant(str(aid))
+                if res.get("status") == "success":
+                    app = res.get("applicant") or {}
+                    break
+        if not app:
+            return None, None
+        addr = app.get("CurrentAddress") or {}
+        address: Optional[dict[str, str]] = {
+            "mailing_address_street_one": addr.get("AddressLine1") or "",
+            "mailing_address_city": addr.get("City") or "",
+            "mailing_address_state": addr.get("State") or "",
+            "mailing_address_zip_code": addr.get("Zip") or "",
+        }
+        if not all(address.values()):
+            address = None
+        contact: Optional[dict[str, str]] = {
+            "first_name": app.get("FirstName") or "",
+            "last_name": app.get("LastName") or "",
+            "email": app.get("BusinessEmail") or app.get("Email") or "",
+            "phone": app.get("BusinessPhone") or app.get("CellPhone") or "",
+        }
+        if not (contact["first_name"] or contact["last_name"]):
+            contact = None
+        return address, contact
+    except Exception as exc:
+        logger.warning("EZLynx insured enrichment failed: %s", exc)
+        return None, None
+
+
 @dataclass
 class WorkflowResult:
     status: str  # "COMPLETED", "NEEDS_CLARIFICATION", "ERROR"
@@ -210,14 +280,35 @@ class AscendWorkflowManager:
         """Execute Ascend program creation and post the link into EZLynx."""
         client = self.client_factory()
 
-        # 1. Match Carrier Identifier
+        # 1. Match Carrier Identifier. Never invent one: a guessed identifier
+        # 422s ("Carrier is invalid") and the failure used to be reported as
+        # success. No match -> ask the sender.
         carrier_identifier = quote.carrier_identifier
         if not carrier_identifier and quote.carrier_name:
             carriers = client.search_carriers(quote.carrier_name)
             if carriers:
                 carrier_identifier = carriers[0].get("identifier")
-            else:
-                carrier_identifier = quote.carrier_name.lower().replace(" ", "_").replace("&", "and")
+        if not carrier_identifier:
+            subject = f"Need carrier name for Ascend agreement: {quote.insured_name}"
+            body_lines = [
+                f"Hi {sender_name or 'Team'},",
+                "",
+                f"I couldn't match the carrier \"{quote.carrier_name or '(none given)'}\" in Ascend "
+                "(search returned no results), so I haven't created the agreement.",
+                "",
+                "• What is the exact carrier name as it appears in Ascend (or the carrier identifier)?",
+                "",
+                "Please reply directly to this email with your answer, and I will generate the Ascend agreement and file it into EZLynx.",
+                "",
+                "Best,",
+                "Robie AI",
+            ]
+            return WorkflowResult(
+                status="NEEDS_CLARIFICATION",
+                quote=quote,
+                reply_email_subject=subject,
+                reply_email_body="\n".join(body_lines),
+            )
 
         # 2. Match Wholesaler Identifier
         wholesaler_identifier = quote.wholesaler_identifier
@@ -227,9 +318,47 @@ class AscendWorkflowManager:
             if wholesalers:
                 wholesaler_identifier = wholesalers[0].get("identifier")
 
-        # 3. Find or Create Insured
+        # 3. Find or Create Insured. Ascend requires a mailing address and a
+        # primary contact for new insureds; the quote email rarely carries
+        # either. Prefer values the sender supplied in a clarification reply;
+        # otherwise pull both from the client's EZLynx applicant record (a
+        # sender-supplied applicant id in the reply retries the lookup with
+        # that id). If neither source yields them, ask the sender.
         insured_name = quote.insured_name or "Named Insured"
-        insured_id, _ = client.find_or_create_insured(business_name=insured_name)
+        effective_applicant_id = quote.applicant_id_hint or applicant_id
+        ezlynx_address, ezlynx_contact = _resolve_insured_from_ezlynx(
+            effective_applicant_id, insured_name
+        )
+        address = quote.mailing_address or ezlynx_address
+        contact = quote.primary_contact or ezlynx_contact
+        if not address or not contact:
+            subject = f"Need client address for Ascend agreement: {insured_name}"
+            body_lines = [
+                f"Hi {sender_name or 'Team'},",
+                "",
+                f"I couldn't find a mailing address and primary contact for \"{insured_name}\" "
+                "in EZLynx, and Ascend requires both to create the insured. I haven't created the agreement.",
+                "",
+                "• What is the client's mailing address (street, city, state, zip)?",
+                "• Who is the primary contact (name, email, phone)?",
+                "  (Or include the client's EZLynx applicant link in your reply and I'll pull it from there.)",
+                "",
+                "Please reply directly to this email with your answers, and I will generate the Ascend agreement and file it into EZLynx.",
+                "",
+                "Best,",
+                "Robie AI",
+            ]
+            return WorkflowResult(
+                status="NEEDS_CLARIFICATION",
+                quote=quote,
+                reply_email_subject=subject,
+                reply_email_body="\n".join(body_lines),
+            )
+        insured_id, _ = client.find_or_create_insured(
+            business_name=insured_name,
+            address=address,
+            contact=contact,
+        )
 
         # 4. Resolve Producer & Account Manager
         producer_id = client.resolve_user(sender_email or sender_name or "Robie AI")
@@ -260,7 +389,7 @@ class AscendWorkflowManager:
 
                 billable = {
                     "billable_identifier": b_ident,
-                    "carrier_identifier": carrier_identifier or "nautilus_insurance_group_scottsdale_e3f1c1",
+                    "carrier_identifier": carrier_identifier,  # guaranteed non-empty above; never guess
                     "coverage_identifier": b_cov,
                     "effective_date": quote.effective_date,
                     "expiration_date": quote.expiration_date,
@@ -277,7 +406,7 @@ class AscendWorkflowManager:
         else:
             billable = {
                 "billable_identifier": billable_ident,
-                "carrier_identifier": carrier_identifier or "nautilus_insurance_group_scottsdale_e3f1c1",
+                "carrier_identifier": carrier_identifier,  # guaranteed non-empty above; never guess
                 "coverage_identifier": quote.coverage_identifier or "commercial_auto",
                 "effective_date": quote.effective_date,
                 "expiration_date": quote.expiration_date,
@@ -304,6 +433,24 @@ class AscendWorkflowManager:
                 status="ERROR",
                 quote=quote,
                 error=result.error or "Failed to create Ascend program",
+            )
+
+        # Defense in depth: even a "successful" worker result must carry every
+        # expected billable before we claim the agreement is ready. A program
+        # with missing billables is not a completed agreement.
+        detail = result.detail or {}
+        billable_ids = detail.get("billable_ids") or []
+        expected_billables = detail.get("expected_billable_count")
+        destination = result.destination or {}
+        if expected_billables is not None and len(billable_ids) != expected_billables:
+            return WorkflowResult(
+                status="ERROR",
+                quote=quote,
+                error=(
+                    f"Ascend created program {destination.get('program_id')} with "
+                    f"{len(billable_ids)} of {expected_billables} billables. "
+                    "The agreement is NOT ready; do not send a checkout link."
+                ),
             )
 
         destination = result.destination or {}

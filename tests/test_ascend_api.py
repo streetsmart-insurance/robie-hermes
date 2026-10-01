@@ -26,6 +26,7 @@ from durable_temp import durable_temporary_directory
 
 
 INSURED_ID = str(uuid4())
+CONTACT_ID = str(uuid4())
 PRODUCER_ID = str(uuid4())
 MANAGER_ID = str(uuid4())
 PROGRAM_ID = str(uuid4())
@@ -158,7 +159,10 @@ class AscendApiTests(unittest.TestCase):
         self.assertEqual(transport.calls[1][3]["program_id"], PROGRAM_ID)
         self.assertEqual(transport.calls[0][3]["metadata"]["robie_idempotency_key"], "key-1")
 
-    def test_worker_does_not_retry_after_partial_creation(self):
+    def test_worker_fails_closed_after_partial_creation(self):
+        # A program whose billables fail must NEVER be reported as success:
+        # the old code returned succeeded=True and the workflow composed an
+        # "Agreement Ready" email for a program with no billables.
         class Partial(FakeTransport):
             def request(self, method, path, *, query=None, json_body=None):
                 if method == "POST" and path == "/billables":
@@ -168,10 +172,60 @@ class AscendApiTests(unittest.TestCase):
         client = AscendApiClient(Partial())
         job = {"id": str(uuid4()), "action_type": ACTION_TYPE, "payload": {**payload(), "execute": True}}
         result = AscendCreateProgramWorker(lambda: client).perform(job, idempotency_key="key-2")
-        self.assertTrue(result.succeeded)
+        self.assertFalse(result.succeeded)
         self.assertFalse(result.retryable)
         self.assertEqual(result.destination["program_id"], PROGRAM_ID)
         self.assertIn("partial_failure", result.detail)
+        self.assertIn("NOT ready", result.error or "")
+
+    def test_find_or_create_insured_sends_mailing_address_and_primary_contact(self):
+        # Ascend rejects new-insured creation without mailing_address_* and
+        # insured_contacts. The workflow resolves both from the EZLynx record;
+        # this asserts they actually reach the create payload.
+        created = {}
+        contact_created = {}
+
+        class InsuredTransport(FakeTransport):
+            def request(self, method, path, *, query=None, json_body=None):
+                if method == "GET" and path == "/insureds":
+                    return {"data": []}
+                if method == "GET" and path == "/contacts":
+                    return {"data": []}
+                if method == "POST" and path == "/contacts":
+                    contact_created.update(json_body or {})
+                    return {"id": CONTACT_ID, **(json_body or {})}
+                if method == "POST" and path == "/insureds":
+                    created.update(json_body or {})
+                    return {"id": INSURED_ID, **(json_body or {})}
+                return super().request(method, path, query=query, json_body=json_body)
+
+        client = AscendApiClient(InsuredTransport())
+        insured_id, _ = client.find_or_create_insured(
+            business_name="Acme Landscaping LLC",
+            address={
+                "mailing_address_street_one": "42 Riva Ave",
+                "mailing_address_city": "North Brunswick",
+                "mailing_address_state": "NJ",
+                "mailing_address_zip_code": "08902",
+            },
+            contact={
+                "first_name": "Mike",
+                "last_name": "Fingerhut",
+                "email": "mjfingerhut@gmail.com",
+                "phone": "7322668111",
+            },
+        )
+        self.assertEqual(insured_id, INSURED_ID)
+        self.assertEqual(created["mailing_address_street_one"], "42 Riva Ave")
+        self.assertEqual(created["mailing_address_city"], "North Brunswick")
+        self.assertEqual(created["mailing_address_state"], "NJ")
+        self.assertEqual(created["mailing_address_zip_code"], "08902")
+        self.assertEqual(len(created["insured_contacts"]), 1)
+        self.assertEqual(created["insured_contacts"][0]["id"], CONTACT_ID)
+        # The contact itself was created with the EZLynx-resolved details.
+        self.assertEqual(contact_created["first_name"], "Mike")
+        self.assertEqual(contact_created["last_name"], "Fingerhut")
+        self.assertEqual(contact_created["email"], "mjfingerhut@gmail.com")
 
     def test_verifier_freshly_reads_program_and_billable(self):
         transport = FakeTransport()
