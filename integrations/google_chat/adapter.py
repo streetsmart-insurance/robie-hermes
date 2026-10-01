@@ -1915,6 +1915,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         for waiting_id in cancel_ids:
             self._forget_stopped_chat_job(source.chat_id, waiting_id)
         if idle_reply:
+            logger.info(
+                "[GoogleChat] idle stop chat=%s reply=%s",
+                source.chat_id,
+                idle_reply,
+            )
             self._post_stop_confirmation_now(
                 source.chat_id,
                 idle_reply,
@@ -1932,9 +1937,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
             reply = stop_reply_line(cancel_ids[0])
         else:
             reply = NOTHING_RUNNING_REPLY
-        stop_thread = getattr(source, "thread_id", None)
-        if cancel_ids:
-            stop_thread = read_job_chat_thread(store, cancel_ids[0]) or stop_thread
+        # The line belongs in the stopped job's thread. A top-level /stop
+        # still has Chat's new thread on the event, and that is a different
+        # message, not this job.
+        stop_thread = None
+        line_job = job_id or (cancel_ids[0] if cancel_ids else None)
+        if line_job:
+            stop_thread = read_job_chat_thread(store, line_job)
+        if not stop_thread and cancel_ids:
+            stop_thread = read_job_chat_thread(store, cancel_ids[0])
+        if not stop_thread:
+            stop_thread = getattr(source, "thread_id", None)
         self._post_stop_confirmation_now(
             source.chat_id,
             reply,

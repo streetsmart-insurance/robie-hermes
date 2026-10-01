@@ -6,7 +6,24 @@ channel. This function never adds them back.
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger("robie.health")
+
+STUCK_LINE = "I got stuck on that; a CSR should take a look."
+_INTERNAL_CODE = re.compile(
+    r"\b(?:ROBIE_[A-Z0-9_]+|PLAYWRIGHT_[A-Z0-9_]+|EZLYNX_[A-Z0-9_]*REFUSED)\b",
+    re.IGNORECASE,
+)
+_SELECTOR = re.compile(
+    r"(?:input#[A-Za-z_][\w-]*|#[A-Za-z_][\w-]*|>>|xpath=|css=|get_by_\w+)",
+    re.IGNORECASE,
+)
+_FIELD_NAME = re.compile(
+    r"\b(?:applicant_id|account_id|note_id|document_id|discussion_id|"
+    r"thread_id|mostRecentNoteId|noteCount|NoteId)\b"
+)
 
 _JOB_REF = re.compile(r"\bref:\s*job\b[^\n]*", re.IGNORECASE)
 _UUID = re.compile(
@@ -46,18 +63,18 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
 
     raw = _strip_markers(scrub_user_reply(text).replace("\r\n", "\n"))
     if not raw or not collapse:
-        return raw
+        return _release_internal(text, raw)
     if raw.startswith(_MENU_START) or "I can't make these yet" in raw:
-        return _clean_menu(raw)
+        return _release_internal(text, _clean_menu(raw))
     if any(marker in raw for marker in _HITL_KEEP):
-        return _clean_menu(raw)
+        return _release_internal(text, _clean_menu(raw))
     kept: list[str] = []
     for line in raw.splitlines():
         cleaned = _clean_line(line)
         if cleaned:
             kept.append(cleaned)
     if not kept:
-        return "I couldn't finish that."
+        return _release_internal(text, "I couldn't finish that.")
     questions = [line for line in kept if line.endswith("?")]
     statements = [line for line in kept if not line.endswith("?")]
     chosen = statements[0] if statements else questions[0]
@@ -66,7 +83,58 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
     if len(chosen) > 400:
         trimmed = chosen[:397].rsplit(" ", 1)[0].rstrip(".,;:")
         chosen = trimmed + "."
-    return chosen
+    return _release_internal(text, chosen)
+
+
+def _has_internal_detail(text: str) -> bool:
+    raw = str(text or "")
+    return bool(
+        _INTERNAL_CODE.search(raw) or _SELECTOR.search(raw) or _FIELD_NAME.search(raw)
+    )
+
+
+def _release_internal(original: str, shown: str) -> str:
+    """Last step before Chat or email. Codes stay in the health log."""
+    visible = str(shown or "").strip()
+    if visible and not _has_internal_detail(visible):
+        return visible
+    source = str(original or "")
+    if not _has_internal_detail(source) and not _has_internal_detail(visible):
+        return visible
+    logger.info(
+        "outbound reply held internal detail: %s",
+        " ".join(source.split())[:2000],
+    )
+    question = _plain_piece(source, question=True) or _plain_piece(visible, question=True)
+    if question:
+        return question
+    sentence = _plain_piece(source, question=False) or _plain_piece(visible, question=False)
+    if sentence:
+        return sentence
+    return STUCK_LINE
+
+
+def _plain_piece(text: str, *, question: bool) -> str:
+    raw = str(text or "").replace("\r\n", "\n")
+    pieces: list[str] = []
+    for line in raw.splitlines():
+        for part in re.split(r"(?<=[.!?])\s+", line.strip()):
+            cleaned = " ".join(part.split()).strip()
+            if cleaned:
+                pieces.append(cleaned)
+    for piece in pieces:
+        if _has_internal_detail(piece):
+            continue
+        is_question = piece.endswith("?")
+        if question and is_question and len(piece) > 1:
+            return piece
+        if not question and not is_question and piece[-1:] in ".!":
+            return piece
+        if not question and not is_question and len(piece.split()) >= 2:
+            if piece[-1] not in ".!?":
+                piece += "."
+            return piece
+    return ""
 
 
 def _clean_menu(raw: str) -> str:
