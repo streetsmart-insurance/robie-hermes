@@ -46,6 +46,8 @@ class _FakeAdapter:
 
     @classmethod
     def with_dwd(cls, mailbox=""):
+        # The report lands in robie@, not the adapter's certificates@ default.
+        assert mailbox == "robie@streetsmart.insurance", f"wrong mailbox: {mailbox!r}"
         return cls()
 
     def list_message_ids(self, query, page_token, page_size=50):

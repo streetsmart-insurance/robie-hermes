@@ -47,6 +47,13 @@ CHAT_WEBHOOK_URL = os.environ.get("ROBIE_TASK_VERIFY_CHAT_WEBHOOK_URL", "") or o
     "ROBIE_GOOGLE_CHAT_WEBHOOK_URL", ""
 )
 
+# Mailbox receiving the hourly "ROBIE task report CSV" emails (Applied
+# Reporting scheduled send, set up by Carlo). The CertGmailAdapter default
+# is the certificates@ mailbox, which never receives this report.
+REPORT_MAILBOX = os.environ.get(
+    "ROBIE_TASK_REPORT_MAILBOX", "robie@streetsmart.insurance"
+)
+
 
 def send_chat_alert(text: str) -> bool:
     if not CHAT_WEBHOOK_URL:
@@ -101,7 +108,7 @@ def fetch_report_csv(subject: str) -> tuple[bytes | None, str]:
         sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
         from robie_job_engine.cert_gmail_adapter import CertGmailAdapter
 
-        adapter = CertGmailAdapter.with_dwd()
+        adapter = CertGmailAdapter.with_dwd(REPORT_MAILBOX)
     except Exception as exc:
         return None, f"gmail adapter unavailable: {type(exc).__name__}: {exc}"
 
