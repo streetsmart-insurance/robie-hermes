@@ -59,3 +59,31 @@ def test_missing_tables_fail_without_migration(tmp_path):
  p=tmp_path/'empty.db';sqlite3.connect(p).close();before=p.read_bytes()
  with pytest.raises(sqlite3.OperationalError):snapshot(p)
  assert p.read_bytes()==before
+
+
+def test_global_completion_evidence_rollup_is_not_page_or_productivity_count(tmp_path):
+ p=database(tmp_path);c=sqlite3.connect(p)
+ c.execute("UPDATE jobs SET status='COMPLETE'")
+ for jid,status in [('j2','COMPLETE'),('j3','COMPLETE'),('j4','FAILED'),('j5','NEEDS_AUTH')]:
+  c.execute("INSERT INTO jobs SELECT ?,action_type,?,0,0,created_at,?,NULL,NULL,payload_json,last_error FROM jobs LIMIT 1",(jid,status,jid))
+ c.executemany('INSERT INTO verification_evidence VALUES(?,?,?,?,?,?)',[
+  (1,'j1',1,1,'private','private'),(2,'j2',1,1,'private','private'),
+  (3,'j2',0,0,'private','private'),(4,'j4',1,1,'private','private')])
+ c.commit();c.close();before=p.read_bytes()
+ result=snapshot(p,limit=1)
+ assert result['completion_evidence']=={'complete_jobs':3,
+  'with_latest_authoritative_verified_evidence':1,
+  'without_latest_authoritative_verified_evidence':2,'useful_work_count_verified':False}
+ assert result['attention_counts_by_status']['FAILED']==1
+ assert result['attention_counts_by_status']['NEEDS_AUTH']==1
+ assert result['attention_counts_by_status']['NEEDS_CLARIFICATION']==0
+ assert result['shown_jobs']==1 and result['truncated'] and p.read_bytes()==before
+ assert 'private' not in json.dumps(result)
+
+
+def test_empty_database_has_zero_completion_and_attention_counts(tmp_path):
+ p=database(tmp_path);c=sqlite3.connect(p);c.execute('DELETE FROM jobs');c.commit();c.close()
+ result=snapshot(p)
+ assert result['completion_evidence']['complete_jobs']==0
+ assert result['completion_evidence']['with_latest_authoritative_verified_evidence']==0
+ assert all(value==0 for value in result['attention_counts_by_status'].values())
