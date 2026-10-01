@@ -1561,7 +1561,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # A write states its plan before Hermes acts. Questions skip this.
         await asyncio.to_thread(prepare_chat_write_plan, ROBIE_JOB_DB, job_id)
-        await self._run_gateway_turn_with_ceiling(job_id, event)
+        from robie_job_engine.turn_finalization import isolated_model_generation_context
+
+        with isolated_model_generation_context():
+            await self._run_gateway_turn_with_ceiling(job_id, event)
 
     async def _send_clarification_if_needed(self, job_id: str, event: MessageEvent) -> None:
         """One plain-English question. Does not start the agent."""
@@ -1640,6 +1643,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             visible_fallback_line,
         )
 
+        from robie_job_engine.turn_finalization import current_model_generation
+
+        generation = current_model_generation(job_id)
         outcome = await watched
         if outcome == "finished" and not stop_requested():
             from robie_job_engine.turn_finalization import (
@@ -1661,7 +1667,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 return str(outcome or "")
             finish_model_generation(job_id)
             line = await asyncio.to_thread(
-                visible_fallback_line, ROBIE_JOB_DB, job_id
+                visible_fallback_line, ROBIE_JOB_DB, job_id, generation=generation
             )
             sent = False
             result = None
@@ -1691,7 +1697,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     store.checkpoint(
                         job_id,
                         "chat_outcome_sent",
-                        {"text": line, "posted": True},
+                        {"text": line, "posted": True, "generation": generation},
                     )
                     if posted_id:
                         from robie_job_engine.chat_turn_control import (
@@ -1704,7 +1710,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
                 await asyncio.to_thread(_record_close_post)
                 await asyncio.to_thread(
-                    close_turn_after_visible_line, ROBIE_JOB_DB, job_id, line
+                    close_turn_after_visible_line, ROBIE_JOB_DB, job_id, line, generation=generation
                 )
         return str(outcome or "")
 
@@ -1738,16 +1744,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
             getattr(source, "thread_id", None),
         )
         before = set(getattr(self, "_background_tasks", set()) or ())
-        self._gateway_turns[key] = {
-            "task": None,
-            "job_id": job_id,
-            "watchdog": None,
-        }
+        turn_record = {"task": None, "job_id": job_id, "watchdog": None}
+        self._gateway_turns[key] = turn_record
         os.environ["ROBIE_CURRENT_JOB_ID"] = str(job_id)
         os.environ["ROBIE_JOB_ID"] = str(job_id)
-        from robie_job_engine.turn_finalization import begin_model_generation
+        from robie_job_engine.turn_finalization import (
+            begin_model_generation, bind_started_model_generation, finish_model_generation,
+        )
 
-        begin_model_generation(job_id)
+        generation = await asyncio.to_thread(
+            lambda: begin_model_generation(job_id, store=JobStore(ROBIE_JOB_DB))
+        )
+        if (self._gateway_turns.get(key) is not turn_record
+                or not bind_started_model_generation(job_id, generation)):
+            await asyncio.to_thread(finish_model_generation, job_id, generation)
+            return
+        turn_record["generation"] = generation
         limit = gateway_max_turn_seconds()
         try:
             from robie_job_engine.chat_turn_control import chat_turn_keeps_context
@@ -1760,17 +1772,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception:
             current = self._gateway_turns.get(key)
-            if current and current.get("job_id") == job_id:
+            if current and current.get("job_id") == job_id and current.get("generation") == generation:
                 self._gateway_turns.pop(key, None)
             raise
         agent = running_agent_task(self, event, before=before)
         current = self._gateway_turns.get(key)
-        if not current or current.get("job_id") != job_id:
+        if not current or current.get("job_id") != job_id or current.get("generation") != generation:
             return
 
         def stop_requested() -> bool:
             record = self._gateway_turns.get(key)
-            return not record or record.get("job_id") != job_id
+            return not record or record.get("job_id") != job_id or record.get("generation") != generation
 
         async def on_timeout() -> None:
             if stop_requested():
@@ -4953,6 +4965,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
         tool_text_job = job_id or current_model_job_id() or self._active_turn_job_id(chat_id)
+        if agent_reply and tool_text_job:
+            from robie_job_engine.turn_finalization import generation_is_superseded
+
+            if await asyncio.to_thread(
+                generation_is_superseded, JobStore(ROBIE_JOB_DB), tool_text_job
+            ):
+                # Refuse old-generation text before the reply guard can finalize
+                # the successor or bind any new destination evidence.
+                return SendResult(success=True, message_id=None)
         if agent_reply and model_text_is_not_final(tool_text_job, str(content or "")):
             # The assistant message still has tool calls. This text is not the reply.
             return SendResult(success=True, message_id=None)

@@ -2824,6 +2824,10 @@ def publish_discussion_note_outcome(
     if not db_path or not job_id:
         return None
     store = JobStore(db_path)
+    from .turn_finalization import generation_is_superseded
+
+    if generation_is_superseded(store, job_id):
+        return None
     try:
         note = store.get_checkpoint(job_id, "discussion_note") or {}
     except Exception:
@@ -2890,8 +2894,11 @@ def publish_discussion_note_outcome(
     from .user_reply import format_user_reply
 
     line = format_user_reply(line)
+    from .turn_finalization import current_model_generation
+
+    generation = current_model_generation(job_id)
     prior = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
-    if " ".join(str(prior.get("text") or "").split()) == line:
+    if prior.get("generation", "") == generation and " ".join(str(prior.get("text") or "").split()) == line:
         from .chat_turn_control import request_agent_stop
 
         request_agent_stop(job_id)
@@ -2907,7 +2914,7 @@ def publish_discussion_note_outcome(
     store.checkpoint(
         job_id,
         "chat_outcome_sent",
-        {"text": line, "thread": thread or "", "space": space},
+        {"text": line, "thread": thread or "", "space": space, "generation": generation},
     )
     from .chat_turn_control import request_agent_stop
 

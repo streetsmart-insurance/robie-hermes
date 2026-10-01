@@ -24,6 +24,10 @@ are not mid-turn tool narration.
 from __future__ import annotations
 
 import os
+import json
+import uuid
+from contextvars import ContextVar
+from contextlib import contextmanager
 import re
 import threading
 from typing import Any
@@ -33,8 +37,10 @@ COULD_NOT_FINISH = "I couldn't finish that; a CSR should take a look."
 _LOCK = threading.Lock()
 _TOOL_TEXT: dict[str, set[str]] = {}
 _TOOL_MESSAGE_OPEN: set[str] = set()
-_OPEN_GENERATION: dict[str, int] = {}
-_GENERATION_DELIVERED: dict[str, threading.Event] = {}
+_OPEN_GENERATION: dict[str, str] = {}
+_GENERATION_CONTEXT: ContextVar[tuple[str, str, str] | None] = ContextVar("robie_generation", default=None)
+_GENERATION_PATHS: dict[tuple[str, str], str] = {}
+_GENERATION_DELIVERED: dict[tuple[str, str], threading.Event] = {}
 _INSTALLED = False
 _WRITE_CLAIM = re.compile(
     r"\b(?:has been filed|been filed|note has been|discussion note has been|"
@@ -48,6 +54,9 @@ def _norm(text: str) -> str:
 
 
 def current_model_job_id() -> str:
+    bound = _GENERATION_CONTEXT.get()
+    if bound:
+        return bound[0]
     return str(os.environ.get("ROBIE_CURRENT_JOB_ID") or "").strip()
 
 
@@ -115,60 +124,155 @@ def clear_tool_call_text(job_id: str | None) -> None:
         _TOOL_MESSAGE_OPEN.discard(str(job_id))
 
 
-def begin_model_generation(job_id: str | None) -> int:
-    """This turn's model generation is running. A close waits for it."""
+@contextmanager
+def isolated_model_generation_context():
+    """Do not leave one turn's identity on the listener task after dispatch."""
+    token = _GENERATION_CONTEXT.set(None)
+    try:
+        yield
+    finally:
+        _GENERATION_CONTEXT.reset(token)
+
+
+def _read_generation(conn: Any, job_id: str, kind: str = "model_generation") -> dict[str, Any]:
+    row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?",
+                       (job_id, kind)).fetchone()
+    return json.loads(row["data_json"]) if row else {}
+
+
+def _save_generation(conn: Any, job_id: str, kind: str, data: dict[str, Any]) -> None:
+    from .store import canonical_json, utc_now
+    conn.execute(
+        "INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(job_id,kind) DO UPDATE SET data_json=excluded.data_json,created_at=excluded.created_at",
+        (job_id, kind, canonical_json(data), utc_now()),
+    )
+
+
+def begin_model_generation(job_id: str | None, *, store: Any = None) -> str:
+    """Create a distinct execution epoch, persisted before starting the worker.
+
+    UUIDs never repeat after finish/restart. Context-local identity follows asyncio
+    tasks/to_thread; it is never inferred from mutable process-global job env vars.
+    Store-less calls support old synthetic callers but cannot authorize a write.
+    """
     if not job_id:
-        return 0
+        return ""
+    key, generation = str(job_id), uuid.uuid4().hex
+    path = str(store.path) if store is not None else ""
     with _LOCK:
-        key = str(job_id)
-        generation = int(_OPEN_GENERATION.get(key, 0)) + 1
+        if store is not None:
+            with store.transaction() as conn:
+                _save_generation(conn, key, "model_generation", {"generation": generation, "running": True})
+        previous = _OPEN_GENERATION.get(key)
+        if previous:
+            event = _GENERATION_DELIVERED.pop((key, previous), None)
+            if event is not None:
+                event.set()
+            _GENERATION_PATHS.pop((key, previous), None)
         _OPEN_GENERATION[key] = generation
-        _GENERATION_DELIVERED[key] = threading.Event()
-        return generation
+        _GENERATION_DELIVERED[(key, generation)] = threading.Event()
+        _GENERATION_PATHS[(key, generation)] = path
+    _GENERATION_CONTEXT.set((key, generation, path))
+    return generation
 
 
-def current_model_generation(job_id: str | None) -> int:
-    if not job_id:
-        return 0
+def bind_started_model_generation(job_id: str, generation: str) -> bool:
+    """Bind the token returned by an off-loop begin; refuse a superseded start."""
     with _LOCK:
-        return int(_OPEN_GENERATION.get(str(job_id), 0))
+        if _OPEN_GENERATION.get(job_id) != generation:
+            return False
+        path = _GENERATION_PATHS.get((job_id, generation), "")
+    _GENERATION_CONTEXT.set((job_id, generation, path))
+    return True
+
+
+def resume_model_generation(store: Any, job_id: str, generation: str) -> bool:
+    """Bind a known durable epoch for retry/readback only; never execute a write.
+
+    A caller must retain its original token. Missing/legacy/superseded tokens are
+    refused; restart never adopts the latest epoch on behalf of an unknown caller.
+    """
+    if not isinstance(generation, str) or not generation:
+        return False
+    with _LOCK:
+        with store.transaction() as conn:
+            state = _read_generation(conn, job_id)
+            if state.get("generation") != generation:
+                return False
+        _GENERATION_PATHS[(job_id, generation)] = str(store.path)
+        event = _GENERATION_DELIVERED.setdefault((job_id, generation), threading.Event())
+        if state.get("running") is True:
+            _OPEN_GENERATION[job_id] = generation
+        else:
+            event.set()
+    _GENERATION_CONTEXT.set((job_id, generation, str(store.path)))
+    return True
+
+
+def current_model_generation(job_id: str | None) -> str:
+    bound = _GENERATION_CONTEXT.get()
+    return bound[1] if bound and bound[0] == str(job_id) else ""
 
 
 def model_generation_is_running(job_id: str | None) -> bool:
     if not job_id:
         return False
+    key = str(job_id)
     with _LOCK:
-        return str(job_id) in _OPEN_GENERATION
+        generation = current_model_generation(key) or _OPEN_GENERATION.get(key, "")
+        if not generation or _OPEN_GENERATION.get(key) != generation:
+            return False
+        path = _GENERATION_PATHS.get((key, generation), "")
+    if path:
+        from .store import JobStore
+        with JobStore(path).connect() as conn:
+            state = _read_generation(conn, key)
+        return state.get("generation") == generation and state.get("running") is True
+    return True
 
 
-def finish_model_generation(job_id: str | None, generation: int | None = None) -> None:
-    """The generation has delivered, or it ended with nothing left to send."""
+def finish_model_generation(job_id: str | None, generation: str | None = None) -> None:
+    """Finish only the caller's epoch; a delayed callback cannot close its successor."""
     if not job_id:
         return
+    key = str(job_id)
+    expected = generation or current_model_generation(key)
+    if not expected:
+        return
     with _LOCK:
-        key = str(job_id)
-        if generation is not None and int(_OPEN_GENERATION.get(key, 0)) != int(generation):
-            return
-        _OPEN_GENERATION.pop(key, None)
-        event = _GENERATION_DELIVERED.get(key)
+        bound = _GENERATION_CONTEXT.get()
+        path = (bound[2] if bound and bound[:2] == (key, expected) else
+                _GENERATION_PATHS.get((key, expected), ""))
+        if path:
+            from .store import JobStore
+            with JobStore(path).transaction() as conn:
+                state = _read_generation(conn, key)
+                if state.get("generation") != expected:
+                    return
+                _save_generation(conn, key, "model_generation", {"generation": expected, "running": False})
+        if _OPEN_GENERATION.get(key) == expected:
+            _OPEN_GENERATION.pop(key, None)
+        event = _GENERATION_DELIVERED.pop((key, expected), None)
+        _GENERATION_PATHS.pop((key, expected), None)
         if event is not None:
             event.set()
+    bound = _GENERATION_CONTEXT.get()
+    if bound and bound[:2] == (key, expected):
+        _GENERATION_CONTEXT.set(None)
 
 
 def note_generation_delivered(job_id: str | None) -> None:
-    """The current generation posted its line. The fallback close must not replace it."""
-    finish_model_generation(job_id)
+    finish_model_generation(job_id, current_model_generation(job_id))
 
 
 def wait_for_generation_delivery(job_id: str | None, timeout: float) -> bool:
-    """True when this generation posted before the timeout."""
-    if not job_id:
+    generation = current_model_generation(job_id)
+    if not job_id or not generation:
         return False
     with _LOCK:
-        event = _GENERATION_DELIVERED.get(str(job_id))
-    if event is None:
-        return False
-    return bool(event.wait(timeout))
+        event = _GENERATION_DELIVERED.get((str(job_id), generation))
+    return bool(event and event.wait(timeout))
 
 
 def generation_settle_seconds() -> float:
@@ -193,17 +297,17 @@ def confirmed_write_this_turn(store: Any, job_id: str | None) -> bool:
     """
     if store is None or not job_id:
         return False
+    generation = current_model_generation(job_id)
+    if not generation:
+        return False
     try:
-        log = store.get_checkpoint(job_id, "turn_write_log") or {}
+        with store.transaction() as conn:
+            state = _read_generation(conn, str(job_id))
+            log = _read_generation(conn, str(job_id), "turn_write_log")
     except Exception:
         return False
-    if not isinstance(log, dict) or not log.get("confirmed"):
-        return False
-    logged = int(log.get("generation") or 0)
-    current = current_model_generation(job_id)
-    if current and logged and logged != current:
-        return False
-    return True
+    return (state.get("generation") == generation and log.get("generation") == generation
+            and log.get("confirmed") is True and bool(log.get("note_id")))
 
 
 def engine_question_already_sent(store: Any, job_id: str | None) -> bool:
@@ -214,6 +318,9 @@ def engine_question_already_sent(store: Any, job_id: str | None) -> bool:
         sent = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
     except Exception:
         sent = {}
+    generation = current_model_generation(job_id)
+    if generation and sent.get("generation") != generation:
+        return False
     text = " ".join(str((sent or {}).get("text") or "").split())
     if not text:
         return False
@@ -227,6 +334,11 @@ def engine_question_already_sent(store: Any, job_id: str | None) -> bool:
 
 def suppress_model_reply(store: Any, job_id: str | None, text: str) -> bool:
     """Drop the model's own send when the engine already asked, or the save is unproved."""
+    generation = current_model_generation(job_id)
+    if generation and store is not None and job_id:
+        state = store.get_checkpoint(job_id, "model_generation") or {}
+        if state and state.get("generation") != generation:
+            return True
     if engine_question_already_sent(store, job_id):
         return True
     if reply_claims_a_write(text) and not confirmed_write_this_turn(store, job_id):
@@ -234,22 +346,32 @@ def suppress_model_reply(store: Any, job_id: str | None, text: str) -> bool:
     return False
 
 
-def record_turn_write(store: Any, job_id: str | None, *, note_id: str = "") -> None:
+def record_turn_write(store: Any, job_id: str | None, *, note_id: str = "") -> bool:
     """Remember that this generation confirmed a write. The model may then say so."""
     if store is None or not job_id:
-        return
-    store.checkpoint(
-        job_id,
-        "turn_write_log",
-        {
-            "confirmed": True,
-            "note_id": str(note_id or "").strip(),
-            "generation": current_model_generation(job_id),
-        },
-    )
+        return False
+    generation = current_model_generation(job_id)
+    if not generation or not str(note_id or "").strip():
+        return False
+    with store.transaction() as conn:
+        state = _read_generation(conn, str(job_id))
+        if state.get("generation") != generation:
+            return False
+        _save_generation(conn, str(job_id), "turn_write_log", {
+            "confirmed": True, "note_id": str(note_id).strip(), "generation": generation,
+        })
+    return True
 
 
-def visible_fallback_line(db_path: str, job_id: str | None) -> str | None:
+def generation_is_superseded(store: Any, job_id: str, generation: str | None = None) -> bool:
+    expected = generation if generation is not None else current_model_generation(job_id)
+    if not expected:
+        return False
+    state = store.get_checkpoint(job_id, "model_generation") or {}
+    return bool(state) and state.get("generation") != expected
+
+
+def visible_fallback_line(db_path: str, job_id: str | None, *, generation: str | None = None) -> str | None:
     """The line a silent turn still owes the user. This does not close the job."""
     if not db_path or not job_id:
         return None
@@ -259,6 +381,8 @@ def visible_fallback_line(db_path: str, job_id: str | None) -> str | None:
     from .store import JobStore
 
     store = JobStore(db_path)
+    if generation_is_superseded(store, job_id, generation):
+        return None
     try:
         job = store.get_job(job_id)
     except Exception:
@@ -271,7 +395,7 @@ def visible_fallback_line(db_path: str, job_id: str | None) -> str | None:
     return _reply_for_silent_turn(store, job) or COULD_NOT_FINISH
 
 
-def close_turn_after_visible_line(db_path: str, job_id: str | None, line: str) -> None:
+def close_turn_after_visible_line(db_path: str, job_id: str | None, line: str, *, generation: str | None = None) -> None:
     """The line is already on its way. Only then may the job become terminal."""
     shown = " ".join(str(line or "").split()).strip()
     if not db_path or not job_id or not shown:
@@ -283,6 +407,8 @@ def close_turn_after_visible_line(db_path: str, job_id: str | None, line: str) -
     from .worker_contract import sanitize_worker_response
 
     store = JobStore(db_path)
+    if generation_is_superseded(store, job_id, generation):
+        return
     store.checkpoint(
         job_id,
         "worker_response",

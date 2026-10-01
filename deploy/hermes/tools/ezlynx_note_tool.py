@@ -317,9 +317,11 @@ def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
 
 def _remember_discussion_note(kwargs: dict, report: dict) -> None:
     import os
+    from robie_job_engine.turn_finalization import current_model_job_id
 
     job_id = str(
         (kwargs or {}).get("job_id")
+        or current_model_job_id()
         or os.environ.get("ROBIE_JOB_ID")
         or os.environ.get("JOB_ID")
         or ""
