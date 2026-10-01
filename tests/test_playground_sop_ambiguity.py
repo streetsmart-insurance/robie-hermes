@@ -31,7 +31,7 @@ def test_unequal_rank_is_not_claimed_as_semantic_conflict_detection():
 def test_handler_holds_tied_sop_and_records_source_ids_without_answering():
  with durable_temporary_directory() as tmp,patch.dict(os.environ,{'ROBIE_PLAYGROUND':'1','ROBIE_PLAYGROUND_SPACE_ID':'fixture'}):
   db=str(Path(tmp)/'jobs.db')
-  replies=handle_playground_chat(db,'How do we handle driver procedure?',conversation_id='spaces/fixture',thread_id='fixture-thread',message_id='fixture-msg',requested_by='Fixture',requester_user_id='fixture',sop_docs=[
+  replies=handle_playground_chat(db,'What is our driver procedure?',conversation_id='spaces/fixture',thread_id='fixture-thread',message_id='fixture-msg',requested_by='Fixture',requester_user_id='fixture',sop_docs=[
    {'doc_id':'fixture-1','title':'Driver procedure','text':'Driver requires agent review.'},
    {'doc_id':'fixture-2','title':'Driver procedure','text':'Driver requires manager review.'}])
   assert 'Which approved source' in replies[0] and 'source ID fixture-1' in replies[0]
