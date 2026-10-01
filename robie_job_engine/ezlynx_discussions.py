@@ -75,8 +75,14 @@ class DiscussionApiError(RuntimeError):
 class DiscussionSelectionError(RuntimeError):
     """No single existing discussion could be chosen. Nothing was written."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        matches: list[str] | None = None,
+    ) -> None:
         self.code = code
+        self.matches = [str(title).strip() for title in (matches or []) if str(title).strip()]
         super().__init__(message)
 
 
@@ -448,6 +454,62 @@ def is_untitled_discussion(record: dict[str, Any]) -> bool:
     return (not title) or title.casefold() == "untitled"
 
 
+_RECENCY_KEYS = (
+    "updatedAt",
+    "UpdatedAt",
+    "lastModified",
+    "LastModified",
+    "modified",
+    "Modified",
+    "createdAt",
+    "CreatedAt",
+    "created",
+    "Created",
+    "date",
+    "Date",
+)
+
+
+def _discussion_stamp(row: dict[str, Any]) -> str:
+    for key in _RECENCY_KEYS:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def recent_discussion_titles(
+    rows: list[dict[str, Any]], *, limit: int = 5
+) -> list[str]:
+    """Up to ``limit`` titles, newest dated rows first."""
+    dated = [row for row in rows if _discussion_stamp(row)]
+    undated = [row for row in rows if not _discussion_stamp(row)]
+    dated.sort(key=_discussion_stamp, reverse=True)
+    titles: list[str] = []
+    for row in dated + undated:
+        title = discussion_title_of(row)
+        if not title or title in titles:
+            continue
+        titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def ambiguous_discussion_question(titles: list[str], hint: str = "") -> str:
+    """One question. At most five titles, so the person can pick."""
+    label = " ".join(str(hint or "").split()).strip()
+    subject = f"{label} discussion" if label else "discussion"
+    shown = [title for title in titles if str(title).strip()][:5]
+    if not shown:
+        return f"Which {subject} should I use?"
+    if len(shown) == 1:
+        choices = shown[0]
+    else:
+        choices = ", ".join(shown[:-1]) + f", or {shown[-1]}"
+    return f"Which {subject} should I use: {choices}?"
+
+
 def select_discussion_for_note(
     discussions: list[dict[str, Any]] | None, *, title_hint: str | None = None
 ) -> dict[str, Any]:
@@ -481,15 +543,18 @@ def select_discussion_for_note(
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
             return matched[0]
+        pool = matched if matched else rows
         raise DiscussionSelectionError(
             AMBIGUOUS_DISCUSSIONS,
             f"title hint {title_hint!r} matched {len(matched)} of {len(rows)} "
             "discussions; refusing to guess",
+            matches=recent_discussion_titles(pool),
         )
     raise DiscussionSelectionError(
         AMBIGUOUS_DISCUSSIONS,
         f"applicant has {len(rows)} discussions and no title hint was given; "
         "refusing to guess",
+        matches=recent_discussion_titles(rows),
     )
 
 
@@ -711,6 +776,7 @@ def file_note_to_existing_discussion(
             "applicant_id": applicant,
             "discussion_id": None,
             "note_id": None,
+            "matches": list(getattr(exc, "matches", []) or []),
         }
     discussion_id = discussion_id_of(record)
     if not discussion_id:

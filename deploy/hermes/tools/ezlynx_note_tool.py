@@ -207,6 +207,31 @@ def _file_note(args: dict) -> dict:
                 else "The note was not sent. Do not try a different screen."
             ),
         }
+    if (
+        status == "pending"
+        and str(filed.get("reason_code") or "") == "AMBIGUOUS_DISCUSSIONS"
+    ):
+        return {
+            "ok": False,
+            "status": "needs_discussion",
+            "note_id": None,
+            "discussion_id": None,
+            "discussion_title": None,
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "title_hint": title_hint or "",
+            "matches": list(filed.get("matches") or []),
+            "read_back": False,
+            "verified_by": None,
+            "reason": filed.get("reason"),
+            "confirmation": None,
+            "wrote": False,
+            "do_not_repost": True,
+            "instruction": (
+                "The user is being asked which discussion. "
+                "Do not file the note and do not add a summary."
+            ),
+        }
     if status not in {"filed", "posted, verifying"}:
         reason = str(filed.get("reason") or "").strip()
         raise RuntimeError(reason or "The note was not sent.")
@@ -326,6 +351,8 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
                 "read_back": bool(report.get("read_back")),
                 "verified_by": report.get("verified_by"),
                 "reason": report.get("reason"),
+                "title_hint": report.get("title_hint"),
+                "matches": list(report.get("matches") or []),
                 "confirmation": report.get("confirmation"),
                 "wrote": bool(report.get("wrote")),
                 "idempotent": bool(report.get("idempotent")),

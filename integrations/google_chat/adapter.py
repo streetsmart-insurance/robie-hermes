@@ -1635,20 +1635,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
         ``watched`` is the ceiling coroutine. It runs here, on the background
         task, so the Chat slot is free for the next message.
         """
-        from robie_job_engine.turn_finalization import finalize_turn_if_still_open
+        from robie_job_engine.turn_finalization import (
+            close_turn_after_visible_line,
+            visible_fallback_line,
+        )
 
         outcome = await watched
         if outcome == "finished" and not stop_requested():
             line = await asyncio.to_thread(
-                finalize_turn_if_still_open, ROBIE_JOB_DB, job_id
+                visible_fallback_line, ROBIE_JOB_DB, job_id
             )
+            sent = False
             if line and source is not None:
                 from robie_job_engine.chat_thread import read_job_chat_thread
 
                 stored_thread = await asyncio.to_thread(
                     read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
                 )
-                await self.send(
+                result = await self.send(
                     source.chat_id,
                     line,
                     reply_to=event.message_id,
@@ -1658,6 +1662,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         "robie_delivery_kind": "notice",
                         "robie_job_id": job_id,
                     },
+                )
+                sent = bool(getattr(result, "success", False))
+            if line and sent:
+                await asyncio.to_thread(
+                    close_turn_after_visible_line, ROBIE_JOB_DB, job_id, line
                 )
         return str(outcome or "")
 

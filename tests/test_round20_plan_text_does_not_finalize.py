@@ -25,6 +25,7 @@ from robie_job_engine.turn_finalization import (
     begin_tool_call_message,
     clear_tool_call_text,
     end_tool_call_message,
+    close_turn_after_visible_line,
     finalize_turn_if_still_open,
     note_assistant_text_has_tool_calls,
 )
@@ -193,6 +194,10 @@ class PlanTextTests(unittest.TestCase):
             try:
                 line = finalize_turn_if_still_open(db, job_id)
                 self.assertEqual(line, COULD_NOT_FINISH)
+                self.assertEqual(
+                    store.get_job(job_id)["status"], JobStatus.RUNNING.value
+                )
+                close_turn_after_visible_line(db, job_id, line)
                 saved = store.get_checkpoint(job_id, "worker_response")
                 self.assertIn(COULD_NOT_FINISH, str(saved.get("response_text") or ""))
                 self.assertEqual(store.get_job(job_id)["status"], JobStatus.UNVERIFIED.value)

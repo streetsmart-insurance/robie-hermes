@@ -19,6 +19,13 @@ _INTERNAL_CODE = re.compile(
 )
 _SIGN_IN = re.compile(r"\b(?:sign[\s-]?in|log[\s-]?in)\b", re.IGNORECASE)
 _ASKS = re.compile(r"^(?:which|what|who|where|when|how)\b", re.IGNORECASE)
+_INFO_REQUEST = re.compile(
+    r"\b(?:please\s+(?:provide|tell|give|send|share|specify|confirm|name)"
+    r"|let me know"
+    r"|(?:provide|tell me|give me)\s+(?:the|a|which|what)"
+    r"|(?:which|what)\s+(?:\w+\s+){0,6}(?:discussion|title))\b",
+    re.IGNORECASE,
+)
 _MISSING_FIELD = re.compile(
     r"MISSING_REQUIRED_FIELD\s*:\s*([^\n]+)",
     re.IGNORECASE,
@@ -86,6 +93,9 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
             kept.append(cleaned)
     if not kept:
         return _release_internal(text, "I couldn't finish that.")
+    asked = info_request_as_question("\n".join(kept))
+    if asked:
+        return _release_internal(text, asked)
     questions = [line for line in kept if line.endswith("?")]
     statements = [line for line in kept if not line.endswith("?")]
     chosen = statements[0] if statements else questions[0]
@@ -148,10 +158,39 @@ def _release_internal(original: str, shown: str) -> str:
     question = _plain_piece(source, question=True) or _plain_piece(visible, question=True)
     if question:
         return question
+    request = info_request_as_question(source) or info_request_as_question(visible)
+    if request:
+        return request
     sentence = _plain_piece(source, question=False) or _plain_piece(visible, question=False)
     if sentence:
         return sentence
     return STUCK_LINE
+
+
+def _sentences(text: str) -> list[str]:
+    pieces: list[str] = []
+    for line in str(text or "").replace("\r\n", "\n").splitlines():
+        for part in re.split(r"(?<=[.!?])\s+", line.strip()):
+            cleaned = " ".join(part.split()).strip()
+            if cleaned:
+                pieces.append(cleaned)
+    return pieces
+
+
+def info_request_as_question(text: str) -> str | None:
+    """A request for a fact stays, and it is phrased as a question."""
+    for piece in _sentences(text):
+        if _has_internal_detail(piece):
+            continue
+        if piece.endswith("?") or not _INFO_REQUEST.search(piece):
+            continue
+        visible = " ".join(piece.split()).strip(" .:")
+        if not visible or _has_internal_detail(visible):
+            continue
+        if not visible.endswith("?"):
+            visible += "?"
+        return visible[0].upper() + visible[1:]
+    return None
 
 
 def _plain_piece(text: str, *, question: bool) -> str:

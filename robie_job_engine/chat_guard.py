@@ -2851,6 +2851,16 @@ def publish_discussion_note_outcome(
             if not close_confirmed_note_job(store, job_id):
                 return None
             line = _discussion_note_user_reply(store, store.get_job(job_id))
+    elif status == "needs_discussion":
+        from .ezlynx_discussions import ambiguous_discussion_question
+
+        line = ambiguous_discussion_question(
+            list(note.get("matches") or []),
+            hint=str(note.get("title_hint") or ""),
+        )
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, line)
     elif status in {"sent", "held"}:
         job = store.get_job(job_id)
         unproved = _unproved_field_user_reply(store, job) if status == "sent" else ""

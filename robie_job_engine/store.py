@@ -323,6 +323,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def fail_dead_running_jobs(
@@ -380,6 +381,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def fail_gateway_restart_orphans(
@@ -436,6 +438,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def retarget_unattempted(
@@ -660,7 +663,21 @@ class JobStore:
                     job_id,
                 ),
             )
-            return self.get_job(job_id, conn=conn)
+            job = self.get_job(job_id, conn=conn)
+        if status in TERMINAL_STATUSES:
+            self._stop_capture([job_id])
+        return job
+
+    def _stop_capture(self, job_ids: list[str]) -> None:
+        """A terminal job writes the browser_capture stop file."""
+        if not job_ids:
+            return
+        try:
+            from .recording import touch_browser_capture_stop_files
+        except Exception:
+            return
+        for job_id in job_ids:
+            touch_browser_capture_stop_files(self.path, job_id)
 
     def increment(self, job_id: str, field: str) -> int:
         if field not in {"attempt_count", "verification_count"}:

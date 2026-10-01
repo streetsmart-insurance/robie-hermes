@@ -107,12 +107,8 @@ def clear_tool_call_text(job_id: str | None) -> None:
         _TOOL_MESSAGE_OPEN.discard(str(job_id))
 
 
-def finalize_turn_if_still_open(db_path: str, job_id: str | None) -> str | None:
-    """The model turn ended. A still-open job with no reply gets one honest line.
-
-    Returns the line when this call recorded it. Returns None when the job
-    already has a reply or is no longer working.
-    """
+def visible_fallback_line(db_path: str, job_id: str | None) -> str | None:
+    """The line a silent turn still owes the user. This does not close the job."""
     if not db_path or not job_id:
         return None
     from .models import JobStatus
@@ -128,15 +124,28 @@ def finalize_turn_if_still_open(db_path: str, job_id: str | None) -> str | None:
         return None
     if _already_has_reply(store, job_id):
         return None
-    line = _reply_for_silent_turn(store, job) or COULD_NOT_FINISH
+    return _reply_for_silent_turn(store, job) or COULD_NOT_FINISH
+
+
+def close_turn_after_visible_line(db_path: str, job_id: str | None, line: str) -> None:
+    """The line is already on its way. Only then may the job become terminal."""
+    shown = " ".join(str(line or "").split()).strip()
+    if not db_path or not job_id or not shown:
+        return
+    from .models import JobStatus
+    from .store import JobStore
     from .worker_contract import sanitize_worker_response
 
+    store = JobStore(db_path)
     store.checkpoint(
         job_id,
         "worker_response",
-        sanitize_worker_response(store, job_id, line),
+        sanitize_worker_response(store, job_id, shown),
     )
-    current = store.get_job(job_id)
+    try:
+        current = store.get_job(job_id)
+    except Exception:
+        current = None
     current_status = str((current or {}).get("status") or "")
     if current_status in {JobStatus.RUNNING.value, JobStatus.VERIFYING.value, JobStatus.PENDING.value}:
         expected = {JobStatus.RUNNING, JobStatus.VERIFYING}
@@ -157,7 +166,11 @@ def finalize_turn_if_still_open(db_path: str, job_id: str | None) -> str | None:
     from .chat_turn_control import request_agent_stop
 
     request_agent_stop(job_id)
-    return line
+
+
+def finalize_turn_if_still_open(db_path: str, job_id: str | None) -> str | None:
+    """Return the fallback line. The caller sends it before closing the job."""
+    return visible_fallback_line(db_path, job_id)
 
 
 def _already_has_reply(store: Any, job_id: str) -> bool:

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -60,6 +61,7 @@ _RESULT_SELECTORS = (
     "a[href*='/applicantportal/']",
 )
 _EMPTY_RESULTS = ("no result", "no applicant", "0 result", "not found", "no match")
+SEARCH_RESULT_TIMEOUT_SECONDS = 15
 _FORM_PATHS = ("/policy/actions/edit/", "formentry", "/applicantportal/policy")
 SEARCH_KIND = "client_name_search"
 _SEARCHER_OVERRIDE: Callable[[str], dict[str, Any]] | None = None
@@ -427,6 +429,45 @@ def _parse_results(page: Any) -> list[dict[str, str]] | None:
     return None
 
 
+def _wait_for_search_results(
+    page: Any, *, seconds: float = SEARCH_RESULT_TIMEOUT_SECONDS
+) -> None:
+    """Enter opens the legacy Search/Index page. Its links are not there yet.
+
+    Wait for that navigation, then for ``/web/account/<digits>/`` links or let
+    the later parse see an explicit no-results marker. One bounded timeout.
+    """
+    deadline = time.monotonic() + max(0.0, float(seconds))
+
+    def remaining_ms() -> int:
+        return max(1, int((deadline - time.monotonic()) * 1000))
+
+    wait_url = getattr(page, "wait_for_url", None)
+    if callable(wait_url):
+        try:
+            wait_url(
+                lambda url: "search/index" in str(url or "").casefold()
+                or bool(re.search(r"/web/account/\d+/", str(url or ""), re.I)),
+                timeout=remaining_ms(),
+            )
+        except Exception:
+            pass
+    locator_fn = getattr(page, "locator", None)
+    if not callable(locator_fn):
+        return
+    try:
+        links = locator_fn("a[href*='/web/account/']")
+    except Exception:
+        return
+    wait_links = getattr(links, "wait_for", None)
+    if not callable(wait_links):
+        return
+    try:
+        wait_links(state="attached", timeout=remaining_ms())
+    except Exception:
+        return
+
+
 def read_applicant_search(page: Any, name: str) -> dict[str, Any]:
     """Type the name into the open page's search box. Do not guess a URL."""
     if _is_auth_url(_page_url(page)):
@@ -443,6 +484,9 @@ def read_applicant_search(page: Any, name: str) -> dict[str, Any]:
     except Exception:
         _log_unreadable(page, name, "search box could not be typed")
         return {"status": "error", "matches": []}
+    if _is_auth_url(_page_url(page)):
+        return {"status": "sign_in", "matches": []}
+    _wait_for_search_results(page)
     if _is_auth_url(_page_url(page)):
         return {"status": "sign_in", "matches": []}
     matches = _parse_results(page)
