@@ -21,8 +21,7 @@ TASK = ("Speak slowly and evenly. Your only purpose is this owner-approved conne
         "After the opening, wait for Jake's response, then say exactly: " + FOLLOWUP +
         " Wait for his reply, then say exactly: " + CLOSE +
         " End the call. Do not discuss clients, insurance advice, money or any other task. "
-        "If a screening assistant asks who/why, identify yourself as Eva, an AI assistant with "
-        "StreetSmart Insurance, making a test call requested by Carlo; then wait silently. "
+        "If a screening assistant responds, do not add words beyond the reviewed script. "
         "If voicemail is detected, hang up immediately without a message. Do not transfer or text.")
 
 
@@ -59,7 +58,11 @@ def dispatch_once(*, db_path, test_id, approved_day, today, hostname, body, api_
     if path.parent.stat().st_mode & 0o077:
         raise TestCallRefused("state directory must be private")
     with sqlite3.connect(path) as conn:
+        conn.execute('BEGIN IMMEDIATE')
         conn.execute('CREATE TABLE IF NOT EXISTS calls(test_id TEXT PRIMARY KEY, state TEXT NOT NULL, call_id TEXT)')
+        prior=conn.execute('SELECT call_id FROM calls LIMIT 1').fetchone()
+        if prior is not None:
+            return {'state':'already_claimed','call_id':prior[0],'new_dispatch':False}
         try:
             conn.execute('INSERT INTO calls VALUES (?, ?, NULL)',(test_id,'claimed'))
         except sqlite3.IntegrityError:
