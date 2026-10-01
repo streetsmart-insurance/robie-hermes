@@ -15,7 +15,7 @@ Environment=ROBIE_PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222
 Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
 Environment=ROBIE_EZLYNX_DRIVER_HOLDER=TEST
 ExecCondition=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
-ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.test_ssrobie_keepalive --json
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ssrobie_keepalive --json
 Nice=10
 NoNewPrivileges=true
 PrivateTmp=true

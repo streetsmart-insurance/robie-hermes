@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from robie_job_engine import test_ssrobie_keepalive as ka
+from robie_job_engine import ssrobie_keepalive as ka
 from robie_job_engine.ezlynx_driver_gate import EzlynxDriverGateRefused
 from robie_job_engine.session_preflight import LOGGED_OUT, NO_EZLYNX_TAB, SESSION_PRESENT
 
