@@ -25,16 +25,29 @@ _NOTE_COUNT_KEYS=('noteCount','NoteCount','note_count')
 _NOTE_MODIFIED_KEYS=('lastModified','LastModified','last-modified','last_modified')
 _NOTE_TEXT_KEYS=('body','note','text','noteText','lastNoteText')
 _CREATED_NOTE_KEYS=('note_id','noteId','NoteId','id','Id')
+_TITLE_KEYS=('title','Title','subject','Subject')
+_APPLICANT_KEYS=('applicantId','ApplicantId','applicant_id')
 CALL_OUTCOMES=('human_reached','voicemail_no_message','voicemail_message_left','no_answer','busy','failed','screener_declined')
 DRY_OUTCOMES=('dry_run','no_call')
 
+def _normalize_note_id(value):
+    # Live GET v8/discussions/{id} returns the latest note id as a JSON number.
+    # Bool is an int subclass and is never a note id.
+    if isinstance(value,bool) or value is None:return ''
+    if isinstance(value,int):return str(value)
+    if isinstance(value,str):return value.strip()
+    return ''
+
 def _created_note_id(result):
-    if isinstance(result,str) and result.strip():return result.strip()
-    if isinstance(result,dict):
-        for key in _CREATED_NOTE_KEYS:
-            value=result.get(key)
-            if isinstance(value,str) and value.strip():return value.strip()
-    raise Refused('append response did not include a note id')
+    """Note id from a write, or None when the live response carries none."""
+    if not isinstance(result,dict):
+        found=_normalize_note_id(result)
+        return found or None
+    for key in _CREATED_NOTE_KEYS:
+        if key not in result:continue
+        found=_normalize_note_id(result.get(key))
+        if found:return found
+    return None
 
 def _lookup_value(snapshot, keys):
     if not isinstance(snapshot,dict):return None
@@ -42,10 +55,74 @@ def _lookup_value(snapshot, keys):
         if key in snapshot:return snapshot.get(key)
     return None
 
-def _latest_note_id(snapshot):
-    value=_lookup_value(snapshot,_LAST_NOTE_KEYS)
-    if not isinstance(value,str) or not value.strip():raise Refused('discussion lookup missing latest note id')
+def _latest_note_id(snapshot, required=True):
+    found=_normalize_note_id(_lookup_value(snapshot,_LAST_NOTE_KEYS))
+    if not found:
+        if required:raise Refused('discussion lookup missing latest note id')
+        return ''
+    return found
+
+def _note_count(snapshot, required=False):
+    value=_lookup_value(snapshot,_NOTE_COUNT_KEYS)
+    if value is None:
+        if required:raise Refused('note readback mismatch')
+        return None
+    if type(value) is not int:raise Refused('note readback mismatch')
+    return value
+
+def _note_modified(snapshot):
+    value=_lookup_value(snapshot,_NOTE_MODIFIED_KEYS)
+    if value is None:return None
+    if not isinstance(value,str) or not value.strip():raise Refused('note readback mismatch')
     return value.strip()
+
+def _plain_field(snapshot, keys):
+    value=_lookup_value(snapshot, keys)
+    if isinstance(value,bool) or value is None:return ''
+    if isinstance(value,int):return str(value)
+    if isinstance(value,str):return value.strip()
+    return ''
+
+def _confirm_returned_note(note_id, snapshot, created, body):
+    if _latest_note_id(snapshot)!=note_id:raise Refused('note readback mismatch')
+    count=_note_count(snapshot)
+    if count is not None and count<1:raise Refused('note readback mismatch')
+    _note_modified(snapshot)
+    for text in _note_texts(created, snapshot):
+        if text!=body:raise Refused('note readback mismatch')
+
+def _confirm_added_note(before, after, again, plan, created, body):
+    """One new note, a new latest id, same title and applicant, second read agrees.
+
+    This is the live path: POST v8/discussions/{id}/notes often returns 2xx
+    with no note id. The matched id is the new latest note id.
+    """
+    before_count=_note_count(before, required=True)
+    after_count=_note_count(after, required=True)
+    if after_count!=before_count+1:raise Refused('note readback mismatch')
+    before_latest=_latest_note_id(before, required=False)
+    after_latest=_latest_note_id(after)
+    if after_latest==before_latest:raise Refused('note readback mismatch')
+    before_title=_plain_field(before,_TITLE_KEYS)
+    after_title=_plain_field(after,_TITLE_KEYS)
+    if not after_title or after_title!=before_title:raise Refused('note readback mismatch')
+    want=str(plan.applicant_id or '').strip()
+    before_applicant=_plain_field(before,_APPLICANT_KEYS)
+    after_applicant=_plain_field(after,_APPLICANT_KEYS)
+    if not after_applicant or after_applicant!=before_applicant or after_applicant!=want:
+        raise Refused('note readback mismatch')
+    after_modified=_note_modified(after)
+    _note_modified(before)
+    for text in _note_texts(created, after):
+        if text!=body:raise Refused('note readback mismatch')
+    if _note_count(again, required=True)!=after_count:raise Refused('note readback mismatch')
+    if _latest_note_id(again)!=after_latest:raise Refused('note readback mismatch')
+    if _plain_field(again,_TITLE_KEYS)!=after_title:raise Refused('note readback mismatch')
+    if _plain_field(again,_APPLICANT_KEYS)!=after_applicant:raise Refused('note readback mismatch')
+    if _note_modified(again)!=after_modified:raise Refused('note readback mismatch')
+    for text in _note_texts(None, again):
+        if text!=body:raise Refused('note readback mismatch')
+    return after_latest
 
 def _note_texts(created, snapshot):
     texts=[]
@@ -177,7 +254,9 @@ class Controls:
             except sqlite3.IntegrityError:return {'status':'already_claimed','dispatch':False}
         return self._send(plan,2)
     def finish(self,plan,call_id,detail):
-        # Read-back is the created note id against a fresh discussion lookup.
+        # Read-back matches a note id (number or string) to a fresh discussion
+        # lookup. When the write has no id, the discussion was read before the
+        # post and is confirmed by count, latest id, title and applicant.
         # GET .../notes is HTTP 405, so this path never lists notes.
         outcome=detail.get('outcome')
         if outcome in DRY_OUTCOMES:
@@ -202,6 +281,20 @@ class Controls:
         # Only an accepted dispatch may use the call-ended line.
         body=f"Call ended {detail['ended_at']}. Call ID: {call_id}. Outcome: {outcome}."
         return self._file_note(plan,call_id,body)
+    def _fetch_discussion(self,plan,before_post):
+        try:snapshot=self.notes.lookup_discussion(plan.applicant_id,plan.discussion_id)
+        except Refused:raise
+        except Exception:
+            if before_post:raise Refused('discussion could not be read before the note was sent')
+            raise Refused('note readback mismatch')
+        if not isinstance(snapshot,dict):
+            if before_post:raise Refused('discussion could not be read before the note was sent')
+            raise Refused('note readback mismatch')
+        # Parse before any write so a bad snapshot cannot post and then refuse.
+        _note_count(snapshot)
+        _latest_note_id(snapshot, required=False)
+        _note_modified(snapshot)
+        return snapshot
     def _file_note(self,plan,note_key,body):
         with self.db() as c:
             c.execute('INSERT OR IGNORE INTO notes VALUES(?,?,?,?,?,NULL)',(note_key,plan.applicant_id,plan.discussion_id,body,'pending'))
@@ -210,7 +303,15 @@ class Controls:
         # Lookup by the id we already stored. Never list the discussion's notes.
         found=self.notes.find(note_key,plan.applicant_id,plan.discussion_id)
         created=found
+        before=None
         if not found:
+            with self.db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                state=c.execute('SELECT status FROM notes WHERE call_id=?',(note_key,)).fetchone()[0]
+                if state!='pending':return {'status':'note_unknown','note_id':None}
+            # The write response often has no note id, so the before-image has
+            # to exist before the post. A failed read does not post.
+            before=self._fetch_discussion(plan,before_post=True)
             with self.db() as c:
                 c.execute('BEGIN IMMEDIATE')
                 state=c.execute('SELECT status FROM notes WHERE call_id=?',(note_key,)).fetchone()[0]
@@ -219,13 +320,11 @@ class Controls:
             try:created=self.notes.append(plan.applicant_id,plan.discussion_id,body,note_key)
             except Exception:return {'status':'note_unknown','note_id':None}
         note_id=_created_note_id(created)
-        snapshot=self.notes.lookup_discussion(plan.applicant_id,plan.discussion_id)
-        if _latest_note_id(snapshot)!=note_id:raise Refused('note readback mismatch')
-        count=_lookup_value(snapshot,_NOTE_COUNT_KEYS)
-        if count is not None and (type(count) is not int or count<1):raise Refused('note readback mismatch')
-        modified=_lookup_value(snapshot,_NOTE_MODIFIED_KEYS)
-        if modified is not None and (not isinstance(modified,str) or not modified.strip()):raise Refused('note readback mismatch')
-        for text in _note_texts(created,snapshot):
-            if text!=body:raise Refused('note readback mismatch')
+        snapshot=self._fetch_discussion(plan,before_post=False)
+        if note_id:_confirm_returned_note(note_id,snapshot,created,body)
+        else:
+            if before is None:raise Refused('append response did not include a note id')
+            again=self._fetch_discussion(plan,before_post=False)
+            note_id=_confirm_added_note(before,snapshot,again,plan,created,body)
         with self.db() as c:c.execute('UPDATE notes SET status=?,note_id=? WHERE call_id=?',('verified',note_id,note_key))
         return {'status':'verified','note_id':note_id}

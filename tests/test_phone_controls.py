@@ -92,7 +92,7 @@ class Safety(unittest.TestCase):
   self.start();self.assertEqual('verified',self.note()['status']);self.assertIn('2026-10-01',self.notes.append.call_args.args[2])
   self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
  def test_note_unknown_not_posted_twice(self):
-  self.start();self.notes.find.return_value=None;self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.return_value={};self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
  def test_note_destination_changed_rejected(self):
   self.start()
   with self.assertRaises(Refused):self.c.finish(replace(self.plan,applicant_id='WRONG'),'SYN-CALL-1',self.detail())
@@ -122,8 +122,61 @@ class Safety(unittest.TestCase):
   with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-FAKE',self.detail())
   self.notes.append.assert_not_called()
  def test_unresolved_note_holds_new_campaign(self):
-  self.start();self.notes.find.return_value=None;self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2',target='+15555550125');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.return_value={};self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2',target='+15555550125');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
   with self.assertRaisesRegex(Refused,'note'):self.start()
+ def _live_discussion(self, latest, count, modified, title='Renewal', applicant='SYN-APP'):
+  # Shape read from discussion 848144863: numeric latest id and note count.
+  return {'discussionId':'848144863','applicantId':applicant,'title':title,'LastNoteId':latest,'mostRecentNoteId':latest,'noteCount':count,'lastModified':modified}
+ def test_live_numeric_ids_confirm_when_the_write_has_no_id(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');after=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z')
+  seen=[]
+  def lookup(*args):
+   seen.append('lookup');return (before,after,dict(after))[seen.count('lookup')-1]
+  def append(*args):
+   seen.append('append');return {}
+  self.notes.find.return_value=None;self.notes.lookup_discussion.side_effect=lookup;self.notes.append.side_effect=append
+  self.notes.list_notes.side_effect=AssertionError('HTTP 405')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'1134251172'},result)
+  self.assertEqual(['lookup','append','lookup','lookup'],seen)
+  self.notes.list_notes.assert_not_called()
+ def test_live_numeric_write_id_matches_numeric_latest_note(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':1134251172}
+  self.notes.lookup_discussion.return_value=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'1134251172'},result)
+ def test_string_write_id_matches_numeric_latest_note(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'NoteId':'1134251172'}
+  self.notes.lookup_discussion.return_value={'mostRecentNoteId':1134251172,'noteCount':3,'lastModified':'2026-10-01T15:00:00Z'}
+  self.assertEqual('1134251172',self.c.finish(self.plan,'SYN-CALL-1',self.detail())['note_id'])
+ def test_bool_note_id_is_not_a_note_id_and_does_not_post(self):
+  self.start();self.notes.find.return_value={'noteId':True};self.notes.lookup_discussion.return_value={'LastNoteId':True,'noteCount':2}
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.notes.append.assert_not_called()
+ def test_missing_write_id_does_not_post_when_the_discussion_cannot_be_read(self):
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.side_effect=TimeoutError()
+  with self.assertRaisesRegex(Refused,'before the note was sent'):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.notes.append.assert_not_called()
+ def test_missing_write_id_refuses_without_a_second_post_when_the_count_does_not_gain_one(self):
+  self.start();stuck=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.return_value=stuck
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_title_changes(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');changed=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z',title='Other')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,changed,dict(changed)]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_applicant_changes(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');changed=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z',applicant='OTHER')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,changed,dict(changed)]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_second_read_disagrees(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');after=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z');moved=self._live_discussion(1134251199,4,'2026-10-01T15:00:01Z')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,after,moved]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
  def test_blank_voice_refused_without_default(self):
   self.plan=replace(self.plan,voice_id='  ');self.grant=replace(self.grant,plan_digest=self.plan.digest())
   with self.assertRaisesRegex(Refused,'voice'):self.start()

@@ -15,6 +15,11 @@ Implemented in order:
    within the same campaign is exempt, not a new campaign.
 4. Carrier and finance directory binding, exact number and audience match.
 5. Dated per-call note to the bound applicant/discussion, readback required.
+   Note ids from the discussion lookup or the write may be numbers or strings.
+   When the write response has no note id, the discussion is read first
+   (count, latest id, title, last-modified) and confirmed only when the count
+   gained one, the latest id changed, the title and applicant stayed the same,
+   and a second read agrees. The matched id is that new latest note id.
    Ambiguous posting is reconciled by lookup, never blindly posted twice.
    Outstanding notes or ambiguous calls block a new campaign.
 6. Single-use client exception: exact approved plan, one attempt only,
