@@ -111,6 +111,12 @@ def outbound_is_clarify(raw: str, cleaned: str = "") -> bool:
     """True when this outbound text is a question for the user."""
     source = str(raw or "")
     body = " ".join(str(cleaned or source).split())
+    from .user_reply import which_client_list_text
+
+    # The numbered account list is longer than a one-line question. It still
+    # parks the job so the reply can pick one account.
+    if which_client_list_text(source) or which_client_list_text(cleaned or body):
+        return True
     if _MISSING_FIELD.search(source) or _MISSING_FIELD.search(body):
         return True
     folded = body.casefold()

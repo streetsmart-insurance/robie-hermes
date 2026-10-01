@@ -119,6 +119,42 @@ def client_name_from_lookup(text: str) -> str | None:
     return name or None
 
 
+def which_client_question(name: str, matches: list[dict[str, Any]]) -> str:
+    """A numbered list so the person can tell the accounts apart."""
+    titled = _titled_name(name)
+    lines = [f"I found more than one {titled}."]
+    for index, row in enumerate(matches[:5], start=1):
+        lines.append(f"{index}. {_match_phrase(row)}")
+    lines.append("Which one should I use?")
+    return "\n".join(lines)
+
+
+def _match_phrase(row: dict[str, Any]) -> str:
+    """Name, place, and account id. No field names and no internal codes."""
+    who = " ".join(str(row.get("name") or "").split())
+    address = " ".join(str(row.get("address") or "").split())
+    city = " ".join(str(row.get("city") or "").split())
+    place = address
+    if city and city.casefold() not in place.casefold():
+        place = ", ".join(part for part in (place, city) if part)
+    if not place:
+        place = " ".join(str(row.get("detail") or "").split())
+    role = " ".join(str(row.get("role") or "").split())
+    applicant = str(row.get("applicant_id") or "").strip()
+    bits: list[str] = []
+    if who:
+        bits.append(who)
+    joined = " ".join(bits).casefold()
+    if place and place.casefold() not in joined:
+        bits.append(place)
+        joined = " ".join(bits).casefold()
+    if role and role.casefold() not in joined:
+        bits.append(role)
+    if applicant:
+        bits.append(f"account {applicant}")
+    return ", ".join(bits) if bits else f"account {applicant}"
+
+
 def bind_named_client(
     store: Any,
     job_id: str,
@@ -134,7 +170,7 @@ def bind_named_client(
         if applicant and applicant not in ids:
             ids.append(applicant)
     if len(ids) > 1:
-        return f"I found more than one {titled}. Which one should I use?"
+        return which_client_question(name, matches)
     if len(ids) != 1:
         return f"I couldn't find a client named {titled}."
     job = store.get_job(job_id)
@@ -351,10 +387,10 @@ def _matches_from_links(links: Any) -> list[dict[str, str]]:
         inner = getattr(item, "inner_text", None)
         if callable(inner):
             try:
-                text = " ".join(str(inner() or "").split())
+                text = str(inner() or "")
             except Exception:
                 text = ""
-        found.append({"applicant_id": applicant, "name": text})
+        found.append({"applicant_id": applicant, **_visible_match_fields(text)})
     return found
 
 
@@ -368,7 +404,60 @@ def _matches_from_hrefs(hrefs: list[str]) -> list[dict[str, str]]:
         if not applicant or applicant in seen:
             continue
         seen.add(applicant)
-        found.append({"applicant_id": applicant, "name": ""})
+        found.append(
+            {
+                "applicant_id": applicant,
+                "name": "",
+                "address": "",
+                "role": "",
+                "detail": "",
+            }
+        )
+    return found
+
+
+def _visible_match_fields(raw: str) -> dict[str, str]:
+    """Split a result row into the name and whatever else the page showed."""
+    lines = [
+        " ".join(part.split())
+        for part in str(raw or "").replace("\r", "\n").split("\n")
+        if part.strip()
+    ]
+    name = lines[0] if lines else ""
+    address = ""
+    role = ""
+    extras: list[str] = []
+    for line in lines[1:]:
+        words = line.split()
+        has_digit = any(character.isdigit() for character in line)
+        if not address and (has_digit or "," in line or len(words) >= 2):
+            address = line
+        elif not role and len(words) <= 3 and not has_digit:
+            role = line
+        else:
+            extras.append(line)
+    detail = ", ".join(part for part in [address, role, *extras] if part)
+    return {"name": name, "address": address, "role": role, "detail": detail}
+
+
+def _matches_from_evaluated(rows: list[Any]) -> list[dict[str, str]]:
+    from .ezlynx_write_scope import applicant_id_from_ezlynx_url
+
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if isinstance(row, str):
+            href, text = row, ""
+        elif isinstance(row, dict):
+            href = str(row.get("href") or "")
+            text = str(row.get("text") or "")
+        else:
+            continue
+        applicant = str(applicant_id_from_ezlynx_url(href) or "").strip()
+        if not applicant or applicant in seen:
+            continue
+        seen.add(applicant)
+        found.append({"applicant_id": applicant, **_visible_match_fields(text)})
     return found
 
 
@@ -390,13 +479,16 @@ def _parse_results(page: Any) -> list[dict[str, str]] | None:
                   ));
                   return nodes
                     .filter(node => !node.closest("header, nav, [role='banner']"))
-                    .map(node => node.getAttribute("href") || "");
+                    .map(node => ({
+                      href: node.getAttribute("href") || "",
+                      text: node.innerText || ""
+                    }));
                 }"""
             )
         except Exception:
             return None
         if isinstance(hrefs, list):
-            found = _matches_from_hrefs([str(item) for item in hrefs])
+            found = _matches_from_evaluated(hrefs)
     elif callable(locator_fn):
         seen: set[str] = set()
         for selector in _RESULT_SELECTORS:
@@ -577,6 +669,17 @@ def _drop_untrusted_binding(store: Any, job: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _stored_match(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        "applicant_id": str(row.get("applicant_id") or "").strip(),
+        "name": str(row.get("name") or "").strip(),
+        "address": str(row.get("address") or "").strip(),
+        "city": str(row.get("city") or "").strip(),
+        "role": str(row.get("role") or "").strip(),
+        "detail": str(row.get("detail") or "").strip(),
+    }
+
+
 def _remember_search(
     store: Any,
     job_id: str,
@@ -586,7 +689,14 @@ def _remember_search(
     user_line: str = "",
     name: str = "",
     candidates: list[str] | None = None,
+    matches: list[dict[str, Any]] | None = None,
+    reasked: bool = False,
 ) -> None:
+    stored = [
+        _stored_match(row)
+        for row in (matches or [])
+        if str((row or {}).get("applicant_id") or "").strip()
+    ]
     store.checkpoint(
         job_id,
         SEARCH_KIND,
@@ -597,6 +707,8 @@ def _remember_search(
             "user_line": user_line,
             "name": name,
             "candidates": list(candidates or []),
+            "matches": stored[:5],
+            "reasked": bool(reasked),
         },
     )
 
@@ -617,6 +729,8 @@ def prepare_named_client_lookup(
         return None
     note = _search_note(store, job_id)
     if note.get("resolved"):
+        if str(note.get("source") or "") == "several":
+            return _consume_client_choice(store, job_id)
         return str(note.get("user_line") or "").strip() or None
     name = ""
     payload = dict(job.get("payload") or {})
@@ -680,7 +794,8 @@ def prepare_named_client_lookup(
         )
         return LOOKUP_MISS
     if len(ids) > 1:
-        line = f"I found more than one {titled}. Which one should I use?"
+        shown = [_stored_match(row) for row in matches if str(row.get("applicant_id") or "").strip()]
+        line = which_client_question(name, shown)
         _remember_search(
             store,
             job_id,
@@ -689,6 +804,7 @@ def prepare_named_client_lookup(
             user_line=line,
             name=name,
             candidates=ids,
+            matches=shown,
         )
         return line
     if len(ids) != 1:
@@ -717,16 +833,256 @@ def prepare_named_client_lookup(
     return None
 
 
+_CHOICE_SKIP = {
+    "the",
+    "a",
+    "an",
+    "one",
+    "account",
+    "and",
+    "of",
+    "to",
+    "for",
+    "please",
+    "use",
+    "which",
+    "i",
+    "me",
+    "that",
+    "this",
+    "client",
+    "on",
+    "in",
+    "at",
+    "my",
+    "it",
+    "is",
+    "with",
+    "from",
+    "or",
+    "stop",
+    "cancel",
+}
+_ORDINAL_WORDS = {
+    "first": 1,
+    "1st": 1,
+    "second": 2,
+    "2nd": 2,
+    "third": 3,
+    "3rd": 3,
+    "fourth": 4,
+    "4th": 4,
+    "fifth": 5,
+    "5th": 5,
+}
+_ORDINAL_REPLY = re.compile(
+    r"(?:"
+    r"(?:(?:the|option|number|choice|no\.?)\s+)*(?:#\s*)?(\d+)(?:st|nd|rd|th)?(?:\s+one)?"
+    r"|(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)(?:\s+one)?"
+    r")"
+    r"(?:\s+please)?",
+    re.IGNORECASE,
+)
+
+
+def _clarification_reply(store: Any, job: dict[str, Any]) -> str:
+    """The user's answer to the pending question, not the original ask."""
+    job_id = str(job.get("id") or "")
+    try:
+        note = store.get_checkpoint(job_id, "clarification_reply") or {}
+    except Exception:
+        note = {}
+    if isinstance(note, dict):
+        text = str(note.get("text") or "").strip()
+        if text:
+            return text
+    return str(dict(job.get("payload") or {}).get("clarification_reply") or "").strip()
+
+
+def _reply_is_stop(text: str) -> bool:
+    """/stop and /cancel are not a client pick. The adapter handles them."""
+    from .chat_turn_control import is_stop_command
+
+    return is_stop_command(text)
+
+
+def _displayed_matches(note: dict[str, Any]) -> list[dict[str, str]]:
+    rows = [
+        _stored_match(row)
+        for row in (note.get("matches") or [])
+        if isinstance(row, dict) and str(row.get("applicant_id") or "").strip()
+    ]
+    if rows:
+        return rows[:5]
+    found: list[dict[str, str]] = []
+    for item in note.get("candidates") or []:
+        token = str(item or "").strip()
+        if token:
+            found.append(_stored_match({"applicant_id": token}))
+    return found[:5]
+
+
+def _ordinal_index(reply: str, count: int) -> int | None:
+    folded = " ".join(str(reply or "").casefold().split()).strip(" .,!?:;")
+    match = _ORDINAL_REPLY.fullmatch(folded)
+    if not match or count < 1:
+        return None
+    if match.group(1):
+        number = int(match.group(1))
+    else:
+        number = _ORDINAL_WORDS[match.group(2)]
+    if 1 <= number <= count:
+        return number - 1
+    return None
+
+
+def _field_tokens(row: dict[str, Any]) -> set[str]:
+    blob = " ".join(
+        str(row.get(key) or "")
+        for key in ("name", "address", "city", "role", "detail")
+    )
+    return {
+        token
+        for token in re.findall(r"[a-z0-9']+", blob.casefold())
+        if token not in _CHOICE_SKIP and len(token) >= 2
+    }
+
+
+def _distinguishing_index(reply: str, matches: list[dict[str, str]]) -> int | None:
+    row_tokens = [_field_tokens(row) for row in matches]
+    nonempty = [tokens for tokens in row_tokens if tokens]
+    common: set[str] = set()
+    if len(nonempty) > 1:
+        common = set.intersection(*nonempty)
+    reply_tokens = [
+        token
+        for token in re.findall(r"[a-z0-9']+", str(reply or "").casefold())
+        if token not in _CHOICE_SKIP and token not in common and len(token) >= 2
+    ]
+    if not reply_tokens:
+        return None
+    hits: set[int] = set()
+    for token in reply_tokens:
+        owners = [index for index, tokens in enumerate(row_tokens) if token in tokens]
+        if len(owners) == 1:
+            hits.add(owners[0])
+    if len(hits) == 1:
+        return next(iter(hits))
+    return None
+
+
+def _select_match_index(reply: str, matches: list[dict[str, str]]) -> int | None:
+    id_hits: list[int] = []
+    for index, row in enumerate(matches):
+        applicant = str(row.get("applicant_id") or "").strip()
+        if applicant and re.search(rf"(?<!\d){re.escape(applicant)}(?!\d)", reply):
+            id_hits.append(index)
+    ordinal = _ordinal_index(reply, len(matches))
+    chosen = set(id_hits)
+    if ordinal is not None:
+        chosen.add(ordinal)
+    if len(chosen) == 1:
+        return next(iter(chosen))
+    if chosen:
+        return None
+    return _distinguishing_index(reply, matches)
+
+
+def _bind_chosen_match(
+    store: Any,
+    job_id: str,
+    job: dict[str, Any],
+    *,
+    name: str,
+    chosen: dict[str, str],
+) -> None:
+    applicant = str(chosen.get("applicant_id") or "").strip()
+    payload = dict(job.get("payload") or {})
+    payload["applicant_id"] = applicant
+    if name:
+        payload["client_name"] = name
+    elif str(chosen.get("name") or "").strip():
+        payload["client_name"] = str(chosen.get("name") or "").strip()
+    store.update_payload(job_id, payload)
+    _remember_search(
+        store,
+        job_id,
+        source="search",
+        applicant_ids=[applicant],
+        user_line="",
+        name=name,
+        candidates=[applicant],
+        matches=[chosen],
+    )
+    from .chat_turn_control import clear_agent_stop
+    from .models import JobStatus
+
+    clear_agent_stop(job_id)
+    current = store.get_job(job_id)
+    if JobStatus(current["status"]) == JobStatus.NEEDS_CLARIFICATION:
+        store.resume(job_id)
+
+
+def _consume_client_choice(store: Any, job_id: str) -> str | None:
+    """Bind one saved match from the reply, or ask once more.
+
+    None means the model may run. A returned line is the question to send
+    instead. Stop does not bind and does not ask again.
+    """
+    note = _search_note(store, job_id)
+    if str(note.get("source") or "") != "several":
+        return str(note.get("user_line") or "").strip() or None
+    if list(note.get("applicant_ids") or []):
+        return None
+    job = store.get_job(job_id)
+    reply = _clarification_reply(store, job)
+    question = str(note.get("user_line") or "").strip()
+    if not reply:
+        return question or None
+    if _reply_is_stop(reply):
+        return None
+    matches = _displayed_matches(note)
+    name = str(note.get("name") or "")
+    index = _select_match_index(reply, matches) if matches else None
+    if index is not None:
+        _bind_chosen_match(store, job_id, job, name=name, chosen=matches[index])
+        return None
+    if note.get("reasked"):
+        return question or which_client_question(name, matches)
+    line = which_client_question(name, matches)
+    ids = [str(row.get("applicant_id") or "") for row in matches if row.get("applicant_id")]
+    _remember_search(
+        store,
+        job_id,
+        source="several",
+        applicant_ids=[],
+        user_line=line,
+        name=name,
+        candidates=list(note.get("candidates") or ids),
+        matches=matches,
+        reasked=True,
+    )
+    return line
+
+
 def pending_named_lookup_line(db_path: str, job_id: str | None) -> str:
-    """The search already decided what to say. The model must not choose an id."""
+    """The line to send before the model, or empty when the model should run.
+
+    A which-client question stays here until the reply picks one saved match.
+    That pick clears the line so the job can answer. A reply that picks nobody
+    asks once more. Stop is not a pick and is not another question.
+    """
     if not db_path or not job_id:
         return ""
     from .store import JobStore
 
     try:
-        note = _search_note(JobStore(db_path), job_id)
+        store = JobStore(db_path)
+        note = _search_note(store, job_id)
     except Exception:
         return ""
+    if str(note.get("source") or "") == "several":
+        return str(_consume_client_choice(store, job_id) or "").strip()
     return str(note.get("user_line") or "").strip()
 
 

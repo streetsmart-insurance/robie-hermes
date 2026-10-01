@@ -121,11 +121,12 @@ class NameLookupTests(unittest.TestCase):
                     {"applicant_id": "88001123", "name": "Buster Brown"},
                 ],
             )
-            self.assertEqual(
-                question,
-                "I found more than one Buster Brown. Which one should I use?",
-            )
-            self.assertNotIn("88001122", question)
+            self.assertIn("I found more than one Buster Brown.", question)
+            self.assertIn("account 88001122", question)
+            self.assertIn("account 88001123", question)
+            self.assertTrue(question.endswith("Which one should I use?"))
+            self.assertNotIn("applicant_id", question)
+            self.assertNotIn("ROBIE_BLOCKED", question)
 
 
 class OutboundCodeTests(unittest.TestCase):

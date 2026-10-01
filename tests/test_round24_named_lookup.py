@@ -317,9 +317,12 @@ class NameSearchTests(unittest.TestCase):
                 ),
             )
             payload = store.get_job(job_id)["payload"]
-            self.assertEqual(
-                line, "I found more than one Buster Brown. Which one should I use?"
-            )
+            self.assertIn("I found more than one Buster Brown.", line or "")
+            self.assertIn(f"1. Buster Brown, account {FOUND_ID}", line or "")
+            self.assertIn("2. Buster Brown, account 88001123", line or "")
+            self.assertTrue(str(line or "").endswith("Which one should I use?"))
+            self.assertNotIn("applicant_id", line or "")
+            self.assertNotIn("ROBIE_BLOCKED", line or "")
             self.assertFalse(str(payload.get("applicant_id") or ""))
             self.assertNotIn(DOCS_ID, payload.values())
             self.assertNotEqual(

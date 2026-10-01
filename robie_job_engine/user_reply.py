@@ -65,6 +65,17 @@ _HITL_KEEP = (
 )
 
 
+def which_client_list_text(text: str) -> str | None:
+    """The numbered which-client question, kept whole so the list is not dropped."""
+    raw = str(text or "").replace("\r\n", "\n").strip()
+    if not raw or _has_internal_detail(raw):
+        return None
+    folded = " ".join(raw.split()).casefold()
+    if "i found more than one" in folded and folded.endswith("which one should i use?"):
+        return raw
+    return None
+
+
 def format_user_reply(text: str, *, collapse: bool = True) -> str:
     """One outbound formatter. Their scrubber runs inside this function.
 
@@ -76,6 +87,9 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
     """
     from .answer_only import scrub_user_reply
 
+    listed = which_client_list_text(text)
+    if listed:
+        return listed
     asked = plain_clarify_or_sign_in(text)
     if asked:
         return asked
