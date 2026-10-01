@@ -28,6 +28,7 @@ class Plan:
     discussion_id: str
     caller_id: str
     max_attempts: int = 1
+    unrestricted_hours: bool = False
     def digest(self): return fingerprint(self.__dict__)
 
 @dataclass(frozen=True)
@@ -65,7 +66,10 @@ class Controls:
         path.chmod(0o600)
     def db(self):return sqlite3.connect(self.path)
     def validate(self,plan,grant_id):
-        now=self.clock();self.window.check(now)
+        now=self.clock()
+        if now.tzinfo is None:raise Refused("aware clock required")
+        if type(plan.unrestricted_hours) is not bool:raise Refused("explicit hours policy required")
+        if not plan.unrestricted_hours:self.window.check(now)
         if not plan.target.startswith('+') or not plan.target[1:].isdigit() or not 8<=len(plan.target)<=16:raise Refused('E164 target required')
         if not all([plan.campaign,plan.script,plan.applicant_id,plan.discussion_id,plan.caller_id]):raise Refused('script and bound note destination required')
         if plan.max_attempts not in (1,2):raise Refused('one or two attempts only')
