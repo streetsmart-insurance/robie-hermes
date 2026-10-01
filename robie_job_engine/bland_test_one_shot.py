@@ -4,12 +4,17 @@ No default voice, caller identity or implicit execute. Permanent atomic claim
 before dispatch; HTTP ambiguity never retries. No retry/voicemail/SMS/webhook.
 """
 from __future__ import annotations
-from datetime import date
+from datetime import date, datetime
 import json
 from pathlib import Path
 import sqlite3
 import socket
 import urllib.request
+from zoneinfo import ZoneInfo
+
+from .bland_transport import get_call, post_call
+
+EASTERN = ZoneInfo("America/New_York")
 
 TARGET = "+17326688161"
 CALLER = "+17322986745"
@@ -42,10 +47,27 @@ def payload(*, target, voice_id, caller_id, max_minutes=1):
             "metadata":{"purpose":"one-shot Jake connection test","redial":"disabled"}}
 
 
-def dispatch_once(*, db_path, test_id, approved_day, today, hostname, body, api_key, request):
+def eastern_today(clock=None):
+    """Current calendar date in America/New_York. Tests inject clock; the CLI cannot."""
+    now = datetime.now(EASTERN) if clock is None else clock()
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise TestCallRefused("aware America/New_York clock required")
+    return now.astimezone(EASTERN).date()
+
+
+def transport_request(method, path, body, api_key):
+    """Single Bland read or write. execute=True is still gated inside the transport."""
+    if method == 'POST' and path == '/v1/calls':
+        return post_call(body, api_key=api_key, execute=True)
+    if method == 'GET' and isinstance(path, str) and path.startswith('/v1/calls/'):
+        return get_call(path[len('/v1/calls/'):], api_key=api_key, execute=True)
+    raise TestCallRefused("unsupported Bland request")
+
+
+def dispatch_once(*, db_path, test_id, approved_day, hostname, body, api_key, request, clock=None):
     if hostname.split('.')[0] != 'hermes-test-01':
         raise TestCallRefused("Test host only")
-    if today != approved_day:
+    if eastern_today(clock) != approved_day:
         raise TestCallRefused("test permission is limited to its approved day")
     if not test_id or not api_key:
         raise TestCallRefused("unique reviewed test ID and key required")
@@ -86,13 +108,6 @@ def dispatch_once(*, db_path, test_id, approved_day, today, hostname, body, api_
     return {'state':state,'call_id':call_id,'new_dispatch':True,'retry_allowed':False}
 
 
-def http(method,path,body,key):
-    data=json.dumps(body).encode() if body is not None else None
-    req=urllib.request.Request('https://api.bland.ai'+path,data=data,method=method,
-                               headers={'Authorization':key,'Content-Type':'application/json'})
-    with urllib.request.urlopen(req,timeout=30) as response: return json.load(response)
-
-
 def main():
     import argparse, base64
     parser=argparse.ArgumentParser(description=__doc__)
@@ -111,11 +126,10 @@ def main():
     with urllib.request.urlopen(meta,timeout=10) as response: token=json.load(response)['access_token']
     req=urllib.request.Request('https://secretmanager.googleapis.com/v1/'+SECRET+':access',headers={'Authorization':'Bearer '+token})
     with urllib.request.urlopen(req,timeout=15) as response:key=base64.b64decode(json.load(response)['payload']['data']).decode().strip()
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
     result=dispatch_once(db_path=args.state_dir/'one-shot.sqlite',test_id=args.test_id,
-                         approved_day=args.approved_day,today=datetime.now(ZoneInfo('America/New_York')).date(),
-                         hostname=socket.gethostname(),body=body,api_key=key,request=http)
+                         approved_day=args.approved_day,
+                         hostname=socket.gethostname(),body=body,api_key=key,
+                         request=transport_request)
     print(json.dumps(result))
 
 

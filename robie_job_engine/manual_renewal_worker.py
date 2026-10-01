@@ -57,7 +57,6 @@ import logging
 import os
 import re
 import sqlite3
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -96,7 +95,6 @@ MAX_FOLLOWUPS = 2  # quiet checks after the initial email, then the voice branch
 # carrier_voice_attempted once-only guard still apply.
 VOICE_ENABLED_DEFAULT = True
 VOICE_CALLER_ID_DEFAULT = "+17322986745"  # Robie line (old system default)
-BLAND_CALLS_URL = "https://api.bland.ai/v1/calls"
 BLAND_QUEUE_ERROR_STATUSES = frozenset({"pre_queue_error", "queue_error"})
 BLAND_CALL_PLACED_STATUSES = frozenset(
     {"queued", "ringing", "in_progress", "in-progress", "completed", "ended"}
@@ -1286,35 +1284,30 @@ def build_carrier_call_prompt(
     )
 
 
-def _bland_post(url: str, payload: dict[str, Any], api_key: str, timeout: int = 15) -> tuple[int, dict[str, Any]]:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Authorization": api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
+def _bland_post(payload: dict[str, Any], api_key: str, timeout: int = 15) -> tuple[int, dict[str, Any]]:
+    """One POST through bland_transport. This module does not open the vendor host."""
+    del timeout
+    from .bland_transport import BlandTransportError, post_call
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = int(getattr(resp, "status", 200) or 200)
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-            return status, data if isinstance(data, dict) else {}
-    except urllib.error.HTTPError as exc:  # noqa: F821 - imported via urllib.request
-        try:
-            data = json.loads(exc.read().decode("utf-8") or "{}")
-        except Exception:
-            data = {}
-        return int(exc.code or 0), data if isinstance(data, dict) else {}
+        data = post_call(payload, api_key=api_key, execute=True)
+    except BlandTransportError as exc:
+        if exc.status is None:
+            raise
+        return int(exc.status), dict(exc.body)
+    return 200, data if isinstance(data, dict) else {}
 
 
-def _bland_get(url: str, api_key: str, timeout: int = 15) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"Authorization": api_key}, method="GET")
+def _bland_get(call_id: str, api_key: str, timeout: int = 15) -> dict[str, Any]:
+    """One GET through bland_transport. Ambiguous reads stay empty; no retry here."""
+    del timeout
+    from .bland_transport import get_call
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-            return data if isinstance(data, dict) else {}
+        data = get_call(call_id, api_key=api_key, execute=True)
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _classify_bland_readback(data: dict[str, Any]) -> dict[str, Any]:
@@ -1408,10 +1401,10 @@ def dispatch_carrier_voice_call(
         "from": from_number,
     }
     try:
-        status, data = _bland_post(BLAND_CALLS_URL, payload, api_key)
+        status, data = _bland_post(payload, api_key)
         if status in (400, 422) and "from" in payload:
             payload.pop("from", None)
-            status, data = _bland_post(BLAND_CALLS_URL, payload, api_key)
+            status, data = _bland_post(payload, api_key)
         if status not in (200, 201):
             return {
                 **base,
@@ -1432,7 +1425,7 @@ def dispatch_carrier_voice_call(
         }
         # Queue-status readback: POST acceptance is not proof the phone rang.
         for _ in range(3):
-            readback = _bland_get(f"{BLAND_CALLS_URL}/{call_id}", api_key)
+            readback = _bland_get(call_id, api_key)
             classified = _classify_bland_readback(readback)
             result.update(classified)
             if classified.get("call_placed") or classified.get("status") == "QUEUE_ERROR":

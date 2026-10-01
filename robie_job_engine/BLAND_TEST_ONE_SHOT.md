@@ -8,7 +8,12 @@ redial, transfers, SMS, tools or webhooks. Uses exactly the reviewed opening,
 follow-up and close. An AI prompt cannot guarantee exact generated words beyond
 first_sentence; this limitation must be surfaced before live use.
 
-The execute path is Test-host-only and approved-day-only. Durable private SQLite
+The execute path is Test-host-only and approved-day-only. `--approved-day` is
+compared with the current date in America/New_York computed in this module;
+the CLI value is not treated as today. Tests inject a clock. HTTP goes through
+`bland_transport` with `execute=True`, which still refuses unless
+`ROBIE_ENV=TEST`, the short hostname is `hermes-test-01`, and
+`ROBIE_PHONE_LIVE_CALLS=1`. Durable private SQLite
 claim commits before POST. Unknown transport outcomes or missing call IDs never
 retry; check the vendor before deciding what happened. POST acceptance is not
 proof Jake answered; GET readback must establish queue/progress and later outcome.

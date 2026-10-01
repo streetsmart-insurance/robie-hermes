@@ -10,7 +10,7 @@ class Safety(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory(dir=Path.home(),prefix='phone-proof-');self.root=Path(self.temp.name);self.root.chmod(0o700)
   self.now=datetime(2026,10,1,15,tzinfo=timezone.utc)
-  self.plan=Plan('SYN-CAMPAIGN','+15555550123','carrier','SYN-DIR','SYN-SCRIPT','','SYN-APP','SYN-DISC','+15555550124',2)
+  self.plan=Plan('SYN-CAMPAIGN','+15555550123','carrier','SYN-DIR','SYN-SCRIPT','','SYN-APP','SYN-DISC','+15555550124','SYN-VOICE',1,2)
   self.grant=Grant('SYN-USER-MESSAGE',self.plan.digest(),self.now+timedelta(hours=2))
   self.approvals=Mock();self.approvals.resolve.side_effect=lambda _:self.grant
   self.directory=Mock();self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
@@ -101,6 +101,17 @@ class Safety(unittest.TestCase):
  def test_unresolved_note_holds_new_campaign(self):
   self.start();self.notes.find.return_value=None;self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2',target='+15555550125');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
   with self.assertRaisesRegex(Refused,'note'):self.start()
+ def test_blank_voice_refused_without_default(self):
+  self.plan=replace(self.plan,voice_id='  ');self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,'voice'):self.start()
+  self.dispatch.assert_not_called()
+ def test_duration_over_one_minute_refused(self):
+  self.plan=replace(self.plan,max_duration_minutes=30);self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,'duration'):self.start()
+  self.dispatch.assert_not_called()
+ def test_send_body_carries_reviewed_voice_and_one_minute_cap(self):
+  self.start();body=self.dispatch.call_args.args[0]
+  self.assertEqual('SYN-VOICE',body['voice']);self.assertEqual(1,body['max_duration'])
  def test_private_directory(self):
   self.root.chmod(0o755)
   with self.assertRaises(Refused):Controls(self.root/'another.sqlite',self.c.window,self.approvals,self.directory,self.dispatch,self.notes,lambda:self.now)

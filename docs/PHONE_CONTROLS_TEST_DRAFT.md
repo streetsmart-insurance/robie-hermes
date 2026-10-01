@@ -7,7 +7,8 @@ enabled under the assumption this module guards them.
 
 Implemented in order:
 1. Exact plan digest approval gate binds recipient, script, voicemail script,
-   caller, attempts and EZLynx destination to a trusted resolver record.
+   caller, voice id, one-minute max duration, attempts and EZLynx destination
+   to a trusted resolver record. There is no default voice.
 2. Explicit timezone and weekday calling window checked on every attempt.
    Test fixture uses America/New_York, 9-17; this is not a live-policy ruling.
 3. Atomic 24-hour per-target campaign cooldown. A reviewed second attempt

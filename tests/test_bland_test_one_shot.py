@@ -1,10 +1,14 @@
 """Synthetic only. No call, credential access or remote traffic."""
-from datetime import date
+from datetime import date, datetime, timezone
+import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
-from robie_job_engine.bland_test_one_shot import payload,dispatch_once,TestCallRefused,TARGET,CALLER
+from io import StringIO
+from contextlib import redirect_stdout
+from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
+from robie_job_engine.bland_test_one_shot import payload,dispatch_once,TestCallRefused,TARGET,CALLER,main
 
 class OneShotSafety(unittest.TestCase):
     def setUp(self):
@@ -16,7 +20,7 @@ class OneShotSafety(unittest.TestCase):
         self.request=Mock(side_effect=[{'call_id':'SYN-CALL'},{'status':'queued'}])
     def tearDown(self):self.tmp.cleanup();self.home.cleanup()
     def run_case(self,**kw):
-        args=dict(db_path=self.root/'calls.sqlite',test_id='SYN-TEST',approved_day=date(2026,10,1),today=date(2026,10,1),hostname='hermes-test-01',body=self.body,api_key='SYN-KEY',request=self.request);args.update(kw);return dispatch_once(**args)
+        args=dict(db_path=self.root/'calls.sqlite',test_id='SYN-TEST',approved_day=date(2026,10,1),hostname='hermes-test-01',body=self.body,api_key='SYN-KEY',request=self.request,clock=lambda: datetime(2026,10,1,15,tzinfo=ZoneInfo('America/New_York')));args.update(kw);return dispatch_once(**args)
     def test_one_post_then_get(self):
         r=self.run_case();self.assertEqual('SYN-CALL',r['call_id']);self.assertEqual(['POST','GET'],[c.args[0] for c in self.request.call_args_list])
     def test_duplicate_never_dispatches(self):
@@ -32,7 +36,18 @@ class OneShotSafety(unittest.TestCase):
         with self.assertRaises(TestCallRefused):self.run_case(hostname='hermes-poc-01')
         self.request.assert_not_called()
     def test_expired_day_refused(self):
-        with self.assertRaises(TestCallRefused):self.run_case(today=date(2026,10,2))
+        with self.assertRaises(TestCallRefused):self.run_case(clock=lambda: datetime(2026,10,2,15,tzinfo=ZoneInfo('America/New_York')))
+    def test_approved_day_follows_eastern_clock_not_the_cli_value(self):
+        # 2026-10-02 03:00 UTC is still 2026-10-01 in America/New_York.
+        self.run_case(clock=lambda: datetime(2026,10,2,3,tzinfo=timezone.utc))
+        with self.assertRaises(TestCallRefused):self.run_case(clock=lambda: datetime(2026,10,2,5,tzinfo=timezone.utc))
+    def test_dry_run_prints_payload_without_transport(self):
+        buf=StringIO()
+        argv=['prog','--voice-id','SYN-VOICE','--test-id','dry','--approved-day','2026-10-01','--state-dir',str(self.root)]
+        with patch('sys.argv',argv), patch('robie_job_engine.bland_transport.post_call',side_effect=AssertionError('post')), patch('robie_job_engine.bland_transport.get_call',side_effect=AssertionError('get')), redirect_stdout(buf):
+            main()
+        printed=json.loads(buf.getvalue())
+        self.assertTrue(printed['dry_run']);self.assertEqual('SYN-VOICE',printed['payload']['voice']);self.assertEqual(1,printed['payload']['max_duration'])
     def test_extra_retry_voicemail_or_recipient_refused(self):
         for k,v in [('retry',{'wait':10}),('phone_number','+15555550123'),('record',True),('voicemail',{'action':'leave_message'})]:
             with self.assertRaises(TestCallRefused):self.run_case(body=dict(self.body,**{k:v}))

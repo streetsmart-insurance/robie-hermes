@@ -13,6 +13,13 @@ from zoneinfo import ZoneInfo
 
 class Refused(ValueError): pass
 
+def _require_call_bounds(plan):
+    if not isinstance(plan.voice_id,str) or not plan.voice_id.strip():
+        raise Refused('reviewed voice ID required')
+    # Bland max_duration is minutes. Test cap is one minute; no default voice or duration.
+    if type(plan.max_duration_minutes) is not int or plan.max_duration_minutes>1 or plan.max_duration_minutes<1:
+        raise Refused('max duration must be one minute')
+
 def fingerprint(value):
     return sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
@@ -27,6 +34,8 @@ class Plan:
     applicant_id: str
     discussion_id: str
     caller_id: str
+    voice_id: str
+    max_duration_minutes: int
     max_attempts: int = 1
     unrestricted_hours: bool = False
     def digest(self): return fingerprint(self.__dict__)
@@ -72,6 +81,7 @@ class Controls:
         if not plan.unrestricted_hours:self.window.check(now)
         if not plan.target.startswith('+') or not plan.target[1:].isdigit() or not 8<=len(plan.target)<=16:raise Refused('E164 target required')
         if not all([plan.campaign,plan.script,plan.applicant_id,plan.discussion_id,plan.caller_id]):raise Refused('script and bound note destination required')
+        _require_call_bounds(plan)
         if plan.max_attempts not in (1,2):raise Refused('one or two attempts only')
         grant=self.approvals.resolve(grant_id)
         if not isinstance(grant,Grant) or not grant.evidence_id or grant.plan_digest!=plan.digest() or grant.expires<=now:raise Refused('exact recipient/scripts approval required')
@@ -100,7 +110,9 @@ class Controls:
     def _send(self,plan,seq):
         # The committed claim consumes the exact per-call exception even if the
         # response is lost. No blind resubmission after a transport ambiguity.
-        body={'phone_number':plan.target,'from':plan.caller_id,'task':plan.script,
+        _require_call_bounds(plan)
+        body={'phone_number':plan.target,'from':plan.caller_id,'voice':plan.voice_id,
+              'max_duration':plan.max_duration_minutes,'task':plan.script,
               'voicemail':{'action':'leave_message','message':plan.voicemail_script} if seq==2 and plan.voicemail_script else {'action':'hangup'},'record':False}
         try:
             result=self.dispatch(body);call_id=result.get('call_id')

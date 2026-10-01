@@ -6,8 +6,11 @@ data may ever appear here (repo may be public; owner ruling pending).
 """
 from __future__ import annotations
 
+import contextvars
 import os
+import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -65,11 +68,37 @@ class FakePort:
         return detail
 
 
+_STORE: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "doubledial_store", default=None
+)
+
+
+@pytest.fixture(autouse=True)
+def durable_dir():
+    """Private 0700 directory outside /tmp. Idempotency rejects /tmp stores."""
+    path = Path(tempfile.mkdtemp(prefix="doubledial-test-", dir=str(Path.home())))
+    os.chmod(path, 0o700)
+    token = _STORE.set(path)
+    try:
+        yield path
+    finally:
+        _STORE.reset(token)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _private_db(name="dd.db"):
+    root = _STORE.get()
+    if root is None:
+        raise RuntimeError("durable_dir fixture is required")
+    slot = Path(tempfile.mkdtemp(prefix="worker-", dir=str(root)))
+    os.chmod(slot, 0o700)
+    return os.path.join(slot, name)
+
+
 def make_worker(port, clock, **config_kwargs):
     config_kwargs.setdefault("poll_intervals_seconds", (0, 0, 0, 0))
     config = DoubleDialConfig(**config_kwargs)
-    db = os.path.join(tempfile.mkdtemp(prefix="doubledial-test-", dir="/home/sandbox"), "dd.db")
-    return DoubleDialWorker(db_path=db, port=port, config=config, clock=clock)
+    return DoubleDialWorker(db_path=_private_db(), port=port, config=config, clock=clock)
 
 
 def voicemail_detail(call_id):
@@ -417,10 +446,10 @@ def test_ten_second_redial_delay_honored_within_180s_window():
 
 # --- attempt-1 concurrency (racing workers) --------------------------------
 
-def test_concurrent_attempt_1_dispatch_places_exactly_one_call():
+def test_concurrent_attempt_1_dispatch_places_exactly_one_call(durable_dir):
     """Two racing workers must not both place the first call."""
     import threading
-    db = os.path.join(tempfile.mkdtemp(prefix="doubledial-race-", dir="/home/sandbox"), "dd.db")
+    db = os.path.join(durable_dir, "dd.db")
     port_a, port_b = FakePort(), FakePort()
     clock = FakeClock()
     worker_a = DoubleDialWorker(db_path=db, port=port_a, clock=clock)

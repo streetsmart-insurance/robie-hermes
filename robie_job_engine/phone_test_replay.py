@@ -37,7 +37,7 @@ def replay(root,hostname):
     for idx,(label,audience) in enumerate([('Robie Call','carrier'),('Robie Call','finance'),('Robie lead follow-up','client'),('Robie audit','client')],1):
         app=f'SYN-APP-{idx}';disc=f'SYN-DISC-{idx}';note=f'SYN-SOURCE-{idx}'
         card={'applicantId':app,'id':disc,'discussionNote':{'id':note,'modifiedAt':now.isoformat(),'noteLabels':[{'labelName':label}],'note':'untrusted source fixture'}}
-        plan=Plan(f'{app}:{disc}:{note}:{slug(label)}',f'+155555501{idx:02d}',audience,f'SYN-DIR-{idx}','SYNTHETIC reviewed connection script','',app,disc,'+15555550199',unrestricted_hours=label in ('Robie Call','Robie lead follow-up'))
+        plan=Plan(f'{app}:{disc}:{note}:{slug(label)}',f'+155555501{idx:02d}',audience,f'SYN-DIR-{idx}','SYNTHETIC reviewed connection script','',app,disc,'+15555550199','SYN-VOICE',1,unrestricted_hours=label in ('Robie Call','Robie lead follow-up'))
         grant=f'SYN-GRANT-{idx}';approvals.records[grant]=Grant(grant,plan.digest(),now+timedelta(hours=1),allow_client=audience=='client')
         directory.records[plan.directory_id]={'audience':audience,'phone':plan.target}
         prepared=runner.preview(card,plan);sent=runner.run_with_test_ports(card,plan,grant)
