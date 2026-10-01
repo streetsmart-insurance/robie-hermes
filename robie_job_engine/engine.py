@@ -608,6 +608,22 @@ class JobEngine:
                         redact_exception(exc),
                     )
 
+    def _remember_hold_question(self, job_id: str, error: str | None) -> None:
+        """Park a missing page as a question the person can answer."""
+        from .browser_read import clarification_for_hold
+
+        question = clarification_for_hold(error)
+        if not question:
+            return
+        try:
+            self.store.checkpoint(
+                job_id,
+                "clarification",
+                {"question": question, "asked": True},
+            )
+        except Exception:
+            logger.exception("could not store clarification job=%s", job_id)
+
     def _perform(
         self,
         job: dict[str, Any],
@@ -740,6 +756,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,
@@ -954,6 +971,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,

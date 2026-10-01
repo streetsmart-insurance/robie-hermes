@@ -303,6 +303,7 @@ _EXPLICIT_NO = re.compile(
     re.IGNORECASE,
 )
 LEFT_AS_IS = "OK, I left it as is."
+ALREADY_DONE = "Already done."
 _DEDUCTIBLE_CHANGE = re.compile(
     r"\b(?:change|update|set|raise|lower)\b.{0,40}\bdeductibles?\b"
     r"|\bdeductibles?\b.{0,24}\b(?:to|of)\b",
@@ -347,6 +348,11 @@ def close_declined_note_repost(store: Any, job_id: str, text: str) -> str | None
             release_lease=True,
         )
     store.checkpoint(job_id, "note_left_as_is", {"reply": LEFT_AS_IS})
+    stop_recordings_for_jobs(
+        str(getattr(store, "path", "") or ""),
+        [job_id],
+        JobStatus.CANCELLED.value,
+    )
     return LEFT_AS_IS
 
 
@@ -403,6 +409,63 @@ def consume_note_repost_allowance(store: Any, job_id: str) -> bool:
     except Exception:
         return False
     return True
+
+
+def _yes_already_spent(store: Any, job_id: str) -> bool:
+    """True when this thread already used its one yes, or the note is filed."""
+    try:
+        confirmed = store.get_checkpoint(job_id, "note_repost_confirmed") or {}
+    except Exception:
+        confirmed = {}
+    if confirmed.get("used"):
+        return True
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return False
+    return str(note.get("status") or "") == "filed"
+
+
+def note_already_done_target(
+    store: Any,
+    text: str,
+    *,
+    conversation_id: str | None,
+    inbound_thread_id: str | None,
+) -> str | None:
+    """The finished note job a second in-thread yes must not reopen.
+
+    The first yes resumes the parked job. After that note is filed, another
+    yes in the same thread is not a new task.
+    """
+    if store is None or not explicit_note_repost(text):
+        return None
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound or not str(conversation_id or "").strip():
+        return None
+    try:
+        with store.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id FROM conversation_job_links
+                   WHERE conversation_id=?
+                   ORDER BY created_at DESC LIMIT 30""",
+                (str(conversation_id),),
+            ).fetchall()
+    except Exception:
+        return None
+    seen: set[str] = set()
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        if read_job_chat_thread(store, job_id) != inbound:
+            continue
+        if _yes_already_spent(store, job_id):
+            return job_id
+    return None
 
 
 def note_repost_confirmed_by_reply(store: Any, job_id: str, text: str) -> bool:
@@ -735,6 +798,30 @@ def settle_job_when_reply_sent(db_path: str, job_id: str, content: str) -> bool:
                 return True
         except Exception:
             pass
+        try:
+            status = JobStatus(store.get_job(job_id)["status"])
+        except Exception:
+            return False
+        if status not in {JobStatus.RUNNING, JobStatus.VERIFYING}:
+            # A partial note close already left the job. Do not transition again.
+            if status in {
+                JobStatus.COMPLETE,
+                JobStatus.FAILED,
+                JobStatus.UNVERIFIED,
+                JobStatus.CANCELLED,
+                JobStatus.NEEDS_CLARIFICATION,
+                JobStatus.AWAITING_HUMAN_INPUT,
+            }:
+                stop_recordings_for_jobs(db_path, [job_id], status.value)
+                if status in {
+                    JobStatus.COMPLETE,
+                    JobStatus.FAILED,
+                    JobStatus.UNVERIFIED,
+                    JobStatus.CANCELLED,
+                }:
+                    _stop_model_for_finished_turn(job_id)
+                return True
+            return False
         store.transition(
             job_id,
             JobStatus.UNVERIFIED,

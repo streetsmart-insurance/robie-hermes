@@ -894,6 +894,20 @@ def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
     return agent_output_blocked(job_id, store)
 
 
+_GATEWAY_STATUS_NOTICE = re.compile(
+    r"interrupting current task|\(interrupted\)|\(no reply\)",
+    re.IGNORECASE,
+)
+
+
+def is_gateway_status_notice(text: str) -> bool:
+    """True for a gateway progress line. It is not an answer to the question."""
+    body = " ".join(str(text or "").split())
+    if not body or len(body) > 180:
+        return False
+    return _GATEWAY_STATUS_NOTICE.search(body) is not None
+
+
 def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
     """Refuse another send or tool call after /stop or the time ceiling."""
     if not job_id:

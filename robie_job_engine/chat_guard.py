@@ -1367,6 +1367,7 @@ def open_chat_job(
         return active_for_turn["id"]
     elif revival == "yes" and not continue_clarification and active_for_turn is not None:
         from .chat_job_controls import (
+            _yes_already_spent,
             mark_job_waiting_for_user,
             note_repost_confirmed_by_reply,
             repeat_note_question,
@@ -1374,27 +1375,42 @@ def open_chat_job(
         from .chat_turn_control import clear_agent_stop
 
         dedupe_id = active_for_turn["id"]
-        clear_agent_stop(dedupe_id)
-        note_repost_confirmed_by_reply(store, dedupe_id, text)
-        if JobStatus(active_for_turn["status"]) == JobStatus.UNVERIFIED:
+        if _yes_already_spent(store, dedupe_id):
+            revival = ""
+        else:
+            clear_agent_stop(dedupe_id)
+            note_repost_confirmed_by_reply(store, dedupe_id, text)
+        if revival == "yes" and JobStatus(active_for_turn["status"]) == JobStatus.UNVERIFIED:
             mark_job_waiting_for_user(
                 store,
                 dedupe_id,
                 repeat_note_question(store, dedupe_id),
                 from_unverified=True,
             )
-        clear_agent_stop(dedupe_id)
-        resumed = store.get_job(dedupe_id)
-        if JobStatus(resumed["status"]) in WAITING_STATUSES:
-            store.resume(dedupe_id)
-        queue.link_conversation_job(
-            conversation_id=context_key,
-            job_id=dedupe_id,
-            message_id=message_id,
-            event_id=message_id,
-            relation="CONTINUATION",
-        )
-        return dedupe_id
+        if revival == "yes":
+            clear_agent_stop(dedupe_id)
+            resumed = store.get_job(dedupe_id)
+            if JobStatus(resumed["status"]) in WAITING_STATUSES:
+                store.resume(dedupe_id)
+            queue.link_conversation_job(
+                conversation_id=context_key,
+                job_id=dedupe_id,
+                message_id=message_id,
+                event_id=message_id,
+                relation="CONTINUATION",
+            )
+            return dedupe_id
+    from .chat_job_controls import ALREADY_DONE, note_already_done_target
+
+    done_id = note_already_done_target(
+        store,
+        text,
+        conversation_id=context_key,
+        inbound_thread_id=inbound_thread_id,
+    )
+    if done_id and not continue_clarification:
+        store.checkpoint(done_id, "note_already_done", {"reply": ALREADY_DONE})
+        return done_id
     if continue_clarification and active_for_turn is not None:
         original = str((active_for_turn.get("payload") or {}).get("text") or "").strip()
         reply = str(text or "").strip()
@@ -2487,6 +2503,37 @@ def agent_reply_is_replaced(store: Any, job_id: str | None) -> bool:
         return False
 
 
+def _stop_job_recording(store: JobStore, job_id: str, status: str) -> None:
+    """Stop the screen recording when the job is no longer working."""
+    path = str(getattr(store, "path", "") or "")
+    if not path or not job_id:
+        return
+    try:
+        from .chat_job_controls import stop_recordings_for_jobs
+
+        stop_recordings_for_jobs(path, [job_id], status)
+    except Exception:
+        logger.exception("could not stop recording job=%s", job_id)
+
+
+def _leave_partial_note_unverified(store: JobStore, job_id: str) -> None:
+    """A filed request note is not the whole job. Never mark that COMPLETE."""
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status == JobStatus.PENDING:
+        store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        status = JobStatus.RUNNING
+    if status in {JobStatus.RUNNING, JobStatus.VERIFYING, JobStatus.COMPLETE}:
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={status},
+            error="only part of the request was done",
+            release_lease=True,
+        )
+    _stop_job_recording(store, job_id, JobStatus.UNVERIFIED.value)
+
+
 def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
     """A note whose readback matched is COMPLETE. That is the verified close.
 
@@ -2508,6 +2555,11 @@ def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
     note_text = str(note.get("note_text") or "").strip()
     applicant_id = str(note.get("applicant_id") or "").strip()
     if not note_id or not discussion_id or not note_text:
+        return False
+    job = store.get_job(job_id)
+    if _unproved_field_user_reply(store, job):
+        # The note landed. The address or holder did not. That is not COMPLETE.
+        _leave_partial_note_unverified(store, job_id)
         return False
     action = dict(store.get_checkpoint(job_id, "action") or {})
     destination = dict(action.get("destination") or {})
@@ -2554,6 +2606,7 @@ def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
     if status == JobStatus.COMPLETE:
+        _stop_job_recording(store, job_id, JobStatus.COMPLETE.value)
         return True
     if status not in {
         JobStatus.PENDING,
@@ -2576,6 +2629,7 @@ def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
         authority=VERIFIER_AUTHORITY,
         release_lease=True,
     )
+    _stop_job_recording(store, job_id, JobStatus.COMPLETE.value)
     return True
 
 
@@ -2609,9 +2663,15 @@ def publish_discussion_note_outcome(
 
         if not api_readback_confirms_write(store, job_id):
             return None
-        if not close_confirmed_note_job(store, job_id):
-            return None
-        line = _discussion_note_user_reply(store, store.get_job(job_id))
+        job = store.get_job(job_id)
+        unproved = _unproved_field_user_reply(store, job)
+        if unproved:
+            _leave_partial_note_unverified(store, job_id)
+            line = unproved
+        else:
+            if not close_confirmed_note_job(store, job_id):
+                return None
+            line = _discussion_note_user_reply(store, store.get_job(job_id))
     else:
         return None
     line = " ".join(str(line or "").split()).strip()
@@ -2737,7 +2797,10 @@ def _guard_chat_response_impl(
     job = store.get_job(job_id)
     forced = _unproved_field_user_reply(store, job)
     if forced:
-        content = forced
+        _leave_partial_note_unverified(store, job_id)
+        recordings = recordings or RecordingManager(db_path)
+        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+        return forced if forced.endswith("\n") else forced + "\n"
     recordings = recordings or RecordingManager(db_path)
     repeat = store.get_checkpoint(job_id, "discussion_note") or {}
     if str(repeat.get("status") or "") == "already_posted":
@@ -2835,6 +2898,13 @@ def _guard_chat_response_impl(
                 or payload.get("account_name")
             ),
         )["prompt"]
+    if JobStatus(job["status"]) == JobStatus.NEEDS_CLARIFICATION:
+        error = str(job.get("last_error") or "")
+        note = store.get_checkpoint(job_id, "clarification") or {}
+        question = " ".join(str(note.get("question") or "").split())
+        if "destination locator" in error.casefold() and question:
+            recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+            return question if question.endswith("\n") else question + "\n"
     if JobStatus(job["status"]) in WAITING_STATUSES:
         status = JobStatus(job["status"]).value
         recordings.safe_stop(job_id, status)
@@ -2850,6 +2920,11 @@ def _guard_chat_response_impl(
     from .email_guard import _strip_internal_reasoning
 
     if is_answer_only_job(job):
+        from .chat_turn_control import is_gateway_status_notice
+
+        if is_gateway_status_notice(content):
+            # The gateway's interrupt line is not the answer. Leave the job open.
+            return ""
         content = _strip_internal_reasoning(content) or content
         store.checkpoint(
             job_id, "worker_response", sanitize_worker_response(store, job_id, content)

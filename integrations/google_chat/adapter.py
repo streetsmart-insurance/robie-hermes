@@ -1524,9 +1524,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         if event.source is None:
             return
+        question = str((note or {}).get("question") or "").strip() or CLARIFICATION_QUESTION
         await self.send(
             event.source.chat_id,
-            f"{CLARIFICATION_QUESTION}\n\nRef: job {job_id}",
+            f"{question}\n\nRef: job {job_id}",
             reply_to=event.message_id,
             metadata={
                 "thread_id": getattr(event.source, "thread_id", None),
@@ -3307,6 +3308,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
         if job_id and await self._halt_note_left_as_is(event, job_id):
             return
+        if job_id and await self._halt_note_already_done(event, job_id):
+            return
         if job_id and await self._halt_failed_drive_ingestion(
             event, job_id, attachment_kwargs["attachment_refs"]
         ):
@@ -3859,6 +3862,42 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "thread_id": stored or getattr(event.source, "thread_id", None),
                 "robie_job_id": job_id,
                 "robie_delivery_kind": "notice",
+                "robie_stop_notice": True,
+            },
+        )
+        release_chat_lock(self, chat_id, job_id)
+        return True
+
+    async def _halt_note_already_done(
+        self, event: MessageEvent, job_id: Optional[str]
+    ) -> bool:
+        """A second yes after the note was filed. One line, no new job."""
+        if not job_id:
+            return False
+        note = await asyncio.to_thread(
+            JobStore(ROBIE_JOB_DB).get_checkpoint, job_id, "note_already_done"
+        )
+        reply = str((note or {}).get("reply") or "").strip()
+        if not reply:
+            return False
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if not chat_id:
+            return True
+        from robie_job_engine.chat_thread import read_job_chat_thread
+        from robie_job_engine.chat_turn_control import release_chat_lock
+
+        stored = await asyncio.to_thread(
+            read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+        )
+        await self.send(
+            chat_id,
+            reply,
+            reply_to=event.message_id,
+            metadata={
+                "thread_id": stored or getattr(event.source, "thread_id", None),
+                "robie_job_id": job_id,
+                "robie_delivery_kind": "notice",
+                "robie_stop_notice": True,
             },
         )
         release_chat_lock(self, chat_id, job_id)
@@ -4235,12 +4274,44 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if not job_id or current == str(job_id):
                 sticky.pop(str(chat_id), None)
 
+    def _job_can_still_speak(self, job_id: str | None) -> bool:
+        """A finished turn, or one that already posted its line, is not live."""
+        if not job_id or self._output_blocked(job_id):
+            return False
+        # A filed note is "replaced" before its one line goes out through
+        # send(). That job is still the live turn until the line is posted.
+        if self._model_prose_held(job_id):
+            return False
+        try:
+            status = str(JobStore(ROBIE_JOB_DB).get_job(job_id).get("status") or "")
+        except Exception:
+            return False
+        return status not in {item.value for item in TERMINAL_STATUSES}
+
+    def _edit_would_land_on_a_finished_turn(self, chat_id: str | None) -> bool:
+        """Drop a progress edit once this turn already posted its one line."""
+        if not chat_id:
+            return False
+        active = str((getattr(self, "_active_chat_job", None) or {}).get(chat_id) or "").strip()
+        sticky = ""
+        remembered = getattr(self, "_reply_job_by_chat", None)
+        if isinstance(remembered, dict):
+            sticky = str(remembered.get(chat_id) or "").strip()
+        if active and self._job_can_still_speak(active):
+            return False
+        for job_id in (active, sticky, self._live_chat_job_id(chat_id)):
+            if job_id and (
+                self._model_prose_held(job_id) or self._agent_reply_is_replaced(job_id)
+            ):
+                return True
+        return False
+
     def _live_unstopped_job_id(self, chat_id: str | None) -> str | None:
         """The turn that is still allowed to speak. A cancelled job is not it."""
         if not chat_id:
             return None
         mapped = str((getattr(self, "_active_chat_job", None) or {}).get(chat_id) or "").strip()
-        if mapped and not self._output_blocked(mapped):
+        if mapped and self._job_can_still_speak(mapped):
             return mapped
         turns = getattr(self, "_gateway_turns", None)
         if isinstance(turns, dict):
@@ -4250,7 +4321,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if not isinstance(record, dict):
                     continue
                 found = str(record.get("job_id") or "").strip()
-                if found and not self._output_blocked(found):
+                if found and self._job_can_still_speak(found):
                     return found
         return None
 
@@ -4539,9 +4610,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "hard_block",
             "notice",
         } and not (metadata or {}).get("robie_stop_notice")
+        from robie_job_engine.chat_turn_control import is_gateway_status_notice
+
+        if agent_reply and is_gateway_status_notice(str(content or "")):
+            # "Interrupting current task" is the gateway, not the answer.
+            return SendResult(success=True, message_id=None)
         if agent_reply and not job_id:
             job_id = self._active_turn_job_id(chat_id)
         if agent_reply and job_id and self._output_blocked(job_id):
+            if self._model_prose_held(job_id) or self._agent_reply_is_replaced(job_id):
+                # This turn already posted its one line. Do not hang the
+                # model's summary on an older job that is still open.
+                return SendResult(success=True, message_id=None)
             # A cancelled job left on the space must not eat the live turn.
             replacement = self._live_unstopped_job_id(chat_id)
             if replacement and replacement != job_id:
@@ -5031,10 +5111,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         if is_plan_refusal_text(content):
             return SendResult(success=True, message_id=message_id)
-        live_job = self._live_chat_job_id(chat_id) or self._active_turn_job_id(chat_id)
-        if live_job and (
-            self._model_prose_held(live_job) or self._agent_reply_is_replaced(live_job)
-        ):
+        if self._edit_would_land_on_a_finished_turn(chat_id):
             # The progress bubble was opened at the top level. Patching the
             # model's paragraph into it is the top-level "note added" message.
             # The one allowed line goes out through send(), on the stored thread.
