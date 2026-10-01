@@ -489,23 +489,53 @@ def add_note_to_discussion(
     discussion_client: Any | None = None,
     note_type: str = "Note",
     dry_run: bool = False,
+    filing_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """File a note on an existing titled discussion and read it back.
 
     This is the only success path for EZLynx notes. Playwright helpers must
     raise :class:`EzlynxPlaywrightNoteDocForbidden` instead of calling this
     after a browser click.
+
+    When ``filing_identity`` is provided (required for every email-sourced
+    filing), the triple verification in
+    :mod:`robie_job_engine.ezlynx_filing_guard` runs BEFORE the write:
+    the worker's matched record must agree with the email's insured name
+    and policy number, the policy must be anchored to the applicant in
+    EZLynx, and the resolved discussion must belong to the applicant.
+    A failed check raises ``FilingTargetMismatch`` and nothing is written.
     """
 
     from .ezlynx_discussions import (
         DiscussionApiClient,
         file_note_to_existing_discussion,
     )
+    from .ezlynx_filing_guard import verify_filing_target
 
     client = discussion_client
     if client is None:
         client = DiscussionApiClient(_discussion_config_from_secret())
     hint = title_hint or discussion_title
+    if filing_identity is not None:
+        # Resolve the discussion without writing, verify the target, then
+        # perform the real filing. A failed check raises before any write.
+        preview = file_note_to_existing_discussion(
+            client,
+            applicant_id,
+            note_text,
+            title_hint=hint,
+            note_type=note_type,
+            dry_run=True,
+        )
+        if preview.get("status") != "dry_run":
+            return preview
+        verified = verify_filing_target(
+            applicant_id=applicant_id,
+            filing_identity=filing_identity,
+            discussion_id=preview.get("discussion_id"),
+            discussion_title=preview.get("discussion_title"),
+            discussion_client=client,
+        )
     filed = file_note_to_existing_discussion(
         client,
         applicant_id,
@@ -524,6 +554,8 @@ def add_note_to_discussion(
         return filed
     confirm_discussion_note(client, discussion_id, note_id)
     filed["read_back"] = True
+    if filing_identity is not None:
+        filed["target_verified"] = verified
     return filed
 
 
@@ -536,12 +568,30 @@ def upload_document_via_api(
     filename: str | None = None,
     policy_master_id: str | None = None,
     file_content_type: str = "application/octet-stream",
+    filing_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Upload via DocumentApi and confirm the numeric id on a fresh search."""
+    """Upload via DocumentApi and confirm the numeric id on a fresh search.
+
+    When ``filing_identity`` is provided (required for every email-sourced
+    filing), the triple verification in
+    :mod:`robie_job_engine.ezlynx_filing_guard` runs BEFORE the upload.
+    A failed check raises ``FilingTargetMismatch`` and nothing is uploaded.
+    """
 
     from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+    from .ezlynx_discussions import DiscussionApiClient
+    from .ezlynx_filing_guard import verify_filing_target
 
     live = client if client is not None else EzlynxApiClient(load_ezlynx_api_config())
+    verified: dict[str, Any] | None = None
+    if filing_identity is not None:
+        discussion_client = DiscussionApiClient(_discussion_config_from_secret())
+        verified = verify_filing_target(
+            applicant_id=applicant_id,
+            filing_identity=filing_identity,
+            discussion_client=discussion_client,
+            policy_client=live,
+        )
     document_id = live.upload_applicant_document(
         applicant_id,
         document_name,
@@ -551,12 +601,15 @@ def upload_document_via_api(
         file_content_type=file_content_type,
     )
     confirm_uploaded_document_id(live, applicant_id, document_id)
-    return {
+    result = {
         "document_id": document_id,
         "applicant_id": str(applicant_id).strip(),
         "document_name": str(document_name).strip(),
         "read_back": True,
     }
+    if verified is not None:
+        result["target_verified"] = verified
+    return result
 
 
 DISCUSSION_API_ENV = "ROBIE_EZLYNX_DISCUSSION_API"
