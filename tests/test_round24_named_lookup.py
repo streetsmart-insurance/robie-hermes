@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,10 @@ from durable_temp import durable_temporary_directory
 from robie_job_engine.chat_guard import build_chat_execution_text
 from robie_job_engine.client_name_lookup import (
     LOOKUP_MISS,
+    QUICK_SEARCH_SELECTOR,
     APPLICANT_SEARCH_SELECTOR,
+    choose_client_search_page,
+    is_readonly_client_search,
     prepare_named_client_lookup,
     read_applicant_search,
     refuse_named_lookup_navigation,
@@ -93,21 +97,83 @@ class _Links:
         return self.rows[index]
 
 
+class _Missing:
+    def count(self) -> int:
+        return 0
+
+    def nth(self, index: int) -> _Link:
+        raise IndexError(index)
+
+
+class _Body:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def inner_text(self) -> str:
+        return self.text
+
+
+class _Inputs:
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self.rows = rows
+
+    def count(self) -> int:
+        return len(self.rows)
+
+    def nth(self, index: int):
+        return self.rows[index]
+
+
+class _InputNode:
+    def __init__(self, ident: str, placeholder: str) -> None:
+        self.ident = ident
+        self.placeholder = placeholder
+
+    def get_attribute(self, name: str) -> str:
+        if name == "id":
+            return self.ident
+        if name == "placeholder":
+            return self.placeholder
+        return ""
+
+
 class _Page:
-    def __init__(self, url: str, links: list[_Link] | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        links: list[_Link] | None = None,
+        *,
+        boxes: dict | None = None,
+        body: str = "",
+        inputs: list[_InputNode] | None = None,
+    ) -> None:
         self.url = url
         self.gotos: list[str] = []
         self.box = _Box()
         self.links = _Links(links or [])
+        self.boxes = boxes if boxes is not None else {QUICK_SEARCH_SELECTOR: self.box}
+        self.body = _Body(body)
+        self.inputs = _Inputs(inputs or [])
 
     def goto(self, url: str, **_kwargs) -> str:
         self.gotos.append(str(url))
         return str(url)
 
     def locator(self, selector: str):
-        if selector == APPLICANT_SEARCH_SELECTOR:
-            return self.box
-        return self.links
+        if selector in self.boxes:
+            return self.boxes[selector]
+        if selector == "body":
+            return self.body
+        if selector == "input":
+            return self.inputs
+        if (
+            "/web/account/" in selector
+            or "/applicantportal/" in selector
+            or "listbox" in selector
+            or "option" in selector
+        ):
+            return self.links
+        return _Missing()
 
 
 class LookupCloseTests(unittest.TestCase):
@@ -348,3 +414,166 @@ class NameSearchTests(unittest.TestCase):
             self.assertFalse(
                 str(store.get_job(job_id)["payload"].get("applicant_id") or "")
             )
+
+
+class SearchBoxTests(unittest.TestCase):
+    def test_dashboard_box_is_tried_before_applicant_search(self):
+        quick = _Box()
+        older = _Box()
+        page = _Page(
+            "https://app.ezlynx.com/web/",
+            [_Link(f"https://app.ezlynx.com/web/account/{FOUND_ID}/overview", "Buster Brown")],
+            boxes={
+                QUICK_SEARCH_SELECTOR: quick,
+                APPLICANT_SEARCH_SELECTOR: older,
+            },
+        )
+        outcome = read_applicant_search(page, "buster brown")
+        self.assertEqual(quick.fills, ["buster brown"])
+        self.assertEqual(older.fills, [])
+        self.assertEqual(outcome["matches"][0]["applicant_id"], FOUND_ID)
+        self.assertTrue(is_readonly_client_search("fill", QUICK_SEARCH_SELECTOR))
+
+    def test_header_placeholder_is_the_last_search_box(self):
+        header = _Box()
+        page = _Page(
+            "https://app.ezlynx.com/web/",
+            [_Link(f"https://app.ezlynx.com/web/account/{FOUND_ID}/overview", "Buster Brown")],
+            boxes={"header input[placeholder='Search']": header},
+        )
+        outcome = read_applicant_search(page, "buster brown")
+        self.assertEqual(header.fills, ["buster brown"])
+        self.assertEqual(outcome["status"], "ok")
+
+    def test_unreadable_search_logs_the_url_and_not_other_clients(self):
+        page = _Page(
+            "https://app.ezlynx.com/web/",
+            body="Welcome Alice Example",
+            boxes={},
+            inputs=[_InputNode("quickSearchInput", "Search")],
+        )
+        with self.assertLogs("robie.health", level="INFO") as logs:
+            outcome = read_applicant_search(page, "buster brown")
+        self.assertEqual(outcome["status"], "error")
+        blob = "\n".join(logs.output)
+        self.assertIn("https://app.ezlynx.com/web/", blob)
+        self.assertIn("buster brown", blob)
+        self.assertIn("quickSearchInput", blob)
+        self.assertNotIn("Alice", blob)
+
+    def test_dashboard_is_used_instead_of_an_unsaved_form(self):
+        class _Dash:
+            url = "https://app.ezlynx.com/web/"
+
+        class _Form:
+            url = "https://app.ezlynx.com/applicantportal/policy/actions/edit/1/2"
+
+            def evaluate(self, _script: str) -> bool:
+                return True
+
+        form = _Form()
+        dash = _Dash()
+        self.assertIs(choose_client_search_page([form, dash]), dash)
+        self.assertIsNone(choose_client_search_page([form]))
+
+        class _Clean(_Form):
+            def evaluate(self, _script: str) -> bool:
+                return False
+
+        clean = _Clean()
+        self.assertIs(choose_client_search_page([clean]), clean)
+
+    def test_prepare_from_the_event_loop_does_not_call_sync_playwright_there(self):
+        """The real searcher, not a fake, started from a running loop."""
+        loop_thread = threading.current_thread()
+        started: list[threading.Thread] = []
+
+        class _BoxLoop(_Box):
+            pass
+
+        box = _BoxLoop()
+
+        class _LinkLoop:
+            def get_attribute(self, name: str) -> str:
+                if name == "href":
+                    return f"https://app.ezlynx.com/web/account/{FOUND_ID}/overview"
+                return ""
+
+            def inner_text(self) -> str:
+                return "Buster Brown"
+
+        class _LinksLoop:
+            def count(self) -> int:
+                return 1
+
+            def nth(self, _index: int) -> _LinkLoop:
+                return _LinkLoop()
+
+        class _PageLoop:
+            url = "https://app.ezlynx.com/web/"
+
+            def locator(self, selector: str):
+                if selector == QUICK_SEARCH_SELECTOR:
+                    return box
+                if (
+                    "/web/account/" in selector
+                    or "/applicantportal/" in selector
+                    or "listbox" in selector
+                    or "option" in selector
+                ):
+                    return _LinksLoop()
+                if selector == "input":
+                    return _Missing()
+                if selector == "body":
+                    return _Body("")
+                return _Missing()
+
+        class _Context:
+            pages = [_PageLoop()]
+
+        class _Browser:
+            contexts = [_Context()]
+
+        class _Playwright:
+            def start(self):
+                started.append(threading.current_thread())
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    return self
+                raise RuntimeError(
+                    "It looks like you are using Playwright Sync API inside the asyncio loop"
+                )
+
+            def stop(self) -> None:
+                return None
+
+            def connect_over_cdp(self, _url: str, timeout: int = 0):
+                del timeout
+                return _Browser()
+
+            @property
+            def chromium(self):
+                return self
+
+        def _sync_playwright():
+            return _Playwright()
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = _job(store, applicant_id=DOCS_ID)
+
+            async def _from_the_loop():
+                asyncio.get_running_loop()
+                return prepare_named_client_lookup(store, job_id)
+
+            with patch("playwright.sync_api.sync_playwright", _sync_playwright):
+                line = asyncio.run(_from_the_loop())
+            payload = store.get_job(job_id)["payload"]
+            self.assertIsNone(line)
+            self.assertEqual(payload.get("applicant_id"), FOUND_ID)
+            self.assertNotIn(DOCS_ID, payload.values())
+            self.assertEqual(box.fills, ["buster brown"])
+            self.assertEqual(len(started), 1)
+            self.assertIsNot(started[0], loop_thread)

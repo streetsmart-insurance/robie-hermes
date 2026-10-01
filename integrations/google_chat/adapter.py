@@ -1474,7 +1474,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         store = JobStore(ROBIE_JOB_DB)
         job = await asyncio.to_thread(store.get_job, job_id)
         original = str((job.get("payload") or {}).get("text") or text)
-        execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, original)
+        execution_text = await asyncio.to_thread(
+            build_chat_execution_text, ROBIE_JOB_DB, job_id, original
+        )
         try:
             event.text = execution_text
         except Exception:
@@ -3587,7 +3589,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             ),
         ):
             return
-        execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
+        execution_text = await asyncio.to_thread(
+            build_chat_execution_text, ROBIE_JOB_DB, job_id, text
+        )
         try:
             event.text = execution_text
         except Exception:

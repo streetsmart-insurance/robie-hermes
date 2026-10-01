@@ -7,10 +7,15 @@ allowlist is unchanged for every other control.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import urlparse
+
+logger = logging.getLogger("robie.health")
 
 _LOOKUP = re.compile(
     r"\b(?:policy\s+numbers?|carriers?)\b",
@@ -36,7 +41,26 @@ _POLICY_FACT = re.compile(r"\bpolicy\s+numbers?\b", re.IGNORECASE)
 _AUTH_MARKERS = ("/login", "/signin", "/sign-in")
 
 LOOKUP_MISS = "I couldn't look that up; a CSR should take a look."
+QUICK_SEARCH_SELECTOR = "#quickSearchInput"
 APPLICANT_SEARCH_SELECTOR = "input#applicantSearch"
+# Dashboard first. The older applicant box is the fallback. A header
+# input whose placeholder is Search is the last resort.
+SEARCH_BOX_SELECTORS = (
+    QUICK_SEARCH_SELECTOR,
+    APPLICANT_SEARCH_SELECTOR,
+    "header input[placeholder='Search' i]",
+    "header input[placeholder='Search']",
+    "[role='banner'] input[placeholder='Search' i]",
+    "[role='banner'] input[placeholder='Search']",
+)
+_RESULT_SELECTORS = (
+    "[role='listbox'] a[href]",
+    "[role='option'] a[href]",
+    "a[href*='/web/account/']",
+    "a[href*='/applicantportal/']",
+)
+_EMPTY_RESULTS = ("no result", "no applicant", "0 result", "not found", "no match")
+_FORM_PATHS = ("/policy/actions/edit/", "formentry", "/applicantportal/policy")
 SEARCH_KIND = "client_name_search"
 _SEARCHER_OVERRIDE: Callable[[str], dict[str, Any]] | None = None
 
@@ -54,7 +78,7 @@ def is_readonly_client_search(method_name: str, selector: object) -> bool:
     if not text:
         return False
     compact = text.casefold().replace(" ", "")
-    if "applicantsearch" in compact:
+    if "applicantsearch" in compact or "quicksearchinput" in compact:
         return True
     return _SEARCH_BOX.search(text) is not None
 
@@ -195,28 +219,128 @@ def _page_url(page: Any) -> str:
     return str(value or "").strip()
 
 
-def _matches_on_page(page: Any) -> list[dict[str, str]]:
+def _is_dashboard_url(url: object) -> bool:
+    parsed = urlparse(str(url or "").strip())
+    if "ezlynx.com" not in (parsed.netloc or str(url or "")).casefold():
+        return False
+    path = (parsed.path or "").casefold().rstrip("/")
+    return path in {"", "/web", "/web/home", "/home", "/dashboard", "/web/dashboard"}
+
+
+def _is_form_url(url: object) -> bool:
+    path = urlparse(str(url or "")).path.casefold()
+    return any(marker in path for marker in _FORM_PATHS)
+
+
+def _page_would_lose_unsaved_form(page: Any) -> bool:
+    """A form tab with unsaved fields is not a place to type a search."""
+    if not _is_form_url(_page_url(page)):
+        return False
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return True
+    try:
+        dirty = evaluate(
+            """() => {
+              const skip = new Set(["quickSearchInput", "applicantSearch"]);
+              const nodes = document.querySelectorAll("input, textarea, select");
+              for (const node of nodes) {
+                if (skip.has(node.id)) continue;
+                if (node.type === "hidden" || node.type === "search") continue;
+                const current = "value" in node ? String(node.value || "") : "";
+                const initial = "defaultValue" in node ? String(node.defaultValue || "") : "";
+                if (current !== initial) return true;
+              }
+              return false;
+            }"""
+        )
+    except Exception:
+        return True
+    return bool(dirty)
+
+
+def choose_client_search_page(pages: list[Any]) -> Any | None:
+    """Use the dashboard. Do not type into a tab that would lose an unsaved form."""
+    ezlynx = [page for page in pages if page and "ezlynx.com" in _page_url(page).casefold()]
+    dashboards = [page for page in ezlynx if _is_dashboard_url(_page_url(page))]
+    if dashboards:
+        return dashboards[0]
+    for page in ezlynx:
+        if _page_would_lose_unsaved_form(page):
+            continue
+        return page
+    return None
+
+
+def _locator_count(node: Any) -> int:
+    try:
+        return int(node.count())
+    except Exception:
+        return 0
+
+
+def _first_search_box(page: Any) -> Any | None:
     locator_fn = getattr(page, "locator", None)
     if not callable(locator_fn):
-        return []
+        return None
+    for selector in SEARCH_BOX_SELECTORS:
+        try:
+            box = locator_fn(selector)
+        except Exception:
+            continue
+        if _locator_count(box) >= 1 and callable(getattr(box, "fill", None)):
+            return box
+    return None
+
+
+def _attr(node: Any, name: str) -> str:
+    getter = getattr(node, "get_attribute", None)
+    if not callable(getter):
+        return ""
     try:
-        links = locator_fn("a[href*='/web/account/'], a[href*='/applicantportal/']")
-        total = int(links.count())
+        return str(getter(name) or "")
     except Exception:
-        return []
+        return ""
+
+
+def _dom_hint(page: Any) -> str:
+    """Input ids and placeholders only. Never the rest of the page text."""
+    locator_fn = getattr(page, "locator", None)
+    if not callable(locator_fn):
+        return "no locator"
+    try:
+        inputs = locator_fn("input")
+        total = _locator_count(inputs)
+    except Exception:
+        return "inputs unreadable"
+    bits: list[str] = []
+    for index in range(min(total, 8)):
+        node = inputs.nth(index) if hasattr(inputs, "nth") else inputs
+        ident = _attr(node, "id") or "-"
+        placeholder = _attr(node, "placeholder") or "-"
+        bits.append(f"id={ident} placeholder={placeholder}")
+    return f"inputs={total} " + "; ".join(bits)
+
+
+def _log_unreadable(page: Any, name: str, why: str) -> None:
+    logger.info(
+        "named client search unreadable url=%s name=%s hint=%s why=%s",
+        _page_url(page) or "none",
+        " ".join(str(name or "").split()),
+        _dom_hint(page),
+        why,
+    )
+
+
+def _matches_from_links(links: Any) -> list[dict[str, str]]:
     from .ezlynx_write_scope import applicant_id_from_ezlynx_url
 
+    total = _locator_count(links)
     found: list[dict[str, str]] = []
     seen: set[str] = set()
     for index in range(total):
         item = links.nth(index) if hasattr(links, "nth") else links
-        href = ""
-        getter = getattr(item, "get_attribute", None)
-        if callable(getter):
-            try:
-                href = str(getter("href") or "")
-            except Exception:
-                href = ""
+        href = _attr(item, "href")
         applicant = str(applicant_id_from_ezlynx_url(href) or "").strip()
         if not applicant or applicant in seen:
             continue
@@ -232,30 +356,107 @@ def _matches_on_page(page: Any) -> list[dict[str, str]]:
     return found
 
 
+def _matches_from_hrefs(hrefs: list[str]) -> list[dict[str, str]]:
+    from .ezlynx_write_scope import applicant_id_from_ezlynx_url
+
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for href in hrefs:
+        applicant = str(applicant_id_from_ezlynx_url(href) or "").strip()
+        if not applicant or applicant in seen:
+            continue
+        seen.add(applicant)
+        found.append({"applicant_id": applicant, "name": ""})
+    return found
+
+
+def _parse_results(page: Any) -> list[dict[str, str]] | None:
+    """Applicant ids from result links, or None when the DOM is not recognizable.
+
+    Header and nav links are not results. An empty recognizable state is an
+    empty list. Anything else is unreadable.
+    """
+    locator_fn = getattr(page, "locator", None)
+    evaluate = getattr(page, "evaluate", None)
+    found: list[dict[str, str]] = []
+    if callable(evaluate):
+        try:
+            hrefs = evaluate(
+                """() => {
+                  const nodes = Array.from(document.querySelectorAll(
+                    "[role='listbox'] a[href], [role='option'] a[href], a[href*='/web/account/'], a[href*='/applicantportal/']"
+                  ));
+                  return nodes
+                    .filter(node => !node.closest("header, nav, [role='banner']"))
+                    .map(node => node.getAttribute("href") || "");
+                }"""
+            )
+        except Exception:
+            return None
+        if isinstance(hrefs, list):
+            found = _matches_from_hrefs([str(item) for item in hrefs])
+    elif callable(locator_fn):
+        seen: set[str] = set()
+        for selector in _RESULT_SELECTORS:
+            try:
+                links = locator_fn(selector)
+            except Exception:
+                continue
+            for row in _matches_from_links(links):
+                applicant = row["applicant_id"]
+                if applicant in seen:
+                    continue
+                seen.add(applicant)
+                found.append(row)
+            if found:
+                break
+    else:
+        return None
+    if found:
+        return found
+    if not callable(locator_fn):
+        return None
+    try:
+        body = locator_fn("body")
+        inner = getattr(body, "inner_text", None)
+        text = " ".join(str(inner() or "").split()).casefold() if callable(inner) else ""
+    except Exception:
+        return None
+    if any(marker in text for marker in _EMPTY_RESULTS):
+        return []
+    return None
+
+
 def read_applicant_search(page: Any, name: str) -> dict[str, Any]:
-    """Type the name into the open page's applicant box. Do not guess a URL."""
+    """Type the name into the open page's search box. Do not guess a URL."""
     if _is_auth_url(_page_url(page)):
         return {"status": "sign_in", "matches": []}
-    locator_fn = getattr(page, "locator", None)
-    if not callable(locator_fn):
+    box = _first_search_box(page)
+    if box is None:
+        _log_unreadable(page, name, "search box not found")
         return {"status": "error", "matches": []}
     try:
-        box = locator_fn(APPLICANT_SEARCH_SELECTOR)
-        if int(box.count()) < 1:
-            return {"status": "error", "matches": []}
         box.fill(name)
         press = getattr(box, "press", None)
         if callable(press):
             press("Enter")
     except Exception:
+        _log_unreadable(page, name, "search box could not be typed")
         return {"status": "error", "matches": []}
     if _is_auth_url(_page_url(page)):
         return {"status": "sign_in", "matches": []}
-    return {"status": "ok", "matches": _matches_on_page(page)}
+    matches = _parse_results(page)
+    if matches is None:
+        _log_unreadable(page, name, "results not recognized")
+        return {"status": "error", "matches": []}
+    return {"status": "ok", "matches": matches}
 
 
 def _connect_current_page() -> tuple[Any, Any] | None:
-    """The page already open. This never navigates to a guessed EZLynx URL."""
+    """The dashboard, or another page that is not an unsaved form.
+
+    This never navigates to a guessed EZLynx URL.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
@@ -273,10 +474,7 @@ def _connect_current_page() -> tuple[Any, Any] | None:
                 pass
         return None
     pages = [page for context in browser.contexts for page in context.pages]
-    ezlynx_pages = [
-        page for page in pages if "ezlynx.com" in _page_url(page).casefold()
-    ]
-    page = (ezlynx_pages or pages or [None])[0]
+    page = choose_client_search_page(pages)
     if page is None:
         try:
             playwright.stop()
@@ -286,20 +484,39 @@ def _connect_current_page() -> tuple[Any, Any] | None:
     return page, playwright
 
 
-def default_searcher(name: str) -> dict[str, Any]:
+def _search_open_page(name: str) -> dict[str, Any]:
     opened = _connect_current_page()
     if opened is None:
+        logger.info(
+            "named client search unreadable url=none name=%s hint=no safe EZLynx page why=no page",
+            " ".join(str(name or "").split()),
+        )
         return {"status": "error", "matches": []}
     page, playwright = opened
     try:
         return read_applicant_search(page, name)
     except Exception:
+        _log_unreadable(page, name, "search failed")
         return {"status": "error", "matches": []}
     finally:
         try:
             playwright.stop()
         except Exception:
             pass
+
+
+def default_searcher(name: str) -> dict[str, Any]:
+    """Sync Playwright cannot run on the gateway loop.
+
+    The EZLynx re-read already leaves the loop for the same reason. When this
+    function is called from the loop, the sync search runs on a worker thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _search_open_page(name)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_search_open_page, name).result()
 
 
 def _drop_untrusted_binding(store: Any, job: dict[str, Any]) -> dict[str, Any]:
