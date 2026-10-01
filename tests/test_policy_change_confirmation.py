@@ -25,8 +25,6 @@ from robie_job_engine.policy_change_confirmation import (
     progressive_access_proof,
     run_confirmation,
 )
-from robie_job_engine.policy_change_worker import JOB_TYPE as OLD_JOB_TYPE
-from robie_job_engine.policy_change_worker import POLICY_CHANGE_ENABLED
 from robie_job_engine.store import JobStore
 
 _FORBIDDEN_NOTE_TOKENS = (
@@ -403,6 +401,12 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         self.assertIn("will not switch", refused["reason"])
 
     def test_old_checker_and_verification_worker_stay_untouched(self):
+        # Import here, not at module load. Discover imports this file before
+        # test_policy_change_worker installs its verification fakes, and an
+        # earlier import binds that worker to the wrong mailer and login gap.
+        from robie_job_engine.policy_change_worker import JOB_TYPE as OLD_JOB_TYPE
+        from robie_job_engine.policy_change_worker import POLICY_CHANGE_ENABLED
+
         self.assertFalse(POLICY_CHANGE_ENABLED)
         self.assertEqual(OLD_JOB_TYPE, "policy_change_verification")
         self.assertNotEqual(OLD_JOB_TYPE, JOB_TYPE)
