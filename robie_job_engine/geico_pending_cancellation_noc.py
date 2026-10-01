@@ -25,6 +25,7 @@ import socket
 import sys
 import tempfile
 import urllib.parse
+import weakref
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
@@ -406,7 +407,24 @@ _TOGGLE_TRUE = frozenset({"true", "page", "step"})
 # Pages whose Pending Cancellations chip was clicked in this process.
 # Live Gateway leaves both "Pending Cancellations (3)" and "All Alerts (50)"
 # on screen, and the pending button may not expose aria-pressed.
-_PENDING_CHIP_CLICKED: set[int] = set()
+_PENDING_CHIP_CLICKED: dict[int, weakref.ReferenceType] = {}
+
+
+def _remember_pending_chip(page: Any) -> None:
+    key = id(page)
+    def forget(reference: weakref.ReferenceType) -> None:
+        if _PENDING_CHIP_CLICKED.get(key) is reference:
+            _PENDING_CHIP_CLICKED.pop(key, None)
+    try:
+        _PENDING_CHIP_CLICKED[key] = weakref.ref(page, forget)
+    except TypeError:
+        # A non-weak-referenceable page must prove selection through its UI.
+        _PENDING_CHIP_CLICKED.pop(key, None)
+
+
+def _pending_chip_was_clicked(page: Any) -> bool:
+    reference = _PENDING_CHIP_CLICKED.get(id(page))
+    return reference is not None and reference() is page
 
 
 def _locator_count(locator: Any) -> int:
@@ -504,7 +522,7 @@ def _click_pending_chip(page: Any) -> None:
     if len(matches) != 1 or matches[0][0] != 1:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
     matches[0][1].click()
-    _PENDING_CHIP_CLICKED.add(id(page))
+    _remember_pending_chip(page)
 
 
 def pending_view_selected(page: Any) -> bool:
@@ -528,7 +546,7 @@ def pending_view_selected(page: Any) -> bool:
     # "All Alerts (50)". That pending button is not selected just because
     # a table is visible. A click of the one pending button is the selection
     # when the control does not expose aria-pressed.
-    if id(page) in _PENDING_CHIP_CLICKED and chip in {"bare", "unselected", "selected"}:
+    if _pending_chip_was_clicked(page) and chip in {"bare", "unselected", "selected"}:
         return True
     if (
         chip == "bare"
