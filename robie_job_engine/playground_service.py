@@ -401,13 +401,16 @@ def _start(
         _note("needs_clarification")
         return reply
     if decision.intent == "sop":
-        hits = retrieve_sop(text, sop_docs, limit=2)
+        hits = retrieve_sop(text, sop_docs, limit=2, include_ties=True)
         if ambiguous_sop_hits(hits):
-            question = ("Two procedure sources match this question with different text: "
-                        + hits[0].citation + "; " + hits[1].citation
+            tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
+            sources = "; ".join(hit.citation for hit in tied[:3])
+            remaining = f"; and {len(tied) - 3} more" if len(tied) > 3 else ""
+            question = (f"{len(tied)} procedure sources match this question with different text: "
+                        + sources + remaining
                         + ". Which approved source should I use?")
             reply = clarify_reply(question=question, job_id=job_id)
-            store.checkpoint(job_id, "sop_ambiguity", {"source_ids": [hit.doc_id for hit in hits],
+            store.checkpoint(job_id, "sop_ambiguity", {"source_ids": [hit.doc_id for hit in tied],
                                                       "needs_review": True})
             store.transition(job_id, JobStatus.NEEDS_CLARIFICATION,
                              expected={JobStatus.PENDING}, error="SOP source ambiguity",
