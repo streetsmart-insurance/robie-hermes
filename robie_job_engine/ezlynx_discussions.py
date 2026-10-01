@@ -675,13 +675,17 @@ def file_note_to_existing_discussion(
     existing discussion can be chosen the result is ``status="pending"`` and
     nothing is written. A discussion is never created and nothing is deleted.
 
-    Confirmation reads the discussion before the post and once after it. The
-    note is filed only when the count went up by exactly one and the latest
-    note id changed. That new id is the note id. Anything else stays held.
-    The post is never repeated automatically.
+    Confirmation reads the discussion before the post and once after it. A
+    count that rose by one is not enough to call the note filed: the live
+    read has no note text, so another note in that gap looks the same. The
+    note is filed only when a second signal says the new note is ours (its
+    text, or a returned note id that is the new latest id). Anything else
+    stays held. The post is never repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
-    again. Text matching is not used: the discussion read has no note bodies.
+    again. A send that cannot be confirmed is stored as sent, unconfirmed
+    and blocks a repost until a person says yes or the 24-hour question
+    window passes. If that ledger write fails, nothing is posted.
 
     Returns a result dict with ``status`` one of ``filed`` / ``pending`` /
     ``held`` / ``dry_run``, plus ``applicant_id``, ``discussion_id``,
@@ -727,9 +731,14 @@ def file_note_to_existing_discussion(
         }
     from .discussion_note_ledger import (
         DiscussionNoteLedgerError,
+        SENT_UNCONFIRMED,
         already_added_question,
+        begin_unconfirmed_note,
         find_posted_note,
         find_recent_same_text,
+        note_still_blocks_repost,
+        note_was_unconfirmed,
+        undo_unconfirmed_note,
     )
 
     doc_id = str(document_id or "").strip()
@@ -758,18 +767,32 @@ def file_note_to_existing_discussion(
     # The same downloaded document is not posted again. A repeated note
     # ask in the last day asks before posting, and does not count as done.
     if already is not None and doc_id and str(already.get("document_id") or "").strip() == doc_id:
-        remembered = str(already.get("note_id") or "").strip()
-        return _note_result(
-            "filed",
-            reason="This note was already sent, so it was not sent again.",
-            applicant=applicant,
-            discussion_id=discussion_id,
-            title=title,
-            note_id=remembered or None,
-            read_back=True,
-            verified_by="ledger",
-            idempotent=True,
-        )
+        if note_was_unconfirmed(already):
+            if not allow_repost and note_still_blocks_repost(already):
+                return _note_result(
+                    "already_posted",
+                    reason=already_added_question(already.get("posted_at")),
+                    applicant=applicant,
+                    discussion_id=discussion_id,
+                    title=title,
+                    note_id=str(already.get("note_id") or "").strip() or None,
+                    read_back=False,
+                    verified_by=None,
+                    confirmation=SENT_UNCONFIRMED,
+                )
+        else:
+            remembered = str(already.get("note_id") or "").strip()
+            return _note_result(
+                "filed",
+                reason="This note was already sent, so it was not sent again.",
+                applicant=applicant,
+                discussion_id=discussion_id,
+                title=title,
+                note_id=remembered or None,
+                read_back=True,
+                verified_by="ledger",
+                idempotent=True,
+            )
     if recent is not None and not allow_repost:
         return _note_result(
             "already_posted",
@@ -780,6 +803,7 @@ def file_note_to_existing_discussion(
             note_id=str(recent.get("note_id") or "").strip() or None,
             read_back=False,
             verified_by=None,
+            confirmation=SENT_UNCONFIRMED if note_was_unconfirmed(recent) else None,
         )
     getter = getattr(client, "get_discussion", None)
     if not callable(getter):
@@ -800,12 +824,41 @@ def file_note_to_existing_discussion(
             discussion_id=discussion_id,
             title=title,
         )
-    created = client.append_note(discussion_id, text, note_type=note_type)
+    try:
+        prior_row = begin_unconfirmed_note(
+            applicant,
+            discussion_id,
+            note_text=text,
+            document_id=doc_id,
+            ledger_path=ledger_path,
+        )
+    except DiscussionNoteLedgerError as exc:
+        return _note_result(
+            "held",
+            reason=str(exc),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
+    try:
+        created = client.append_note(discussion_id, text, note_type=note_type)
+    except Exception:
+        try:
+            undo_unconfirmed_note(
+                applicant,
+                discussion_id,
+                note_text=text,
+                document_id=doc_id,
+                previous=prior_row,
+                ledger_path=ledger_path,
+            )
+        except DiscussionNoteLedgerError:
+            pass
+        raise
     try:
         after_record = getter(discussion_id)
     except Exception:
-        return _note_result(
-            "held",
+        return _unconfirmed_note_result(
             reason=(
                 "The note was sent, but the discussion could not be read afterward. "
                 "It was not sent again."
@@ -819,27 +872,35 @@ def file_note_to_existing_discussion(
     if before["note_count"] is not None or after["note_count"] is not None:
         confirmed, reason = _metadata_note_confirmation(before, after)
         if not confirmed:
-            return _note_result(
-                "held",
+            return _unconfirmed_note_result(
                 reason=reason,
                 applicant=applicant,
                 discussion_id=discussion_id,
                 title=title,
                 response=created,
             )
-        if _payload_has_note_bodies(after_record) and not _posted_text_matches(after_record, text):
-            return _note_result(
-                "held",
-                reason=(
+        identity = _new_note_identity(after_record, after, text, created)
+        if identity is None:
+            if _payload_has_note_bodies(after_record) and not _posted_text_matches(
+                after_record, text
+            ):
+                hold_reason = (
                     "The note was sent, but the new text did not match. "
                     "It was not sent again."
-                ),
+                )
+            else:
+                hold_reason = (
+                    "The note was sent, but it could not be told apart from another note. "
+                    "It was not sent again."
+                )
+            return _unconfirmed_note_result(
+                reason=hold_reason,
                 applicant=applicant,
                 discussion_id=discussion_id,
                 title=title,
                 response=created,
             )
-        note_id = after["most_recent_note_id"]
+        note_id, verified_by = identity
         _remember_posted_note(
             applicant,
             discussion_id,
@@ -847,7 +908,7 @@ def file_note_to_existing_discussion(
             document_id=doc_id,
             note_id=note_id,
             ledger_path=ledger_path,
-            source="discussion_count",
+            source="discussion_count" if verified_by == "text" else "returned_note_id",
         )
         return _note_result(
             "filed",
@@ -857,14 +918,13 @@ def file_note_to_existing_discussion(
             title=title,
             note_id=note_id,
             read_back=True,
-            verified_by="discussion",
+            verified_by=verified_by,
             response=created,
         )
     # Older payloads omit the count. Accept only an id that a fresh read shows.
     note_id = _note_id_of(created) if isinstance(created, dict) else ""
     if not note_id:
-        return _note_result(
-            "held",
+        return _unconfirmed_note_result(
             reason=(
                 "The note was sent, but it could not be confirmed. It was not sent again."
             ),
@@ -898,6 +958,39 @@ def file_note_to_existing_discussion(
     )
 
 
+def _new_note_identity(
+    after_record: Any,
+    after: dict[str, Any],
+    note_text: str,
+    created: Any,
+) -> tuple[str, str] | None:
+    """Id of the note we just added, and how we know it is ours.
+
+    A higher count alone is not that signal. The live discussion read has no
+    note text, so a different note that landed in the same gap must not be
+    marked done.
+    """
+
+    latest = str(after.get("most_recent_note_id") or "")
+    returned = _note_id_of(created) if isinstance(created, dict) else ""
+    if _payload_has_note_bodies(after_record):
+        latest_rows = [
+            row
+            for row in iter_discussion_notes(after_record)
+            if latest and _note_id_of(row) == latest
+        ]
+        if latest_rows:
+            if any(_posted_text_matches(row, note_text) for row in latest_rows):
+                return latest, "text"
+            return None
+        if returned and latest and returned == latest:
+            return latest, "note_id"
+        return None
+    if returned and latest and returned == latest:
+        return latest, "note_id"
+    return None
+
+
 def _note_result(
     status: str,
     *,
@@ -910,6 +1003,7 @@ def _note_result(
     verified_by: str | None = None,
     idempotent: bool = False,
     response: Any = None,
+    confirmation: str | None = None,
 ) -> dict[str, Any]:
     result = {
         "status": status,
@@ -922,11 +1016,21 @@ def _note_result(
         "read_back": read_back,
         "verified_by": verified_by,
     }
+    if confirmation:
+        result["confirmation"] = confirmation
     if idempotent:
         result["idempotent"] = True
     if response is not None:
         result["response"] = response
     return result
+
+
+def _unconfirmed_note_result(**kwargs: Any) -> dict[str, Any]:
+    """Held, not filed. The ledger already says sent, unconfirmed."""
+
+    from .discussion_note_ledger import SENT_UNCONFIRMED
+
+    return _note_result("held", confirmation=SENT_UNCONFIRMED, **kwargs)
 
 
 def _remember_posted_note(
@@ -939,9 +1043,9 @@ def _remember_posted_note(
     ledger_path: Any,
     source: str,
 ) -> None:
-    """Best-effort local memory. A full disk must not hide a confirmed note."""
+    """Upgrade the pre-post row to confirmed. A failed upgrade stays unconfirmed."""
 
-    from .discussion_note_ledger import record_posted_note
+    from .discussion_note_ledger import CONFIRMED, DiscussionNoteLedgerError, record_posted_note
 
     try:
         record_posted_note(
@@ -953,8 +1057,9 @@ def _remember_posted_note(
             source=source,
             ledger_path=ledger_path,
             refresh=True,
+            confirmation=CONFIRMED,
         )
-    except Exception:
+    except DiscussionNoteLedgerError:
         return
 
 

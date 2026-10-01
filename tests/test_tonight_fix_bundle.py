@@ -2400,7 +2400,7 @@ class Round6ConversationTests(unittest.TestCase):
             ceiling.index("self.handle_message"),
         )
 
-    def test_note_without_id_is_confirmed_by_count_and_not_posted_twice(self):
+    def test_note_without_a_second_signal_is_not_filed_or_posted_twice(self):
         from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
 
         title = "Policy Change Request Checkup - Mailing Address update"
@@ -2435,10 +2435,10 @@ class Round6ConversationTests(unittest.TestCase):
             first = file_note_to_existing_discussion(
                 client, "220250093", body, title_hint=title, ledger_path=ledger
             )
-            self.assertEqual(first["status"], "filed")
-            self.assertTrue(first["read_back"])
-            self.assertEqual(first["verified_by"], "discussion")
-            self.assertEqual(first["note_id"], "new-note")
+            self.assertEqual(first["status"], "held")
+            self.assertFalse(first["read_back"])
+            self.assertIsNone(first["note_id"])
+            self.assertNotEqual(first.get("verified_by"), "discussion")
             self.assertEqual(first["discussion_title"], title)
             self.assertEqual(client.appended, 1)
             self.assertNotIn("note_id", str(first.get("reason") or ""))

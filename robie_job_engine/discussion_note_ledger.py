@@ -4,9 +4,14 @@ EZLynx DiscussionApi does not return note text on ``GET v8/discussions/{id}``,
 and ``GET v8/discussions/{id}/notes`` answers HTTP 405. A text match cannot
 tell a rerun that a note is already there, so a retry would post it again.
 
-This ledger is local only. It never calls EZLynx, never creates a discussion,
-and never deletes anything. The key is the applicant, the discussion, and a
-hash of the note text plus the document id when there is one.
+This ledger is local only. It never calls EZLynx and never creates a
+discussion. The key is the applicant, the discussion, and a hash of the note
+text plus the document id when there is one.
+
+A note that was sent but could not be confirmed is stored as
+``sent, unconfirmed``. That row blocks another post until a person says yes
+or the 24-hour "already added" window passes. A write that does not land
+is a failure: the caller must not post.
 """
 
 from __future__ import annotations
@@ -47,6 +52,8 @@ class DiscussionNoteLedgerError(RuntimeError):
 
 
 NOTE_REPEAT_HOURS = 24
+SENT_UNCONFIRMED = "sent, unconfirmed"
+CONFIRMED = "confirmed"
 _PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 _EASTERN = ZoneInfo("America/New_York")
 
@@ -97,7 +104,11 @@ def already_added_question(posted_at: Any) -> str:
 
 
 def known_posted_notes() -> list[dict[str, Any]]:
-    """The six notes already posted on 2026-09-30, with no note id on file."""
+    """The six notes already posted on 2026-09-30, with no note id on file.
+
+    These rows are not treated as sent unless ``--record-known`` wrote them
+    into the ledger file, or this process is running with ``ROBIE_ENV=TEST``.
+    """
 
     rows = []
     for document_id in KNOWN_POSTED_DOCUMENT_IDS:
@@ -209,8 +220,13 @@ def record_posted_note(
     source: str = "recorded_without_post",
     ledger_path: Path | str | None = None,
     refresh: bool = False,
+    confirmation: str = CONFIRMED,
 ) -> dict[str, Any]:
-    """Remember a note that was already accepted. Does not call EZLynx."""
+    """Remember a note that was already accepted. Does not call EZLynx.
+
+    ``confirmation`` is ``confirmed`` or ``sent, unconfirmed``. A disk error
+    raises :class:`DiscussionNoteLedgerError` and the caller must not post.
+    """
 
     applicant = str(applicant_id or "").strip()
     discussion = str(discussion_id or "").strip()
@@ -226,14 +242,23 @@ def record_posted_note(
     fingerprint = note_fingerprint(text, document) if text.strip() else ""
     norm = note_norm_fingerprint(text) if text.strip() else ""
     stamp = _utc_now()
+    marked = str(confirmation or CONFIRMED).strip() or CONFIRMED
     existing = _match(applicant, discussion, document, fingerprint, notes)
     if existing is None and norm:
         existing = _match_norm(applicant, discussion, norm, notes)
     if existing is not None:
         if refresh:
-            _touch_posted(notes, existing, stamp, str(note_id or "").strip(), norm)
+            _touch_posted(
+                notes,
+                existing,
+                stamp,
+                str(note_id or "").strip(),
+                norm,
+                confirmation=marked,
+                source=str(source or ""),
+            )
             payload["notes"] = notes
-            _write_file(path, payload)
+            _save_file(path, payload)
             touched = _match(applicant, discussion, document, fingerprint, notes)
             return touched or existing
         return existing
@@ -246,12 +271,124 @@ def record_posted_note(
         "note_id": str(note_id or "").strip(),
         "posted_at": stamp,
         "source": str(source or "recorded_without_post"),
+        "confirmation": marked,
     }
     notes.append(row)
     payload["version"] = LEDGER_VERSION
     payload["notes"] = notes
-    _write_file(path, payload)
+    _save_file(path, payload)
     return row
+
+
+def begin_unconfirmed_note(
+    applicant_id: str,
+    discussion_id: str,
+    *,
+    note_text: str = "",
+    document_id: str = "",
+    ledger_path: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Remember a note as sent-but-unconfirmed before it is posted.
+
+    Returns the file row this replaces, so a post that never left can be
+    undone. Raises when the file cannot be written. The caller must not post
+    in that case.
+    """
+
+    applicant = str(applicant_id or "").strip()
+    discussion = str(discussion_id or "").strip()
+    document = str(document_id or "").strip()
+    text = str(note_text or "")
+    path = resolve_ledger_path(ledger_path)
+    payload = _read_file(path)
+    notes = [item for item in payload.get("notes") or [] if isinstance(item, dict)]
+    fingerprint = note_fingerprint(text, document) if text.strip() else ""
+    norm = note_norm_fingerprint(text) if text.strip() else ""
+    previous = _match(applicant, discussion, document, fingerprint, notes)
+    if previous is None and norm:
+        previous = _match_norm(applicant, discussion, norm, notes)
+    record_posted_note(
+        applicant,
+        discussion,
+        note_text=text,
+        document_id=document,
+        source="sent_unconfirmed",
+        ledger_path=path,
+        refresh=True,
+        confirmation=SENT_UNCONFIRMED,
+    )
+    return dict(previous) if previous else None
+
+
+def undo_unconfirmed_note(
+    applicant_id: str,
+    discussion_id: str,
+    *,
+    note_text: str = "",
+    document_id: str = "",
+    previous: dict[str, Any] | None = None,
+    ledger_path: Path | str | None = None,
+) -> None:
+    """Remove a sent-unconfirmed row after a post that did not happen.
+
+    When ``previous`` is set, that row is put back in its place.
+    """
+
+    applicant = str(applicant_id or "").strip()
+    discussion = str(discussion_id or "").strip()
+    document = str(document_id or "").strip()
+    text = str(note_text or "")
+    path = resolve_ledger_path(ledger_path)
+    payload = _read_file(path)
+    notes = [item for item in payload.get("notes") or [] if isinstance(item, dict)]
+    fingerprint = note_fingerprint(text, document) if text.strip() else ""
+    norm = note_norm_fingerprint(text) if text.strip() else ""
+    kept: list[dict[str, Any]] = []
+    for row in notes:
+        if not _same_unconfirmed_target(
+            row,
+            applicant,
+            discussion,
+            document,
+            fingerprint,
+            norm,
+        ):
+            kept.append(row)
+    if previous:
+        kept.append(dict(previous))
+    payload["version"] = LEDGER_VERSION
+    payload["notes"] = kept
+    _save_file(path, payload)
+
+
+def note_was_unconfirmed(row: dict[str, Any] | None) -> bool:
+    """True when this row was sent and the readback did not confirm it."""
+
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("confirmation") or "").strip() == SENT_UNCONFIRMED
+
+
+def note_still_blocks_repost(
+    row: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    within_hours: int = NOTE_REPEAT_HOURS,
+) -> bool:
+    """An unconfirmed send still blocks until the repeat window passes.
+
+    A missing timestamp keeps blocking. Confirmed rows are not handled here.
+    """
+
+    if not note_was_unconfirmed(row):
+        return False
+    posted = _parse_stamp((row or {}).get("posted_at"))
+    if posted is None:
+        return True
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    return timedelta(0) <= (clock - posted) <= timedelta(hours=within_hours)
 
 
 def record_known_posted_notes(ledger_path: Path | str | None = None) -> list[dict[str, Any]]:
@@ -304,12 +441,41 @@ def _match_norm(
     return None
 
 
+def _same_unconfirmed_target(
+    row: dict[str, Any],
+    applicant: str,
+    discussion: str,
+    document: str,
+    fingerprint: str,
+    norm: str,
+) -> bool:
+    if str(row.get("confirmation") or "") != SENT_UNCONFIRMED:
+        return False
+    if str(row.get("applicant_id") or "") != applicant:
+        return False
+    if str(row.get("discussion_id") or "") != discussion:
+        return False
+    stored_document = str(row.get("document_id") or "").strip()
+    stored_fingerprint = str(row.get("note_text_sha256") or "").strip()
+    stored_norm = str(row.get("note_norm_sha256") or "").strip()
+    if document and stored_document and stored_document == document:
+        return True
+    if fingerprint and stored_fingerprint and stored_fingerprint == fingerprint:
+        return True
+    if norm and stored_norm and stored_norm == norm:
+        return True
+    return False
+
+
 def _touch_posted(
     notes: list[dict[str, Any]],
     existing: dict[str, Any],
     stamp: str,
     note_id: str,
     norm: str,
+    *,
+    confirmation: str = "",
+    source: str = "",
 ) -> None:
     for row in notes:
         if str(row.get("applicant_id") or "") != str(existing.get("applicant_id") or ""):
@@ -332,6 +498,10 @@ def _touch_posted(
             row["note_id"] = note_id
         if norm:
             row["note_norm_sha256"] = norm
+        if confirmation:
+            row["confirmation"] = confirmation
+        if source:
+            row["source"] = source
         return
 
 
@@ -356,8 +526,20 @@ def _match(
     return None
 
 
+def _known_notes_apply() -> bool:
+    """The six hard-coded Test ids count only while ROBIE_ENV is TEST.
+
+    ``--record-known`` writes those ids into the ledger file, and that file
+    is read in every environment. This injection is the other gate.
+    """
+
+    from .runtime_env import TEST_ENV_NAME, current_robie_env
+
+    return current_robie_env() == TEST_ENV_NAME
+
+
 def _rows(ledger_path: Path | str | None) -> list[dict[str, Any]]:
-    rows = known_posted_notes()
+    rows = known_posted_notes() if _known_notes_apply() else []
     payload = _read_file(resolve_ledger_path(ledger_path))
     for item in payload.get("notes") or []:
         if isinstance(item, dict):
@@ -379,6 +561,17 @@ def _read_file(path: Path) -> dict[str, Any]:
             "The saved note list could not be read, so nothing was sent."
         )
     return parsed
+
+
+def _save_file(path: Path, payload: dict[str, Any]) -> None:
+    """Write the ledger. A full disk or a locked directory fails closed."""
+
+    try:
+        _write_file(path, payload)
+    except OSError as exc:
+        raise DiscussionNoteLedgerError(
+            "The note list could not be saved, so the note was not sent."
+        ) from exc
 
 
 def _write_file(path: Path, payload: dict[str, Any]) -> None:

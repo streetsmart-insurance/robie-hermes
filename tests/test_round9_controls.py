@@ -62,7 +62,7 @@ class _CountClient:
         self.posts += 1
         self.note_count += 1
         self.latest = f"new-note-{self.posts}"
-        return {}
+        return {"noteId": self.latest}
 
 
 class VerifiedClaimTests(unittest.TestCase):

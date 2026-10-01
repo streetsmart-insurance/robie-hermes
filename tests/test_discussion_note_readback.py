@@ -7,6 +7,7 @@ GET v8/discussions/{id} returned metadata only. GET .../notes returned 405.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from robie_job_engine import ezlynx_discussions as disc
 from robie_job_engine.discussion_note_ledger import (
     KNOWN_POSTED_DOCUMENT_IDS,
+    SENT_UNCONFIRMED,
     main,
     record_known_posted_notes,
     record_posted_note,
@@ -93,27 +95,110 @@ def _file(client, text="NatGen cancellation notice was added. ROBIE was here", *
     return disc.file_note_to_existing_discussion(client, APPLICANT, text, **kwargs)
 
 
-def test_metadata_count_confirms_a_post_that_returns_no_note_id(tmp_path):
+def test_textless_count_increase_is_not_filed_and_blocks_a_repost(tmp_path):
+    """A count of +1 with no note text is not proof the new note is ours."""
+
     client = LiveShapeClient()
     with pytest.raises(disc.DiscussionApiError) as listed:
         client.list_notes(DISCUSSION)
     assert listed.value.status == 405
 
-    result = _file(client, ledger_path=tmp_path / "ledger.json", document_id="824463419")
-    assert result["status"] == "filed"
-    assert result["note_id"] == "701"
-    assert result["read_back"] is True
-    assert result["verified_by"] == "discussion"
-    assert result["reason"] == "The note was added to the discussion."
+    ledger = tmp_path / "ledger.json"
+    result = _file(client, ledger_path=ledger, document_id="824463419")
+    assert result["status"] == "held"
+    assert result["note_id"] is None
+    assert result["read_back"] is False
+    assert result["verified_by"] is None
+    assert result["confirmation"] == SENT_UNCONFIRMED
+    assert "not sent again" in result["reason"]
+    assert "told apart" in result["reason"]
     assert client.posts == 1
     assert client.reads == 2
     assert client.note_lists == 1  # the explicit 405 check above, not the filer
     for word in FIELD_WORDS:
         assert word not in result["reason"]
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
+    assert saved["notes"][0]["note_id"] == ""
+
+    again = _file(client, ledger_path=ledger, document_id="824463419")
+    assert again["status"] == "already_posted"
+    assert "Want me to add it again?" in again["reason"]
+    assert client.posts == 1
+
+    allowed = _file(client, ledger_path=ledger, document_id="824463419", allow_repost=True)
+    assert allowed["status"] == "held"
+    assert client.posts == 2
+
+
+def test_returned_note_id_that_matches_the_latest_note_is_filed(tmp_path):
+    client = LiveShapeClient(post_body={"noteId": "701"})
+    result = _file(client, ledger_path=tmp_path / "ledger.json")
+    assert result["status"] == "filed"
+    assert result["note_id"] == "701"
+    assert result["read_back"] is True
+    assert result["verified_by"] == "note_id"
+    assert result["reason"] == "The note was added to the discussion."
+    assert client.posts == 1
+    saved = json.loads((tmp_path / "ledger.json").read_text(encoding="utf-8"))
+    assert saved["notes"][0]["confirmation"] == "confirmed"
+    assert saved["notes"][0]["note_id"] == "701"
+
+
+def test_a_different_latest_note_is_not_marked_done(tmp_path):
+    client = LiveShapeClient(post_body={"noteId": "701"}, after_latest="888")
+    result = _file(client, ledger_path=tmp_path / "ledger.json")
+    assert result["status"] == "held"
+    assert result["note_id"] is None
+    assert result["read_back"] is False
+    assert result["confirmation"] == SENT_UNCONFIRMED
+    assert "888" not in result["reason"]
+    assert client.posts == 1
+
+
+def test_unconfirmed_send_blocks_until_the_day_window_passes(tmp_path):
+    client = LiveShapeClient(after_count=7, after_latest="700")
+    ledger = tmp_path / "ledger.json"
+    first = _file(client, ledger_path=ledger)
+    assert first["status"] == "held"
+    assert first["confirmation"] == SENT_UNCONFIRMED
+    assert client.posts == 1
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    saved["notes"][0]["posted_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=25)
+    ).isoformat()
+    ledger.write_text(json.dumps(saved), encoding="utf-8")
+    second = _file(client, ledger_path=ledger)
+    assert client.posts == 2
+    assert second["status"] == "held"
+
+
+def test_ledger_write_failure_does_not_post(tmp_path):
+    client = LiveShapeClient()
+    with patch(
+        "robie_job_engine.discussion_note_ledger._write_file",
+        side_effect=OSError("disk full"),
+    ):
+        result = _file(client, ledger_path=tmp_path / "ledger.json")
+    assert result["status"] == "held"
+    assert "not sent" in result["reason"]
+    assert client.posts == 0
+
+
+def test_a_post_that_raises_does_not_keep_the_unconfirmed_row(tmp_path):
+    class Boom(LiveShapeClient):
+        def append_note(self, discussion_id, text, note_type="Note"):
+            raise disc.DiscussionApiError(500, "rejected")
+
+    ledger = tmp_path / "ledger.json"
+    with pytest.raises(disc.DiscussionApiError):
+        _file(Boom(), ledger_path=ledger)
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    assert saved["notes"] == []
 
 
 def test_rerun_uses_the_ledger_and_does_not_post_again(tmp_path):
-    client = LiveShapeClient()
+    client = LiveShapeClient(post_body={"noteId": "701"})
     ledger = tmp_path / "ledger.json"
     text = "Progressive memo dated 9/30/2026 was added. ROBIE was here"
     first = _file(client, text, ledger_path=ledger, document_id="501")
@@ -129,7 +214,7 @@ def test_rerun_uses_the_ledger_and_does_not_post_again(tmp_path):
 
 
 def test_same_document_with_different_wording_is_not_posted_again(tmp_path):
-    client = LiveShapeClient()
+    client = LiveShapeClient(post_body={"noteId": "701"})
     ledger = tmp_path / "ledger.json"
     _file(client, "first wording. ROBIE was here", ledger_path=ledger, document_id="501")
     again = _file(client, "rewritten wording. ROBIE was here", ledger_path=ledger, document_id="501")
@@ -185,7 +270,8 @@ def test_unread_discussion_is_not_posted(tmp_path):
     assert client.posts == 0
 
 
-def test_known_posted_documents_are_not_sent_again(tmp_path):
+def test_known_posted_documents_are_not_sent_again_on_test(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
     client = LiveShapeClient()
     with patch(
         "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
@@ -207,6 +293,48 @@ def test_known_posted_documents_are_not_sent_again(tmp_path):
     assert client.posts == 0
     assert client.note_lists == 0
     assert not (tmp_path / "empty.json").exists()
+
+
+def test_known_posted_documents_are_not_implicit_outside_test(tmp_path, monkeypatch):
+    monkeypatch.delenv("ROBIE_ENV", raising=False)
+    client = LiveShapeClient(post_body={"noteId": "701"})
+    with patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({TEST_APPLICANT}),
+    ):
+        result = disc.file_note_to_existing_discussion(
+            client,
+            TEST_APPLICANT,
+            "NatGen cancellation notice dated 9/30/2026 for someone, policy ending in 1506, "
+            "saved to this test account. ROBIE was here",
+            document_id=KNOWN_POSTED_DOCUMENT_IDS[0],
+            ledger_path=tmp_path / "empty.json",
+        )
+    assert result["status"] == "filed"
+    assert result.get("idempotent") is not True
+    assert client.posts == 1
+    assert (tmp_path / "empty.json").exists()
+
+
+def test_record_known_blocks_the_six_documents_without_test_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("ROBIE_ENV", raising=False)
+    ledger = tmp_path / "ledger.json"
+    record_known_posted_notes(ledger)
+    client = LiveShapeClient()
+    with patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({TEST_APPLICANT}),
+    ):
+        result = disc.file_note_to_existing_discussion(
+            client,
+            TEST_APPLICANT,
+            "already on file. ROBIE was here",
+            document_id=KNOWN_POSTED_DOCUMENT_IDS[0],
+            ledger_path=ledger,
+        )
+    assert result["status"] == "filed"
+    assert result["idempotent"] is True
+    assert client.posts == 0
 
 
 def test_record_known_notes_writes_a_file_and_does_not_post(tmp_path, capsys):
