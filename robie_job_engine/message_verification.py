@@ -38,10 +38,17 @@ class MessageOutcomeVerifier:
         result = self.reader.verify(job, action)
         if not result.verified:
             return result
+        expected = result.evidence.expected
+        # Applicant-scoped filings (note and/or documents, no policy number)
+        # are verified by the destination readback itself: the readback IS
+        # the outcome check. The presence-request gate below only applies to
+        # policy-presence verifications, where "policy exists" must not stand
+        # in for a richer requested outcome.
+        if not expected.get("policy_number"):
+            return result
         payload = job.get('payload') or {}
         request = str(payload.get('request_text') or payload.get('text') or payload.get('prompt') or '')
         match = presence_request(request)
-        expected = result.evidence.expected
         covered = bool(match and match.group(1) == expected.get('policy_number') and
                        match.group(2) == str(expected.get('applicant_id')))
         if covered:

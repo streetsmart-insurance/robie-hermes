@@ -15,11 +15,14 @@ BOND_APPLICANT = "194066748"
 class FakePort:
     """Configurable stand-in for the real EZLynx API client."""
 
-    def __init__(self, policies=None, documents=None, discussions=None, raise_on=None):
+    def __init__(self, policies=None, documents=None, discussions=None, raise_on=None,
+                 notes_present=None):
         self._policies = policies if policies is not None else []
         self._documents = documents if documents is not None else []
         self._discussions = discussions if discussions is not None else []
         self._raise_on = raise_on or set()
+        # notes_present: set of (discussion_id, note_id) tuples the fake API returns.
+        self._notes_present = notes_present if notes_present is not None else set()
 
     def policy_by_number(self, policy_number):
         if "policy" in self._raise_on:
@@ -43,6 +46,11 @@ class FakePort:
         if "discussions" in self._raise_on:
             raise ConnectionError("discussions unreachable")
         return self._discussions
+
+    def note_in_discussion(self, discussion_id, note_id):
+        if "note_readback" in self._raise_on:
+            raise ConnectionError("DiscussionApi read-back unreachable")
+        return (str(discussion_id), str(note_id)) in self._notes_present
 
 
 def job(applicant=BOND_APPLICANT, policy=BOND_POLICY):
@@ -244,6 +252,122 @@ class VerifierTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ApplicantScopedFilingTests(unittest.TestCase):
+    """Email/note filings with no policy number must verify via readback.
+
+    Regression for the 2026-09-30 email filing outage: hermes.email_task
+    jobs that file discussion notes (or documents) to an applicant could
+    never pass destination verification because the verifier demanded a
+    policy number ("no policy number ... nothing to re-read").
+    """
+
+    def email_job(self):
+        return {
+            "id": "56a07672",
+            "action_type": "hermes.email_task",
+            "created_at": "2026-09-30T15:00:00+00:00",
+            "payload": {"applicant_id": BOND_APPLICANT},
+        }
+
+    def note_action(self, **kw):
+        dest = {
+            "applicant_id": BOND_APPLICANT,
+            "discussion_id": "disc-123",
+            "note_id": "note-456",
+            "discussion_title": "Email 2026-09-30",
+        }
+        dest.update(kw)
+        return {"destination": dest, "detail": {}}
+
+    def test_note_filing_verifies_when_note_id_reads_back(self):
+        port = FakePort(notes_present={("disc-123", "note-456")})
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            self.email_job(), self.note_action()
+        )
+        self.assertTrue(r.verified, "a filed note must verify via readback")
+        self.assertTrue(r.evidence.authoritative)
+        self.assertEqual(r.evidence.observed["note_id"], "note-456")
+        self.assertTrue(r.evidence.observed["note_found"])
+        self.assertIsNone(r.error)
+
+    def test_note_filing_fails_when_note_absent(self):
+        """We looked and the note is not there -- real absence, not unknown."""
+        port = FakePort(notes_present=set())
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            self.email_job(), self.note_action()
+        )
+        self.assertFalse(r.verified)
+        self.assertTrue(r.evidence.authoritative)
+        self.assertFalse(r.retryable)
+        self.assertIn("not present", r.error)
+
+    def test_note_filing_without_ids_fails_closed(self):
+        port = FakePort(notes_present={("disc-123", "note-456")})
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            self.email_job(), self.note_action(note_id="", discussion_id="")
+        )
+        self.assertFalse(r.verified, "no claimed ids means nothing to re-read")
+        self.assertIn("nothing to re-read", r.error)
+
+    def test_note_filing_without_applicant_fails(self):
+        j = self.email_job()
+        j["payload"] = {}
+        a = self.note_action()
+        a["destination"].pop("applicant_id")
+        port = FakePort(notes_present={("disc-123", "note-456")})
+        r = HermesChatEzlynxDestinationVerifier(port).verify(j, a)
+        self.assertFalse(r.verified)
+        self.assertIn("no applicant", r.error)
+
+    def test_note_readback_failure_is_retryable(self):
+        port = FakePort(raise_on={"note_readback"})
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            self.email_job(), self.note_action()
+        )
+        self.assertFalse(r.verified)
+        self.assertTrue(r.retryable, "transient read failure must be retryable")
+        self.assertFalse(r.evidence.authoritative)
+
+    def test_document_filing_without_policy_verifies(self):
+        port = FakePort(
+            documents=[{"id": "818921949", "name": "Email attachment.pdf"}],
+        )
+        j = self.email_job()
+        a = {"destination": {
+            "applicant_id": BOND_APPLICANT,
+            "document_names": ["Email attachment.pdf"],
+        }, "detail": {}}
+        r = HermesChatEzlynxDestinationVerifier(port).verify(j, a)
+        self.assertTrue(r.verified)
+        self.assertTrue(r.evidence.authoritative)
+        self.assertEqual(r.evidence.observed["document_ids"], ["818921949"])
+
+    def test_document_filing_missing_fails_closed(self):
+        port = FakePort(documents=[{"id": "1", "name": "other.pdf"}])
+        j = self.email_job()
+        a = {"destination": {
+            "applicant_id": BOND_APPLICANT,
+            "document_names": ["Email attachment.pdf"],
+        }, "detail": {}}
+        r = HermesChatEzlynxDestinationVerifier(port).verify(j, a)
+        self.assertFalse(r.verified)
+        self.assertIn("not found", r.error)
+
+    def test_policy_path_still_requires_policy_record(self):
+        """The Bond rule is unchanged: a note never verifies a policy mutation."""
+        port = FakePort(
+            policies=[],  # policy does NOT exist
+            notes_present={("disc-123", "note-456")},
+        )
+        j = self.email_job()
+        j["payload"]["policy_number"] = BOND_POLICY
+        a = self.note_action()
+        a["destination"]["policy_number"] = BOND_POLICY
+        r = HermesChatEzlynxDestinationVerifier(port).verify(j, a)
+        self.assertFalse(r.verified, "a note must never verify a missing policy")
+        self.assertIn("not present in EZLynx", r.error)
 
 class ApplicantIdentityTests(unittest.TestCase):
     def test_policy_without_applicant_cannot_verify_bound_job(self):

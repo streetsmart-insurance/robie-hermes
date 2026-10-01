@@ -13,9 +13,18 @@ authoritative because it found a note, ROBIE would be confirming its own
 prose -- a job could post a note about work it never did and self-verify.
 That is the exact false-success mode the job contract exists to prevent.
 
-So: the POLICY RECORD is the proof. Documents are proof. The note is
-recorded in ``observed`` as a receipt and can never make evidence
-authoritative on its own.
+So: the POLICY RECORD is the proof for policy mutations. Documents are proof.
+The note is recorded in ``observed`` as a receipt and can never make evidence
+authoritative on its own -- FOR POLICY MUTATIONS.
+
+Applicant-scoped NOTE FILINGS are the exception: when a job's claimed
+destination is itself a discussion note (no policy number; the action
+checkpoint carries the server-returned ``note_id``/``discussion_id`` from
+the DiscussionApi append), the note IS the destination mutation. Verifying
+it is a fresh authenticated GET of that discussion confirming the note_id
+is present -- the worker cannot invent a server-generated note_id that the
+API returns. This does not weaken the rule above: a note still never
+verifies a policy mutation.
 
 Read-only by construction. Every read is a fresh authenticated API call --
 never a DOM snapshot, never the worker's report of what it did.
@@ -73,6 +82,17 @@ class EzlynxDestinationReadPort(Protocol):
     def discussions_for_applicant(self, applicant_id: str) -> list[dict[str, Any]]:
         """NORMALIZED rows: [{"title": str}]. Receipt only, never evidence."""
 
+    def note_in_discussion(self, discussion_id: str, note_id: str) -> bool:
+        """Fresh GET of one discussion; True iff ``note_id`` is present.
+
+        Used to verify applicant-scoped NOTE FILINGS (jobs with no policy
+        number whose claimed destination is the note itself). The note is
+        the destination mutation here, not a receipt for a policy change:
+        the read is a fresh authenticated API GET of EZLynx state, and a
+        worker cannot invent a server-generated note_id that the API
+        returns. Missing note_id is a real absence, not an unknown.
+        """
+
 
 class HermesChatEzlynxDestinationVerifier:
     """Re-read EZLynx and decide whether the claimed mutation really landed.
@@ -104,6 +124,10 @@ class HermesChatEzlynxDestinationVerifier:
             if str(name).strip()
         ]
         discussion_title = str(claimed.get("discussion_title") or "").strip()
+        # Applicant-scoped note filing: the action checkpoint carries the
+        # server-returned ids from the DiscussionApi append call.
+        note_id = str(claimed.get("note_id") or "").strip()
+        discussion_id = str(claimed.get("discussion_id") or "").strip()
 
         expected = {
             "applicant_id": applicant_id,
@@ -111,6 +135,14 @@ class HermesChatEzlynxDestinationVerifier:
             "document_names": expected_documents,
             "discussion_title": discussion_title,
         }
+        # Only include note_id/discussion_id when actually claimed. An empty
+        # key would trigger the "note write claimed" detector in
+        # ezlynx_api_only_writes (which checks key presence) and cause
+        # postcondition_mismatch (expected '' vs observed None).
+        if note_id:
+            expected["note_id"] = note_id
+        if discussion_id:
+            expected["discussion_id"] = discussion_id
 
         bound_applicant = str(payload.get("applicant_id") or "").strip()
         claim_applicant = str(claimed.get("applicant_id") or "").strip()
@@ -124,12 +156,16 @@ class HermesChatEzlynxDestinationVerifier:
             )
 
         if not policy_number:
-            return self._fail(
-                expected,
-                {},
-                "no policy number on the Job or the action checkpoint; nothing to re-read",
-                locator=None,
-                retryable=False,
+            # No policy mutation claimed. This is an applicant-scoped filing
+            # (note and/or documents). Verify what was actually claimed via
+            # API readback instead of failing with "nothing to re-read".
+            return self._verify_applicant_scoped(
+                expected=expected,
+                applicant_id=applicant_id,
+                expected_documents=expected_documents,
+                discussion_title=discussion_title,
+                note_id=note_id,
+                discussion_id=discussion_id,
             )
 
         # ---- 1. THE PROOF: does the policy actually exist? --------------
@@ -263,6 +299,160 @@ class HermesChatEzlynxDestinationVerifier:
             locator=policy_number,
         )
         return VerificationResult(verified, evidence, retryable=False, error=error)
+
+    # ------------------------------------------------------------------ #
+
+    def _verify_applicant_scoped(
+        self,
+        *,
+        expected: dict[str, Any],
+        applicant_id: str,
+        expected_documents: list[str],
+        discussion_title: str,
+        note_id: str,
+        discussion_id: str,
+    ) -> VerificationResult:
+        """Verify a filing whose destination is the applicant, not a policy.
+
+        Two shapes, both read back from EZLynx via fresh API calls:
+
+        * NOTE FILING: the action checkpoint carries the server-returned
+          ``note_id``/``discussion_id`` from the DiscussionApi append. The
+          note is the destination mutation. A fresh GET of the discussion
+          must contain the note_id; a worker cannot invent a
+          server-generated id the API returns.
+        * DOCUMENT FILING: ``document_names`` claimed. Each must be found
+          in DocumentApi with a numeric id and download to non-empty bytes.
+
+        Fails closed when nothing verifiable was claimed.
+        """
+        if not applicant_id:
+            return self._fail(
+                expected,
+                {},
+                "no policy number and no applicant on the Job or the action "
+                "checkpoint; nothing to re-read",
+                locator=None,
+                retryable=False,
+            )
+
+        observed: dict[str, Any] = {
+            "applicant_id": applicant_id,
+            "policy_number": "",
+            "read_method": "DiscussionApi+DocumentApi",
+        }
+
+        # ---- 1. NOTE FILING: the note is the mutation -----------------
+        if note_id and discussion_id:
+            try:
+                present = self._port.note_in_discussion(discussion_id, note_id)
+            except Exception as exc:
+                return self._fail(
+                    expected,
+                    {**observed, "discussion_error": f"{type(exc).__name__}: {exc}"},
+                    "DiscussionApi read-back failed; destination state unknown",
+                    locator=discussion_id,
+                    retryable=True,
+                )
+            observed["discussion_id"] = discussion_id
+            observed["note_id"] = note_id
+            observed["note_found"] = bool(present)
+            if not present:
+                return self._fail(
+                    expected,
+                    observed,
+                    f"note {note_id} is not present in discussion {discussion_id} "
+                    "in EZLynx on re-read",
+                    locator=discussion_id,
+                    retryable=False,
+                    # A real absence is authoritative: we looked and it is not there.
+                    authoritative=True,
+                )
+            evidence = VerificationEvidence(
+                method="EZLYNX_API_DESTINATION_READBACK",
+                source="ezlynx-discussionapi",
+                expected=expected,
+                observed=observed,
+                # Authoritative: fresh authenticated GET of the discussion
+                # confirmed the server-generated note_id is present.
+                authoritative=True,
+                captured_at=_utc_now(),
+                locator=discussion_id,
+            )
+            return VerificationResult(True, evidence, retryable=False, error=None)
+
+        # ---- 2. DOCUMENT FILING ----------------------------------------
+        if expected_documents:
+            try:
+                rows = self._port.documents_for_applicant(applicant_id)
+            except Exception as exc:
+                return self._fail(
+                    expected,
+                    {**observed, "documents_error": f"{type(exc).__name__}: {exc}"},
+                    "DocumentApi search failed; cannot confirm the uploaded document",
+                    locator=applicant_id,
+                    retryable=True,
+                )
+            seen = [str(r.get("name") or "") for r in rows]
+            observed["documents_seen"] = seen[:25]
+            missing: list[str] = []
+            downloaded_ids: list[str] = []
+            for name in expected_documents:
+                match = next(
+                    (row for row in rows if _norm(row.get("name")) == _norm(name)),
+                    None,
+                )
+                doc_id = str((match or {}).get("id") or "").strip()
+                if not match or not doc_id.isdigit():
+                    missing.append(name)
+                    continue
+                try:
+                    body = self._port.download_document(doc_id)
+                except Exception as exc:
+                    return self._fail(
+                        expected,
+                        {**observed, "documents_error": f"{type(exc).__name__}: {exc}"},
+                        "DocumentApi download failed; cannot confirm the uploaded document",
+                        locator=applicant_id,
+                        retryable=True,
+                    )
+                raw = getattr(body, "body", body)
+                if not raw:
+                    missing.append(name)
+                    continue
+                downloaded_ids.append(doc_id)
+            observed["documents_missing"] = missing
+            observed["document_ids"] = downloaded_ids
+            if missing:
+                return self._fail(
+                    expected,
+                    observed,
+                    "expected document(s) not found in DocumentApi: "
+                    f"{observed.get('documents_missing')}",
+                    locator=applicant_id,
+                    retryable=False,
+                    authoritative=True,
+                )
+            evidence = VerificationEvidence(
+                method="EZLYNX_API_DESTINATION_READBACK",
+                source="ezlynx-documentapi",
+                expected=expected,
+                observed=observed,
+                authoritative=True,
+                captured_at=_utc_now(),
+                locator=applicant_id,
+            )
+            return VerificationResult(True, evidence, retryable=False, error=None)
+
+        # ---- 3. Nothing verifiable claimed ------------------------------
+        return self._fail(
+            expected,
+            observed,
+            "no policy number, note_id, or document names on the Job or the "
+            "action checkpoint; nothing to re-read",
+            locator=None,
+            retryable=False,
+        )
 
     # ------------------------------------------------------------------ #
 
