@@ -152,7 +152,8 @@ class AllClientsTests(unittest.TestCase):
             self.assertEqual(len(writer.calls), 1)
             self.assertEqual(writer.calls[0].new_value, "changes@progressive.com")
             self.assertNotIn("PRACTICE", writer.calls[0].subject)
-            self.assertIn("Done.", done[1])
+            self.assertEqual(len(done), 1)
+            self.assertIn("Done", done[0])
             store = JobStore(db)
             rows = list_writes_since(
                 store,

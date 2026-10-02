@@ -14,6 +14,7 @@ Never invents LOB steps. Never binds. Never authorizes COMPLETE.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -391,6 +392,23 @@ def account_nav_contract_lines(
     return lines
 
 
+def _refuse_untrusted_named_lookup(url: object) -> str | None:
+    """A named-client job may open only this search or the user's own id."""
+    job_id = os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
+    db_path = os.environ.get("ROBIE_JOB_DB") or ""
+    if not job_id or not db_path:
+        return None
+    try:
+        from .client_name_lookup import refuse_named_lookup_navigation
+        from .store import JobStore
+
+        store = JobStore(db_path)
+        job = store.get_job(job_id)
+    except Exception:
+        return None
+    return refuse_named_lookup_navigation(store, job, str(url or ""))
+
+
 def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
     """Wrap Page.goto so a URL-guess loop cannot run for minutes."""
     page_cls = scope.get("Page")
@@ -405,6 +423,9 @@ def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
 
     def wrapped(self, url, *args, **kwargs):
         attempted = scope.setdefault("_robie_account_nav_attempted", [])
+        refused = _refuse_untrusted_named_lookup(url)
+        if refused:
+            raise RuntimeError(refused)
         refuse_guessed_account_url(
             url,
             attempted_urls=attempted,

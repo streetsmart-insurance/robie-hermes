@@ -55,6 +55,41 @@ class PostJobAuditError(RuntimeError):
     """Fail-closed audit construction error. Never used to authorize COMPLETE."""
 
 
+_API_READBACK_METHODS = frozenset(
+    {
+        "EZLYNX_API",
+        "EZLYNX_API_DESTINATION_READBACK",
+        "DiscussionApi",
+    }
+)
+
+
+def api_readback_confirms_write(store: JobStore, job_id: str) -> bool:
+    """True when a fresh API read, not the tool's own receipt, confirmed the write.
+
+    The recording is supporting evidence after this. It does not decide the
+    audit verdict. A discussion-note checkpoint with ``read_back`` set is the
+    tool's own claim and does not count.
+    """
+    readback = store.get_checkpoint(job_id, "write_readback") or {}
+    if readback.get("passed"):
+        return True
+    note_readback = store.get_checkpoint(job_id, "discussion_note_readback") or {}
+    if note_readback.get("matched"):
+        return True
+    for item in store.list_evidence(job_id):
+        if not item.get("verified") or not item.get("authoritative"):
+            continue
+        observed = item.get("observed") or {}
+        if isinstance(observed, dict) and observed.get("note_text_matched"):
+            return True
+        method = str(item.get("method") or "")
+        source = str(item.get("source") or "").casefold()
+        if method in _API_READBACK_METHODS or "discussionapi" in source:
+            return True
+    return False
+
+
 def _verdict(*parts: str) -> str:
     if any(part == "FAIL" for part in parts):
         return "FAIL"
@@ -554,13 +589,25 @@ def run_post_job_audit(
         store, job_id, motion, session_root=hermes_home
     )
     mismatch_result = str(mismatch.get("result") or "UNKNOWN")
-    verdict = _verdict(
-        str(heartbeat.get("result") or "UNKNOWN"),
-        str(evidence.get("result") or "UNKNOWN"),
-        str(motion.get("result") or "UNKNOWN"),
-        "FAIL" if mismatch_result == "MISMATCH" else mismatch_result,
-        str(playwright_log.get("result") or "UNKNOWN"),
-    )
+    confirmed = api_readback_confirms_write(store, job_id)
+    if confirmed:
+        motion = dict(motion)
+        motion["supporting_only"] = True
+        mismatch = dict(mismatch)
+        mismatch["supporting_only"] = True
+        verdict = _verdict(
+            str(heartbeat.get("result") or "UNKNOWN"),
+            str(evidence.get("result") or "UNKNOWN"),
+            str(playwright_log.get("result") or "UNKNOWN"),
+        )
+    else:
+        verdict = _verdict(
+            str(heartbeat.get("result") or "UNKNOWN"),
+            str(evidence.get("result") or "UNKNOWN"),
+            str(motion.get("result") or "UNKNOWN"),
+            "FAIL" if mismatch_result == "MISMATCH" else mismatch_result,
+            str(playwright_log.get("result") or "UNKNOWN"),
+        )
     return {
         "job_id": job["id"],
         "job_status": job["status"],

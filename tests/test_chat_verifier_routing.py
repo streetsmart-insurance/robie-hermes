@@ -315,7 +315,7 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(db, "unknown-1", "Perform a custom external action")
             response = guard_chat_response(db, job_id, "Done")
-            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Not verified.", response)
             self.assertIn("structured destination", JobStore(db).get_job(job_id)["last_error"])
 
     def test_progress_wrapper_does_not_force_premature_unverified(self):

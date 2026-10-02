@@ -6,7 +6,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
@@ -41,11 +41,21 @@ from .playwright_observability import (
     fail_closed_zero_playwright_rows,
     maybe_snapshot_and_bind,
 )
-from .post_job_audit import format_audit_chat_message, maybe_audit_terminal_job
+from .post_job_audit import maybe_audit_terminal_job
 from .store import JobStore
 
 
 logger = logging.getLogger(__name__)
+
+# The live Chat adapter installs this so a note tool can post on the job
+# thread before the model speaks. Tests pass a poster instead.
+_OUTCOME_POSTER: Callable[..., Any] | None = None
+
+
+def install_chat_outcome_poster(poster: Callable[..., Any] | None) -> None:
+    """Register the process-wide Chat poster for note outcomes."""
+    global _OUTCOME_POSTER
+    _OUTCOME_POSTER = poster
 
 _BOUND_POLICY_TERMS = re.compile(
     r"(?:\b(?:renew|endorse|cancel|reassign)\b|"
@@ -155,6 +165,39 @@ def start_generic_chat_job_heartbeat(
     return written
 
 
+def question_only_skips_recording(store: Any, job: dict[str, Any] | None, inbound_text: str = "") -> bool:
+    """A question never records, including when an in-thread answer resumes it.
+
+    The resume text is the answer, not the question. The original request
+    and a question-only exemption already stored on the job still count.
+    """
+    if not job:
+        return False
+    job_id = str(job.get("id") or "")
+    if job_id and store is not None:
+        try:
+            if store.get_checkpoint(job_id, "question_only"):
+                return True
+        except Exception:
+            pass
+    from .answer_only import is_answer_only_job, is_informational_ask
+
+    if is_answer_only_job(job) or is_informational_ask(inbound_text):
+        return True
+    payload = dict(job.get("payload") or {})
+    for key in ("request_text", "text", "prompt", "original_text"):
+        if is_informational_ask(str(payload.get(key) or "")):
+            return True
+    job_id = str(job.get("id") or "")
+    if not job_id or store is None:
+        return False
+    try:
+        note = store.get_checkpoint(job_id, "recording_exemption") or {}
+    except Exception:
+        note = {}
+    return "question only" in str(note.get("reason") or "").casefold()
+
+
 def reopen_resumed_generic_chat_job(
     db_path: str,
     job_id: str | None,
@@ -185,7 +228,16 @@ def reopen_resumed_generic_chat_job(
         job = store.get_job(job_id)
     if job["status"] != JobStatus.RUNNING.value:
         return job
-    RecordingManager(db_path).safe_start(job_id)
+    resumed_text = str((job.get("payload") or {}).get("text") or "")
+    if question_only_skips_recording(store, job, resumed_text):
+        store.checkpoint(job_id, "question_only", {"reason": "question only"})
+        store.checkpoint(
+            job_id,
+            "recording_exemption",
+            {"reason": "question only; no browser recording"},
+        )
+    else:
+        RecordingManager(db_path).safe_start(job_id)
     return start_generic_chat_job_heartbeat(db_path, job_id, now=now)
 
 
@@ -208,21 +260,35 @@ def notify_terminal_chat_job(
         return None
     if JobStatus(job["status"]) not in TERMINAL_STATUSES:
         return None
-    message = guard_chat_response(
-        db_path, job_id, job.get("last_error") or "job ended"
+    from .user_reply import format_user_reply
+
+    message = format_user_reply(
+        guard_chat_response(db_path, job_id, job.get("last_error") or "job ended")
     )
     from .chat_app_post import conversation_target, post_as_chat_app
+    from .chat_thread import read_job_chat_thread
 
     target = conversation_target(job)
+    stored_thread = read_job_chat_thread(store, job_id)
     posted = False
     if target is not None:
         send = poster or post_as_chat_app
         space, thread = target
+        if stored_thread:
+            thread = stored_thread
         try:
             try:
-                send(space, message, thread_name=thread)
+                if thread:
+                    send(space, message, thread_name=thread)
+                else:
+                    from .chat_thread import job_thread_key
+
+                    send(space, message, thread_key=job_thread_key(job_id))
             except TypeError:
-                send(space, message)
+                try:
+                    send(space, message, thread_name=thread)
+                except TypeError:
+                    send(space, message)
             posted = True
         except Exception:
             logger.exception("terminal Chat post failed job=%s", job_id)
@@ -414,8 +480,15 @@ def _retarget_bounded_correction(
     )
 
 
+_IN_PROGRESS_MAX_CHARS = 280
+
+
 def _looks_in_progress(content: str) -> bool:
     text = str(content or "")
+    # A finished essay can contain the word "working". Only a short status
+    # line keeps the job and the recording open.
+    if len(" ".join(text.split())) > _IN_PROGRESS_MAX_CHARS:
+        return False
     # FAIL_CLOSED_MESSAGE contains the substring "playwright_exec". Job
     # c282de98 stored that exact fail-closed line and Chat rendered
     # "still working" because this helper treated it as in-progress.
@@ -931,6 +1004,11 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         and job["status"] == JobStatus.RUNNING.value
     ):
         start_generic_chat_job_heartbeat(db_path, job_id)
+    if JobStatus(job["status"]) in {JobStatus.PENDING, JobStatus.RUNNING}:
+        from .client_name_lookup import prepare_named_client_lookup
+
+        prepare_named_client_lookup(store, job_id)
+        job = store.get_job(job_id)
     if job["status"] == JobStatus.FAILED:
         if is_action_gate_refusal(job):
             return (
@@ -966,12 +1044,34 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     route = purpose_built_instructions(str(dict(job.get("payload") or {}).get("text") or text))
     if route and route not in lines:
         lines.append(route)
-    if is_answer_only_job(job):
+    from .client_name_lookup import job_is_client_policy_lookup
+
+    client_lookup = job_is_client_policy_lookup(job)
+    if is_answer_only_job(job) and not client_lookup:
         lines.append(
             "This is a question. Answer it in plain English. "
             "Do not open EZLynx. Do not write a note or a document. "
             "Do not include your reasoning or thinking."
         )
+    elif client_lookup:
+        held = str(
+            (store.get_checkpoint(job_id, "client_name_search") or {}).get("user_line")
+            or ""
+        ).strip()
+        if held:
+            lines.append(
+                "The client search already ran. Do not open EZLynx. "
+                "Do not guess an applicant id or an EZLynx URL. "
+                f"Reply with exactly: {held}"
+            )
+        else:
+            lines.append(
+                "This is a read-only client lookup. Open only the applicant id "
+                "this job bound from its applicant search or from the user's "
+                "message. Do not guess an EZLynx URL. Do not take an applicant "
+                "id from docs, runbooks, memory, or an earlier chat. Do not "
+                "write a note or a document."
+            )
     from .write_verification_loop import (
         get_locked_plan,
         is_ezlynx_write_job,
@@ -986,7 +1086,10 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             lines.append(
                 "Before any tool or write, state a plan of exactly the write, "
                 "the target, and the values. Do not invent a value. Do not write "
-                "until that plan is locked."
+                "until that plan is locked. target may be the account id, the "
+                "policy number, or the discussion name. If a write tool names "
+                "the wrong field, fix that field once. If it refuses again, stop. "
+                "Do not call the tool again."
             )
     lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
@@ -1013,7 +1116,6 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     lines.extend([
         "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), you MUST execute it by calling the 'playwright_exec' tool directly. Do not output text claiming 'playwright_exec is unavailable' or simulating error messages without having actually executed the tool. Do not use generic terminal/bash commands for browser automation.",
         "When the user request provides every field the job schema requires, do not re-prompt with a generic 'Ready to proceed?' confirmation — proceed directly to execution. This does not relax clarify/HITL for genuinely ambiguous or conflicting fields, for any request affecting an already-bound policy (renewal, endorsement, cancellation, reassignment) regardless of field completeness, or for any case where the target account/applicant can't be resolved to exactly one match. Every action remains subject to independent post-job verification — destination evidence and structured playwright_exec proof — before COMPLETE is authorized; skipping the pre-execution prompt does not skip or weaken that check in any way.",
-        "When navigating to an EZLynx account, try the direct URL (e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct navigation does not find the applicant or stays on a listing page, use the global search bar to locate the applicant.",
         "EZLynx notes and documents are API-only. File notes with ezlynx_discussion_note (DiscussionApi add_note_to_discussion / file_note_to_existing_discussion). Upload files with ezlynx_document_upload (DocumentApi). Never use playwright_exec, a file chooser, Add Note, or Save Note to write notes or documents to EZLynx. Playwright is for forms and portals only. COMPLETE is refused without a DiscussionApi note_id or DocumentApi document_id.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested) through those APIs, not the browser.",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
@@ -1029,6 +1131,13 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Do not emit ROBIE_BLOCKED for a completed action, a general question, or an ordinary explanation.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
+    if not client_lookup:
+        lines.append(
+            "When navigating to an EZLynx account, try the direct URL "
+            "(e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct "
+            "navigation does not find the applicant or stays on a listing page, "
+            "use the global search bar to locate the applicant."
+        )
     payload = dict(job.get("payload") or {})
     payload.setdefault("action_type", job.get("action_type"))
     lines.extend(account_nav_contract_lines(text, payload))
@@ -1049,16 +1158,82 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     return text + "\n".join(lines)
 
 
+_ROUTING_TERMINAL = {
+    JobStatus.UNVERIFIED,
+    JobStatus.COMPLETE,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+}
+
+
+def _inbound_in_job_thread(
+    store: JobStore, job: dict[str, Any] | None, inbound_thread_id: str | None
+) -> bool:
+    """True only when this message is inside the thread stored on the job."""
+    if not job:
+        return False
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound:
+        return False
+    stored = read_job_chat_thread(store, str(job.get("id") or ""))
+    return bool(stored and inbound == stored)
+
+
+def _live_job_owning_thread(
+    store: JobStore, conversation_id: str, inbound_thread_id: str | None
+) -> dict[str, Any] | None:
+    """The open job this thread belongs to, when it is not the active link."""
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound or not str(conversation_id or "").strip():
+        return None
+    try:
+        with store.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id FROM conversation_job_links
+                   WHERE conversation_id=?
+                   ORDER BY created_at DESC LIMIT 30""",
+                (str(conversation_id),),
+            ).fetchall()
+    except Exception:
+        return None
+    seen: set[str] = set()
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        if read_job_chat_thread(store, job_id) != inbound:
+            continue
+        try:
+            job = store.get_job(job_id)
+        except Exception:
+            continue
+        if JobStatus(job["status"]) in _ROUTING_TERMINAL:
+            continue
+        return job
+    return None
+
+
 def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
-    """Checkpoint RETRY. Return a refusal reason, or None after an allowed resume.
+    """Checkpoint RETRY. Return a refusal reason, or None when the job may resume.
 
-    AWAITING_HUMAN_INPUT is left for the existing resume path. FAILED and
-    UNVERIFIED are re-opened only when leftover_retry_hold_reason allows it
-    (playground on, younger than 24 hours).
+    A finished job stays finished. Chat never moves UNVERIFIED, COMPLETE,
+    FAILED, or CANCELLED back to PENDING. AWAITING_HUMAN_INPUT is left for
+    the existing resume path.
     """
-    from .engine import leftover_retry_hold_reason, resume_terminal_for_playground_retry
+    from .engine import leftover_retry_hold_reason
 
+    status = JobStatus(job["status"])
     reason = leftover_retry_hold_reason(job)
+    if status in _ROUTING_TERMINAL:
+        reason = reason or (
+            "This job is already finished. Chat cannot reopen it. "
+            "Start a new request."
+        )
     store.checkpoint(
         job["id"],
         "leftover_retry",
@@ -1066,9 +1241,6 @@ def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
     )
     if reason:
         return reason
-    status = JobStatus(job["status"])
-    if status in {JobStatus.FAILED, JobStatus.UNVERIFIED}:
-        resume_terminal_for_playground_retry(store, job)
     return None
 
 
@@ -1143,10 +1315,25 @@ def open_chat_job(
     drive_port: object | None = None,
     artifact_root: str | None = None,
     action_payload: dict[str, Any] | None = None,
+    inbound_thread_id: str | None = None,
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
-    store.fail_orphaned_chat_jobs()
+    orphaned = store.fail_orphaned_chat_jobs()
+    from .chat_job_controls import stop_recordings_for_jobs, sweep_dead_running_jobs
+
+    dead = sweep_dead_running_jobs(store)
+    stop_recordings_for_jobs(
+        db_path,
+        list(dict.fromkeys([*orphaned, *dead])),
+        JobStatus.FAILED.value,
+    )
+    try:
+        from .chat_job_controls import expire_stale_waiting_jobs
+
+        expire_stale_waiting_jobs(store)
+    except Exception:
+        logger.exception("stale waiting-job expire failed; continuing")
     try:
         from .hitl_ladder import expire_unanswered_hitl_jobs
 
@@ -1220,11 +1407,26 @@ def open_chat_job(
             active_for_turn = store.get_job(active_for_turn_id)
         except KeyError:
             active_for_turn = None
+    from .chat_job_controls import waiting_job_to_bind
+
+    bind_target = waiting_job_to_bind(store, text, inbound_thread_id)
     continue_clarification = bool(
-        active_for_turn
-        and JobStatus(active_for_turn["status"]) == JobStatus.NEEDS_CLARIFICATION
-        and not conversation_must_start_fresh(store, active_for_turn)
+        bind_target is not None
+        and not conversation_must_start_fresh(store, bind_target)
     )
+    if continue_clarification:
+        active_for_turn = bind_target
+    elif (
+        active_for_turn
+        and str(active_for_turn.get("status") or "") == JobStatus.NEEDS_CLARIFICATION.value
+    ):
+        # Only a reply inside the waiting job's thread answers it.
+        # A top-level message starts a new job.
+        related_only = False
+        explicit_continuation = False
+        queue.deactivate_conversation(context_key)
+        resume_context = None
+        active_for_turn = None
     if active_for_turn and conversation_must_start_fresh(store, active_for_turn):
         # The stopped, timed-out, or finished job must not swallow the next message.
         queue.deactivate_conversation(context_key)
@@ -1238,6 +1440,73 @@ def open_chat_job(
     ):
         explicit_continuation = True
     continued_job: dict[str, Any] | None = None
+    revival = ""
+    if active_for_turn is not None:
+        from .chat_job_controls import dedupe_note_revival
+
+        revival = dedupe_note_revival(
+            store, active_for_turn, text, inbound_thread_id
+        )
+    if revival == "block":
+        # A parked or unverified repeat-note job is not a continuation of
+        # the next message. Leave it waiting and open a new job.
+        queue.deactivate_conversation(context_key)
+        related_only = False
+        explicit_continuation = False
+        continue_clarification = False
+        active_for_turn = None
+        resume_context = None
+    elif revival == "no" and not continue_clarification and active_for_turn is not None:
+        from .chat_job_controls import close_declined_note_repost
+
+        close_declined_note_repost(store, active_for_turn["id"], text)
+        return active_for_turn["id"]
+    elif revival == "yes" and not continue_clarification and active_for_turn is not None:
+        from .chat_job_controls import (
+            _yes_already_spent,
+            mark_job_waiting_for_user,
+            note_repost_confirmed_by_reply,
+            repeat_note_question,
+        )
+        from .chat_turn_control import clear_agent_stop
+
+        dedupe_id = active_for_turn["id"]
+        if _yes_already_spent(store, dedupe_id):
+            revival = ""
+        else:
+            clear_agent_stop(dedupe_id)
+            note_repost_confirmed_by_reply(store, dedupe_id, text)
+        if revival == "yes" and JobStatus(active_for_turn["status"]) == JobStatus.UNVERIFIED:
+            mark_job_waiting_for_user(
+                store,
+                dedupe_id,
+                repeat_note_question(store, dedupe_id),
+                from_unverified=True,
+            )
+        if revival == "yes":
+            clear_agent_stop(dedupe_id)
+            resumed = store.get_job(dedupe_id)
+            if JobStatus(resumed["status"]) in WAITING_STATUSES:
+                store.resume(dedupe_id)
+            queue.link_conversation_job(
+                conversation_id=context_key,
+                job_id=dedupe_id,
+                message_id=message_id,
+                event_id=message_id,
+                relation="CONTINUATION",
+            )
+            return dedupe_id
+    from .chat_job_controls import ALREADY_DONE, note_already_done_target
+
+    done_id = note_already_done_target(
+        store,
+        text,
+        conversation_id=context_key,
+        inbound_thread_id=inbound_thread_id,
+    )
+    if done_id and not continue_clarification:
+        store.checkpoint(done_id, "note_already_done", {"reply": ALREADY_DONE})
+        return done_id
     if continue_clarification and active_for_turn is not None:
         original = str((active_for_turn.get("payload") or {}).get("text") or "").strip()
         reply = str(text or "").strip()
@@ -1246,6 +1515,8 @@ def open_chat_job(
             combined = f"{original}\n\nUser reply: {reply}".strip()
         payload = dict(active_for_turn.get("payload") or {})
         payload["text"] = combined
+        if not str(payload.get("original_text") or "").strip() and original:
+            payload["original_text"] = original
         payload["clarification_reply"] = reply
         store.update_payload(active_for_turn["id"], payload)
         store.checkpoint(
@@ -1253,11 +1524,22 @@ def open_chat_job(
             "clarification_reply",
             {"message_id": message_id, "text": reply, "combined": combined},
         )
+        from .chat_job_controls import (
+            close_declined_note_repost,
+            note_repost_confirmed_by_reply,
+        )
+
+        if close_declined_note_repost(store, active_for_turn["id"], reply):
+            return active_for_turn["id"]
+        note_repost_confirmed_by_reply(store, active_for_turn["id"], reply)
         store.checkpoint(
             active_for_turn["id"],
             "keep_chat_context",
             {"reason": "needs_clarification"},
         )
+        from .chat_turn_control import clear_agent_stop
+
+        clear_agent_stop(active_for_turn["id"])
         store.resume(active_for_turn["id"])
         queue.link_conversation_job(
             conversation_id=context_key,
@@ -1277,57 +1559,79 @@ def open_chat_job(
         if not active_job_id:
             return None
         active_job = store.get_job(active_job_id)
-        would_resume = (
-            explicit_continuation
-            or JobStatus(active_job["status"]) in WAITING_STATUSES
-        )
-        if would_resume:
-            refused = apply_action_gate(store, active_job, text=text)
-            if refused is not None:
-                return refused["id"]
-        if would_resume:
-            if is_retry_text(text) and _apply_explicit_retry(store, active_job):
+        threaded = _live_job_owning_thread(store, context_key, inbound_thread_id)
+        if threaded is not None and str(threaded.get("id") or "") != str(active_job_id):
+            active_job = threaded
+            active_job_id = str(threaded["id"])
+        status = JobStatus(active_job["status"])
+        in_thread = _inbound_in_job_thread(store, active_job, inbound_thread_id)
+        # A finished job stays finished. An unrelated top-level message opens
+        # a new job. A reply in the job's thread, or an explicit continuation
+        # of a job that is still open, may still bind.
+        unrelated_top_level = not in_thread and not explicit_continuation
+        if status in _ROUTING_TERMINAL or unrelated_top_level:
+            if status in _ROUTING_TERMINAL and is_retry_text(text):
+                _apply_explicit_retry(store, active_job)
                 return active_job_id
-            active_job = store.get_job(active_job_id)
-        if JobStatus(active_job["status"]) in WAITING_STATUSES:
-            store.resume(active_job_id)
-        elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
-            target = (
-                JobStatus.VERIFYING
-                if store.get_checkpoint(active_job_id, "action")
-                else JobStatus.PENDING
+            queue.deactivate_conversation(context_key)
+            related_only = False
+            explicit_continuation = False
+            resume_context = None
+            active_job_id = None
+        skip_bind = active_job_id is None
+        if active_job_id:
+            would_resume = (
+                explicit_continuation
+                or JobStatus(active_job["status"]) in WAITING_STATUSES
             )
-            store.transition(
+            if would_resume:
+                refused = apply_action_gate(store, active_job, text=text)
+                if refused is not None:
+                    return refused["id"]
+            if would_resume:
+                if is_retry_text(text) and _apply_explicit_retry(store, active_job):
+                    return active_job_id
+                active_job = store.get_job(active_job_id)
+            if JobStatus(active_job["status"]) in WAITING_STATUSES:
+                from .chat_job_controls import dedupe_note_revival
+
+                if dedupe_note_revival(store, active_job, text, inbound_thread_id) == "block":
+                    queue.deactivate_conversation(context_key)
+                    related_only = False
+                    explicit_continuation = False
+                    skip_bind = True
+                else:
+                    store.resume(active_job_id)
+            elif JobStatus(active_job["status"]) in _ROUTING_TERMINAL:
+                queue.deactivate_conversation(context_key)
+                related_only = False
+                explicit_continuation = False
+                skip_bind = True
+        if active_job_id and not skip_bind:
+            store.checkpoint(
                 active_job_id,
-                target,
-                expected={JobStatus.UNVERIFIED},
-                error=None,
-                release_lease=True,
+                f"continuation:{message_id}",
+                {
+                    "message_id": message_id,
+                    "text": text,
+                    "requested_by": requested_by or "Google Chat user",
+                    "related_only": related_only,
+                },
             )
-        store.checkpoint(
-            active_job_id,
-            f"continuation:{message_id}",
-            {
-                "message_id": message_id,
-                "text": text,
-                "requested_by": requested_by or "Google Chat user",
-                "related_only": related_only,
-            },
-        )
-        queue.link_conversation_job(
-            conversation_id=context_key,
-            job_id=active_job_id,
-            message_id=message_id,
-            event_id=message_id,
-            relation=(
-                "CORRECTION"
-                if classification.action_type in BOUNDED_ENGINE_ACTIONS
-                else "CONTINUATION"
-            ),
-        )
-        if related_only:
-            return active_job_id
-        continued_job = store.get_job(active_job_id)
+            queue.link_conversation_job(
+                conversation_id=context_key,
+                job_id=active_job_id,
+                message_id=message_id,
+                event_id=message_id,
+                relation=(
+                    "CORRECTION"
+                    if classification.action_type in BOUNDED_ENGINE_ACTIONS
+                    else "CONTINUATION"
+                ),
+            )
+            if related_only:
+                return active_job_id
+            continued_job = store.get_job(active_job_id)
     server_payload: dict[str, Any] = {}
     if classification.action_type == "drive.skill_sync":
         from .skill_sync import ALLOWED_FOLDERS, EXCLUDED_FOLDERS, skill_sync_root
@@ -1397,6 +1701,7 @@ def open_chat_job(
                     "worker": classification.worker,
                     **server_payload,
                     "request_text": text,
+                    "original_text": text,
                     "answer_only": bool(getattr(classification, "answer_only", False)),
                 }
             ),
@@ -1445,6 +1750,25 @@ def open_chat_job(
             "destination_verification",
             {"verified": False, "reason": "ASCEND_UNAVAILABLE"},
         )
+        return job["id"]
+    from .chat_job_controls import hard_block_reply
+
+    blocked_line = None if continued_job is not None else hard_block_reply(text)
+    if blocked_line:
+        current = store.get_job(job["id"])
+        if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.NEEDS_CLARIFICATION,
+                },
+                error=blocked_line,
+                release_lease=True,
+            )
+        store.checkpoint(job["id"], "hard_block", {"reply": blocked_line})
         return job["id"]
     pre_execution_hold = pre_execution_hold_reason(text, server_payload)
     if pre_execution_hold:
@@ -1645,7 +1969,19 @@ def open_chat_job(
             )
             store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
         else:
-            RecordingManager(db_path).safe_start(job["id"])
+            if question_only_skips_recording(store, current, text):
+                store.checkpoint(
+                    job["id"],
+                    "question_only",
+                    {"reason": "question only"},
+                )
+                store.checkpoint(
+                    job["id"],
+                    "recording_exemption",
+                    {"reason": "question only; no browser recording"},
+                )
+            else:
+                RecordingManager(db_path).safe_start(job["id"])
     current = store.get_job(job["id"])
     if current["status"] not in {JobStatus.COMPLETE.value, JobStatus.FAILED.value}:
         try:
@@ -1698,24 +2034,27 @@ def _post_job_audit_note(
     job_id: str,
     recordings: RecordingManager | None = None,
 ) -> str:
-    """Append the four-answer audit. Posted by the existing Chat APP send()."""
+    """Persist the audit on the job. The CSR reply does not include it.
+
+    The full checklist stays in the job log and the health-channel poster.
+    Stop the recording first so the audit does not read a row still
+    marked RECORDING.
+    """
     try:
-        audit = maybe_audit_terminal_job(db_path, job_id)
+        if recordings is not None:
+            status = JobStatus.UNVERIFIED.value
+            try:
+                status = str(JobStore(db_path).get_job(job_id).get("status") or status)
+            except Exception:
+                status = JobStatus.UNVERIFIED.value
+            if status not in _RECORDING_KEEP_OPEN:
+                recordings.safe_stop(job_id, status)
+        maybe_audit_terminal_job(db_path, job_id)
         if recordings is not None:
             recordings.release_local_after_audit(job_id)
-    except Exception as exc:
-        return (
-            f"\n\nROBIE post-job audit — {job_id} — UNKNOWN\n"
-            f"1. Heartbeat gateway_progress: UNKNOWN ({type(exc).__name__})\n"
-            f"2. Destination evidence: UNKNOWN\n"
-            f"3. Recording motion: FAIL (audit crashed; fail-closed)\n"
-            f"4. Tool vs recording: UNKNOWN\n"
-            f"5. Playwright tool rows: UNKNOWN\n"
-            "Audit verdict: FAIL (does not authorize COMPLETE)"
-        )
-    if not audit:
-        return ""
-    return "\n\n" + format_audit_chat_message(audit)
+    except Exception:
+        logger.exception("post-job audit stayed in the ledger only job=%s", job_id)
+    return ""
 
 
 def _login_secret_chat_note(store: JobStore, job_id: str) -> str:
@@ -1900,26 +2239,59 @@ def _render_chat_terminal(
     every user gets the same shape. Internal codes are translated for
     display only -- detection on raw worker text is untouched.
     """
-    from .answer_only import is_answer_only_job
+    from .answer_only import (
+        FIXTURE_POLICY_MARKER,
+        LIVE_LOOKUP_FAILED,
+        is_answer_only_job,
+    )
     from .end_state_report import end_state_report_enabled, render_job_end_state
 
+    if FIXTURE_POLICY_MARKER in str(content or ""):
+        return LIVE_LOOKUP_FAILED + "\n"
     forced = _unproved_field_user_reply(store, job)
     if forced:
         from . import status_format
 
         ref = status_format.short_job_ref(job["id"])
         body = forced if not ref else f"{forced}\n\n{ref}"
+        _post_job_audit_note(str(store.path), job["id"], recordings)
         return body.strip() + "\n"
+    note_reply = _discussion_note_user_reply(store, job)
+    if note_reply:
+        _post_job_audit_note(str(store.path), job["id"], recordings)
+        return note_reply if note_reply.endswith("\n") else note_reply + "\n"
     # A question is answered in the reply. EZLynx is not the destination.
-    if is_answer_only_job(job):
-        return render_job_end_state(
-            store, job, content, recordings=recordings, channel="chat"
-        )
-    from .write_verification_loop import write_reply_if_planned
+    if is_answer_only_job(job) or dict(job.get("payload") or {}).get("answered"):
+        from .user_reply import format_user_reply
 
-    planned_reply = write_reply_if_planned(store, job, content)
-    if planned_reply:
-        return planned_reply
+        _post_job_audit_note(str(store.path), job["id"], recordings)
+        answer = str(content or "").strip() or "Answered."
+        if not answer.lower().startswith("answered"):
+            answer = f"Answered. {answer}"
+        text = format_user_reply(answer)
+        return text if text.endswith("\n") else text + "\n"
+    from .runtime_env import playground_enabled
+    from .write_verification_loop import (
+        is_ezlynx_write_job,
+        nothing_written_line,
+        unwritten_write_reason,
+        write_landed,
+        write_reply_if_planned,
+    )
+
+    keep_quote = (
+        playground_enabled() and str(job.get("action_type") or "") == "ezlynx.quote"
+    )
+    if is_ezlynx_write_job(job) and not keep_quote:
+        planned_reply = write_reply_if_planned(store, job, content)
+        if write_landed(store, job) and planned_reply:
+            return planned_reply
+        if not write_landed(store, job):
+            return nothing_written_line(unwritten_write_reason(store, job)) + "\n"
+    else:
+        planned_reply = write_reply_if_planned(store, job, content)
+        if planned_reply:
+            return planned_reply
     # Flag on: one end-state report scored by Jev. The old "Not verified"
     # wording is display-only and is skipped here. Deterministic verifiers
     # still ran before this render; a failed hard readback forces wrong.
@@ -2049,11 +2421,100 @@ def _render_chat_terminal(
     )
 
 
+def _account_display_name(job: dict[str, Any]) -> str:
+    payload = dict(job.get("payload") or {})
+    for key in (
+        "account_name",
+        "client_name",
+        "company_name",
+        "applicant_name",
+        "customer_name",
+    ):
+        name = " ".join(str(payload.get(key) or "").split()).strip()
+        if name:
+            return name
+    return "the account"
+
+
+def _is_address_or_holder_job(job: dict[str, Any]) -> bool:
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or "")
+    folded = text.casefold()
+    action = str(job.get("action_type") or "")
+    address = action == "ezlynx.policy_change" or "mailing address" in folded
+    holder = action == "ezlynx.certificate" or (
+        "certificate" in folded or "certificate holder" in folded
+    )
+    return address or holder
+
+
+def _discussion_note_user_reply(store: JobStore, job: dict[str, Any]) -> str:
+    """One line from the readback. The audit stays off this reply."""
+    note = store.get_checkpoint(job["id"], "discussion_note") or {}
+    discussion_id = str(note.get("discussion_id") or "").strip()
+    if not discussion_id or _is_address_or_holder_job(job):
+        return ""
+    from .post_job_audit import api_readback_confirms_write
+
+    name = _account_display_name(job)
+    title = " ".join(str(note.get("discussion_title") or "").split()).strip() or "the discussion"
+    if str(note.get("status") or "") == "sent":
+        return _count_note_user_line(name, title)
+    if api_readback_confirms_write(store, job["id"]):
+        sentence = f'Added the note to {name} on "{title}".'
+    else:
+        sentence = "I couldn't confirm that landed, please check."
+    return sentence
+
+
+def _count_note_user_line(name: str, title: str) -> str:
+    """One line when the discussion gained one note and its text could not be read."""
+    who = " ".join(str(name or "").split()).strip() or "the account"
+    heading = " ".join(str(title or "").split()).strip() or "the discussion"
+    return (
+        f'Added the note to {who} on "{heading}". '
+        "I couldn't read its text to double-check."
+    )
+
+
+def _merge_discussion_note_destination(store: JobStore, job_id: str) -> None:
+    """Put the filed note's keys on the action claim so readback can re-read it.
+
+    Policy number still wins for a policy-level write. note_id stays off the
+    destination so the discussion id remains the identity when there is no
+    policy number.
+    """
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    discussion_id = str(note.get("discussion_id") or "").strip()
+    note_text = str(note.get("note_text") or "").strip()
+    if not discussion_id or not note_text:
+        return
+    action = store.get_checkpoint(job_id, "action")
+    if not isinstance(action, dict):
+        return
+    destination = dict(action.get("destination") or {})
+    destination["discussion_id"] = discussion_id
+    destination["note_text"] = note_text
+    applicant = str(note.get("applicant_id") or "").strip()
+    if applicant and not str(destination.get("applicant_id") or "").strip():
+        destination["applicant_id"] = applicant
+    title = str(note.get("discussion_title") or "").strip()
+    if title and not str(destination.get("discussion_title") or "").strip():
+        destination["discussion_title"] = title
+    destination["write_kind"] = "discussion_note"
+    updated = dict(action)
+    updated["destination"] = destination
+    store.checkpoint(job_id, "action", updated)
+
+
 def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
     """The user-facing line when a note was filed and the field was not changed."""
     note = store.get_checkpoint(job["id"], "discussion_note") or {}
     status = str(note.get("status") or "")
-    if status not in {"filed", "posted, verifying"} and not note.get("read_back"):
+    if (
+        status not in {"filed", "posted, verifying", "sent"}
+        and not note.get("read_back")
+    ):
         return ""
     title = str(note.get("discussion_title") or "").strip()
     if not title:
@@ -2092,7 +2553,443 @@ def _unproved_field_user_reply(store: JobStore, job: dict[str, Any]) -> str:
     return ""
 
 
+_RECORDING_KEEP_OPEN = {
+    JobStatus.PENDING.value,
+    JobStatus.RUNNING.value,
+    JobStatus.VERIFYING.value,
+}
+
+
+def job_recorded_a_write(store: Any, job_id: str) -> bool:
+    """True when this job filed a note or uploaded a document."""
+    from .answer_only import action_claims_mutation
+    from .chat_job_controls import note_job_already_wrote
+
+    if note_job_already_wrote(store, job_id):
+        return True
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        note = {}
+    if str(note.get("status") or "") in {"filed", "sent", "posted, verifying"}:
+        return True
+    try:
+        action = store.get_checkpoint(job_id, "action") or {}
+    except Exception:
+        action = {}
+    if action_claims_mutation(action if isinstance(action, dict) else {}):
+        return True
+    for kind in ("document", "document_upload", "applicant_document"):
+        try:
+            row = store.get_checkpoint(job_id, kind) or {}
+        except Exception:
+            row = {}
+        if str((row or {}).get("document_id") or "").strip():
+            return True
+    return False
+
+
+def _release_session_if_terminal(db_path: str, job_id: str | None) -> None:
+    """A finished job does not keep renewing its session lock."""
+    if not db_path or not job_id:
+        return
+    try:
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return
+    if JobStatus(job["status"]) not in TERMINAL_STATUSES:
+        return
+    from .chat_turn_control import release_finished_job_session
+
+    release_finished_job_session(db_path, job_id, stop_agent=False)
+
+
+def _release_chat_recording(
+    db_path: str,
+    job_id: str | None,
+    recordings: RecordingManager | None,
+) -> None:
+    """Stop the screen recording unless the job is still in progress.
+
+    The verifier can set UNVERIFIED after this function has already read
+    the job. A later check of that first copy skips safe_stop, and the
+    webm keeps growing. This reads the job again.
+    """
+    if not job_id or not db_path:
+        return
+    status = JobStatus.UNVERIFIED.value
+    try:
+        status = str(JobStore(db_path).get_job(job_id).get("status") or status)
+    except Exception:
+        status = JobStatus.UNVERIFIED.value
+    if status in _RECORDING_KEEP_OPEN:
+        return
+    manager = recordings or RecordingManager(db_path)
+    manager.safe_stop(job_id, status)
+
+
+_VERIFIED_CLAIM = re.compile(
+    r"posted\s*&\s*verified|posted and verified|(?<![\w])verified\b|(?<![\w])done\b",
+    re.IGNORECASE,
+)
+_EXECUTION_SUMMARY = re.compile(r"execution summary", re.IGNORECASE)
+
+
+def agent_reply_is_replaced(store: Any, job_id: str | None) -> bool:
+    """True when the model's own final text must not be posted.
+
+    A ledger park and a confirmed note each have one built line. A second
+    send of the model's prose is not another message.
+    """
+    if not job_id or store is None:
+        return False
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return False
+    status = str(note.get("status") or "")
+    if status == "already_posted" and str(note.get("reason") or "").strip():
+        return True
+    if status == "sent":
+        return True
+    if status == "held" and str(note.get("reason") or "").strip():
+        return True
+    if status != "filed":
+        return False
+    from .post_job_audit import api_readback_confirms_write
+
+    try:
+        return bool(api_readback_confirms_write(store, job_id))
+    except Exception:
+        return False
+
+
+def _stop_job_recording(store: JobStore, job_id: str, status: str) -> None:
+    """Stop the screen recording when the job is no longer working."""
+    path = str(getattr(store, "path", "") or "")
+    if not path or not job_id:
+        return
+    try:
+        from .chat_job_controls import stop_recordings_for_jobs
+
+        stop_recordings_for_jobs(path, [job_id], status)
+    except Exception:
+        logger.exception("could not stop recording job=%s", job_id)
+
+
+def _leave_partial_note_unverified(store: JobStore, job_id: str) -> None:
+    """A filed request note is not the whole job. Never mark that COMPLETE."""
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status == JobStatus.PENDING:
+        store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        status = JobStatus.RUNNING
+    if status in {JobStatus.RUNNING, JobStatus.VERIFYING, JobStatus.COMPLETE}:
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={status},
+            error="only part of the request was done",
+            release_lease=True,
+        )
+    _stop_job_recording(store, job_id, JobStatus.UNVERIFIED.value)
+
+
+def close_confirmed_note_job(store: JobStore, job_id: str) -> bool:
+    """A note whose readback matched is COMPLETE. That is the verified close.
+
+    The live send used to leave these RUNNING and then settle them to
+    UNVERIFIED. COMPLETE is only allowed from VERIFYING, with the note id
+    on authoritative evidence.
+    """
+    if not job_id:
+        return False
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    if str(note.get("status") or "") != "filed":
+        return False
+    from .post_job_audit import api_readback_confirms_write
+
+    if not api_readback_confirms_write(store, job_id):
+        return False
+    note_id = str(note.get("note_id") or "").strip()
+    discussion_id = str(note.get("discussion_id") or "").strip()
+    note_text = str(note.get("note_text") or "").strip()
+    applicant_id = str(note.get("applicant_id") or "").strip()
+    if not note_id or not discussion_id or not note_text:
+        return False
+    job = store.get_job(job_id)
+    if _unproved_field_user_reply(store, job):
+        # The note landed. The address or holder did not. That is not COMPLETE.
+        _leave_partial_note_unverified(store, job_id)
+        return False
+    action = dict(store.get_checkpoint(job_id, "action") or {})
+    destination = dict(action.get("destination") or {})
+    destination.update(
+        {
+            "applicant_id": applicant_id or destination.get("applicant_id") or "",
+            "discussion_id": discussion_id,
+            "note_text": note_text,
+            "note_id": note_id,
+            "write_kind": "discussion_note",
+        }
+    )
+    action["destination"] = destination
+    store.checkpoint(job_id, "action", action)
+    expected = {
+        "applicant_id": str(destination.get("applicant_id") or ""),
+        "discussion_id": discussion_id,
+        "note_text": note_text,
+        "note_id": note_id,
+    }
+    observed = dict(expected)
+    observed["note_text_matched"] = True
+    from .models import VERIFIER_AUTHORITY, VerificationEvidence
+    from .store import utc_now
+
+    already = any(
+        item.get("verified") and item.get("authoritative") and item.get("locator") == note_id
+        for item in store.list_evidence(job_id)
+    )
+    if not already:
+        store.add_evidence(
+            job_id,
+            True,
+            VerificationEvidence(
+                method="DiscussionApi",
+                source="ezlynx-discussionapi",
+                expected=expected,
+                observed=observed,
+                authoritative=True,
+                captured_at=utc_now(),
+                locator=note_id,
+            ),
+        )
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status == JobStatus.COMPLETE:
+        _stop_job_recording(store, job_id, JobStatus.COMPLETE.value)
+        return True
+    if status not in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+        JobStatus.UNVERIFIED,
+    }:
+        return False
+    if status != JobStatus.VERIFYING:
+        store.transition(
+            job_id,
+            JobStatus.VERIFYING,
+            expected={status},
+            release_lease=True,
+        )
+    store.transition(
+        job_id,
+        JobStatus.COMPLETE,
+        expected={JobStatus.VERIFYING},
+        authority=VERIFIER_AUTHORITY,
+        release_lease=True,
+    )
+    _stop_job_recording(store, job_id, JobStatus.COMPLETE.value)
+    return True
+
+
+def _leave_spoken_note_unverified(store: JobStore, job_id: str, error: str) -> None:
+    """The user has the one line. The note is not called done."""
+    job = store.get_job(job_id)
+    status = JobStatus(job["status"])
+    if status == JobStatus.PENDING:
+        store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        status = JobStatus.RUNNING
+    if status in {JobStatus.RUNNING, JobStatus.VERIFYING}:
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={status},
+            error=error,
+            release_lease=True,
+        )
+    _stop_job_recording(store, job_id, JobStatus.UNVERIFIED.value)
+
+
+def publish_discussion_note_outcome(
+    db_path: str,
+    job_id: str,
+    poster: Callable[..., Any] | None = None,
+) -> str | None:
+    """Post the ledger question or the readback line on the stored thread.
+
+    The model does not send this line. A later model send has nothing to add.
+    """
+    if not db_path or not job_id:
+        return None
+    store = JobStore(db_path)
+    from .turn_finalization import generation_is_superseded
+
+    if generation_is_superseded(store, job_id):
+        return None
+    try:
+        note = store.get_checkpoint(job_id, "discussion_note") or {}
+    except Exception:
+        return None
+    status = str(note.get("status") or "")
+    line = ""
+    if status == "already_posted":
+        line = " ".join(str(note.get("reason") or "").split())
+        if not line:
+            return None
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, line, from_unverified=True)
+    elif status == "filed":
+        from .post_job_audit import api_readback_confirms_write
+
+        if not api_readback_confirms_write(store, job_id):
+            return None
+        job = store.get_job(job_id)
+        unproved = _unproved_field_user_reply(store, job)
+        if unproved:
+            _leave_partial_note_unverified(store, job_id)
+            line = unproved
+        else:
+            if not close_confirmed_note_job(store, job_id):
+                return None
+            line = _discussion_note_user_reply(store, store.get_job(job_id))
+    elif status == "needs_discussion":
+        from .ezlynx_discussions import ambiguous_discussion_question
+
+        line = ambiguous_discussion_question(
+            list(note.get("matches") or []),
+            hint=str(note.get("title_hint") or ""),
+        )
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, line)
+    elif status in {"sent", "held"}:
+        job = store.get_job(job_id)
+        unproved = _unproved_field_user_reply(store, job) if status == "sent" else ""
+        if unproved:
+            _leave_partial_note_unverified(store, job_id)
+            line = unproved
+        elif status == "sent" or str(note.get("verified_by") or "") == "count":
+            line = _count_note_user_line(
+                _account_display_name(job),
+                str(note.get("discussion_title") or ""),
+            )
+            _leave_spoken_note_unverified(
+                store, job_id, "the note was added, but its text could not be read"
+            )
+        else:
+            line = " ".join(str(note.get("reason") or "").split())
+            if not line:
+                return None
+            _leave_spoken_note_unverified(
+                store, job_id, "the note could not be confirmed"
+            )
+    else:
+        return None
+    line = " ".join(str(line or "").split()).strip()
+    if not line:
+        return None
+    from .user_reply import format_user_reply
+
+    line = format_user_reply(line)
+    from .turn_finalization import current_model_generation
+
+    generation = current_model_generation(job_id)
+    prior = store.get_checkpoint(job_id, "chat_outcome_sent") or {}
+    if prior.get("generation", "") == generation and " ".join(str(prior.get("text") or "").split()) == line:
+        from .chat_turn_control import request_agent_stop
+
+        request_agent_stop(job_id)
+        return line
+    from .chat_thread import read_job_chat_thread
+
+    thread = read_job_chat_thread(store, job_id)
+    job = store.get_job(job_id)
+    space = str((job.get("payload") or {}).get("conversation_id") or "").strip()
+    send = poster if poster is not None else _OUTCOME_POSTER
+    if send is not None and space:
+        send(space, line, thread, job_id)
+    store.checkpoint(
+        job_id,
+        "chat_outcome_sent",
+        {"text": line, "thread": thread or "", "space": space, "generation": generation},
+    )
+    from .chat_turn_control import request_agent_stop
+
+    request_agent_stop(job_id)
+    return line
+
+
+def enforce_note_reply_wording(db_path: str, job_id: str | None, text: str) -> str:
+    """Done or verified only when the deterministic read-back passed.
+
+    The model's words are not proof. A multi-line Execution Summary is
+    replaced with the one-line result.
+    """
+    if not job_id or not db_path:
+        return text
+    try:
+        store = JobStore(db_path)
+        job = store.get_job(job_id)
+    except Exception:
+        return text
+    note = store.get_checkpoint(job_id, "discussion_note") or {}
+    if str(note.get("status") or "") == "already_posted":
+        question = " ".join(str(note.get("reason") or "").split())
+        if question:
+            return question if question.endswith("\n") else question + "\n"
+    from .post_job_audit import api_readback_confirms_write
+
+    confirmed = api_readback_confirms_write(store, job_id)
+    line = _discussion_note_user_reply(store, job)
+    if line:
+        return line if line.endswith("\n") else line + "\n"
+    body = str(text or "")
+    if _EXECUTION_SUMMARY.search(body):
+        if line:
+            return line if line.endswith("\n") else line + "\n"
+        from . import status_format
+
+        sentence = _EXECUTION_SUMMARY.split(body, maxsplit=1)[0]
+        sentence = " ".join(sentence.split()).strip() or "Couldn't finish."
+        ref = status_format.short_job_ref(job_id)
+        collapsed = sentence if not ref else f"{sentence}\n{ref}"
+        return collapsed if collapsed.endswith("\n") else collapsed + "\n"
+    if note and _VERIFIED_CLAIM.search(body) and not confirmed:
+        if line:
+            return line if line.endswith("\n") else line + "\n"
+    return text
+
+
 def guard_chat_response(
+    db_path: str,
+    job_id: str | None,
+    content: str,
+    *,
+    verifiers: dict[str, Any] | None = None,
+    recordings: RecordingManager | None = None,
+) -> str:
+    """User-facing Chat reply. The recording stops on the way out."""
+    from .answer_only import scrub_user_reply
+
+    try:
+        body = _guard_chat_response_impl(
+            db_path,
+            job_id,
+            content,
+            verifiers=verifiers,
+            recordings=recordings,
+        )
+        body = enforce_note_reply_wording(db_path, job_id, body)
+        return scrub_user_reply(body)
+    finally:
+        _release_chat_recording(db_path, job_id, recordings)
+        _release_session_if_terminal(db_path, job_id)
+
+
+def _guard_chat_response_impl(
     db_path: str,
     job_id: str | None,
     content: str,
@@ -2106,6 +3003,34 @@ def guard_chat_response(
     from .hitl import sanitize_hitl_chat_text
 
     content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
+    from .chat_turn_control import (
+        is_gateway_status_notice,
+        is_progress_heartbeat_or_thinking,
+        is_refused_tool_text,
+        is_tool_progress_text,
+    )
+
+    # A refused tool call and a raw progress line go back to the model.
+    # They are not the reply, not a write, and they do not end the job.
+    if is_tool_progress_text(content) or is_refused_tool_text(content):
+        return ""
+    if is_gateway_status_notice(content):
+        return ""
+    # A heartbeat or thinking line is not the reply. Leave the job as it is.
+    if is_progress_heartbeat_or_thinking(content):
+        if not job_id:
+            return ""
+        return (
+            f"ROBIE Job {job_id} — RUNNING\n\n"
+            "ROBIE accepted the request and is still working. "
+            "Completion has not been claimed."
+        )
+    from .turn_finalization import model_text_is_not_final
+
+    # Plan text that shares the assistant message with a tool call is not
+    # the reply. It does not bind a destination, verify, or close.
+    if model_text_is_not_final(job_id, content):
+        return ""
     if not job_id:
         if _looks_like_unbound_policy_success(content):
             return (
@@ -2116,10 +3041,50 @@ def guard_chat_response(
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    from .user_reply import SIGN_IN_QUESTION, plain_clarify_or_sign_in
+
+    sign_in = plain_clarify_or_sign_in(content)
+    if sign_in == SIGN_IN_QUESTION and JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
+        recordings = recordings or RecordingManager(db_path)
+        recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+        return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
+    from .chat_job_controls import outbound_is_clarify
+    from .turn_finalization import model_generation_is_running
+
+    # The model's question for this generation is the reply. Do not close
+    # the job underneath it.
+    if model_generation_is_running(job_id) and outbound_is_clarify(content):
+        return content if str(content).endswith("\n") else str(content).rstrip() + "\n"
     forced = _unproved_field_user_reply(store, job)
     if forced:
-        content = forced
+        _leave_partial_note_unverified(store, job_id)
+        recordings = recordings or RecordingManager(db_path)
+        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+        return forced if forced.endswith("\n") else forced + "\n"
     recordings = recordings or RecordingManager(db_path)
+    repeat = store.get_checkpoint(job_id, "discussion_note") or {}
+    if str(repeat.get("status") or "") == "already_posted":
+        question = " ".join(str(repeat.get("reason") or "").split())
+        if question:
+            from .chat_job_controls import mark_job_waiting_for_user
+
+            mark_job_waiting_for_user(
+                store, job_id, question, from_unverified=True
+            )
+            recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+            return question if question.endswith("\n") else question + "\n"
+    if close_confirmed_note_job(store, job_id):
+        line = _discussion_note_user_reply(store, store.get_job(job_id))
+        recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
+        if line:
+            return line if line.endswith("\n") else line + "\n"
     from .policy_setup_dispatch import is_policy_setup_honest_hitl
 
     if is_policy_setup_honest_hitl(content) and JobStatus(job["status"]) in {
@@ -2200,6 +3165,13 @@ def guard_chat_response(
                 or payload.get("account_name")
             ),
         )["prompt"]
+    if JobStatus(job["status"]) == JobStatus.NEEDS_CLARIFICATION:
+        error = str(job.get("last_error") or "")
+        note = store.get_checkpoint(job_id, "clarification") or {}
+        question = " ".join(str(note.get("question") or "").split())
+        if "destination locator" in error.casefold() and question:
+            recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+            return question if question.endswith("\n") else question + "\n"
     if JobStatus(job["status"]) in WAITING_STATUSES:
         status = JobStatus(job["status"]).value
         recordings.safe_stop(job_id, status)
@@ -2214,7 +3186,67 @@ def guard_chat_response(
     from .answer_only import is_answer_only_job
     from .email_guard import _strip_internal_reasoning
 
-    if is_answer_only_job(job):
+    # A read-only lookup has nothing to re-read. A note or document write
+    # still goes through the destination check below. A named client's
+    # policy number is COMPLETE only after this job loaded that account.
+    if is_answer_only_job(job) and not job_recorded_a_write(store, job_id):
+        from .chat_job_controls import outbound_is_clarify
+        from .chat_turn_control import is_gateway_status_notice
+        from .client_name_lookup import (
+            LOOKUP_MISS,
+            job_is_client_policy_lookup,
+            named_lookup_read_state,
+        )
+        from .user_reply import SIGN_IN_QUESTION, _SIGN_IN
+
+        if is_gateway_status_notice(content):
+            # The gateway's interrupt line is not the answer. Leave the job open.
+            return ""
+        # A clarify or a sign-in ask parks the job. It is not the lookup answer.
+        if outbound_is_clarify(content) or _SIGN_IN.search(str(content or "")):
+            return content
+        if job_is_client_policy_lookup(job):
+            state = named_lookup_read_state(store, job)
+            held = str(
+                (store.get_checkpoint(job_id, "client_name_search") or {}).get(
+                    "user_line"
+                )
+                or ""
+            ).strip()
+            if state != "read":
+                if state == "sign_in":
+                    line = SIGN_IN_QUESTION
+                elif held:
+                    line = held
+                else:
+                    line = LOOKUP_MISS
+                if line.endswith("?"):
+                    return line if line.endswith("\n") else line + "\n"
+                current = store.get_job(job_id)
+                if JobStatus(current["status"]) in {
+                    JobStatus.RUNNING,
+                    JobStatus.PENDING,
+                    JobStatus.VERIFYING,
+                }:
+                    store.transition(
+                        job_id,
+                        JobStatus.UNVERIFIED,
+                        expected={JobStatus(current["status"])},
+                        error="named lookup had no successful EZLynx read",
+                        release_lease=True,
+                    )
+                recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+                store.checkpoint(
+                    job_id,
+                    "worker_response",
+                    sanitize_worker_response(store, job_id, line),
+                )
+                store.checkpoint(
+                    job_id,
+                    "answer_only_close",
+                    {"reason": "no_ezlynx_read", "wrote": False},
+                )
+                return line if line.endswith("\n") else line + "\n"
         content = _strip_internal_reasoning(content) or content
         store.checkpoint(
             job_id, "worker_response", sanitize_worker_response(store, job_id, content)
@@ -2222,18 +3254,14 @@ def guard_chat_response(
         store.checkpoint(
             job_id,
             "answer_only_close",
-            {"reason": "answer only; no EZLynx destination readback"},
+            {"reason": "answered", "wrote": False},
         )
         current = store.get_job(job_id)
         if JobStatus(current["status"]) in {JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING}:
-            store.transition(
-                job_id,
-                JobStatus.UNVERIFIED,
-                expected={JobStatus.RUNNING, JobStatus.PENDING, JobStatus.VERIFYING},
-                error="answer only; no EZLynx destination readback",
-                release_lease=True,
-            )
-        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+            from .answer_only import mark_answered_question
+
+            mark_answered_question(store, job_id, content)
+        recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
         final = store.get_job(job_id)
         if JobStatus(final["status"]) in TERMINAL_STATUSES:
             maybe_snapshot_and_bind(db_path, job_id, phase="end")
@@ -2244,10 +3272,18 @@ def guard_chat_response(
         from .chat_destination_binding import bind_destination_for_job, claimed_from_job
 
         bind_destination_for_job(store, job, claimed=claimed_from_job(job, content))
+    _merge_discussion_note_destination(store, job_id)
     action = store.get_checkpoint(job_id, "action")
     registry = dict(verifiers or _default_chat_verifiers())
     verifier = registry.get(job["action_type"])
     if action and verifier:
+        from .chat_job_controls import note_job_already_wrote
+
+        if note_job_already_wrote(store, job_id):
+            # The note already left. Do not run the engine again from Chat:
+            # that re-reads EZLynx on this turn and freezes the gateway loop.
+            line = _discussion_note_user_reply(store, store.get_job(job_id)) or content
+            return line if str(line).endswith("\n") else str(line) + "\n"
         from .engine import JobEngine
 
         if JobStatus(job["status"]) == JobStatus.RUNNING:
@@ -2313,7 +3349,12 @@ def guard_chat_response(
                 )
             recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
             return interaction["prompt"]
-        if decision.status == JobStatus.FAILED.value:
+        if decision.reason == "answered question":
+            from .answer_only import mark_answered_question
+
+            mark_answered_question(store, job_id, content)
+            recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
+        elif decision.status == JobStatus.FAILED.value:
             store.transition(
                 job_id,
                 JobStatus.FAILED,

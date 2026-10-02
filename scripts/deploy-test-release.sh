@@ -370,6 +370,7 @@ payload = {
     "gateway_unit": sys.argv[7],
     "gateway_active_enter": sys.argv[8],
     "proof_path": sys.argv[9],
+    "official_install_proof": json.loads(pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")),
     "test_skill": {
         "name": "ezlynx-policy-setup",
         "version": "0.2.0-test",

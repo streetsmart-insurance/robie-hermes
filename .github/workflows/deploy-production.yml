@@ -11,6 +11,14 @@ on:
         description: Exact SHA-256 from the approved immutable artifact
         required: true
         type: string
+      test_run_id:
+        description: Successful protected-main Test certification run (required for release promotion)
+        required: false
+        type: string
+      test_artifact_id:
+        description: Immutable verified-test-release artifact ID (required for release promotion)
+        required: false
+        type: string
       confirmation:
         description: Type DEPLOY_TO_HERMES_POC_01
         required: true
@@ -68,44 +76,27 @@ jobs:
           path: controller
           persist-credentials: false
 
-      - name: Check out only the exact release commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.commit }}
-          path: release-source
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Refuse a substituted or newer release revision
-        shell: bash
-        env:
-          REQUESTED_COMMIT: ${{ inputs.commit }}
-        run: |
-          set -euo pipefail
-          test "$(git -C release-source rev-parse HEAD)" = "${REQUESTED_COMMIT}"
-          test "$(git -C controller rev-parse HEAD)" = "${GITHUB_SHA}"
-
-      - name: Build and verify the exact immutable artifact
+      - name: Download and verify the exact Test package (never rebuild)
         id: release
         shell: bash
         env:
           REQUESTED_COMMIT: ${{ inputs.commit }}
           REQUESTED_SHA256: ${{ inputs.sha256 }}
+          TEST_RUN_ID: ${{ inputs.test_run_id }}
+          TEST_ARTIFACT_ID: ${{ inputs.test_artifact_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python -m pip install "pytest>=8.3,<9"
-          mkdir -p "${RUNNER_TEMP}/releases"
-          (
-            cd release-source
-            bash scripts/build-release.sh "${RUNNER_TEMP}/releases"
-          ) | tee "${RUNNER_TEMP}/release.env"
-          source "${RUNNER_TEMP}/release.env"
+          bundle="${RUNNER_TEMP}/verified-test-package"
+          PYTHONPATH=controller python -m robie_job_engine.release_promotion download \
+            --directory "${bundle}" --commit "${REQUESTED_COMMIT}" --sha256 "${REQUESTED_SHA256}" \
+            --run-id "${TEST_RUN_ID}" --artifact-id "${TEST_ARTIFACT_ID}"
+          release_commit="${REQUESTED_COMMIT}"
+          release_archive="${bundle}/robie-hermes-${REQUESTED_COMMIT:0:12}.tgz"
+          release_sha256="$(sha256sum "${release_archive}" | cut -d' ' -f1)"
           test "${release_commit}" = "${REQUESTED_COMMIT}"
           test "${release_sha256}" = "${REQUESTED_SHA256}"
-          (
-            cd release-source
-            bash scripts/verify-release.sh "${release_archive}" "${release_archive}.sha256"
-          )
+          bash controller/scripts/verify-release.sh "${release_archive}" "${release_archive}.sha256"
           echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
           echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
           echo "sha256=${release_sha256}" >>"${GITHUB_OUTPUT}"
