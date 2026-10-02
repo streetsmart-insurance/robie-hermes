@@ -59,19 +59,13 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # Production intentionally has no default: pass the literal base explicitly.
 UAT_DISCUSSION_BASE_URL = "https://app.uatezlynx.com/DiscussionApi/"
 
-# A dialable phone has parentheses or a separator between the groups.
-# A bare 10-digit policy number such as 2037678234, including NatGen's
-# "2037678234 01" term, is not a phone. Formatted numbers still match:
+# Separators are optional, so a bare 10-digit run matches. Hello notes and
+# any other discussion text still refuse that run. A filing note is allowed
+# to keep the policy number it was given; that exception lives in the filing
+# sentence, not in this pattern. Formatted numbers match as well:
 # 732-995-2407, (732) 995-2407, 732 995 2407, +1 603 769 3995.
 _PHONE_LIKE = re.compile(
-    r"(?<!\d)"
-    r"(?:\+?1[-.\s])?"
-    r"(?:"
-    r"\(\d{3}\)[-.\s]?\d{3}[-.\s]\d{4}"
-    r"|"
-    r"\d{3}[-.\s]\d{3}[-.\s]\d{4}"
-    r")"
-    r"(?!\d)"
+    r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}"
 )
 
 
@@ -227,15 +221,39 @@ def _discussion_cookies(
     return list(cookies)
 
 
+# The filing sentence names one policy and the file that starts with that
+# policy: "for policy 2037678234 01, file 2037678234 01 ...". Those bare
+# digits are the policy, not a phone. A formatted number never matches this.
+_FILING_POLICY_NUMBERS = re.compile(
+    r"for policy (?P<policy>\d{10}(?: \d{2})?), file (?P<file>\d{10}(?: \d{2})?)"
+)
+
+
+def _filing_policy_number(text: str, match: re.Match[str]) -> bool:
+    """True when this bare digit run is the policy inside a filing sentence."""
+
+    if re.search(r"\D", match.group(0)):
+        return False
+    for found in _FILING_POLICY_NUMBERS.finditer(text):
+        for group in ("policy", "file"):
+            start, end = found.span(group)
+            if start <= match.start() and match.end() <= end:
+                return True
+    return False
+
+
 def reject_phone_numbers(body: str) -> str:
     """Refuse a note body containing a dialable phone number.
 
     The agency's call automation watches EZLynx discussion text and dials
     numbers it finds; discussion cards cannot be edited or removed afterwards.
+    A filing sentence may keep the bare policy number it names. Any other
+    10-digit run, and every formatted phone, is still refused.
     """
     text = str(body or "")
-    match = _PHONE_LIKE.search(text)
-    if match:
+    for match in _PHONE_LIKE.finditer(text):
+        if _filing_policy_number(text, match):
+            continue
         raise DiscussionApiError(
             None,
             "note body contains a phone-number-like value "

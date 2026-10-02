@@ -407,6 +407,12 @@ def review_task_payload(
     )
 
 
+def _match_is_bare_digits(match: re.Match[str]) -> bool:
+    """True when the phone pattern hit a policy-shaped digit run, not a formatted number."""
+
+    return re.search(r"\D", match.group(0)) is None
+
+
 def _without_phone_numbers(text: str) -> str:
     """Drop a formatted phone so a file name can sit in a discussion note.
 
@@ -419,12 +425,20 @@ def _without_phone_numbers(text: str) -> str:
     cleaned = " ".join(str(text or "").split())
 
     def shorten(match: re.Match[str]) -> str:
+        if _match_is_bare_digits(match):
+            return match.group(0)
         digits = re.sub(r"\D", "", match.group(0))
         return f"ending in {digits[-4:]}" if len(digits) >= 4 else "on file"
 
     cleaned = _PHONE_LIKE.sub(shorten, cleaned)
+    # The refusal check ignores the bare policy digits this function just kept.
+    # A formatted phone that is still present fails the whole name.
+    check = cleaned
+    for match in _PHONE_LIKE.finditer(cleaned):
+        if _match_is_bare_digits(match):
+            check = check.replace(match.group(0), " ", 1)
     try:
-        reject_phone_numbers(cleaned)
+        reject_phone_numbers(check)
     except Exception:
         return "on file"
     return cleaned or "on file"
@@ -1225,13 +1239,14 @@ def _client_name(value: object) -> str:
 def _display_policy(policy_number: str) -> str:
     """Full policy number, or its last four when it is written as a phone."""
 
+    from .ezlynx_discussions import _PHONE_LIKE
+
     text = str(policy_number or "").strip()
-    try:
-        reject_phone_numbers(text)
+    match = _PHONE_LIKE.search(text)
+    if match is None or _match_is_bare_digits(match):
         return text
-    except Exception:
-        runs = [run for run in re.findall(r"\d+", text) if len(run) >= 4]
-        return f"ending in {runs[0][-4:]}" if runs else "on file"
+    runs = [run for run in re.findall(r"\d+", text) if len(run) >= 4]
+    return f"ending in {runs[0][-4:]}" if runs else "on file"
 
 
 def test_account_note(

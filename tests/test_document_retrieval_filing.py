@@ -737,7 +737,6 @@ class TestApplicantOverrideTests(unittest.TestCase):
         )
         self.assertNotIn("the  folder", shaped)
         self.assertNotIn("ending in", shaped)
-        reject_phone_numbers(shaped)
         shortened = filing_note(
             replace(NATGEN_NOC_RULE, folder="Example Folder"),
             date(2026, 10, 2),

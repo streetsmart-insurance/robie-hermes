@@ -147,11 +147,19 @@ def test_reject_phone_numbers_allows_plain_text():
     assert disc.reject_phone_numbers("No dialable digits here.") == "No dialable digits here."
 
 
-def test_reject_phone_numbers_keeps_a_bare_policy_number():
-    policy = "NatGen policy 2037678234 01 stays whole"
-    assert disc.reject_phone_numbers(policy) == policy
-    assert disc._PHONE_LIKE.search("2037678234") is None
-    assert disc._PHONE_LIKE.search("2037678234 01") is None
+def test_reject_phone_numbers_still_refuses_a_bare_ten_digit_run():
+    """A 10-digit run is still refused unless it is the filing sentence's policy."""
+
+    with pytest.raises(disc.DiscussionApiError, match="phone-number-like"):
+        disc.reject_phone_numbers("NatGen policy 2037678234 01")
+    filed = (
+        "NatGen cancellation notice dated 10/2/2026 for policy 2037678234 01, "
+        "file 2037678234 01 NatGen NOC non-payment was added to the Example Folder "
+        "folder. ROBIE was here"
+    )
+    assert disc.reject_phone_numbers(filed) == filed
+    with pytest.raises(disc.DiscussionApiError, match="phone-number-like"):
+        disc.reject_phone_numbers(filed + " Call (732) 995-2407.")
 
 
 # ---------------------------------------------------------------------------
