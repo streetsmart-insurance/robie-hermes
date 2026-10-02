@@ -80,8 +80,8 @@ jobs:
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
-          PYTHONPATH=.:tests python -m pytest -q tests/test_durable_turn_generations.py tests/test_chat_reply_recovery.py tests/test_reply_and_go_guards.py tests/test_discussion_note_readback.py
-          PYTHONPATH=. python -m pytest -q tests/test_release_promotion.py tests/test_production_deploy_workflow.py
+          PYTHONPATH=.:tests python -m pytest -q tests/test_chat_review_concurrency.py tests/test_durable_turn_generations.py tests/test_chat_reply_recovery.py tests/test_reply_and_go_guards.py tests/test_discussion_note_readback.py
+          PYTHONPATH=. python -m pytest -q tests/test_release_promotion.py tests/test_production_deploy_workflow.py tests/test_chat_release_scope.py tests/test_test_deploy_workflow.py
 
       - name: Build immutable artifact
         id: release
@@ -165,7 +165,7 @@ jobs:
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --ssh-key-file="${SSH_KEY}" \
-            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}'"
+            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}' --skip-policy-setup"
 
       - name: Retain installed Test package for independent QA
         env:
@@ -235,9 +235,12 @@ jobs:
             --run-id "${TEST_RUN_ID}" --artifact-id "${TEST_ARTIFACT_ID}"
           python - <<'PYQA'
           import json, os, pathlib
+          from robie_job_engine.release_promotion import bind_qa_to_install
           qa = json.loads(os.environ["QA_EVIDENCE"])
-          if qa.get("reviewer") != os.environ["REVIEWER"]:
-              raise SystemExit("QA reviewer must be the authenticated workflow actor")
+          # Bind independent evidence to the actual verified download above.
+          # QA reviewer must be the authenticated workflow actor.
+          qa = bind_qa_to_install(qa, os.environ["TEST_RUN_ID"],
+                                  os.environ["TEST_ARTIFACT_ID"], os.environ["REVIEWER"])
           target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "verified-test-package/test-qa-evidence.json"
           target.write_text(json.dumps(qa, sort_keys=True) + "\n", encoding="utf-8")
           PYQA

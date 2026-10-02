@@ -13,11 +13,13 @@ GATEWAY_RUNTIME_DROPIN="/etc/systemd/system/robie-gateway.service.d/zz-robie-tes
 archive=""
 checksum=""
 commit=""
+install_policy_setup=true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --archive) archive="$2"; shift 2 ;;
     --checksum) checksum="$2"; shift 2 ;;
     --commit) commit="$2"; shift 2 ;;
+    --skip-policy-setup) install_policy_setup=false; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -48,7 +50,7 @@ old_current="$(readlink -f "${OPT_ROOT}/current")"
 old_releases_current="$(readlink -f "${OPT_ROOT}/releases/current")"
 policy_skill_link="${OPT_ROOT}/.hermes/skills/ezlynx-policy-setup"
 old_policy_skill_target=""
-if [[ -e "${policy_skill_link}" || -L "${policy_skill_link}" ]]; then
+if [[ "${install_policy_setup}" == true ]] && [[ -e "${policy_skill_link}" || -L "${policy_skill_link}" ]]; then
   [[ -L "${policy_skill_link}" ]] || {
     echo "existing Test Policy Setup skill is not an atomic symlink; refuse deploy" >&2
     exit 2
@@ -153,7 +155,8 @@ rollback_test() {
     "${OPT_ROOT}/current" \
     "${OPT_ROOT}/releases/current" \
     "${policy_skill_link}" \
-    "${GATEWAY_UNIT}"
+    "${GATEWAY_UNIT}" \
+    "${install_policy_setup}"
   [[ "${runtime_config_restored}" == true ]]
 }
 
@@ -248,6 +251,9 @@ while datetime.now(timezone.utc).replace(microsecond=0) <= flipped:
     time.sleep(0.05)
 PY
 
+policy_skill_source=""
+policy_skill_digest=""
+if [[ "${install_policy_setup}" == true ]]; then
 # Install only the explicitly Test-only draft skill. The destination is an
 # atomic symlink into this immutable release, so rollback restores the exact
 # previous skill bytes. Production uses a different root and is never touched.
@@ -302,6 +308,8 @@ if ! atomic_pointer "${policy_skill_source}" "${policy_skill_link}"; then
 fi
 policy_skill_digest="$(sha256sum "${policy_skill_source}/SKILL.md" "${policy_skill_source}/references/profiles.json" | sha256sum | awk '{print $1}')"
 
+fi
+
 install_gateway_runtime_config() {
   install -d -m 0755 "$(dirname "${GATEWAY_RUNTIME_DROPIN}")" || return
   runtime_dropin_tmp="${GATEWAY_RUNTIME_DROPIN}.new-$$"
@@ -355,7 +363,7 @@ python3 - "${evidence_dir}/test-deploy-evidence.json" "${inventory}" \
   "${commit}" "${archive_digest}" "${release_root}" "${old_current}" \
   "${GATEWAY_UNIT}" "${after}" "${proof}" "${policy_skill_link}" \
   "${policy_skill_source}" "${policy_skill_digest}" "${old_policy_skill_target}" \
-  "${runtime_root}" "${runtime_digest}" "${GATEWAY_RUNTIME_DROPIN}" <<'PY'
+  "${runtime_root}" "${runtime_digest}" "${GATEWAY_RUNTIME_DROPIN}" "${install_policy_setup}" <<'PY'
 import json
 import pathlib
 import sys
@@ -402,7 +410,10 @@ payload = {
     "test_job_inventory": json.loads(sys.argv[2]),
     "verified_at": datetime.now(timezone.utc).isoformat(),
     "production_touched": False,
+    "policy_setup_changed": sys.argv[17] == "true",
 }
+if not payload["policy_setup_changed"]:
+    payload["test_skill"] = {"changed": False, "reason": "Chat-only release preserves existing policy setup"}
 path = pathlib.Path(sys.argv[1])
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(json.dumps(payload, sort_keys=True))

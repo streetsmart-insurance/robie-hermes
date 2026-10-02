@@ -1,18 +1,16 @@
 """Read-only client lookup by name.
 
-Typing into EZLynx global search is not a write. One matching client is
+No live browser search is installed by this backport. An explicit applicant
+ID or an injected, authorized search result is required. One matching client is
 bound onto the job. More than one match asks a plain question. The write
 allowlist is unchanged for every other control.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -665,73 +663,6 @@ def read_applicant_search(page: Any, name: str) -> dict[str, Any]:
     return {"status": "ok", "matches": matches}
 
 
-def _connect_current_page() -> tuple[Any, Any] | None:
-    """The dashboard, or another page that is not an unsaved form.
-
-    This never navigates to a guessed EZLynx URL.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        return None
-    cdp_url = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
-    playwright = None
-    try:
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.connect_over_cdp(cdp_url, timeout=2000)
-    except Exception:
-        if playwright is not None:
-            try:
-                playwright.stop()
-            except Exception:
-                pass
-        return None
-    pages = [page for context in browser.contexts for page in context.pages]
-    page = choose_client_search_page(pages)
-    if page is None:
-        try:
-            playwright.stop()
-        except Exception:
-            pass
-        return None
-    return page, playwright
-
-
-def _search_open_page(name: str) -> dict[str, Any]:
-    opened = _connect_current_page()
-    if opened is None:
-        logger.info(
-            "named client search unreadable url=none name=%s hint=no safe EZLynx page why=no page",
-            " ".join(str(name or "").split()),
-        )
-        return {"status": "error", "matches": []}
-    page, playwright = opened
-    try:
-        return read_applicant_search(page, name)
-    except Exception:
-        _log_unreadable(page, name, "search failed")
-        return {"status": "error", "matches": []}
-    finally:
-        try:
-            playwright.stop()
-        except Exception:
-            pass
-
-
-def default_searcher(name: str) -> dict[str, Any]:
-    """Sync Playwright cannot run on the gateway loop.
-
-    The EZLynx re-read already leaves the loop for the same reason. When this
-    function is called from the loop, the sync search runs on a worker thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return _search_open_page(name)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_search_open_page, name).result()
-
-
 def _drop_untrusted_binding(store: Any, job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
     trusted = set(trusted_applicant_ids(store, job))
@@ -807,7 +738,7 @@ def prepare_named_client_lookup(
     if not job_is_client_policy_lookup(job):
         return None
     note = _search_note(store, job_id)
-    if note.get("resolved"):
+    if note.get("resolved") and note.get("source") != "needs_id":
         if str(note.get("source") or "") in {"several", "linked"}:
             return _consume_client_choice(store, job_id)
         return str(note.get("user_line") or "").strip() or None
@@ -837,7 +768,14 @@ def prepare_named_client_lookup(
     _drop_untrusted_binding(store, job)
     if not name:
         return None
-    runner = searcher or _SEARCHER_OVERRIDE or default_searcher
+    runner = searcher or _SEARCHER_OVERRIDE
+    if runner is None:
+        # This Chat backport does not own the shared browser. Never attach CDP
+        # or type into another driver's session to resolve a name.
+        line = "Which EZLynx applicant ID should I use?"
+        _remember_search(store, job_id, source="needs_id", applicant_ids=[],
+                         user_line=line, name=name)
+        return line
     try:
         outcome = dict(runner(name) or {})
     except Exception:

@@ -48,7 +48,6 @@ AUTH_CODES = {
 }
 LOGIN_URL = "https://app.ezlynx.com/auth/account/login"
 APP_URL = "https://app.ezlynx.com/"
-APP_WEB_URL = "https://app.ezlynx.com/web/"
 
 
 def _now() -> str:
@@ -232,47 +231,24 @@ class PlaywrightEzlynxSession:
             self._page.goto(APP_URL, wait_until="domcontentloaded")
 
     def state(self) -> SessionState:
-        """Judge the session on the app page, not on a blank login tab."""
-        try:
-            self._page.goto(APP_WEB_URL, wait_until="domcontentloaded")
-        except Exception:
-            return SessionState.UNVERIFIED
+        self._ensure_page()
         url = self._page.url.casefold()
-        try:
-            body = self._page.locator("body").inner_text(timeout=10_000).casefold()
-        except Exception:
-            body = ""
+        body = self._page.locator("body").inner_text(timeout=10_000).casefold()
         if "captcha" in body or "verification code" in body or "multi-factor" in body:
             return SessionState.INTERACTIVE_AUTH_REQUIRED
-        try:
-            internal_web_links = self._page.locator('a[href*="/web/"]').count()
-            login_controls = self._page.locator("#txtUserName,#txtPassword,#btnLogin").count()
-        except Exception:
-            return SessionState.UNVERIFIED
-        if authenticated_app_evidence(
-            url,
-            internal_web_links=internal_web_links,
-            login_controls=login_controls,
-        ):
-            return SessionState.SIGNED_IN
         if "/auth/account/login" in url or "/auth/account/logout" in url:
             return SessionState.LOGIN_REQUIRED
+        if authenticated_app_evidence(
+            url,
+            internal_web_links=self._page.locator('a[href*="/web/"]').count(),
+            login_controls=self._page.locator("#txtUserName,#txtPassword,#btnLogin").count(),
+        ):
+            return SessionState.SIGNED_IN
         return SessionState.UNVERIFIED
-
-    def _wait_for_login_form(self) -> None:
-        """A blank login page has no form until it reloads."""
-        field = self._page.locator("#txtUserName")
-        try:
-            field.wait_for(state="visible", timeout=8_000)
-            return
-        except Exception:
-            self._page.reload(wait_until="domcontentloaded")
-        field.wait_for(state="visible", timeout=15_000)
 
     def login(self, username: str, password: str) -> SessionState:
         self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
         try:
-            self._wait_for_login_form()
             self._page.locator("#txtUserName").fill(username)
             self._page.locator("#txtPassword").fill(password)
             self._page.locator("#btnLogin").click()

@@ -722,6 +722,10 @@ def _metadata_note_confirmation(
     )
 
 
+from .discussion_note_ledger import with_serialized_ledger
+
+
+@with_serialized_ledger
 def file_note_to_existing_discussion(
     client: DiscussionApiClient,
     applicant_id: str,

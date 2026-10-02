@@ -9,7 +9,7 @@ import zipfile
 import pytest
 
 from robie_job_engine.release_promotion import (
-    REPOSITORY, unpack_bundle, validate_directory, validate_evidence, validate_provenance,
+    REPOSITORY, bind_qa_to_install, unpack_bundle, validate_directory, validate_evidence, validate_provenance,
 )
 
 COMMIT = "a" * 40
@@ -19,7 +19,8 @@ DIGEST = hashlib.sha256(BODY).hexdigest()
 
 def evidence():
     common = dict(commit=COMMIT, release_sha256=DIGEST, environment="Test", host="hermes-test-01")
-    deploy = dict(common, production_touched=False, previous_release="/test/prior-release",
+    deploy = dict(common, production_touched=False, policy_setup_changed=False, previous_release="/test/prior-release",
+                  verified_at="2026-10-01T23:00:00Z",
                   test_job_inventory={"blocking": 0, "rows": []},
                   official_install_proof={"done": True, "live": True, "authorizes_complete": False,
                                           "sha": COMMIT[:12], "proof": {"live": True}})
@@ -28,6 +29,9 @@ def evidence():
               driver_lease_clear=True, checks={name: "PASS" for name in (
                   "generation_restart", "stale_receipt", "concurrent_turn", "reply_recovery",
                   "service_account", "secrets", "browser", "job_db")})
+    qa["installed_source"] = {"run_id": "10", "artifact_id": "20"}
+    qa["check_evidence"] = {name: {"uri": f"https://evidence.example/runs/10/{name}.json",
+                                          "sha256": "e" * 64} for name in qa["checks"]}
     return deploy, qa
 
 
@@ -80,7 +84,7 @@ def test_inconclusive_and_missing_checks_never_authorize_promotion(check):
 
 
 @pytest.mark.parametrize("change", [
-    {"previous_release": ""}, {"production_touched": True},
+    {"previous_release": ""}, {"production_touched": True}, {"policy_setup_changed": True},
     {"test_job_inventory": {"blocking": 1, "rows": [{"id": "active"}]}},
     {"official_install_proof": {"done": True, "live": False}},
 ])
@@ -197,3 +201,73 @@ def test_download_checks_api_provenance_and_zip_digest_before_unpack(tmp_path, m
     else:
         assert download_verified_bundle(tmp_path, COMMIT, DIGEST, "12", "34").read_bytes() == BODY
     assert calls == list(endpoints)
+
+
+@pytest.mark.parametrize("value", [None, "garbage", "2026-10-02T00:00:00",
+                                  "2026-10-01T23:00:00Z", "2026-10-01T22:59:59Z"])
+def test_qa_requires_timezone_timestamp_after_installation(value):
+    deploy, qa = evidence()
+    qa["verified_at"] = value
+    with pytest.raises(ValueError):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_timezone_offsets_compare_as_instants():
+    deploy, qa = evidence()
+    qa["verified_at"] = "2026-10-02T02:00:00+03:00"
+    with pytest.raises(ValueError, match="follow installation"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+    qa["verified_at"] = "2026-10-02T02:00:01+03:00"
+    validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+@pytest.mark.parametrize("value", [None, {}, {"uri": "file:///tmp/proof", "sha256": "a" * 64},
+    {"uri": "https://evidence.example/proof", "sha256": "not-a-digest"},
+    {"uri": "https://user:password@evidence.example/proof", "sha256": "a" * 64}])
+def test_pass_without_durable_evidence_reference_and_digest_refuses(value):
+    deploy, qa = evidence()
+    qa["check_evidence"]["generation_restart"] = value
+    with pytest.raises(ValueError):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_certification_binds_actual_installed_download_and_actor():
+    _, qa = evidence()
+    bound = bind_qa_to_install(qa, "10", "20", qa["reviewer"])
+    assert bound["installed_source"] == {"run_id": "10", "artifact_id": "20"}
+    assert bound is not qa
+    for run_id, artifact_id, actor in (("11", "20", qa["reviewer"]),
+                                      ("10", "21", qa["reviewer"]),
+                                      ("10", "20", "different-reviewer")):
+        with pytest.raises(ValueError):
+            bind_qa_to_install(qa, run_id, artifact_id, actor)
+
+
+def test_qa_without_original_installed_source_refuses():
+    deploy, qa = evidence()
+    del qa["installed_source"]
+    with pytest.raises(ValueError, match="installed source"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_certification_binds_only_after_download():
+    root = Path(__file__).resolve().parents[1]
+    certify = (root / ".github/workflows/deploy-test.yml").read_text().split("  certify-test:", 1)[1]
+    assert certify.index("release_promotion download-installed") < certify.index("qa = bind_qa_to_install")
+    assert 'os.environ["TEST_RUN_ID"]' in certify and 'os.environ["TEST_ARTIFACT_ID"]' in certify
+
+
+@pytest.mark.parametrize("check", list(evidence()[1]["checks"]))
+def test_every_passing_check_requires_its_own_evidence(check):
+    deploy, qa = evidence()
+    del qa["check_evidence"][check]
+    with pytest.raises(ValueError, match="QA evidence"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+@pytest.mark.parametrize("value", [None, "garbage", "2026-10-01T23:00:00"])
+def test_installation_timestamp_must_be_authoritative_and_zoned(value):
+    deploy, qa = evidence()
+    deploy["verified_at"] = value
+    with pytest.raises(ValueError, match="installation timestamp"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)

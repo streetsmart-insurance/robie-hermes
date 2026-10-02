@@ -7,6 +7,7 @@ the attestation. A successful installer alone cannot manufacture QA approval.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +15,7 @@ import re
 import stat
 import subprocess
 import zipfile
+from urllib.parse import urlparse
 
 REPOSITORY = "streetsmart-insurance/robie-hermes"
 MAX_BYTES = 128 * 1024 * 1024
@@ -22,6 +24,31 @@ MAX_BYTES = 128 * 1024 * 1024
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def evidence_timestamp(value: object, label: str) -> datetime:
+    require(isinstance(value, str), f"{label} timestamp missing")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} timestamp invalid") from exc
+    require(result.tzinfo is not None and result.utcoffset() is not None,
+            f"{label} timestamp requires timezone")
+    return result
+
+
+def bind_qa_to_install(qa: dict, run_id: str, artifact_id: str, reviewer: str) -> dict:
+    """Called only after download-installed verifies these immutable IDs.
+
+    The workflow persists the binding in QA; this does not authenticate the
+    evidence URLs or establish that the actor is an independent reviewer.
+    """
+    require(run_id.isdecimal() and artifact_id.isdecimal(), "numeric installed IDs required")
+    require(bool(reviewer) and qa.get("reviewer") == reviewer,
+            "QA reviewer must be the authenticated workflow actor")
+    expected = {"run_id": run_id, "artifact_id": artifact_id}
+    require(qa.get("installed_source") == expected, "QA installed source differs from downloaded package")
+    return {**qa, "installed_source": expected}
 
 
 def validate_install(deploy: dict, commit: str, digest: str) -> None:
@@ -33,7 +60,9 @@ def validate_install(deploy: dict, commit: str, digest: str) -> None:
         require(evidence.get("environment") == "Test", "Test evidence required")
         require(evidence.get("host") == "hermes-test-01", "wrong Test host")
     require(deploy.get("production_touched") is False, "Test touched Production")
+    require(deploy.get("policy_setup_changed") is False, "Chat release changed policy setup")
     require(bool(deploy.get("previous_release")), "rollback evidence missing")
+    evidence_timestamp(deploy.get("verified_at"), "installation")
     inventory = deploy.get("test_job_inventory") or {}
     require(inventory.get("blocking") == 0 and inventory.get("rows") == [], "Test jobs not clear")
     require(inventory.get("database") != "missing", "Test job database missing")
@@ -49,7 +78,14 @@ def validate_evidence(deploy: dict, qa: dict, commit: str, digest: str) -> None:
     require(qa.get("commit") == commit and qa.get("release_sha256") == digest, "QA package mismatch")
     require(qa.get("environment") == "Test" and qa.get("host") == "hermes-test-01", "wrong QA target")
     require(qa.get("passed") is True, "independent Test QA not passed")
-    require(bool(qa.get("reviewer")) and bool(qa.get("verified_at")), "QA provenance missing")
+    require(bool(qa.get("reviewer")), "QA provenance missing")
+    require(evidence_timestamp(qa.get("verified_at"), "QA") >
+            evidence_timestamp(deploy.get("verified_at"), "installation"),
+            "QA must follow installation")
+    source = qa.get("installed_source") or {}
+    require(isinstance(source, dict) and set(source) == {"run_id", "artifact_id"}
+            and all(isinstance(value, str) and value.isdecimal() for value in source.values()),
+            "QA installed source missing or invalid")
     require(qa.get("applicant_ids") == ["26356199"], "Test applicant scope differs")
     require(qa.get("filing_enabled") is False, "filing must stay disabled")
     require(qa.get("client_writes_performed") is False, "this release requires no-client-write QA")
@@ -58,6 +94,18 @@ def validate_evidence(deploy: dict, qa: dict, commit: str, digest: str) -> None:
     for name in ("generation_restart", "stale_receipt", "concurrent_turn", "reply_recovery",
                  "service_account", "secrets", "browser", "job_db"):
         require(checks.get(name) == "PASS", f"QA check not passed: {name}")
+        evidence = (qa.get("check_evidence") or {}).get(name) or {}
+        require(isinstance(evidence, dict), f"QA evidence invalid: {name}")
+        uri = evidence.get("uri")
+        require(isinstance(uri, str) and not any(char.isspace() for char in uri),
+                f"QA evidence URI missing: {name}")
+        parsed = urlparse(uri)
+        require(parsed.scheme in ("https", "gs") and bool(parsed.netloc)
+                and bool(parsed.path.strip("/")) and parsed.username is None
+                and parsed.password is None, f"QA evidence URI must be durable: {name}")
+        require(isinstance(evidence.get("sha256"), str)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])),
+                f"QA evidence digest missing: {name}")
 
 
 def validate_directory(directory: Path, commit: str, digest: str, *, require_qa: bool = True) -> Path:

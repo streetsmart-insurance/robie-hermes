@@ -165,7 +165,7 @@ jobs:
           checksum="${archive}.sha256"
           gcloud compute ssh "${PRODUCTION_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo bash '${STAGING_DIR}/deploy-production-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${REQUESTED_COMMIT}' --digest '${REQUESTED_SHA256}'"
+            --command="sudo bash '${STAGING_DIR}/deploy-production-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${REQUESTED_COMMIT}' --digest '${REQUESTED_SHA256}' --skip-policy-setup"
 
       - name: Retrieve immutable Production evidence
         if: always()

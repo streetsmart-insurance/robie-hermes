@@ -48,14 +48,17 @@ rollback_test_release() {
   local releases_current_link="$5"
   local policy_skill_link="$6"
   local gateway_unit="$7"
+  local restore_policy_skill="${8:-true}"
   local systemctl_bin="${ROBIE_SYSTEMCTL:-systemctl}"
 
   atomic_pointer "${old_current}" "${current_link}"
   atomic_pointer "${old_releases_current}" "${releases_current_link}"
+  if [[ "${restore_policy_skill}" == true ]]; then
   if [[ -n "${old_policy_skill_target}" ]]; then
     atomic_pointer "${old_policy_skill_target}" "${policy_skill_link}"
   else
     rm -f "${policy_skill_link}"
+  fi
   fi
   "${systemctl_bin}" restart "${gateway_unit}"
   "${systemctl_bin}" is-active --quiet "${gateway_unit}"

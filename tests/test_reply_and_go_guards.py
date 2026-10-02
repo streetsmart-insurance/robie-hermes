@@ -45,6 +45,7 @@ ADDRESS = (
 # that is missing from this set and does not call format_user_reply fails
 # the test. Operational reports and the health webhook keep their full text.
 EXEMPT_SENDS = {
+    ("scripts/robie_email_agent.py", "process_inbox"): "unchanged main email behavior is outside this Chat backport",
     ("integrations/google_chat/adapter.py", "_deliver_durable_reply"): "replays send()'s persisted formatted wire bodies unchanged for server idempotency; covered by test_chat_reply_recovery",
     ("integrations/google_chat/adapter.py", "_create_message"): "transport; send() formats the text",
     ("integrations/google_chat/adapter.py", "_handle_card_event"): "card patch uses the choice receipt",

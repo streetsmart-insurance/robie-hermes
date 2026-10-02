@@ -33,12 +33,7 @@ from robie_job_engine.chat_turn_control import (
     session_is_busy,
 )
 from robie_job_engine.discussion_note_ledger import already_added_question
-from robie_job_engine.ezlynx_session import (
-    APP_WEB_URL,
-    LOGIN_URL,
-    PlaywrightEzlynxSession,
-    SessionState,
-)
+
 from robie_job_engine.models import JobStatus
 from robie_job_engine.recording import RecordingManager
 from robie_job_engine.store import JobStore
@@ -216,79 +211,6 @@ def _assert_clean(test: unittest.TestCase, text: str, *job_ids: str) -> None:
     for job_id in job_ids:
         if job_id:
             test.assertNotIn(job_id, text)
-
-
-class _Page:
-    def __init__(self, url: str) -> None:
-        self.url = url
-        self.body = ""
-        self.login_controls = 0
-        self.web_links = 0
-        self.form_visible = False
-        self.form_after_reload = False
-        self.signed_in_after_app = False
-        self.stay_on_login = False
-        self.gotos: list[str] = []
-        self.reloads = 0
-        self.filled: list[tuple[str, str]] = []
-        self.clicked: list[str] = []
-
-    def goto(self, url: str, wait_until: str | None = None) -> None:
-        del wait_until
-        self.gotos.append(url)
-        self.url = url
-        if self.signed_in_after_app and "ezlynx.com/web" in url:
-            self.url = "https://app.ezlynx.com/web/home"
-            self.web_links = 4
-            self.login_controls = 0
-            self.body = "home"
-        elif self.stay_on_login and "ezlynx.com/web" in url:
-            self.url = "https://app.ezlynx.com/auth/account/login"
-            self.body = ""
-
-    def reload(self, wait_until: str | None = None) -> None:
-        del wait_until
-        self.reloads += 1
-        if self.form_after_reload:
-            self.form_visible = True
-
-    def locator(self, selector: str):
-        return _Locator(self, selector)
-
-    def wait_for_load_state(self, *args, **kwargs) -> None:
-        del args, kwargs
-
-    def wait_for_timeout(self, ms: int) -> None:
-        del ms
-
-
-class _Locator:
-    def __init__(self, page: _Page, selector: str) -> None:
-        self.page = page
-        self.selector = selector
-
-    def inner_text(self, timeout: int | None = None) -> str:
-        del timeout
-        return self.page.body
-
-    def count(self) -> int:
-        if "txtUserName" in self.selector:
-            return self.page.login_controls
-        if "/web/" in self.selector:
-            return self.page.web_links
-        return 0
-
-    def wait_for(self, state: str = "visible", timeout: int | None = None) -> None:
-        del state, timeout
-        if self.page.form_visible:
-            return
-        raise TimeoutError("blank login page")
-
-    def fill(self, value: str) -> None:
-        self.page.filled.append((self.selector, value))
-
-    def click(self) -> None:
-        self.page.clicked.append(self.selector)
 
 
 class ReplyCloseTests(unittest.TestCase):
@@ -930,57 +852,6 @@ class LiveNoteReplyTests(unittest.TestCase):
             self.assertEqual(resumed, job_id)
             reason = store.get_checkpoint(job_id, "recording_exemption")["reason"]
             self.assertIn("question only", reason)
-
-
-class EzlynxBlankLoginTests(unittest.TestCase):
-    def test_state_opens_the_app_page_before_calling_it_logged_out(self):
-        session = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
-        page = _Page("https://app.ezlynx.com/auth/account/login")
-        page.signed_in_after_app = True
-        session._page = page
-        self.assertEqual(session.state(), SessionState.SIGNED_IN)
-        self.assertEqual(page.gotos, [APP_WEB_URL])
-
-        logged_out = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
-        blank = _Page("about:blank")
-        blank.stay_on_login = True
-        logged_out._page = blank
-        self.assertEqual(logged_out.state(), SessionState.LOGIN_REQUIRED)
-        self.assertIn(APP_WEB_URL, blank.gotos)
-
-    def test_login_reloads_a_blank_login_page(self):
-        session = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
-        page = _Page("https://app.ezlynx.com/auth/account/login")
-        page.form_after_reload = True
-        page.stay_on_login = True
-        session._page = page
-        with patch(
-            "robie_job_engine.ezlynx_session.wait_for_post_login_state",
-            return_value=SessionState.SIGNED_IN,
-        ):
-            state = session.login("agent", "secret")
-        self.assertEqual(state, SessionState.SIGNED_IN)
-        self.assertGreaterEqual(page.reloads, 1)
-        self.assertIn(LOGIN_URL, page.gotos)
-        self.assertTrue(any(item[0] == "#txtUserName" for item in page.filled))
-
-    def test_bootstrap_checks_the_app_page_and_reloads_a_blank_form(self):
-        from ezlynx_login_bootstrap import (
-            SUBMISSION_URL,
-            ensure_login_form,
-            session_is_logged_in_on_app_page,
-        )
-
-        page = _Page("https://app.ezlynx.com/auth/account/login")
-        page.signed_in_after_app = True
-        self.assertTrue(session_is_logged_in_on_app_page(page))
-        self.assertEqual(page.gotos[0], SUBMISSION_URL)
-
-        blank = _Page("https://app.ezlynx.com/auth/account/login")
-        blank.form_after_reload = True
-        ensure_login_form(blank)
-        self.assertEqual(blank.reloads, 1)
-        self.assertTrue(blank.form_visible)
 
 
 if __name__ == "__main__":

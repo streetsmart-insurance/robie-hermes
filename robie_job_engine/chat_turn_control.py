@@ -551,6 +551,17 @@ def _release_adapter_job(adapter: Any, job_id: str, *, cancel_turn: bool) -> Non
                 chat_ids.append(str(chat_id))
     keys: list[str] = []
     for chat_id in chat_ids:
+        # Runner keys can collapse multiple thread turns to one shared DM
+        # session. Never release or unblock that session while another job
+        # still owns a running turn in the space.
+        if isinstance(turns, dict) and any(
+            isinstance(key, tuple) and key and str(key[0]) == chat_id
+            and isinstance(record, dict)
+            and str(record.get("job_id") or "") != job_id
+            and _turn_record_running(record)
+            for key, record in turns.items()
+        ):
+            continue
         for key in _iter_live_session_keys(adapter):
             matched = _key_matches_chat(key, chat_id, "") or any(
                 _key_matches_chat(key, chat_id, thread) for thread in threads

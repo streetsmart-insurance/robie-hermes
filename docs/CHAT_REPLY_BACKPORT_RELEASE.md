@@ -20,9 +20,11 @@ installed package, rollback pointers, current skills/runtime configuration and
 durable jobs. Refuse an occupied driver lease or active job; do not override it.
 Only Test applicant `26356199` may be considered for separately authorized work;
 this release's QA contract instead requires zero client writes and filing disabled.
-The existing policy-setup installer is not authorization for its example applicant
-or any other client action. Compare its installation effects with the live inventory
-before dispatch; unresolved scope or ownership differences block deployment.
+The Chat deployment workflows explicitly pass --skip-policy-setup on both hosts.
+They preserve the existing skill on install and rollback; Test evidence must say
+policy_setup_changed:false. The legacy general installer mode still validates and
+installs a homeowners-only Test skill for applicant220250093, but that mode is not
+used by this Chat release and is not authorization for any client action.
 
 ## Promotion operations
 
@@ -65,12 +67,16 @@ these fields are requirements, not default answers:
   "environment": "Test",
   "host": "hermes-test-01",
   "reviewer": "<authenticated GitHub actor who independently reviewed QA>",
-  "verified_at": "<UTC timestamp of verification>",
+  "verified_at": "<UTC timestamp after installation>",
+  "installed_source": {"run_id": "<original Test run ID>", "artifact_id": "<original installed artifact ID>"},
   "passed": true,
   "applicant_ids": ["26356199"],
   "filing_enabled": false,
   "client_writes_performed": false,
   "driver_lease_clear": true,
+  "check_evidence": {
+    "<each of the eight check names below>": {"uri": "<durable https or gs evidence URI>", "sha256": "<64-character evidence digest>"}
+  },
   "checks": {
     "generation_restart": "PASS",
     "stale_receipt": "PASS",
@@ -84,6 +90,10 @@ these fields are requirements, not default answers:
 }
 ```
 
+Each check requires its own durable evidence URI and SHA-256. The certification
+workflow binds installed_source to the successfully downloaded original package.
+QA timestamps must follow installation. These checks validate provenance structure,
+not the truth of referenced evidence; independent human review remains required.
 Keep supporting evidence with the review. Secret readiness must be established
 without copying secret payloads. Neither this JSON nor an installation proof
 authorizes a client write. Immediately before Production, repeat health, job/lease
@@ -120,8 +130,9 @@ turn_finalization, the reply outbox, thread binding, job controls, client lookup
 note deduplication ledger, or user-facing reply formatter. The gateway and guards
 need those interfaces together. Cancellation/session release, recorder cleanup,
 question-only routing, API receipt correlation, and requester-bound clarification
-are coupled prerequisites. Email adopts the shared formatter only; its transport
-and resend controls are unchanged. Existing Playground live writer wiring stays
+are coupled prerequisites. The independent email formatter change and login navigation/reload changes have
+been removed. Named lookup no longer installs a live CDP searcher: absent an injected
+authorized searcher, Chat asks for an explicit applicant ID without touching the browser. Existing Playground live writer wiring stays
 on the main implementation; no new playground_ports module is included.
 
 Python runtime requirements are unchanged. The promotion validator uses only the
@@ -134,6 +145,32 @@ than a writable home directory. The process cleanup test uses an isolated Linux
 child subreaper to verify SIGKILL and reap orphaned fixture children; production
 process cleanup behavior is not weakened for this runner.
 
-The file-backed note ledger still relies on existing single-writer/session
-coordination. This candidate does not certify concurrent external note writers or
-make a metadata-only API response authoritative. Such responses stay held.
+The note ledger now serializes check/reservation/POST/readback using a bounded
+interprocess lock and fsyncs updates. Repost approval consumption is atomic.
+Terminal cleanup cannot release another running turn's shared session lease.
+Concurrent external writers still cannot make metadata-only counts authoritative.
+The installer job inventory is not a lock on new claims: supported driver ownership
+and coordinated intake quiescence through flip/restart remain deployment gates.
+
+## Source provenance correction
+
+Public PR726 remains at 7d4b0d8d6367c5b2c933c3d44db7d85cae0954c7.
+The preserved 5e97bb1eb6907563d05fa8e4f33c8486bf1494b9 is an unpublished local
+follow-up; it must not be described as the public PR head.
+
+## Independent review deployment gates
+
+Two independent review passes found and addressed note-ledger concurrency, one-use
+approval races, shared-session cleanup, live named-lookup CDP bypass, and incomplete
+QA provenance. They did not certify the deployed runtime or waive required checks.
+Before using skip-policy mode, verify the existing policy skill is an independent
+directory or points to an immutable target. A link through current/releases/current
+would change indirectly when the release pointer flips, even without relinking it.
+No such runtime inspection was performed here.
+
+Skip mode still provisions the existing release-local gateway Python dependency
+bundle and PYTHONPATH drop-in on Test, flips the supported release pointers, and
+restarts the gateway. Those are real deployment effects, not policy writes.
+The installer inventories jobs once but does not hold an admission/driver lock
+through installation. Current supported driver ownership, coordinated intake
+quiescence and a verified rollback artifact are required before any dispatch.
