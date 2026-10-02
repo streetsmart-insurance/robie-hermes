@@ -14,15 +14,22 @@ archive=""
 checksum=""
 commit=""
 install_policy_setup=true
+keep_stopped=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --archive) archive="$2"; shift 2 ;;
     --checksum) checksum="$2"; shift 2 ;;
     --commit) commit="$2"; shift 2 ;;
     --skip-policy-setup) install_policy_setup=false; shift ;;
+    --keep-stopped) keep_stopped=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ "${keep_stopped}" == true && "${install_policy_setup}" != false ]]; then
+  echo '--keep-stopped requires --skip-policy-setup' >&2
+  exit 2
+fi
 
 [[ "${EUID}" -eq 0 ]] || { echo "deploy-test-release requires sudo" >&2; exit 2; }
 [[ "$(hostname -s)" == "${EXPECTED_HOST}" ]] || {
@@ -97,6 +104,13 @@ PY
 release_parent="${OPT_ROOT}/releases/${short}"
 release_root="${release_parent}/robie-hermes-${short}"
 manifest="${release_root}/.release-sha256"
+stopped_snapshot="${release_parent}/stopped-install-before.json"
+if [[ "${keep_stopped}" == true ]]; then
+  # Read the digest-checked candidate guard without extracting/mutating Test.
+  # Masked units have no ExecStart after reload: use only the captured receipt.
+  gateway_python="$(tar -xOzf "${archive}" "robie-hermes-${short}/scripts/test_stopped_install.py" |
+    python3 - --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}" --preflight)"
+fi
 if [[ -d "${release_root}" ]]; then
   [[ -f "${manifest}" && "$(tr -d '[:space:]' <"${manifest}")" == "${archive_digest}" ]] || {
     echo "existing Test release does not match archive digest" >&2
@@ -122,13 +136,22 @@ fi
 # bootstrapping into Test. This still occurs before either pointer is changed
 # or the gateway is restarted, and Bash keeps the gate independent of mode
 # bits in historical archives.
+if [[ "${keep_stopped}" == true ]]; then
+  python3 "${release_root}/scripts/test_stopped_install.py" --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}"
+fi
 bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
 source "${release_root}/scripts/lib/test-release-rollback.sh"
 
 runtime_dropin_snapshot="${release_parent}/.pre-${short}-gateway-runtime.conf"
 runtime_dropin_state=absent
-if [[ -f "${GATEWAY_RUNTIME_DROPIN}" ]]; then
+if [[ "${keep_stopped}" == true ]]; then
+  runtime_dropin_state="$(python3 - "${stopped_snapshot}" <<'PY_STATE'
+import json, sys
+print(json.load(open(sys.argv[1]))['rollback']['runtime_dropin']['state'])
+PY_STATE
+)"
+elif [[ -f "${GATEWAY_RUNTIME_DROPIN}" ]]; then
   install -D -m 0600 "${GATEWAY_RUNTIME_DROPIN}" "${runtime_dropin_snapshot}"
   runtime_dropin_state=present
 fi
@@ -156,16 +179,19 @@ rollback_test() {
     "${OPT_ROOT}/releases/current" \
     "${policy_skill_link}" \
     "${GATEWAY_UNIT}" \
-    "${install_policy_setup}"
+    "${install_policy_setup}" \
+    "$([[ "${keep_stopped}" == true ]] && echo false || echo true)"
   [[ "${runtime_config_restored}" == true ]]
 }
 
-gateway_exec="$(systemctl show "${GATEWAY_UNIT}" -p ExecStart --value --no-pager)"
-gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
-[[ -x "${gateway_python}" ]] || {
-  echo "active Test gateway Python interpreter is unavailable" >&2
-  exit 2
-}
+if [[ "${keep_stopped}" != true ]]; then
+  gateway_exec="$(systemctl show "${GATEWAY_UNIT}" -p ExecStart --value --no-pager)"
+  gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
+  [[ -x "${gateway_python}" ]] || {
+    echo "active Test gateway Python interpreter is unavailable" >&2
+    exit 2
+  }
+fi
 runtime_requirements="${release_root}/${GATEWAY_RUNTIME_REQUIREMENTS}"
 runtime_root="${release_root}/${GATEWAY_RUNTIME_DIRNAME}"
 [[ -f "${runtime_requirements}" ]] || {
@@ -324,6 +350,17 @@ EOF
 if ! install_gateway_runtime_config; then
   rollback_test
   exit 2
+fi
+
+if [[ "${keep_stopped}" == true ]]; then
+  if ! python3 "${release_root}/scripts/test_stopped_install.py" \
+    --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}" --verify; then
+    rollback_test
+    exit 2
+  fi
+  echo "TEST INSTALLED STOPPED commit=${commit} sha256=${archive_digest} rollback=${old_current} snapshot=${stopped_snapshot}"
+  echo 'NO LIVE PROOF OR QA CERTIFICATION. Explicit approved resume required; masks remain in place.'
+  exit 0
 fi
 
 if ! systemctl restart "${GATEWAY_UNIT}" || \
