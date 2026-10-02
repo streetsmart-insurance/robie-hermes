@@ -95,6 +95,153 @@ def _file(client, text="NatGen cancellation notice was added. ROBIE was here", *
     return disc.file_note_to_existing_discussion(client, APPLICANT, text, **kwargs)
 
 
+def _noc_note(policy: str, filename: str) -> str:
+    stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
+    return (
+        "NatGen cancellation notice dated 10/2/2026 for policy "
+        f"{policy}, file {stem} was added to the Example Folder folder. ROBIE was here"
+    )
+
+
+class SequentialLiveClient(LiveShapeClient):
+    """Live shape: the post returns no note id and the read has no note text.
+
+    Each post moves the count by one and advances the latest note id.
+    """
+
+    def __init__(self):
+        super().__init__(note_count=10, latest="700", after_count=11, after_latest="701")
+        self.posted_texts = []
+
+    def get_discussion(self, discussion_id):
+        self.reads += 1
+        return {
+            "discussionId": discussion_id,
+            "applicantId": APPLICANT,
+            "title": self.title,
+            "noteCount": self.note_count,
+            "mostRecentNoteId": self.latest,
+            "deleted": False,
+        }
+
+    def append_note(self, discussion_id, text, note_type="Note"):
+        self.posts += 1
+        self.posted_texts.append(text)
+        self.note_count += 1
+        self.latest = str(700 + len(self.posted_texts))
+        return {}
+
+
+class TextRereadClient(SequentialLiveClient):
+    """The re-read includes each posted note's full text and its new id."""
+
+    def get_discussion(self, discussion_id):
+        record = super().get_discussion(discussion_id)
+        record["notes"] = [
+            {"noteId": str(700 + index), "body": text}
+            for index, text in enumerate(self.posted_texts, start=1)
+        ]
+        return record
+
+
+def test_two_natgen_nocs_in_one_run_confirm_distinct_notes(tmp_path):
+    """Two notices, no returned note id, no note text on the read. Both confirm."""
+
+    first = _noc_note("2037678234 01", "2037678234 01 NatGen NOC non-payment.pdf")
+    second = _noc_note("2031936859 00", "2031936859 00 NatGen NOC nsf.pdf")
+    assert first != second
+    assert "2037678234 01" in first
+    assert "ending in" not in first
+    assert "the  folder" not in first
+    client = SequentialLiveClient()
+    ledger = tmp_path / "ledger.json"
+    filed = []
+    for text, document_id in ((first, "825478826"), (second, "825478842")):
+        result = _file(client, text, ledger_path=ledger, document_id=document_id)
+        filed.append(result)
+    assert [row["status"] for row in filed] == ["filed", "filed"]
+    assert [row["note_id"] for row in filed] == ["701", "702"]
+    assert all(row["read_back"] is True for row in filed)
+    assert client.posts == 2
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    assert [row["note_id"] for row in saved["notes"]] == ["701", "702"]
+    assert all(row["confirmation"] == "confirmed" for row in saved["notes"])
+    for word in FIELD_WORDS:
+        assert word not in filed[0]["reason"]
+        assert word not in filed[1]["reason"]
+
+
+def test_two_natgen_nocs_confirm_by_reread_text_when_the_post_has_no_id(tmp_path):
+    first = _noc_note("2037678234 01", "2037678234 01 NatGen NOC non-payment.pdf")
+    second = _noc_note("2031936859 00", "2031936859 00 NatGen NOC nsf.pdf")
+    client = TextRereadClient()
+    ledger = tmp_path / "ledger.json"
+    filed = [
+        _file(client, first, ledger_path=ledger, document_id="825478826"),
+        _file(client, second, ledger_path=ledger, document_id="825478842"),
+    ]
+    assert [row["status"] for row in filed] == ["filed", "filed"]
+    assert [row["note_id"] for row in filed] == ["701", "702"]
+    assert [row["verified_by"] for row in filed] == ["text", "text"]
+    assert client.posts == 2
+
+
+def test_reread_confirms_a_note_by_document_id_and_file_name(tmp_path):
+    text = _noc_note("2037678234 01", "2037678234 01 NatGen NOC non-payment.pdf")
+
+    class DocClient(SequentialLiveClient):
+        def get_discussion(self, discussion_id):
+            record = super().get_discussion(discussion_id)
+            if self.posted_texts:
+                record["notes"] = [{
+                    "noteId": self.latest,
+                    "documentId": "825478826",
+                    "body": "file 2037678234 01 NatGen NOC non-payment was added to the Example Folder folder",
+                }]
+            return record
+
+    result = _file(DocClient(), text, ledger_path=tmp_path / "ledger.json", document_id="825478826")
+    assert result["status"] == "filed"
+    assert result["note_id"] == "701"
+    assert result["verified_by"] == "text"
+
+
+def test_identical_note_text_on_the_reread_stays_held(tmp_path):
+    """Two copies of the same sentence, and neither is the new latest id."""
+
+    text = _noc_note("2037678234 01", "2037678234 01 NatGen NOC non-payment.pdf")
+
+    class Ambiguous(LiveShapeClient):
+        def __init__(self):
+            super().__init__(note_count=10, latest="700", after_count=11, after_latest="701")
+            self.body = ""
+
+        def append_note(self, discussion_id, text, note_type="Note"):
+            self.body = text
+            return super().append_note(discussion_id, text, note_type=note_type)
+
+        def get_discussion(self, discussion_id):
+            record = super().get_discussion(discussion_id)
+            if self.posted:
+                record["notes"] = [
+                    {"noteId": "10", "body": self.body},
+                    {"noteId": "11", "body": self.body},
+                ]
+            return record
+
+    client = Ambiguous()
+    result = _file(client, text, ledger_path=tmp_path / "ledger.json", document_id="825478826")
+    assert result["status"] == "held"
+    assert result["note_id"] is None
+    assert result["read_back"] is False
+    assert result["confirmation"] == SENT_UNCONFIRMED
+    assert "told apart" in result["reason"]
+    assert client.posts == 1
+    again = _file(client, text, ledger_path=tmp_path / "ledger.json", document_id="825478826")
+    assert again["status"] == "already_posted"
+    assert client.posts == 1
+
+
 def test_textless_count_increase_is_not_filed_and_blocks_a_repost(tmp_path):
     """A count of +1 with no note text is not proof the new note is ours."""
 

@@ -59,8 +59,19 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # Production intentionally has no default: pass the literal base explicitly.
 UAT_DISCUSSION_BASE_URL = "https://app.uatezlynx.com/DiscussionApi/"
 
+# A dialable phone has parentheses or a separator between the groups.
+# A bare 10-digit policy number such as 2037678234, including NatGen's
+# "2037678234 01" term, is not a phone. Formatted numbers still match:
+# 732-995-2407, (732) 995-2407, 732 995 2407, +1 603 769 3995.
 _PHONE_LIKE = re.compile(
-    r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}"
+    r"(?<!\d)"
+    r"(?:\+?1[-.\s])?"
+    r"(?:"
+    r"\(\d{3}\)[-.\s]?\d{3}[-.\s]\d{4}"
+    r"|"
+    r"\d{3}[-.\s]\d{3}[-.\s]\d{4}"
+    r")"
+    r"(?!\d)"
 )
 
 
@@ -676,11 +687,16 @@ def file_note_to_existing_discussion(
     nothing is written. A discussion is never created and nothing is deleted.
 
     Confirmation reads the discussion before the post and once after it. A
-    count that rose by one is not enough to call the note filed: the live
-    read has no note text, so another note in that gap looks the same. The
-    note is filed only when a second signal says the new note is ours (its
-    text, or a returned note id that is the new latest id). Anything else
-    stays held. The post is never repeated automatically.
+    count that rose by one is not enough to call the note filed. The note is
+    filed when a second signal says the new note is ours: the re-read shows
+    that exact text on exactly one note we can tie to the new latest id, or
+    the re-read shows the document id together with the file name on that
+    note, or the post returned that same latest id. The live read often has
+    no note text and the post returns no id. In that case the new latest id
+    is accepted only when the sentence names one policy and one file, so two
+    different documents stay distinct. A re-read that shows the same text on
+    more than one note, and cannot tie exactly one of them to the new latest
+    id, stays held. The post is never repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
     again. A send that cannot be confirmed is stored as sent, unconfirmed
@@ -815,7 +831,8 @@ def file_note_to_existing_discussion(
             title=title,
         )
     try:
-        before = discussion_note_snapshot(getter(discussion_id))
+        before_record = getter(discussion_id)
+        before = discussion_note_snapshot(before_record)
     except Exception:
         return _note_result(
             "held",
@@ -879,7 +896,14 @@ def file_note_to_existing_discussion(
                 title=title,
                 response=created,
             )
-        identity = _new_note_identity(after_record, after, text, created)
+        identity = _new_note_identity(
+            after_record,
+            after,
+            text,
+            created,
+            before_record=before_record,
+            document_id=doc_id,
+        )
         if identity is None:
             if _payload_has_note_bodies(after_record) and not _posted_text_matches(
                 after_record, text
@@ -958,35 +982,131 @@ def file_note_to_existing_discussion(
     )
 
 
+def _file_name_in_note(note_text: str) -> str:
+    """The file name inside a filing sentence, or empty when it has none."""
+
+    text = " ".join(str(note_text or "").split())
+    match = re.search(r", file (.+?) was added to the ", text)
+    return match.group(1).strip() if match else ""
+
+
+def _note_names_one_document(note_text: str) -> bool:
+    """True when the sentence names one policy and one file.
+
+    Live ``GET v8/discussions/{id}`` has no note text, and the notes list
+    answers HTTP 405, so a re-read cannot compare bodies. The policy and the
+    file name are what make two cancellation notices different. A sentence
+    without them is not confirmed from the new latest id alone.
+    """
+
+    text = " ".join(str(note_text or "").split())
+    if not text or "the  folder" in text:
+        return False
+    return (
+        " for policy " in text
+        and ", file " in text
+        and " was added to the " in text
+    )
+
+
+def _row_document_id(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in (
+        "documentId",
+        "DocumentId",
+        "document_id",
+        "applicantDocumentId",
+        "ApplicantDocumentId",
+    ):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _row_ties_document(row: Any, document_id: str, file_name: str) -> bool:
+    """True when this note carries the document id and the file name."""
+
+    document = str(document_id or "").strip()
+    name = str(file_name or "").strip()
+    if not document or not name:
+        return False
+    body = _note_body(row)
+    if name not in body and name not in " ".join(body.split()):
+        return False
+    if document in body:
+        return True
+    return _row_document_id(row) == document
+
+
+def _matching_note_rows(record: Any, note_text: str, document_id: str = "") -> list[Any]:
+    """Notes on this read whose text, or document id plus file name, is ours."""
+
+    file_name = _file_name_in_note(note_text)
+    found: list[Any] = []
+    for row in iter_discussion_notes(record):
+        if _posted_text_matches(row, note_text):
+            found.append(row)
+            continue
+        if _row_ties_document(row, document_id, file_name):
+            found.append(row)
+    return found
+
+
 def _new_note_identity(
     after_record: Any,
     after: dict[str, Any],
     note_text: str,
     created: Any,
+    before_record: Any = None,
+    document_id: str = "",
 ) -> tuple[str, str] | None:
     """Id of the note we just added, and how we know it is ours.
 
-    A higher count alone is not that signal. The live discussion read has no
-    note text, so a different note that landed in the same gap must not be
-    marked done.
+    A higher count alone is not that signal. When the re-read includes note
+    text, exactly one matching note has to be the new latest note. Two copies
+    of the same text, with no single note tied to that new id, stay unknown.
+    When the re-read has no text, the post's id is used if it is the new
+    latest id. If the post returned no id either, the new latest id is used
+    only for a sentence that names one policy and one file.
     """
 
     latest = str(after.get("most_recent_note_id") or "")
     returned = _note_id_of(created) if isinstance(created, dict) else ""
+    before_latest = ""
+    if before_record is not None:
+        before_latest = str(
+            discussion_note_snapshot(before_record).get("most_recent_note_id") or ""
+        )
+    latest_changed = bool(latest) and latest != before_latest
     if _payload_has_note_bodies(after_record):
+        matches = _matching_note_rows(after_record, note_text, document_id)
+        tied = [
+            row for row in matches if latest and _note_id_of(row) == latest
+        ]
+        if len(tied) == 1 and latest_changed:
+            return latest, "text"
+        if len(matches) == 1 and latest_changed:
+            nid = _note_id_of(matches[0])
+            if not nid or nid == latest:
+                return latest, "text"
+            return None
+        if len(matches) > 1:
+            return None
         latest_rows = [
             row
             for row in iter_discussion_notes(after_record)
             if latest and _note_id_of(row) == latest
         ]
-        if latest_rows:
-            if any(_posted_text_matches(row, note_text) for row in latest_rows):
-                return latest, "text"
-            return None
-        if returned and latest and returned == latest:
+        if returned and latest and returned == latest and not latest_rows:
             return latest, "note_id"
         return None
     if returned and latest and returned == latest:
+        return latest, "note_id"
+    if returned and returned != latest:
+        return None
+    if latest_changed and _note_names_one_document(note_text):
         return latest, "note_id"
     return None
 

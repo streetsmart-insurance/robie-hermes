@@ -119,7 +119,8 @@ def sketch_carrier_rule(
     Geico, Progressive BOP, NatGen, and Travelers call ``file_carrier_batch``
     with this rule once their draft branch includes the module. Leave
     ``workflow_title`` and ``folder`` empty until that carrier's Mail Sorting
-    row is known. An empty title skips Notes and uses the Nicole task.
+    row is known. An empty title skips Notes and uses the Nicole task. An
+    empty folder holds before upload when a note would name that folder.
     """
 
     return FilingRule(
@@ -407,7 +408,11 @@ def review_task_payload(
 
 
 def _without_phone_numbers(text: str) -> str:
-    """Drop dialable digit runs so a file name can sit in a discussion note."""
+    """Drop a formatted phone so a file name can sit in a discussion note.
+
+    A bare policy number is kept. ``2037678234 01 NatGen NOC non-payment``
+    stays whole. ``(732) 995-2407`` is still shortened.
+    """
 
     from .ezlynx_discussions import _PHONE_LIKE
 
@@ -442,6 +447,23 @@ def _note_document_identity(policy_number: str, filename: str) -> str:
     return ", ".join(parts)
 
 
+def _folder_hold_reason(rule: FilingRule) -> str:
+    """Why a note cannot be posted, or empty when the folder name is set.
+
+    FAO's folder is ``Additional Information``. NatGen, Geico, BOP, and
+    Travelers do not name an EZLynx folder in the Mail Sorting notes, the
+    locators, or the carrier SOP, so the name is not invented here.
+    """
+
+    if str(rule.folder or "").strip():
+        return ""
+    label = str(rule.carrier_label or rule.carrier_section or "This carrier").strip()
+    return (
+        f"{label} filing folder is not set. The folder name needs a decision. "
+        "Nothing was uploaded."
+    )
+
+
 def filing_note(
     rule: FilingRule,
     processed_on: date,
@@ -449,22 +471,26 @@ def filing_note(
     policy_number: str = "",
     filename: str = "",
 ) -> str:
-    """Short plain-English note. A phone-like policy is shortened to its last four.
+    """Short plain-English note. A formatted phone is refused; a policy number is kept.
 
     The policy and file name are included when the caller has them, so a second
     document for the same carrier and date is not the same note as the first.
     The same document produces the same sentence and is still treated as a repeat.
+    An empty folder is refused so the sentence cannot say ``the  folder``.
     """
 
+    held = _folder_hold_reason(rule)
+    if held:
+        raise FilingHeld(held)
+    folder = " ".join(str(rule.folder or "").split())
     identity = _note_document_identity(policy_number, filename)
     dated = f"{rule.note_label} dated {sheet_date_text(processed_on)}"
     if identity:
-        text = (
-            f"{dated} for {identity} was added to the "
-            f"{rule.folder} folder. {ROBIE_SIGNATURE}"
-        )
+        text = f"{dated} for {identity} was added to the {folder} folder. {ROBIE_SIGNATURE}"
     else:
-        text = f"{dated} was added to the {rule.folder} folder. {ROBIE_SIGNATURE}"
+        text = f"{dated} was added to the {folder} folder. {ROBIE_SIGNATURE}"
+    if "the  folder" in text:
+        raise FilingHeld(held or "filing folder is not set. Nothing was uploaded.")
     reject_phone_numbers(text)
     if not text.endswith(ROBIE_SIGNATURE):
         raise FilingHeld("note must end with ROBIE was here")
@@ -956,6 +982,10 @@ def _file_one(
     mode, matched, workflow_detail = _resolve_workflow(deps, applicant_id, rule)
     if mode == "hold":
         return _item_result("held", item, applicant_id=applicant_id, reason=workflow_detail)
+    if mode == "note":
+        folder_hold = _folder_hold_reason(rule)
+        if folder_hold:
+            return _item_result("held", item, applicant_id=applicant_id, reason=folder_hold)
     tab = status_tab_title(sheet_day)
     try:
         uploaded = deps.upload(applicant_id, filename, pdf, filename=filename)
@@ -1193,7 +1223,7 @@ def _client_name(value: object) -> str:
 
 
 def _display_policy(policy_number: str) -> str:
-    """Full policy number, or its last four when the digits would look dialable."""
+    """Full policy number, or its last four when it is written as a phone."""
 
     text = str(policy_number or "").strip()
     try:
@@ -1256,6 +1286,9 @@ def _file_one_test_account(
         return _item_result(
             "skipped_duplicate", item, reason=f"matching {duplicate} already exists; upload skipped", **base
         )
+    folder_hold = _folder_hold_reason(rule)
+    if folder_hold:
+        return _item_result("held", item, reason=folder_hold, **base)
     title = discussion_title_of(dict(discussion))
     try:
         note_text = test_account_note(

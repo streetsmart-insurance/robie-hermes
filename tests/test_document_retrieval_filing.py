@@ -675,26 +675,78 @@ class TestApplicantOverrideTests(unittest.TestCase):
                          ("Groesbeck, Zachary", "876263535", "501", "77"))
         self.assertEqual(result["test_account_discussion"]["id"], "819225260")
 
-    def test_phone_like_policy_is_shortened_in_the_note(self):
+    def test_empty_natgen_folder_holds_before_upload(self):
         deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
         env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
         item = memo_item(
-            policy_number="2035471506 00", insured_name="A&E CONTRACTOR LLC",
-            filename="2035471506 00 NatGen NOC non-payment.pdf", processed_on="2026-09-30",
+            policy_number="2037678234 01", insured_name="Buster Brown",
+            filename="2037678234 01 NatGen NOC non-payment.pdf", processed_on="2026-10-02",
         )
         result = file_with(deps, [item], env, rule=NATGEN_NOC_RULE)
-        self.assertEqual(result["status"], "filed", result)
-        self.assertEqual(
-            deps.notes[0]["text"],
+        self.assertEqual(result["results"][0]["status"], "held", result)
+        self.assertIn("folder name needs a decision", result["results"][0]["reason"])
+        self.assertIn("Nothing was uploaded", result["results"][0]["reason"])
+        self.assertNotIn("the  folder", result["results"][0]["reason"])
+        self.assertEqual(deps.uploads, [])
+        self.assertEqual(deps.notes, [])
+        self.assertEqual(NATGEN_NOC_RULE.folder, "")
+
+    def test_empty_folder_holds_before_upload_when_a_note_would_be_posted(self):
+        from dataclasses import replace
+
+        deps = FakeDeps()
+        result = file_with(deps, [memo_item()], rule=replace(PROGRESSIVE_MEMO_RULE, folder=""))
+        self.assertEqual(result["results"][0]["status"], "held", result)
+        self.assertIn("folder name needs a decision", result["results"][0]["reason"])
+        self.assertEqual(deps.uploads, [])
+        self.assertEqual(deps.notes, [])
+
+    def test_note_text_never_names_an_empty_folder(self):
+        from dataclasses import replace
+
+        from robie_job_engine.document_retrieval_filing import FilingHeld
+
+        with self.assertRaises(FilingHeld) as caught:
             filing_note(
-                NATGEN_NOC_RULE, date(2026, 9, 30),
-                policy_number="2035471506 00",
-                filename="2035471506 00 NatGen NOC non-payment.pdf",
-            ),
+                NATGEN_NOC_RULE, date(2026, 10, 2),
+                policy_number="2037678234 01",
+                filename="2037678234 01 NatGen NOC non-payment.pdf",
+            )
+        self.assertIn("folder name needs a decision", str(caught.exception))
+        self.assertNotIn("the  folder", str(caught.exception))
+        fao = filing_note(
+            PROGRESSIVE_MEMO_RULE, date(2026, 10, 2),
+            policy_number="993334183",
+            filename="993334183 Progressive Memo.pdf",
         )
-        self.assertIn("non-payment", deps.notes[0]["text"])
-        self.assertNotIn("A&E", deps.notes[0]["text"])
-        reject_phone_numbers(deps.notes[0]["text"])
+        self.assertNotIn("the  folder", fao)
+        self.assertIn("the Additional Information folder", fao)
+        # The folder string here is only so the sentence can be built. It is
+        # not NatGen's EZLynx folder.
+        shaped = filing_note(
+            replace(NATGEN_NOC_RULE, folder="Example Folder"),
+            date(2026, 10, 2),
+            policy_number="2037678234 01",
+            filename="2037678234 01 NatGen NOC non-payment.pdf",
+        )
+        self.assertEqual(
+            shaped,
+            "NatGen cancellation notice dated 10/2/2026 for policy 2037678234 01, "
+            "file 2037678234 01 NatGen NOC non-payment was added to the Example Folder "
+            "folder. ROBIE was here",
+        )
+        self.assertNotIn("the  folder", shaped)
+        self.assertNotIn("ending in", shaped)
+        reject_phone_numbers(shaped)
+        shortened = filing_note(
+            replace(NATGEN_NOC_RULE, folder="Example Folder"),
+            date(2026, 10, 2),
+            policy_number="203-767-8234",
+            filename="203-767-8234 notice.pdf",
+        )
+        self.assertIn("ending in 8234", shortened)
+        self.assertNotIn("203-767-8234", shortened)
+        reject_phone_numbers(shortened)
 
     def test_dirty_fao_client_name_stays_out_of_the_note(self):
         deps = FakeDeps(discussions=list(BB_DISCUSSIONS))

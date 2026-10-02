@@ -147,6 +147,13 @@ def test_reject_phone_numbers_allows_plain_text():
     assert disc.reject_phone_numbers("No dialable digits here.") == "No dialable digits here."
 
 
+def test_reject_phone_numbers_keeps_a_bare_policy_number():
+    policy = "NatGen policy 2037678234 01 stays whole"
+    assert disc.reject_phone_numbers(policy) == policy
+    assert disc._PHONE_LIKE.search("2037678234") is None
+    assert disc._PHONE_LIKE.search("2037678234 01") is None
+
+
 # ---------------------------------------------------------------------------
 # fail-closed selection
 

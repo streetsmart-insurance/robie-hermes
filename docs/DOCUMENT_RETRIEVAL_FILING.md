@@ -124,9 +124,12 @@ sketches those hooks and does not rewrite the carrier pull PRs:
 
 `sketch_carrier_rule` leaves `workflow_title` and `folder` empty until that
 carrier's Mail Sorting row is known. An empty title uploads the PDF, skips
-Notes, and opens the same Nicole review task. Fill the title later to attach
-the note when the discussion already exists. Do not copy a second EZLynx
-client.
+Notes, and opens the same Nicole review task. An empty folder holds before
+upload when a note would name the folder. The note is not written as
+`the  folder`. NatGen's EZLynx folder is not named in the Mail Sorting
+notes, the locators, or the NatGen SOP, so it is not guessed. Fill the title
+later to attach the note when the discussion already exists. Do not copy a
+second EZLynx client.
 
 ## hermes-test-01
 
