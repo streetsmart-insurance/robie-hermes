@@ -696,7 +696,12 @@ class AscendWorkflowManager:
             "Client Agreement & Checkout Link:",
             program_url,
             "",
-            "EZLynx Filing Status: Agreement link and policy details filed to EZLynx discussion card.",
+            (
+                "EZLynx Filing Status: Agreement link and policy details filed to EZLynx discussion card."
+                if ezlynx_result
+                else "EZLynx Filing Status: NOT filed — the EZLynx note failed to post. "
+                     "The agreement is ready but needs manual filing to EZLynx."
+            ),
             "",
             "Robie was here",
         ])

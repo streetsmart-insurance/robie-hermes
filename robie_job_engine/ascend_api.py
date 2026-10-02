@@ -501,21 +501,39 @@ class AscendApiClient:
         Returns None only when the policy genuinely has no matching program.
         Transport, authentication, and API failures raise AscendApiError so a
         failed lookup is never mistaken for "no program found".
+
+        The /billables search endpoint is not trusted blindly: every returned
+        billable's actual policy_number AND billable_identifier are normalized
+        and compared. An unrelated billable (wrong policy) is skipped, never
+        returned as a false duplicate.
         """
         clean_policy = policy_number.strip().upper()
+
+        def _billable_matches(billable: dict[str, Any]) -> bool:
+            for field in ("policy_number", "billable_identifier"):
+                val = str(billable.get(field, "") or "").strip().upper()
+                if val and val == clean_policy:
+                    return True
+                # billable_identifier may have a suffix ("POL-123-MTC");
+                # match the base policy number too.
+                if val and val.startswith(clean_policy + "-"):
+                    return True
+            return False
+
         # 1. Search billables directly if possible
         resp = self.transport.request("GET", "/billables", query={"policy_number": clean_policy})
         items = resp.get("data", [])
-        if items:
-            first_billable = items[0]
-            prog_id = first_billable.get("program_id")
+        for billable in items:
+            if not _billable_matches(billable):
+                continue  # unrelated billable; do not trust the search index
+            prog_id = billable.get("program_id")
             if prog_id:
                 prog = self.get_program(prog_id)
                 return {
                     "program": prog,
-                    "billable": first_billable,
+                    "billable": billable,
                     "program_id": prog_id,
-                    "parent_billable_id": first_billable.get("id"),
+                    "parent_billable_id": billable.get("id"),
                 }
 
         # 2. Fallback: inspect recent programs
@@ -524,7 +542,7 @@ class AscendApiClient:
             pid = p.get("id")
             b_resp = self.transport.request("GET", f"/programs/{pid}/billables")
             for b in b_resp.get("data", []):
-                if str(b.get("policy_number", "")).strip().upper() == clean_policy:
+                if _billable_matches(b):
                     return {
                         "program": p,
                         "billable": b,

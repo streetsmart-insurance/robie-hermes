@@ -358,6 +358,73 @@ class TestResolveUser(unittest.TestCase):
                          "user-jake")
         self.assertEqual(client.resolve_user("Jake Ferrara"), "user-jake")
 
+    def test_find_program_by_policy_skips_unrelated_billables(self):
+        """The /billables search can return billables for other policies.
+        They must be skipped, never returned as a false duplicate."""
+        p_wrong = "2d74e0fe-22b3-42e6-9ed0-3f58a2b072a3"
+        p_right = "c37b837a-5763-45a6-8040-a88df9e23d41"
+
+        class SearchTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    # Search returns an UNRELATED billable first
+                    return {"data": [
+                        {"id": "b-unrelated", "program_id": p_wrong,
+                         "policy_number": "OTHER-999",
+                         "billable_identifier": "OTHER-999"},
+                        {"id": "b-right", "program_id": p_right,
+                         "policy_number": "TARGET-123",
+                         "billable_identifier": "TARGET-123"},
+                    ]}
+                if (method, path) == ("GET", f"/programs/{p_right}"):
+                    return {"id": p_right}
+                if (method, path) == ("GET", "/programs"):
+                    return {"data": []}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(SearchTransport())
+        result = client.find_program_by_policy("TARGET-123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["program_id"], p_right)
+        self.assertEqual(result["billable"]["id"], "b-right")
+
+    def test_find_program_by_policy_returns_none_when_no_match(self):
+        class EmptyTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    return {"data": [
+                        {"id": "b-unrelated", "program_id": "2d74e0fe-22b3-42e6-9ed0-3f58a2b072a3",
+                         "policy_number": "OTHER-999",
+                         "billable_identifier": "OTHER-999"},
+                    ]}
+                if (method, path) == ("GET", "/programs"):
+                    return {"data": []}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(EmptyTransport())
+        self.assertIsNone(client.find_program_by_policy("NOTHING-000"))
+
+    def test_find_program_by_policy_matches_suffixed_identifier(self):
+        """billable_identifier like 'POL-123-MTC' matches policy 'POL-123'."""
+        p_sfx = "458258a7-f460-4e03-9362-f03418e42a62"
+
+        class SuffixTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    return {"data": [
+                        {"id": "b-sfx", "program_id": p_sfx,
+                         "policy_number": "",
+                         "billable_identifier": "POL-123-MTC"},
+                    ]}
+                if (method, path) == ("GET", f"/programs/{p_sfx}"):
+                    return {"id": p_sfx}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(SuffixTransport())
+        result = client.find_program_by_policy("POL-123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["program_id"], p_sfx)
+
 
 if __name__ == "__main__":
     unittest.main()
