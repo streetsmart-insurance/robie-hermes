@@ -611,8 +611,178 @@ class TestReadonlyRelease(unittest.TestCase):
         self.gateway['active_enter'] = '2025-01-01T00:00:00+00:00'
         self.refused('gateway_predates_flip')
 
+    def handover_fixture(self):
+        older_commit = 'b' * 40
+        older = self.root / 'releases' / older_commit[:12] / f'robie-hermes-{older_commit[:12]}'
+        archive = Path(self.tmp.name) / 'reported-older.tgz'
+        for source, _, _ in audit.OVERLAYS:
+            self.write(older / source, b'# older source\n')
+        with tarfile.open(archive, 'w:gz') as bundle:
+            for source, _, _ in audit.OVERLAYS:
+                bundle.add(older / source, arcname=f'{older.name}/{source}')
+        older_sha = audit.digest(archive.read_bytes())
+        current_sha = audit.digest(self.archive.read_bytes())
+        self.write(older / '.release-sha256', older_sha.encode())
+        for release, commit, sha, previous in (
+                (self.release, self.commit, current_sha, older),
+                (older, older_commit, older_sha, self.release)):
+            self.write_json(self.root / f'deployments/{commit[:12]}/test-deploy-evidence.json', {
+                'commit': commit, 'release_sha256': sha, 'environment': 'Test', 'host': audit.HOST,
+                'release_root': str(release), 'previous_release': str(previous),
+                'proof_path': str(release / 'official-install-proof.json'),
+                'gateway_playwright_runtime': {'root': str(release / '.gateway-runtime'),
+                    'content_digest': 'c' * 64, 'payload': 'SECRET_SENTINEL'},
+                'payload': 'SECRET_SENTINEL'})
+            self.write_json(release / 'official-install-proof.json', {
+                'sha': commit[:12], 'done': True, 'live': True, 'authorizes_complete': False,
+                'proof': {'live': True, 'payload': 'SECRET_SENTINEL'}})
+            self.write_json(release / 'official-install-flip.json', {
+                'sha': commit[:12], 'release_root': str(release), 'flip_at': '2026-01-01T00:00:00Z'})
+        for key, value in (('HANDOVER_CURRENT', (self.commit, current_sha)),
+                           ('HANDOVER_OLDER', (older_commit, older_sha)), ('HANDOVER_ARCHIVE', archive)):
+            mocked = patch.object(audit, key, value)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        return older, archive
+
+    def handover_collect(self):
+        with patch.object(audit.os, 'scandir', side_effect=AssertionError('No scanning')), \
+                patch.object(audit, 'find_rollback_archive', side_effect=AssertionError('No fallback')):
+            report = audit.collect(self.root, self.staging, handover=True)
+        self.assertNotIn('AssertionError', report['errors'])
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(report))
+        return report
+
+    def test_handover_separates_current_archive_and_older_evidence_without_writes(self):
+        older, archive = self.handover_fixture()
+        before = {str(p): p.read_bytes() for p in Path(self.tmp.name).rglob('*') if p.is_file()}
+        report = self.handover_collect()
+        self.assertTrue(report['snapshot_verified'], report)
+        self.assertFalse(report['deployment_authorized'])
+        self.assertEqual(report['checks']['release']['rollback_archive'], str(self.archive))
+        self.assertEqual(report['checks']['current_deployment_record']['previous_release'], str(older))
+        candidate = report['checks']['older_reported_archive']
+        self.assertEqual(candidate['path'], str(archive))
+        self.assertTrue(candidate['selected_sources_match'])
+        self.assertFalse(candidate['rollback_selected'])
+        self.assertEqual(candidate['previous_release_suitability'], 'UNVERIFIED')
+        self.assertEqual(before, {str(p): p.read_bytes() for p in Path(self.tmp.name).rglob('*') if p.is_file()})
+
+    def test_handover_missing_current_never_uses_valid_older_archive(self):
+        self.handover_fixture()
+        self.archive.unlink()
+        report = self.handover_collect()
+        self.assertIn('current_archive_exact_paths_missing', report['errors'])
+        self.assertNotIn('rollback_archive', report['checks']['release'])
+        self.assertTrue(report['checks']['older_reported_archive']['selected_sources_match'])
+
+    def test_handover_missing_older_proof_does_not_hide_archive_or_job_counts(self):
+        older, _ = self.handover_fixture()
+        (older / 'official-install-proof.json').unlink()
+        self.driver.update(state='IN', holder='PRODUCTION', clear=False)
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO jobs VALUES ('WAITING',NULL,'SECRET_SENTINEL')")
+        report = self.handover_collect()
+        self.assertFalse(report['checks']['older_deployment_record']['verified'])
+        self.assertTrue(report['checks']['older_reported_archive']['selected_sources_match'])
+        self.assertEqual(report['checks']['durable_work']['jobs_by_status']['WAITING'], 1)
+        self.assertIn('driver_conflict_or_expired', report['errors'])
+        self.assertIn('durable_work_not_quiescent', report['errors'])
+        self.assertFalse(report['snapshot_verified'])
+
+    def test_handover_records_are_collected_when_gateway_is_unavailable(self):
+        self.handover_fixture()
+        audit.gateway.side_effect = RuntimeError('SECRET_SENTINEL')
+        report = self.handover_collect()
+        self.assertTrue(report['checks']['current_deployment_record']['stored_proof_live'])
+        self.assertTrue(report['checks']['older_deployment_record']['stored_proof_live'])
+        self.assertFalse(report['snapshot_verified'])
+
+    def test_handover_rejects_tampered_older_archive_and_extracted_source(self):
+        older, archive = self.handover_fixture()
+        original = archive.read_bytes()
+        archive.write_bytes(original + b'tampered')
+        self.assertIn('older_archive_digest', self.handover_collect()['errors'])
+        archive.write_bytes(original)
+        self.write(older / audit.OVERLAYS[0][0], b'tampered')
+        self.assertIn('older_archive_source_changed', self.handover_collect()['errors'])
+
+    def test_handover_metadata_cannot_echo_or_follow_arbitrary_paths(self):
+        self.handover_fixture()
+        original = json.loads(self.evidence.read_text())
+        for key, value, error in (
+                ('previous_release', '/tmp/SECRET_SENTINEL', 'previous_release_unverified'),
+                ('proof_path', '/tmp/SECRET_SENTINEL', 'proof_path_invalid'),
+                ('gateway_playwright_runtime', {'root': '/tmp/SECRET_SENTINEL'}, 'runtime_metadata_unverified')):
+            self.write_json(self.evidence, dict(original, **{key: value}))
+            self.assertIn(error, self.handover_collect()['errors'])
+
+    def test_handover_detects_changed_current_release_identity(self):
+        self.handover_fixture()
+        with patch.object(audit, 'HANDOVER_CURRENT', ('d' * 40, 'd' * 64)):
+            report = self.handover_collect()
+        self.assertIn('handover_current_mismatch', report['errors'])
+        self.assertNotIn('rollback_archive', report['checks']['release'])
+
+    def test_exact_reads_refuse_parent_and_final_symlinks_fifo_and_growth(self):
+        self.handover_fixture()
+        alias = self.root / 'redirect'
+        alias.symlink_to(self.evidence.parent)
+        with self.assertRaises(OSError):
+            audit.exact_bytes(alias / self.evidence.name)
+        link = self.root / 'linked-file'
+        link.symlink_to(self.evidence)
+        with self.assertRaises(OSError):
+            audit.exact_bytes(link)
+        fifo = self.root / 'fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(audit.Refused, 'archive_file_type_or_size'):
+            audit.exact_bytes(fifo)
+        real_fstat = os.fstat
+        calls = []
+        def changing(fd):
+            value = real_fstat(fd)
+            calls.append(fd)
+            if len(calls) == 1:
+                with self.evidence.open('ab') as stream:
+                    stream.write(b' ')
+            return value
+        with patch.object(audit.os, 'fstat', side_effect=changing):
+            with self.assertRaisesRegex(audit.Refused, 'file_changed_during_read'):
+                audit.exact_bytes(self.evidence)
+
 
 class TestTransportContracts(unittest.TestCase):
+    def test_handover_transport_accepts_only_boolean_and_sends_fixed_flag(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / '.github/workflows/diagnose-test-gateway-and-browser.yml').read_text())
+        step = next(s for s in workflow['jobs']['diagnose']['steps']
+                    if s.get('name') == 'Collect bounded Test snapshot without remote installation')
+        self.assertEqual(step['env']['RELEASE_HANDOVER'], '${{ inputs.release_handover }}')
+        for value, flag, exit_code in (('true', True, 0), ('false', False, 0),
+                                      ('--archive=/tmp/SECRET_SENTINEL', False, 2)):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / 'python3').symlink_to(__import__('sys').executable)
+                fake = base / 'gcloud'
+                fake.write_text('#!/bin/bash\ncat >/dev/null\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/args"\nprintf "%s" "$FIXTURE_PAYLOAD"\n')
+                fake.chmod(0o755)
+                result = subprocess.run(['bash', '-c', step['run']], cwd=root, capture_output=True, text=True,
+                    env={'PATH': f'{base}:/usr/bin:/bin', 'HOME': directory, 'RUNNER_TEMP': directory,
+                         'GITHUB_SHA': 'a' * 40, 'TEST_VM': audit.HOST, 'PROJECT_ID': 'streetsmart-hermes-poc',
+                         'ZONE': 'us-east1-b', 'OSLOGIN_SSH_KEY_TTL': '1h', 'RELEASE_HANDOVER': value,
+                         'FIXTURE_PAYLOAD': json.dumps({'host': audit.HOST, 'snapshot_verified': True,
+                             'deployment_authorized': False, 'errors': []})})
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertNotIn('SECRET_SENTINEL', result.stdout + result.stderr)
+                if exit_code:
+                    self.assertFalse((base / 'args').exists())
+                else:
+                    args = (base / 'args').read_text().splitlines()
+                    command = next(a for a in args if a.startswith('--command='))
+                    self.assertEqual(command.endswith(' --release-handover'), flag)
+
     def test_oslogin_instance_override_and_access_failure_stop_before_key(self):
         import yaml
         root = Path(__file__).resolve().parents[1]
@@ -669,7 +839,7 @@ class TestTransportContracts(unittest.TestCase):
         with patch.object(audit, 'collect', side_effect=audit.CollectorTimeout), \
              patch.object(audit.signal, 'signal'), patch.object(audit.signal, 'alarm'), \
              patch('sys.stdout', new_callable=io.StringIO) as output:
-            self.assertEqual(audit.main(), 2)
+            self.assertEqual(audit.main([]), 2)
             self.assertEqual(json.loads(output.getvalue())['errors'], ['collector_timeout'])
 
     def test_selected_systemd_fields_only(self):
