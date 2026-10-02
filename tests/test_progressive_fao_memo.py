@@ -3595,6 +3595,7 @@ class LivePageFixTests(unittest.TestCase):
             "Magana, Austreber M\n70 Winding Wood": "Magana, Austreber M",
             "3JR Contracting LLC PO Box 12 Tampa": "3JR Contracting LLC",
             "Yolanda Concepcion": "Yolanda Concepcion",
+            "Groesbeck, Zachary Jackson, Nj 08527 (732) 995-2407": "Groesbeck, Zachary Jackson, Nj 08527",
         }
         for raw, want in cases.items():
             with self.subTest(raw=raw):

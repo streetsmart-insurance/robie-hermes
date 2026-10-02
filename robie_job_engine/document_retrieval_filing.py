@@ -475,8 +475,57 @@ def _policy_key(value: object) -> str:
     return _POLICY_IN_NAME.sub("", str(value or "")).upper()
 
 
-def _tokens(value: object) -> frozenset[str]:
-    return frozenset(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split())
+def _normalized_label(value: object) -> str:
+    """Strip one extension, then lowercase and collapse punctuation and space."""
+
+    text = str(value or "").strip()
+    text = re.sub(r"\.[A-Za-z]{1,5}$", "", text)
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split())
+
+
+def _policies_match(left: str, right: str) -> bool:
+    """True for the same policy, including NatGen's ``NNNNNNNNNN 00`` suffix."""
+
+    a = _policy_key(left)
+    b = _policy_key(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    long, short = (a, b) if len(a) >= len(b) else (b, a)
+    return len(short) >= 8 and long == f"{short}00"
+
+
+def _policy_in_label(label: str, policy_number: str) -> bool:
+    policy = _normalized_label(policy_number)
+    if not policy:
+        return False
+    padded = f" {label} "
+    if f" {policy} " in padded:
+        return True
+    compact = policy.replace(" ", "")
+    return f" {compact} " in padded
+
+
+_DOCUMENT_TYPE_MARKERS = frozenset({"memo", "noc"})
+
+
+def _type_marker(tokens: Sequence[str]) -> str:
+    found = [token for token in tokens if token in _DOCUMENT_TYPE_MARKERS]
+    return found[0] if len(found) == 1 else ""
+
+
+def _distinctive_tokens(tokens: Sequence[str], policy_number: str, marker: str) -> frozenset[str]:
+    policy_tokens = set(_normalized_label(policy_number).split())
+    skip = set(_GENERIC_NAME_TOKENS) | policy_tokens | {marker, "natgen", "geico"}
+    kept = []
+    for token in tokens:
+        if token in skip:
+            continue
+        if token.isdigit() and len(token) <= 2:
+            continue
+        kept.append(token)
+    return frozenset(kept)
 
 
 def document_is_duplicate(
@@ -486,27 +535,32 @@ def document_is_duplicate(
     existing_name: str,
     existing_policy: str = "",
 ) -> bool:
-    """True when an existing EZLynx document is the same policy and a similar file.
+    """True when an existing EZLynx document is the same policy and document type.
 
-    A different memo reason on the same policy is not a duplicate. A second
-    copy that adds a suffix still is. A declarations page is not.
+    Names are compared after the extension is removed and punctuation is
+    collapsed, so ``file.pdf`` matches ``file``. NatGen's ``NNNNNNNNNN 00``
+    policy form counts. The same policy with a different memo reason, NOC
+    reason, or document type does not match. A second copy that only adds a
+    suffix still does.
     """
 
-    policy = _policy_key(policy_number)
-    have_policy = _policy_key(existing_policy)
-    if not policy or (have_policy and have_policy != policy):
+    want = _normalized_label(filename)
+    have = _normalized_label(existing_name)
+    if not want or not have or not _policy_in_label(want, policy_number):
         return False
-    want_tokens = _tokens(Path(str(filename or "")).stem)
-    have_tokens = _tokens(existing_name)
-    if not want_tokens or not have_tokens:
+    if str(existing_policy or "").strip():
+        if not _policies_match(policy_number, existing_policy):
+            return False
+    elif not _policy_in_label(have, policy_number):
         return False
-    policy_confirmed = have_policy == policy or policy.lower() in have_tokens
-    if want_tokens == have_tokens:
+    if want == have:
         return True
-    if not policy_confirmed or "memo" not in have_tokens:
+    want_tokens = want.split()
+    have_tokens = have.split()
+    marker = _type_marker(want_tokens)
+    if not marker or marker != _type_marker(have_tokens):
         return False
-    distinctive = {token for token in want_tokens if token not in _GENERIC_NAME_TOKENS}
-    return bool(distinctive) and distinctive <= have_tokens
+    return _distinctive_tokens(want_tokens, policy_number, marker) <= set(have_tokens)
 
 
 def _date_key(value: object) -> str:
@@ -867,7 +921,7 @@ def _file_one(
 
     policy_number = str(item.get("policy_number") or "").strip()
     filename = str(item.get("filename") or "").strip()
-    insured_name = str(item.get("insured_name") or "").strip()
+    insured_name = _client_name(item.get("insured_name"))
     department = str(item.get("department") or "").strip()
     if not policy_number or not filename or not insured_name:
         return _item_result("held", item, reason="policy, insured name, or filename is missing")
@@ -1130,6 +1184,14 @@ def choose_test_discussion(
     return None, titles
 
 
+def _client_name(value: object) -> str:
+    """Insured name only. A Progressive cell may also hold the street and a phone."""
+
+    from .progressive_fao_memo import clean_insured_name
+
+    return clean_insured_name(str(value or ""))
+
+
 def _display_policy(policy_number: str) -> str:
     """Full policy number, or its last four when the digits would look dialable."""
 
@@ -1142,19 +1204,22 @@ def _display_policy(policy_number: str) -> str:
         return f"ending in {runs[0][-4:]}" if runs else "on file"
 
 
-def test_account_note(rule: FilingRule, *, insured_name: str, policy_number: str, processed_on: date) -> str:
-    """Plain-English note naming the real client and policy, e.g.
-    "Progressive memo dated 9/29/2026 for Groesbeck, Zachary, policy 876263535,
-    saved to this test account. ROBIE was here"."""
+def test_account_note(
+    rule: FilingRule,
+    *,
+    policy_number: str,
+    processed_on: date,
+    filename: str,
+    insured_name: str = "",
+) -> str:
+    """The same sentence Production posts, so a Test filing proves that text.
 
-    policy = _display_policy(policy_number)
-    policy_text = f"policy {policy}"
-    text = (
-        f"{rule.note_label} dated {sheet_date_text(processed_on)} for {insured_name.strip()}, "
-        f"{policy_text}, saved to this test account. {ROBIE_SIGNATURE}"
-    )
-    reject_phone_numbers(text)
-    return text
+    Policy number and file name, not the client name. A Progressive cell often
+    includes the street address and a phone number, and a phone number is refused.
+    """
+
+    del insured_name
+    return filing_note(rule, processed_on, policy_number=policy_number, filename=filename)
 
 
 def _file_one_test_account(
@@ -1170,7 +1235,7 @@ def _file_one_test_account(
 
     policy_number = str(item.get("policy_number") or "").strip()
     filename = str(item.get("filename") or "").strip()
-    insured_name = str(item.get("insured_name") or "").strip()
+    insured_name = _client_name(item.get("insured_name"))
     base = {"applicant_id": applicant_id, "real_client": insured_name, "real_policy": policy_number}
     if not policy_number or not filename or not insured_name:
         return _item_result("held", item, reason="policy, insured name, or filename is missing", **base)
@@ -1194,7 +1259,11 @@ def _file_one_test_account(
     title = discussion_title_of(dict(discussion))
     try:
         note_text = test_account_note(
-            rule, insured_name=insured_name, policy_number=policy_number, processed_on=processed_on
+            rule,
+            insured_name=insured_name,
+            policy_number=policy_number,
+            processed_on=processed_on,
+            filename=filename,
         )
     except Exception as exc:
         return _item_result("held", item, reason=f"note text was refused ({type(exc).__name__})", **base)
@@ -1618,7 +1687,9 @@ def pack_filing_items(output_dir: str | Path) -> list[dict[str, Any]]:
                     continue
                 filename = str(entry.get("filename") or "").strip()
                 policy = str(entry.get("policy_number") or "").strip()
-                insured = next((str(entry.get(k) or "").strip() for k in _INSURED_KEYS if entry.get(k)), "")
+                insured = _client_name(
+                    next((str(entry.get(k) or "").strip() for k in _INSURED_KEYS if entry.get(k)), "")
+                )
                 disposition = str(entry.get("disposition") or "pulled").strip().lower()
                 path = manifest_path.parent / filename
                 if not filename or not policy or disposition != "pulled" or not path.is_file():

@@ -2196,6 +2196,7 @@ class LocalDeliveryLedger:
 
     def ensure_private(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.root, 0o700)
         if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
             raise IntakeHold("Memo output directory must be private (0700)")
 
@@ -2277,6 +2278,7 @@ class LocalDeliveryLedger:
         if folder.is_symlink():
             raise IntakeHold("Memo output directory must be private (0700)")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(folder, 0o700)
         if not folder.is_dir() or folder.stat().st_mode & 0o077:
             raise IntakeHold("Memo output directory must be private (0700)")
         return folder
@@ -3071,11 +3073,16 @@ def clean_insured_name(value: str) -> str:
 
     Live 2026-09-30 the cell also holds the street address, phone, and an
     Email link ("Groesbeck, Zachary 2 Round Hill Rd Jackson, Nj 08527
-    H:(732) 995-2407 Email"). The name is everything before the first
-    street number, PO box, phone label, or Email.
+    H:(732) 995-2407 Email"). The 9/29 pack kept that whole cell. The name
+    is everything before the first street number, PO box, phone, or Email.
     """
+    from .ezlynx_discussions import _PHONE_LIKE
+
     lines = [line for line in (_norm(part) for part in str(value or "").splitlines()) if line]
     text = lines[0] if lines else ""
+    phone = _PHONE_LIKE.search(text)
+    if phone and phone.start() > 0:
+        text = text[: phone.start()]
     for pattern in (_CONTACT_START, _STREET_START):
         match = pattern.search(text)
         if match and match.start() > 0:

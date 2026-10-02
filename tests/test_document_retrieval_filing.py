@@ -238,6 +238,39 @@ class DedupeTests(unittest.TestCase):
             existing_policy="860521214",
         ))
 
+    def test_natgen_and_geico_pdf_names_match_on_policy_and_document_type(self):
+        # Live EZLynx docs 824464961 and 824464983 keep the .pdf extension.
+        self.assertTrue(document_is_duplicate(
+            policy_number="2035471506 00",
+            filename="2035471506 00 NatGen NOC non-payment.pdf",
+            existing_name="2035471506 00 NatGen NOC non-payment.pdf",
+        ))
+        self.assertTrue(document_is_duplicate(
+            policy_number="2031936859 00",
+            filename="2031936859 00 NatGen NOC nsf.pdf",
+            existing_name="2031936859 00 NatGen NOC nsf.pdf",
+        ))
+        self.assertTrue(document_is_duplicate(
+            policy_number="2035471506 00",
+            filename="2035471506 00 NatGen NOC non-payment.pdf",
+            existing_name="2035471506-00 NatGen NOC non-payment.PDF",
+        ))
+        self.assertFalse(document_is_duplicate(
+            policy_number="2035471506 00",
+            filename="2035471506 00 NatGen NOC non-payment.pdf",
+            existing_name="2035471506 00 NatGen NOC nsf.pdf",
+        ))
+        self.assertTrue(document_is_duplicate(
+            policy_number="6123456789",
+            filename="6123456789 NOC Geico.pdf",
+            existing_name="6123456789 NOC Geico.pdf",
+        ))
+        self.assertFalse(document_is_duplicate(
+            policy_number="6123456789",
+            filename="6123456789 NOC Geico.pdf",
+            existing_name="6123456789 Declarations Geico.pdf",
+        ))
+
 
 class FilingGateTests(unittest.TestCase):
     def test_kill_switch_defaults_off_and_does_not_build_a_client(self):
@@ -627,9 +660,14 @@ class TestApplicantOverrideTests(unittest.TestCase):
         self.assertEqual(deps.notes[0]["title"], "Additional Information - CHANGE ME")
         self.assertEqual(
             deps.notes[0]["text"],
-            "Progressive memo dated 9/29/2026 for Groesbeck, Zachary, policy 876263535, "
-            "saved to this test account. ROBIE was here",
+            filing_note(
+                PROGRESSIVE_MEMO_RULE, date(2026, 9, 29),
+                policy_number="876263535",
+                filename="876263535 Progressive Memo Discount Memo.pdf",
+            ),
         )
+        self.assertIn("file 876263535 Progressive Memo Discount Memo", deps.notes[0]["text"])
+        self.assertNotIn("Groesbeck", deps.notes[0]["text"])
         self.assertEqual(deps.sheets.writes, [])
         self.assertEqual(deps.tasks, [])
         row = result["results"][0]
@@ -648,10 +686,87 @@ class TestApplicantOverrideTests(unittest.TestCase):
         self.assertEqual(result["status"], "filed", result)
         self.assertEqual(
             deps.notes[0]["text"],
-            "NatGen cancellation notice dated 9/30/2026 for A&E CONTRACTOR LLC, policy ending in 1506, "
-            "saved to this test account. ROBIE was here",
+            filing_note(
+                NATGEN_NOC_RULE, date(2026, 9, 30),
+                policy_number="2035471506 00",
+                filename="2035471506 00 NatGen NOC non-payment.pdf",
+            ),
         )
+        self.assertIn("non-payment", deps.notes[0]["text"])
+        self.assertNotIn("A&E", deps.notes[0]["text"])
         reject_phone_numbers(deps.notes[0]["text"])
+
+    def test_dirty_fao_client_name_stays_out_of_the_note(self):
+        deps = FakeDeps(discussions=list(BB_DISCUSSIONS))
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        dirty = "Groesbeck, Zachary 2 Round Hill Rd Jackson, Nj 08527 H:(732) 995-2407 Email"
+        filename = "876263535 Progressive Memo Discount Memo.pdf"
+        item = memo_item(
+            policy_number="876263535",
+            insured_name=dirty,
+            filename=filename,
+            processed_on="2026-09-29",
+        )
+        result = file_with(deps, [item], env)
+        self.assertEqual(result["status"], "filed", result)
+        note = deps.notes[0]["text"]
+        self.assertEqual(
+            note,
+            filing_note(
+                PROGRESSIVE_MEMO_RULE, date(2026, 9, 29),
+                policy_number="876263535", filename=filename,
+            ),
+        )
+        self.assertNotIn("995-2407", note)
+        self.assertNotIn("Round Hill", note)
+        self.assertEqual(result["results"][0]["real_client"], "Groesbeck, Zachary")
+        reject_phone_numbers(note)
+
+    def test_existing_natgen_and_geico_pdfs_are_skipped(self):
+        env = {**TEST_OVERRIDE, "ROBIE_DOCUMENT_RETRIEVAL_TEST_DISCUSSION_TITLE": "Additional Information - CHANGE ME"}
+        natgen = FakeDeps(
+            discussions=list(BB_DISCUSSIONS),
+            documents={
+                "results": [
+                    {"id": "824464961", "documentName": "2035471506 00 NatGen NOC non-payment.pdf"},
+                    {"id": "824464983", "documentName": "2031936859 00 NatGen NOC nsf.pdf"},
+                ],
+            },
+        )
+        natgen_items = [
+            memo_item(
+                policy_number="2035471506 00",
+                insured_name="A&E CONTRACTOR LLC",
+                filename="2035471506 00 NatGen NOC non-payment.pdf",
+                processed_on="2026-09-30",
+            ),
+            memo_item(
+                policy_number="2031936859 00",
+                insured_name="Sample Client",
+                filename="2031936859 00 NatGen NOC nsf.pdf",
+                processed_on="2026-09-30",
+            ),
+        ]
+        result = file_with(natgen, natgen_items, env, rule=NATGEN_NOC_RULE)
+        self.assertEqual(
+            [row["status"] for row in result["results"]],
+            ["skipped_duplicate", "skipped_duplicate"],
+            result,
+        )
+        self.assertEqual(natgen.uploads, [])
+        geico = FakeDeps(
+            discussions=list(BB_DISCUSSIONS),
+            documents={"results": [{"id": "900", "documentName": "6123456789 NOC Geico.pdf"}]},
+        )
+        geico_item = memo_item(
+            policy_number="6123456789",
+            insured_name="Sample Client",
+            filename="6123456789 NOC Geico.pdf",
+            processed_on="2026-09-30",
+        )
+        geico_result = file_with(geico, [geico_item], env, rule=GEICO_NOC_RULE)
+        self.assertEqual(geico_result["results"][0]["status"], "skipped_duplicate", geico_result)
+        self.assertEqual(geico.uploads, [])
 
     def test_duplicate_on_test_account_skips_upload(self):
         deps = FakeDeps(
@@ -711,6 +826,51 @@ class PackItemTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["policy_number"], "2035471506 00")
         self.assertEqual(items[0]["processed_on"], "2026-09-30")
+
+    def test_fao_pack_client_name_drops_the_street_and_phone(self):
+        import json
+        import tempfile
+
+        from robie_job_engine.document_retrieval_filing import pack_filing_items
+
+        dirty = "Groesbeck, Zachary 2 Round Hill Rd Jackson, Nj 08527 H:(732) 995-2407 Email"
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / "2026-09-29"
+            day.mkdir()
+            (day / "876263535 Progressive Memo Discount Memo.pdf").write_bytes(PDF)
+            (day / "manifest.json").write_text(json.dumps({
+                "processed_date": "2026-09-29",
+                "memos": [{
+                    "filename": "876263535 Progressive Memo Discount Memo.pdf",
+                    "policy_number": "876263535",
+                    "insured_name": dirty,
+                    "disposition": "pulled",
+                }],
+            }))
+            items = pack_filing_items(tmp)
+        self.assertEqual(items[0]["insured_name"], "Groesbeck, Zachary")
+        self.assertNotIn("995-2407", items[0]["insured_name"])
+
+
+class OutputPrivacyTests(unittest.TestCase):
+    def test_pull_output_directories_are_created_at_0700(self):
+        import os
+        import tempfile
+
+        from robie_job_engine.natgen_pending_cancellation import LocalDeliveryLedger as NatGenLedger
+        from robie_job_engine.progressive_fao_memo import LocalDeliveryLedger as FaoLedger
+
+        previous = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for ledger in (FaoLedger(root / "fao"), NatGenLedger(root / "natgen")):
+                    ledger.ensure_private()
+                    self.assertEqual(ledger.root.stat().st_mode & 0o777, 0o700)
+                    day = ledger.date_dir(date(2026, 9, 29))
+                    self.assertEqual(day.stat().st_mode & 0o777, 0o700)
+        finally:
+            os.umask(previous)
 
 
 class PlainSheetTextTests(unittest.TestCase):

@@ -585,6 +585,7 @@ class LocalNocLedger:
 
     def ensure_private(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.root, 0o700)
         if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
 
@@ -594,6 +595,7 @@ class LocalNocLedger:
         if folder.is_symlink():
             raise IntakeHold("BOP output directory must be private (0700)")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(folder, 0o700)
         if not folder.is_dir() or folder.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
         return folder
