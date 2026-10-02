@@ -195,7 +195,7 @@ def test_stale_or_cancelled_clarification_cannot_wake(tmp_path):
     assert answer(store, resolve) == 'refused'
     store.transition(owner, JobStatus.CANCELLED, expected={JobStatus.RUNNING})
     assert answer(store, resolve, clarify_id='clarify-one') == 'refused'
-    assert answer(store, resolve, text='Start a new request') == 'absent'
+    assert answer(store, resolve, text='Start a new request') == 'new_intent'
     resolve.assert_not_called()
 
 
@@ -384,10 +384,11 @@ def test_exact_receipt_survives_later_failure_but_not_next_generation(tmp_path):
     assert not confirmed_write_this_turn(store, owner)
 
 
-def test_note_entry_refuses_fixture_before_lookup_or_post(tmp_path):
+@pytest.mark.parametrize('wording', ['Add a note for Buster Brown', 'Add a note to Buster Brown’s account'])
+def test_note_entry_refuses_fixture_before_lookup_or_post(tmp_path, wording):
     from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
     store = JobStore(str(tmp_path / 'jobs.db'))
-    owner = running(store, applicant_id='220250093')
+    owner = running(store, wording, applicant_id='220250093')
     begin_model_generation(owner, store=store)
     client = Mock()
     with pytest.raises(RuntimeError, match='EZLYNX_APPLICANT_UNTRUSTED'):
@@ -450,3 +451,244 @@ def test_invalid_or_foreign_card_environment_is_refused(stamp, monkeypatch):
     monkeypatch.setenv('ROBIE_ENV', 'PRODUCTION')
     if stamp != 'prod':
         assert not _adapter_module()._click_routed_to_this_gateway({'robie_env': stamp})
+
+
+@pytest.mark.parametrize('flag', [True, None])
+@pytest.mark.parametrize('attrs', [{}, {'robie_env': 'prod'}])
+def test_foreign_thread_stop_refused_before_build(tmp_path, monkeypatch, flag, attrs):
+    store = JobStore(str(tmp_path / 'prod.db'))
+    owner = running(store)
+    chat = _chat(str(store.path))
+    monkeypatch.setattr(_adapter_module(), 'ROBIE_JOB_DB', str(store.path))
+    monkeypatch.setenv('ROBIE_ENV', 'PRODUCTION')
+    chat._active_chat_job[SPACE] = owner
+    chat._job_db_path = str(store.path)
+    chat._build_message_event = Mock(side_effect=AssertionError('must not build'))
+    msg = {'text': '/stop', 'space': {'name': SPACE}, 'thread': {'name': SPACE + '/threads/test-only'}}
+    if flag is not None:
+        msg['threadReply'] = flag
+    asyncio.run(chat._dispatch_message(msg, {}, routing_attributes=attrs))
+    chat._build_message_event.assert_not_called()
+    assert store.get_job(owner)['status'] == 'RUNNING'
+
+
+def test_thread_contract_and_read_failure(tmp_path):
+    from robie_job_engine.chat_environment import thread_ingress_refusal, ThreadOwnershipUnavailable
+    store = JobStore(str(tmp_path / 'prod.db'))
+    owner = running(store)
+    message = {'thread': {'name': THREAD}, 'threadReply': True}
+    kwargs = dict(space=SPACE, environment='prod', db_path=str(store.path))
+    assert thread_ingress_refusal(message, **kwargs) is None
+    store.checkpoint(owner, 'chat_request_owner', {'environment': 'test'})
+    assert thread_ingress_refusal(message, **kwargs) == 'CHAT_THREAD_ENVIRONMENT_MISMATCH'
+    assert thread_ingress_refusal({**message, 'threadReply': False}, **kwargs) is None
+    assert thread_ingress_refusal({**message, 'threadReply': 'false'}, **kwargs) == 'CHAT_THREAD_METADATA_INVALID'
+    missing = tmp_path / 'missing.db'
+    with pytest.raises(ThreadOwnershipUnavailable):
+        thread_ingress_refusal(message, **{**kwargs, 'db_path': str(missing)})
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize('body', ['/stop', 'use follw up 1', 'hello'])
+@pytest.mark.parametrize('field', ['text', 'argumentText'])
+def test_multiple_mentions_cannot_hide_test_marker(body, field):
+    message = {field: '<users/one> <users/two> @robie [[robie-test]] ' + body}
+    route, clean = route_message(message)
+    assert route == 'test'
+    assert clean[field] == body
+    assert route_message(message, {'robie_env': 'prod'})[0] == 'invalid'
+
+
+def test_cancelled_old_stop_cannot_touch_new_shared_agent(tmp_path):
+    from robie_job_engine.chat_turn_control import terminate_gateway_agent, job_turn_is_alive
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    old = running(store)
+    store.transition(old, JobStatus.CANCELLED, expected={JobStatus.RUNNING})
+    new = running(store)
+    chat = _chat(str(store.path))
+    key = f'agent:main:google_chat:dm:{SPACE}'
+    agent = Mock()
+    lease = Mock()
+    chat.gateway_runner._running_agents[key] = agent
+    chat.gateway_runner._active_session_leases = {key: lease}
+    chat.gateway_runner._session_history = {key: ['new turn']}
+    chat.gateway_runner._interrupt_and_clear_session = Mock()
+    chat._gateway_turns[(SPACE, '')] = {'job_id': new, 'task': None}
+    chat._active_chat_job[SPACE] = new
+    assert not job_turn_is_alive(chat, _Event(THREAD, '/stop'), old, store)
+    asyncio.run(terminate_gateway_agent(chat, _Event(THREAD, '/stop'), old, reason='/stop', store=store))
+    agent.assert_not_called()
+    assert agent.method_calls == []
+    lease.release.assert_not_called()
+    chat.gateway_runner._interrupt_and_clear_session.assert_not_called()
+    assert chat.gateway_runner._session_history[key] == ['new turn']
+    assert store.get_job(new)['status'] == 'RUNNING'
+
+
+def test_stop_generation_and_actual_agent_identity(tmp_path):
+    from robie_job_engine.chat_turn_control import remember_session_owner, job_turn_is_alive
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store)
+    generation = begin_model_generation(owner, store=store)
+    chat = _chat(str(store.path))
+    key = f'agent:main:google_chat:dm:{SPACE}'
+    chat.gateway_runner._running_agents[key] = object()
+    event = _Event(None, '/stop')
+    assert not job_turn_is_alive(chat, event, owner, store)
+    remember_session_owner(chat, event, owner, generation)
+    assert job_turn_is_alive(chat, event, owner, store)
+    chat.gateway_runner._running_agents[key] = object()
+    assert not job_turn_is_alive(chat, event, owner, store)
+
+
+@pytest.mark.parametrize('terminal', [True, False])
+def test_current_clarification_ignores_historical_candidates(tmp_path, terminal):
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    old, _ = question(store)
+    if terminal:
+        store.transition(old, JobStatus.CANCELLED, expected={JobStatus.RUNNING})
+    else:
+        begin_model_generation(old, store=store)
+    current, generation = question(store)
+    register_question(store, current, generation, 'current-question')
+    resolve = Mock(return_value=True)
+    assert answer(store, resolve, clarify_id='current-question') == 'delivered'
+    assert answer(store, resolve, clarify_id='current-question') == 'delivered'
+    resolve.assert_called_once_with('current-question', 'use follw up 1')
+    assert answer(store, resolve, clarify_id='clarify-one', message_id='other') == 'refused'
+
+
+def test_new_request_does_not_answer_question(tmp_path):
+    from robie_job_engine.chat_job_controls import should_bind_waiting_reply
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner, generation = question(store)
+    before = store.get_job(owner)['payload']
+    resolve = Mock(return_value=True)
+    assert answer(store, resolve, text='New request: check a different client') == 'new_intent'
+    resolve.assert_not_called()
+    assert store.get_checkpoint(owner, 'chat_live_question')['open']
+    assert store.get_job(owner)['payload'] == before
+
+
+@pytest.mark.parametrize('text', ["Add a note to Buster Brown’s account", "Add a note to Buster Brown's account", 'Write this down'])
+def test_every_bound_write_requires_applicant_provenance(tmp_path, text):
+    from robie_job_engine.chat_write_boundary import assert_chat_applicant
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store, text, applicant_id='220250093')
+    begin_model_generation(owner, store=store)
+    with pytest.raises(RuntimeError, match='EZLYNX_APPLICANT_UNTRUSTED'):
+        assert_chat_applicant('220250093')
+    client, write = transport_client('discussion')
+    client._urlopen = Mock()
+    with pytest.raises(RuntimeError, match='EZLYNX_APPLICANT_UNTRUSTED'):
+        write()
+    client._urlopen.assert_not_called()
+
+
+@pytest.mark.parametrize('text,hint,allowed', [
+    ('Add the note to Follow Up', 'Follow Up', True),
+    ('Do not use Follow Up', 'Follow Up', False),
+    ('Don’t use Follow Up', 'Follow Up', False),
+    ('Use Follow Up Later', 'Follow Up', False),
+    ('Follow Up was mentioned earlier', 'Follow Up', False),
+    ('Use Follow', 'Follow', False),
+])
+def test_bound_discussion_selection_is_exact_and_affirmative(tmp_path, text, hint, allowed):
+    from robie_job_engine.ezlynx_discussions import select_discussion_for_note, DiscussionSelectionError
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store, text)
+    begin_model_generation(owner, store=store)
+    rows = [{'discussionId': '1', 'title': 'Follow Up'}, {'discussionId': '2', 'title': 'Other'}]
+    if allowed:
+        assert select_discussion_for_note(rows, title_hint=hint)['discussionId'] == '1'
+    else:
+        with pytest.raises(DiscussionSelectionError):
+            select_discussion_for_note(rows, title_hint=hint)
+
+
+def test_http_card_missing_runtime_refuses_before_local_resolution(tmp_path, monkeypatch):
+    chat = _chat(str(tmp_path / 'jobs.db'))
+    monkeypatch.delenv('ROBIE_ENV', raising=False)
+    envelope = {'type': 'CARD_CLICKED', 'action': {'actionMethodName': 'robie_decision', 'parameters': []}}
+    assert asyncio.run(chat.dispatch_http_event(envelope)) == {}
+
+
+@pytest.mark.parametrize('flag', [True, None, False])
+def test_real_builder_retains_owned_reply_after_restart(tmp_path, monkeypatch, flag):
+    from types import SimpleNamespace
+    adapter = _adapter_module()
+    monkeypatch.setattr(adapter, 'MessageEvent', SimpleNamespace)
+    chat = _chat(str(tmp_path / 'jobs.db'))
+    chat._last_sender_by_chat = {}
+    chat._reply_in_existing_thread = {}
+    chat._thread_count_store.incr = lambda *args: 0
+    chat.build_source = lambda **kwargs: SimpleNamespace(**kwargs)
+    msg = {'name': SPACE + '/messages/reply', 'thread': {'name': THREAD}, 'text': '/stop',
+           'sender': {'name': 'users/carlo'}, 'space': {'name': SPACE, 'type': 'DM'}}
+    if flag is not None:
+        msg['threadReply'] = flag
+    event = asyncio.run(chat._build_message_event(msg, {}))
+    assert event.source.thread_id == (None if flag is False else THREAD)
+    assert chat._reply_in_existing_thread.get(msg['name']) == (None if flag is False else THREAD)
+
+
+def test_verified_target_remains_authorized_at_transport(tmp_path):
+    from robie_job_engine.chat_write_boundary import assert_chat_write_allowed, assert_chat_applicant
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store, 'Add a note to applicant 26356199', applicant_id='26356199')
+    begin_model_generation(owner, store=store)
+    assert_chat_write_allowed()
+    assert_chat_applicant('26356199')
+    with pytest.raises(RuntimeError, match='EZLYNX_APPLICANT_UNTRUSTED'):
+        assert_chat_applicant('220250093')
+
+
+def test_new_request_in_old_question_thread_gets_one_fresh_job(tmp_path):
+    from robie_job_engine.chat_guard import open_chat_job
+    from robie_job_engine.chat_job_controls import mark_job_waiting_for_user
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner, _ = question(store)
+    mark_job_waiting_for_user(store, owner, 'Which discussion?')
+    kwargs = dict(conversation_id=SPACE, inbound_thread_id=THREAD, requested_by='Carlo')
+    first = open_chat_job(str(store.path), 'new-request', 'New request: check a different client', **kwargs)
+    duplicate = open_chat_job(str(store.path), 'new-request', 'New request: check a different client', **kwargs)
+    assert first == duplicate and first != owner
+    assert store.get_checkpoint(owner, 'chat_live_question')['open']
+    assert len(store.list_jobs_by_status(set(JobStatus))) == 2
+
+
+def test_owned_stop_cancels_exact_stamped_background_task(tmp_path):
+    from robie_job_engine.chat_turn_control import remember_session_owner, terminate_gateway_agent
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store)
+    generation = begin_model_generation(owner, store=store)
+    chat = _chat(str(store.path))
+    key = f'agent:main:google_chat:dm:{SPACE}'
+    agent = Mock()
+    task = Mock()
+    task.done.return_value = False
+    chat.gateway_runner._running_agents[key] = agent
+    chat.gateway_runner._session_history = {key: ['old']}
+    async def clear(*args, **kwargs):
+        chat.gateway_runner._running_agents.pop(key)
+    chat.gateway_runner._interrupt_and_clear_session = clear
+    event = _Event(None, '/stop')
+    remember_session_owner(chat, event, owner, generation, task)
+    asyncio.run(terminate_gateway_agent(chat, event, owner, reason='/stop', store=store))
+    agent.interrupt.assert_called_once()
+    task.cancel.assert_called_once()
+    assert chat.gateway_runner._session_history[key] == []
+
+
+def test_session_stamp_never_claims_another_thread_agent(tmp_path):
+    from robie_job_engine.chat_turn_control import remember_session_owner
+    chat = _chat(str(tmp_path / 'jobs.db'))
+    shared = f'agent:main:google_chat:dm:{SPACE}'
+    threaded = shared + '/threads/job'
+    chat.gateway_runner._running_agents = {shared: object(), threaded: object()}
+    event = _Event(THREAD, 'hello')
+    remember_session_owner(chat, event, 'owner', 'generation')
+    assert chat._robie_session_owners == {}  # ambiguous fallback refuses
+    chat._event_session_key = lambda event: threaded
+    remember_session_owner(chat, event, 'owner', 'generation')
+    assert list(chat._robie_session_owners) == [threaded]

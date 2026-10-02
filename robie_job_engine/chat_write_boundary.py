@@ -25,19 +25,21 @@ def assert_chat_write_allowed() -> None:
     if (job.get('status') != 'RUNNING' or not state.get('running')
             or state.get('generation') != generation):
         raise RuntimeError('EZLYNX_WRITE_REFUSED: Chat job is not the running owner')
+    assert_chat_applicant(str((job.get('payload') or {}).get('applicant_id') or ''))
 
 
 def assert_chat_applicant(applicant_id: str) -> None:
-    """A named Chat request cannot borrow an allowlisted fixture account."""
+    """Every bound Chat write needs unambiguous job-specific provenance."""
     from .turn_finalization import bound_model_context
     owner, generation, path = bound_model_context()
-    if not owner:
+    if not owner and not generation and not path:
         return
-    if not path or not generation:
+    if not owner or not path or not generation:
         raise RuntimeError('EZLYNX_APPLICANT_UNTRUSTED: missing Chat context')
     from .store import JobStore
-    from .client_name_lookup import trusted_applicant_ids, write_client_name
+    from .client_name_lookup import trusted_applicant_ids
     store = JobStore(path)
     job = store.get_job(owner)
-    if write_client_name(job) and str(applicant_id) not in trusted_applicant_ids(store, job):
+    trusted = trusted_applicant_ids(store, job)
+    if len(trusted) != 1 or str(applicant_id) != trusted[0]:
         raise RuntimeError('EZLYNX_APPLICANT_UNTRUSTED: applicant was not resolved for this request')

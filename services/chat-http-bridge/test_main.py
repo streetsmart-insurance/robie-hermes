@@ -71,6 +71,8 @@ class BridgeTests(unittest.TestCase):
         for message in (
             {"text": "[[robie-test]] hello"},
             {"text": "<users/bot> [[robie-test]] hello"},
+            {"text": "<users/one> <users/two> [[robie-test]] /stop"},
+            {"argumentText": "<users/one> @robie robie-test: use follow up"},
             {"text": "@robie hello", "argumentText": "robie-test: hello"},
         ):
             with self.subTest(message=message):

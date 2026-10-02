@@ -25,7 +25,7 @@ def register_question(store, job_id: str, generation: str, clarify_id: str) -> b
 def deliver_reply(store, *, thread: str, actor: str, environment: str,
                   message_id: str, text: str, resolve: Callable[[str, str], bool],
                   clarify_id: str = '') -> str:
-    """Return absent, refused or delivered. A refused reply cannot start a turn.
+    """Return absent, new_intent, refused or delivered. A refused reply cannot start a turn.
 
     The DB transaction serializes duplicate answers against the durable generation.
     Hermes resolves only the exact clarify id; it never wakes a whole DM session.
@@ -41,31 +41,35 @@ def deliver_reply(store, *, thread: str, actor: str, environment: str,
         ).fetchall()
         owners = [row['job_id'] for row in rows
                   if json.loads(row['data_json']).get('thread_name') == thread]
-        candidates = []
-        for ident in owners:
-            row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind='chat_live_question'", (ident,)).fetchone()
-            if row:
-                candidates.append(ident)
-        if not candidates:
-            return 'absent'
-        if len(candidates) != 1:
-            return 'refused'
-        ident = candidates[0]
-        def checkpoint(kind):
+        def checkpoint(ident, kind):
             row = conn.execute('SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?', (ident, kind)).fetchone()
             return json.loads(row[0]) if row else {}
-        pending = checkpoint('chat_live_question')
-        if not pending:
-            return 'absent'
-        generation = checkpoint('model_generation')
-        row = conn.execute('SELECT status FROM jobs WHERE id=?', (ident,)).fetchone()
-        if row and row[0] in {'COMPLETE', 'FAILED', 'CANCELLED', 'UNVERIFIED'}:
-            return 'refused' if clarify_id else 'absent'
-        if (not actor or actor != pending.get('actor') or environment != pending.get('environment')
-                or (clarify_id and clarify_id != pending.get('clarify_id'))
-                or pending.get('generation') != generation.get('generation')
-                or not generation.get('running') or not row
-                or row[0] != 'RUNNING'):
+        candidates = []
+        stale_running = False
+        for ident in owners:
+            pending = checkpoint(ident, 'chat_live_question')
+            row = conn.execute('SELECT status FROM jobs WHERE id=?', (ident,)).fetchone()
+            if not pending or not row or row[0] != 'RUNNING':
+                continue
+            generation = checkpoint(ident, 'model_generation')
+            if (not generation.get('running')
+                    or pending.get('generation') != generation.get('generation')):
+                stale_running = True
+                continue
+            if clarify_id and pending.get('clarify_id') != clarify_id:
+                continue
+            if pending.get('open') or pending.get('message_id') == message_id:
+                candidates.append((ident, pending))
+        if not clarify_id and text.strip():
+            from .hitl import classify_human_reply
+            if classify_human_reply(text, {}) == 'NEW_INTENT':
+                return 'new_intent'
+        if not candidates:
+            return 'refused' if clarify_id or stale_running else 'absent'
+        if len(candidates) != 1:
+            return 'refused'
+        ident, pending = candidates[0]
+        if not actor or actor != pending.get('actor') or environment != pending.get('environment'):
             return 'refused'
         if not pending.get('open'):
             return 'delivered' if pending.get('message_id') == message_id else 'absent'

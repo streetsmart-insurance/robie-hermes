@@ -1536,11 +1536,14 @@ async def terminate_gateway_agent(
                 stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
             except Exception:
                 pass
+    if not keys:
+        return
     source = getattr(event, "source", None)
     tasks = _tasks_for_keys(adapter, keys)
-    captured = _capture_session_task(adapter, event, resolved)
-    if captured is not None and captured not in tasks:
-        tasks.append(captured)
+    for key in keys:
+        stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+        if stamp and len(stamp) > 3 and stamp[3] is not None and stamp[3] not in tasks:
+            tasks.append(stamp[3])
     agent = _running_agent_for_key(adapter, resolved)
     _hard_stop_agent(agent)
     # The clarify/question wait lives on a worker thread. Cancel the
@@ -1578,6 +1581,10 @@ async def terminate_gateway_agent(
             except Exception:
                 result = None
             await _await_interrupt(result)
+    # An awaited interrupt may have yielded to a new owner. Do not clear
+    # that replacement's lease, task, transcript or runner state.
+    if not _session_owned_for_stop(adapter, resolved, job_id, store, chat_id, allow_released=True):
+        return
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
@@ -1585,6 +1592,8 @@ async def terminate_gateway_agent(
             await _await_interrupt(result)
         except Exception:
             pass
+    if not _session_owned_for_stop(adapter, resolved, job_id, store, chat_id, allow_released=True):
+        return
     if runner is not None:
         drop = getattr(runner, "_drop_turn_slot", None)
         if callable(drop):
@@ -1616,7 +1625,8 @@ async def terminate_gateway_agent(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
-    _close_session_history(adapter, keys, chat_id=chat_id, thread_id=_thread_id)
+    keys = [key for key in keys if _session_owned_for_stop(adapter, key, job_id, store, chat_id, allow_released=True)]
+    _close_session_history(adapter, keys)
     for key in keys:
         _release_session_guard(adapter, key)
 
@@ -1687,6 +1697,53 @@ def content_is_only_progress(text: str) -> bool:
     return all(_line_is_tool_trace(line) or _line_is_heartbeat(line) for line in lines)
 
 
+def remember_session_owner(adapter: Any, event: Any, job_id: str, generation: str, task: Any = None) -> None:
+    """Record the actual live object, so a later turn cannot inherit stop authority."""
+    chat, thread = _event_chat_thread(event)
+    owners = getattr(adapter, "_robie_session_owners", None)
+    if owners is None:
+        owners = adapter._robie_session_owners = {}
+    exact = session_key_from_adapter(adapter, event)
+    keys = [exact] if _running_agent_for_key(adapter, exact) is not None else [
+        key for key in _iter_live_session_keys(adapter)
+        if _running_agent_for_key(adapter, key) is not None
+        and _key_matches_stop(key, chat, thread)
+    ]
+    # Never stamp every matching DM/thread agent as this turn's owner.
+    # Legacy key discovery is safe only when there is a single candidate.
+    if len(keys) == 1:
+        key = keys[0]
+        owners[key] = (str(job_id), str(generation), _running_agent_for_key(adapter, key), task)
+
+
+def _session_owned_for_stop(adapter: Any, key: str, job_id: str | None,
+                            store: Any, chat: str, *, allow_released: bool = False) -> bool:
+    if not job_id:
+        return False
+    # A shared DM session may already belong to the next job. Check even
+    # legacy turns that predate durable generation/session stamps.
+    for turn_key, record in (getattr(adapter, "_gateway_turns", {}) or {}).items():
+        if (isinstance(turn_key, tuple) and len(turn_key) > 1
+                and turn_key[0] == chat and _turn_record_running(record)
+                and str(record.get("job_id")) != str(job_id)
+                and (not turn_key[1] or _key_matches_stop(key, chat, str(turn_key[1])))):
+            return False
+    active = (getattr(adapter, "_active_chat_job", {}) or {}).get(chat)
+    if active and str(active) != str(job_id) and _key_matches_chat(key, chat, ""):
+        return False
+    try:
+        state = store.get_checkpoint(job_id, "model_generation") if store is not None else None
+    except Exception:
+        return False
+    stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+    if state or stamp:
+        return bool(state and stamp and stamp[0] == str(job_id)
+                    and stamp[1] == state.get("generation")
+                    and (stamp[2] is _running_agent_for_key(adapter, key)
+                         or (allow_released and _running_agent_for_key(adapter, key) is None)))
+    return True  # Legacy, exact local session with no conflicting turn.
+
+
 def stop_session_keys(
     adapter: Any,
     event: Any,
@@ -1735,13 +1792,14 @@ def stop_session_keys(
                 matched.append(key)
         elif _key_is_running(adapter, key):
             matched.append(key)
+    matched = [key for key in matched if _session_owned_for_stop(adapter, key, job_id, store, chat_id)]
     agent_keys = [key for key in matched if str(key).startswith("agent:")]
     if agent_keys:
         resolved = agent_keys[0]
     elif matched:
         resolved = matched[0]
     else:
-        resolved = derived if not threads or any(_key_matches_stop(derived, chat_id, thread) for thread in threads) else ""
+        resolved = derived if (not threads or any(_key_matches_stop(derived, chat_id, thread) for thread in threads)) and _session_owned_for_stop(adapter, derived, job_id, store, chat_id) else ""
     keys: list[str] = []
     for key in (resolved, *matched):
         if key and key not in keys:

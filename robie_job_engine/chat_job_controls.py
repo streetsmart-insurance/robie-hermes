@@ -522,6 +522,9 @@ def should_bind_waiting_reply(
         return False
     if hard_block_reply(text):
         return False
+    from .hitl import classify_human_reply
+    if text.strip() and classify_human_reply(text, {}) == "NEW_INTENT":
+        return False
     from .chat_thread import read_job_chat_thread, thread_resource_name
 
     inbound = thread_resource_name(inbound_thread_id)

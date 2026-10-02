@@ -1815,6 +1815,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     },
                 )
 
+        from robie_job_engine.chat_turn_control import remember_session_owner
+        remember_session_owner(self, event, job_id, generation, agent)
         current["task"] = agent
 
         watchdog = asyncio.create_task(
@@ -2772,6 +2774,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "text": text,
                 "argumentText": text,
             }
+            if "threadReply" in envelope:
+                msg["threadReply"] = envelope["threadReply"]
             thread_name = envelope.get("thread_name") or ""
             if thread_name:
                 msg["thread"] = {"name": thread_name}
@@ -2936,6 +2940,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         here still updates the card, including the expired-question reply
         after in-memory clarify state is gone.
         """
+        from robie_job_engine.runtime_env import chat_routing_env
+        if chat_routing_env() not in {"prod", "test"}:
+            logger.info("[GoogleChat] CHAT_RUNTIME_ENVIRONMENT_INVALID")
+            return None
         payload = _card_event_payload(envelope)
         if payload is None:
             return "That action could not be read. Please ask ROBIE to show it again."
@@ -2955,6 +2963,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         from robie_job_engine.confirmation_cards import canonical_card_action
         action = canonical_card_action(raw_action)
         parameters = _card_parameters(payload)
+        if (action in {"robie_decision", "robie_confirmation_decision"}
+                and "robie_env" not in parameters and chat_routing_env() != "prod"):
+            return None
 
         # Foreign clicks must not reach the patch below: Prod's old
         # else-branch told the user the action was unsupported and stripped
@@ -3204,6 +3215,20 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if route != chat_routing_env():
             _log_inbound_drop("foreign or invalid message environment")
             return
+        # A default/explicit environment is not proof of thread ownership.
+        # Refuse ambiguous foreign replies before downloads, stop/resume, or
+        # generic Chat can create a Production job from a Test-thread reply.
+        from robie_job_engine.chat_environment import thread_ingress_refusal
+
+        source_space = envelope.get("space") or clean_msg.get("space") or {}
+        refusal = await asyncio.to_thread(
+            thread_ingress_refusal, clean_msg,
+            space=str(source_space.get("name") or ""), environment=route,
+            db_path=_gateway_job_db_path(self),
+        )
+        if refusal:
+            _log_inbound_drop(refusal)
+            return
         # Normalize before event creation, commands, classification and job creation.
         msg = clean_msg
         try:
@@ -3229,7 +3254,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     environment=route, message_id=str(event.message_id or ""),
                     text=text, resolve=resolve_gateway_clarify,
                 )
-                if result != "absent":
+                if result not in {"absent", "new_intent"}:
                     return
 
             # Short-circuit /setup-files before the agent dispatch.
@@ -4017,25 +4042,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 space_name, thread_name
             )
 
-        # Session-thread + outbound-thread routing for DMs:
-        # - prev_count == 0  → first message in this thread. Google Chat
-        #   creates a fresh thread per top-level message in the DM input
-        #   box; treat as "main flow" so all top-level messages share
-        #   one DM session and the user keeps continuity. The bot's
-        #   reply ALSO must NOT thread with the user message — if we
-        #   pass thread.name on outbound, Chat displays the pair as an
-        #   expandable thread under the user's message instead of two
-        #   adjacent top-level cards.
-        # - prev_count >= 1  → user explicitly engaged a thread that
-        #   already had messages (clicked "Reply in thread" on a prior
-        #   message). Isolate session by chat_id+thread_id, AND keep
-        #   the bot's reply inside that thread.
-        #
-        # For groups, threads ARE meaningful conversational containers
-        # (Telegram forum / Discord thread parity); always isolate AND
-        # always reply in-thread.
+        # Ingress has verified the raw thread before this builder. Use the
+        # authoritative top-level flag, never a process-local count that is
+        # empty after restart. Missing flags reached here only for an owned
+        # durable thread; they must remain isolated from the shared DM.
         if chat_type == "dm":
-            is_side_thread = prev_thread_count > 0
+            is_side_thread = bool(thread_name) and msg.get("threadReply") is not False
             session_thread_id = thread_name if is_side_thread else None
             # Outbound thread cache: populated only when side-thread, so
             # _resolve_thread_id falls through to "no thread" on main
@@ -4050,11 +4062,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if thread_name and space_name:
                 self._last_inbound_thread[space_name] = thread_name
 
-        # A reply inside a thread that already had messages is bound to
-        # the job. A brand-new top-level (prev count 0) is not: the first
-        # outbound starts the job's own thread.
+        # Preserve an owned reply's raw thread for job binding.
         inbound_name = str(msg.get("name") or "")
-        if thread_name and inbound_name and prev_thread_count > 0:
+        if thread_name and inbound_name and msg.get("threadReply") is not False:
             self._reply_in_existing_thread[inbound_name] = thread_name
 
         source = self.build_source(

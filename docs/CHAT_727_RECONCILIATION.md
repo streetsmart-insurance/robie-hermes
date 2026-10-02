@@ -32,8 +32,8 @@ The Mac operator owns runtime inventory and authentication separately.
 - Recheck the driver at the DiscussionApi, JSON and multipart transport boundaries.
   Bound Chat writes require the same RUNNING durable generation and database.
   Process-level job variables cannot substitute a newer job for the bound owner.
-- Reject fixture applicant bindings for named requests unless the request itself or an
-  authorized injected search supplied that applicant. No automatic browser search is installed.
+- Reject fixture applicant bindings for every bound Chat write unless the request itself or an
+  authorized injected search supplied exactly one matching applicant, regardless of name parsing. No automatic browser search is installed.
   A model-invented discussion title cannot select among several discussions.
 - Attribute note-tool receipts to the bound turn instead of mutable job variables.
 
@@ -50,23 +50,26 @@ All destinations and API transports in reconciliation tests are synthetic.
 - New regressions: `tests/test_chat_reconciliation.py`, selectively adapted from
   725's live-round, progress/signout, and round-27 fixtures. These do not import
   the unsafe seal or blanket sending-lease recovery.
-- Focused reconciliation/preservation suite: **254 passed**. Includes durable
+- Focused reconciliation/preservation suite: **288 passed**. Includes durable
   generations, reply recovery, ledger concurrency, atomic repost allowance,
   card ownership, Pub/Sub ACK coordination, exact-package promotion and stopped installation.
 - Bridge unittest suite: **39 passed**.
 - Full 727 base: **4,450 passed, 73 failed, 14 skipped**.
-- Full final candidate: **4,496 passed, 73 failed, 14 skipped**; exact
+- Full final candidate: **4,530 passed, 73 failed, 14 skipped**; exact
   failing-test-ID comparison found **zero new failures**. Hosted CI evaluates the pushed head.
 - Regression battery `--ci`: `ok=true`, no new failures; **INCONCLUSIVE**, with
   existing service-account, secrets, browser and job-db parity gaps. Not a green runtime result.
 - Compile and `git diff --check`: passed. Tracked sensitive/runtime-file scan: zero matches.
-- Two older address-note fixtures now explicitly include the applicant ID in their
-  synthetic request, rather than relying solely on a prefilled payload ID.
+- Two older address-note fixtures explicitly include the applicant ID in their
+  synthetic request. Stop fixtures now provide a job/session task owner, the owned
+  HTTP decision fixture names its runtime, and the old waiting-thread fixture now
+  requires new-intent separation and duplicate idempotency. No safety expectation
+  was weakened to accept stale ownership or fixture applicant provenance.
 
 Commands:
 
 ```sh
-PYTHONPATH=.:tests ROBIE_ENV=TEST python -m pytest -q tests --junitxml=/tmp/reconcile-final-head.xml
+PYTHONPATH=.:tests ROBIE_ENV=TEST python -m pytest -q tests --junitxml=/tmp/review-final-full3.xml
 PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py'
 PYTHONPATH=.:tests ROBIE_ENV=TEST python -m robie_job_engine.regression_battery --ci
 PYTHONPYCACHEPREFIX=/tmp/robie-reconcile-pyc python -m compileall -q deploy/hermes integrations robie_job_engine src tests
@@ -75,18 +78,43 @@ git diff --check
 
 ## Remaining blockers and QA handoff
 
-**Unmarked Test-thread replies are not automatically routed to Test.** The operator-reported
-Test subscription accepts only `attributes.robie_env = "test"`. The HTTP bridge has no
-shared durable thread-to-environment registry. Gateway code cannot process a message that
-its subscription never delivers. Candidate bridge marker stamping and VM checks do not prove
-which ingress is live, and this task does not assume a Cloud Run redeploy fixes that gap.
-Until a reviewed ingress design exists, Test replies/stop must arrive with an explicit Test
-attribute (or a marker through an ingress that actually stamps that attribute).
+The independent review of `04abb29979dbe2ec32ac9315dc1c7156b7b6c84e`
+identified seven source-level defects. This follow-up adds bounded corrections:
 
-The local guards prevent foreign/invalid events that reach a gateway from executing there;
-they do not establish cross-environment thread ownership for unmarked events. No subscription
-or routing infrastructure was changed. This unresolved requirement blocks a claim that the
-whole reconciliation is runtime-ready.
+- Raw thread ownership is read before event building, attachments, commands or jobs.
+  Unknown threads are refused; unreadable ownership state propagates for NACK.
+  The builder preserves owned reply threads even with a zero local message count.
+- All leading mention tokens are handled consistently by bridge and gateway markers.
+- Stop authority checks job, durable generation and actual live agent identity.
+  A newer shared DM owner protects its task, lease and history from an old stop.
+  Task cancellation uses the recorded owner, never an arbitrary background task.
+- Terminal/stale questions are filtered before clarification ambiguity checks.
+- Explicit new requests use the existing new-intent/defer path and cannot answer or
+  rebind an old question; duplicate deliveries retain one fresh job.
+- Every bound Chat API write requires one job-specific applicant provenance result.
+  Possessive wording and prefilled fixture IDs cannot bypass the boundary.
+- Multi-discussion selection requires an exact full title with affirmative context
+  or a matching-generation clarification; substrings and negations are refused.
+- HTTP card processing now also requires a recognized runtime environment; local
+  decision presence cannot bypass environment validation.
+
+**Compatibility:** unthreaded and Google `threadReply: false` top-level messages
+remain ordinary Production requests by default. A threaded message with true or
+missing `threadReply` must already be owned by this gateway's durable database;
+a present owner environment stamp must match. This deliberately refuses legacy
+unmarked Production traffic that supplies an unknown thread but omits the flag.
+A `prod` attribute does not override unknown thread ownership. Known legacy local
+thread bindings without an environment stamp remain supported in the isolated DB.
+Google documents the output-only flag in the
+[Message contract](https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages#Message).
+
+Unmarked Test-thread replies are **not automatically delivered to Test**. The
+operator-reported Test subscription filters for the Test attribute, and the bridge
+has no shared thread-to-environment registry. If a Test reply reaches Production,
+it is now refused instead of becoming a Production stop/job. This safe interim
+refusal does not solve cross-environment delivery or certify which ingress is live.
+No subscription, Cloud Run deployment, runtime state or credentials were changed.
+Release remains held for independent runtime QA and the separate operator workflow.
 
 Deferred: stuck-tab recovery, live name-search installation, safety-seal implementation,
 blanket sending-lease recovery (unsafe for live owners), phone/Bland, PFA, workers/services,

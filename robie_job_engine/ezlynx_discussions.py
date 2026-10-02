@@ -552,13 +552,30 @@ def select_discussion_for_note(
         job = store.get_job(owner)
         payload = job.get("payload") or {}
         reply = store.get_checkpoint(owner, "clarification_reply") or {}
-        authorized_text = " ".join(str(payload.get(key) or "") for key in ("request_text", "original_text"))
-        if reply.get("generation") == generation:
-            authorized_text += " " + str(reply.get("text") or "")
-        if hint not in " ".join(authorized_text.casefold().split()):
+        texts = [str(payload.get(key) or "") for key in ("request_text", "original_text")]
+        clarification = str(reply.get("text") or "") if reply.get("generation") == generation else ""
+        # Bound Chat selection is deliberately narrow: exact title after an
+        # affirmative selector, or an exact clarification answer. Mentions,
+        # negations and substrings do not grant write authority.
+        import re
+        def selected(text, *, answer=False):
+            normalized = " ".join(text.casefold().replace("’", "'").split()).strip(" .!\"'")
+            if re.search(r"\b(?:not|never|avoid|except|don't|dont|instead)\b", normalized):
+                return False
+            if answer and normalized == hint:
+                return True
+            return bool(re.search(r"\b(?:use|select|choose|in|to)\s+(?:the\s+)?(?:discussion\s+)?[\"']?"
+                                  + re.escape(hint) + r"[\"']?(?:\s+discussion)?(?:[.!]|$)", normalized))
+        if not (any(selected(text) for text in texts) or selected(clarification, answer=True)):
             raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
                 "discussion title was not selected by the requester; refusing to guess",
                 matches=recent_discussion_titles(rows))
+        exact = [row for row in rows if discussion_title_of(row).strip().casefold() == hint]
+        if len(exact) != 1:
+            raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
+                "requester selection must identify exactly one full discussion title",
+                matches=recent_discussion_titles(rows))
+        return exact[0]
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:

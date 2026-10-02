@@ -551,7 +551,7 @@ def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str
         return attrs
     message = event.get("message") or {}
     for key in ("argumentText", "text"):
-        text = re.sub(r"^(?:<users/[^>]+>|@robie)\s*", "", str(message.get(key) or "").lstrip(), flags=re.I)
+        text = re.sub(r"^(?:(?:<users/[^>]+>|@robie)\s*)+", "", str(message.get(key) or "").lstrip(), flags=re.I)
         if re.match(r"^(?:\[\[robie-test\]\]|robie-test:)(?=\s|$)", text, flags=re.I):
             attrs["robie_env"] = "test"
             return attrs

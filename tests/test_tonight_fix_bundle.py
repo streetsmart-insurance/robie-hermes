@@ -658,6 +658,7 @@ class ProveFollowUpTests(unittest.TestCase):
             def __init__(self):
                 self._session_tasks = {}
                 self._background_tasks = {task}
+                self._session_tasks = {"chat:spaces/1:thread": task}
                 self.calls = []
 
             def interrupt_session_activity(self, key, chat_id):
@@ -1746,7 +1747,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
             adapter = Adapter()
             event = Event()
             await terminate_gateway_agent(
-                adapter, event, None, reason="gateway_max_turn_seconds", store=None
+                adapter, event, "history-owner", reason="gateway_max_turn_seconds", store=None
             )
             self.assertEqual(adapter.gateway_runner._session_history[real], [])
             self.assertEqual(adapter.gateway_runner.session_store.session_id, "fresh-session")
