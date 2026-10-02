@@ -183,6 +183,28 @@ def agent_stop_requested(job_id: str | None) -> bool:
         return str(job_id) in _ABORTED_JOBS
 
 
+def running_turn_must_stop(job_id: str | None, db_path: str | None = None) -> bool:
+    """True when this turn's tools must stop.
+
+    ``/stop`` and the ceiling set the in-process abort flag. A normal
+    COMPLETE or UNVERIFIED does not. That finish still ends the running
+    turn: job 598820fc kept calling tools for about a minute after COMPLETE.
+    The flag stays clear so a later confirmation send is not a stop.
+    """
+    if agent_stop_requested(job_id):
+        return True
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        job = JobStore(db_path).get_job(str(job_id))
+    except Exception:
+        return False
+    status = str((job or {}).get("status") or "")
+    return status in TERMINAL_STATUSES or status in {item.value for item in TERMINAL_STATUSES}
+
+
 def register_agent_process(job_id: str | None, pid: int) -> None:
     """Track a browser/tool process group so /stop and the ceiling can kill it."""
     if not job_id or not pid:
@@ -1018,7 +1040,7 @@ _TOOL_PROGRESS_LINE = re.compile(
     r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)?"
     r"(?:playwright_exec|ezlynx_discussion_note|ezlynx_document_upload|"
     r"web_search|terminal|execute_code|read_file|gemini_unique_field)\b"
-    r"(?:\s*[:：].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
+    r"(?:\s*[:\uFF1A].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
     re.IGNORECASE,
 )
 
@@ -1028,7 +1050,7 @@ def _line_is_tool_trace(line: str) -> bool:
 
 
 def _line_is_heartbeat(line: str) -> bool:
-    """One Working… / thinking / iteration line. Not a sentence that mentions work."""
+    """One Working\u2026 / thinking / iteration line. Not a sentence that mentions work."""
     body = line.strip()
     if not body or len(body) > 240:
         return False
@@ -1039,7 +1061,7 @@ def _line_is_heartbeat(line: str) -> bool:
         "",
         body,
     ).strip()
-    folded = stripped.casefold().rstrip(".… ")
+    folded = stripped.casefold().rstrip(".\u2026 ")
     return folded in _STATUS_ONLY
 
 
@@ -1047,7 +1069,7 @@ def is_tool_progress_text(text: str) -> bool:
     """True for a raw tool-progress bubble. It is not a reply to the person.
 
     A run of these lines is still progress when there are more than a handful.
-    Job 598820fc stored seven ``🎭 playwright_exec`` lines and that count used
+    Job 598820fc stored seven ``\U0001F3AD playwright_exec`` lines and that count used
     to fall through as an answer.
     """
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
@@ -1057,7 +1079,7 @@ def is_tool_progress_text(text: str) -> bool:
 
 
 def content_is_only_progress(text: str) -> bool:
-    """True when every line is a tool trace or a Working… heartbeat.
+    """True when every line is a tool trace or a Working\u2026 heartbeat.
 
     That text is never an answer and never finalizes a job by itself.
     """
@@ -1070,7 +1092,7 @@ def content_is_only_progress(text: str) -> bool:
 _HEARTBEAT_LINE = re.compile(
     r"\b(?:"
     r"iteration\s+\d+\s*/\s*\d+"
-    r"|(?:working|thinking)\s*[—–\-]\s*\d+"
+    r"|(?:working|thinking)\s*[\u2014\u2013\-]\s*\d+"
     r")",
     re.IGNORECASE,
 )
@@ -1087,7 +1109,7 @@ _STATUS_ONLY = frozenset(
 def is_progress_heartbeat_or_thinking(text: str) -> bool:
     """True for a progress, heartbeat, or thinking line. Never a final answer.
 
-    ``⏳ Working — 6 min — iteration 21/500, clarify`` is the gateway
+    ``\u23F3 Working \u2014 6 min \u2014 iteration 21/500, clarify`` is the gateway
     talking to itself. It must not be stored as the reply or close the job.
     """
     if (
@@ -1109,7 +1131,7 @@ def is_progress_heartbeat_or_thinking(text: str) -> bool:
         "",
         body,
     ).strip()
-    folded = stripped.casefold().rstrip(".… ")
+    folded = stripped.casefold().rstrip(".\u2026 ")
     return folded in _STATUS_ONLY
 
 
