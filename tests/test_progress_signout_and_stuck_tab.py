@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from durable_temp import durable_temporary_directory
 
 from robie_job_engine.chat_guard import _render_chat_terminal, guard_chat_response
 from robie_job_engine.chat_turn_control import (
+    agent_output_blocked,
     agent_stop_requested,
+    running_turn_must_stop,
     clear_agent_stop,
     is_refused_tool_text,
     is_tool_progress_text,
@@ -209,38 +212,25 @@ class ProgressDoesNotCompleteTests(unittest.TestCase):
             )
             self.assertIsNotNone(store.claim(job_id, "turn-lease"))
             self.assertTrue(store.get_job(job_id)["lease_owner"])
-            try:
+            self.assertFalse(running_turn_must_stop(job_id, db))
+            with mock.patch(
+                "robie_job_engine.chat_turn_control.kill_agent_processes",
+                return_value=[],
+            ) as killed:
                 reply = guard_chat_response(db, job_id, ANSWER)
-            finally:
-                clear_agent_stop(job_id)
             self.assertIn("GL-100", reply)
             self.assertIn("Harbor", reply)
             finished = store.get_job(job_id)
             self.assertEqual(finished["status"], JobStatus.COMPLETE.value)
             self.assertFalse(finished.get("lease_owner"))
-            # The stop was requested at the terminal transition, before cleanup.
-            # clear_agent_stop above is the next turn. Re-read the flag by
-            # completing a second time is unnecessary: claim the behavior
-            # from a fresh terminal transition.
-        with durable_temporary_directory() as tmp:
-            db = str(Path(tmp) / "jobs.db")
-            store = JobStore(db)
-            job_id = _job(store)
-            record_playwright_exec(
-                f"page.goto('{ACCOUNT}')",
-                {"url": ACCOUNT},
-                job_id=job_id,
-                db_path=db,
-                status="ok",
+            # A normal finish interrupts the running turn. It is not /stop,
+            # so a later confirmation send is not blocked.
+            self.assertFalse(agent_stop_requested(job_id))
+            self.assertIsNone(agent_output_blocked(job_id, store))
+            self.assertTrue(running_turn_must_stop(job_id, db))
+            self.assertTrue(
+                any(str(call.args[0]) == job_id for call in killed.call_args_list)
             )
-            store.claim(job_id, "turn-lease")
-            guard_chat_response(db, job_id, ANSWER)
-            try:
-                self.assertTrue(agent_stop_requested(job_id))
-                self.assertFalse(store.get_job(job_id).get("lease_owner"))
-                self.assertEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE.value)
-            finally:
-                clear_agent_stop(job_id)
 
     def test_real_answer_still_completes_with_that_answer(self):
         with durable_temporary_directory() as tmp:
