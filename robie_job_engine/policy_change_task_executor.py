@@ -1,24 +1,23 @@
 """Carry out the post-check task action on the box browser. Dry-run by default.
 
 The decision (what to do) comes from ``policy_change_task_action.build_task_action``.
-This module is the hands (how to do it):
+This module is the hands (how to do it). EZLynx has no Task API, so both
+writes run in the box browser:
 
-1. File the result note to the applicant's existing discussion via the
-   Discussion API and read back the note_id. Without a read-back, stop —
-   the reassignment does not run.
-2. In the box browser, open the EZLynx task, confirm it is still assigned to
-   ROBIE, set the assignee back to the original assigner, save, and read the
-   assignee back.
+1. Open the task and confirm it is still assigned to ROBIE. Stop if not.
+2. Post the plain-English result note as a task comment. Refuse a note that
+   does not end with "ROBIE was here". Read the comment back afterwards.
+3. Set the assignee back to the original assigner and save.
+4. Read the assignee back. It must name the original assigner.
 
-EZLynx has no Task API, so step 2 is browser-only. The note stays API-only
-per repo rules — the browser never types a note.
+A new task is never created. The executor has no create path.
 
 Modes:
 - ``dry_run=True`` (default): log exactly what would be done, touch nothing.
-- ``probe``: open the task read-only and report the assignee control's
-  markup so the SELECTORS table below can be confirmed against the live UI.
-- ``live``: perform the reassignment. Requires an explicit flag, a logged-in
-  box browser session, and a task still assigned to ROBIE.
+- ``probe``: open the task read-only and report the comment box and assignee
+  control markup so the SELECTORS table below can be confirmed.
+- ``live``: perform the comment + reassignment. Requires an explicit flag,
+  a logged-in box browser session, and a task still assigned to ROBIE.
 
 SELECTORS must be confirmed against the live Test EZLynx task dialog before
 any live run. A selector that does not match exactly one visible control
@@ -30,10 +29,15 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
+from .policy_change_task_action import NOTE_CHANNEL, NOTE_SIGNATURE
+
 # Confirm each selector against the live Test EZLynx task dialog (probe mode)
 # before any live run. UNCONFIRMED until then.
 SELECTORS = {
     "task_dialog": "UNCONFIRMED: dialog showing the assigned task",
+    "comment_box": "UNCONFIRMED: the task comment input",
+    "comment_save": "UNCONFIRMED: the control that posts the comment",
+    "comment_list": "UNCONFIRMED: the posted comments, for read-back",
     "assignee_control": "UNCONFIRMED: the control that shows the current assignee",
     "assignee_option": "UNCONFIRMED: option row for a named assignee",
     "save_button": "UNCONFIRMED: the task dialog save/confirm button",
@@ -51,31 +55,22 @@ def describe_plan(action: Mapping[str, Any]) -> list[str]:
     action = dict(action or {})
     lines: list[str] = []
     kind = str(action.get("action") or "")
-    _log(lines, f"task_action={kind} create_task={action.get('create_task')}")
+    _log(lines, f"task_action={kind} create_task={action.get('create_task')} note_channel={NOTE_CHANNEL}")
     if kind == "hold":
         _log(lines, f"HOLD: {action.get('reason')}")
-        _log(lines, "No note filed. No reassignment. The task stays with ROBIE.")
+        _log(lines, "No comment posted. No reassignment. The task stays with ROBIE.")
         return lines
     if kind != "reassign_back":
         _log(lines, f"UNKNOWN action {kind!r}: refusing.")
         return lines
+    note = str(action.get("note") or "")
+    signed = note.strip().endswith(NOTE_SIGNATURE)
     _log(lines, f"task_id={action.get('task_id')}")
-    _log(
-        lines,
-        "1. File the result note to the existing discussion via the Discussion "
-        "API and read back the note_id. Stop if no note_id comes back.",
-    )
-    _log(
-        lines,
-        f"2. Open the task in the box browser and confirm it is still assigned "
-        f"to ROBIE. Stop if it is not.",
-    )
-    _log(
-        lines,
-        f"3. Set the assignee to {action.get('to_assigner_name')!r} "
-        f"(id {action.get('to_assigner_id')!r}) and save.",
-    )
-    _log(lines, "4. Read the assignee back. It must name the original assigner.")
+    _log(lines, f"1. Open the task in the box browser and confirm it is still assigned to ROBIE. Stop if it is not.")
+    _log(lines, f"2. Post the result note as a task comment (signed: {signed}). Refuse when the signature is missing.")
+    _log(lines, "3. Read the comment back. It must carry the note text and the signature.")
+    _log(lines, f"4. Set the assignee to {action.get('to_assigner_name')!r} (id {action.get('to_assigner_id')!r}) and save.")
+    _log(lines, "5. Read the assignee back. It must name the original assigner.")
     _log(lines, "A new task is never created.")
     return lines
 
@@ -89,6 +84,7 @@ def execute(action: Mapping[str, Any], *, mode: str = "dry_run") -> dict[str, An
             "mode": "dry_run",
             "action": action.get("action"),
             "create_task": False,
+            "note_channel": NOTE_CHANNEL,
             "plan": plan,
             "executed": False,
         }
@@ -97,12 +93,13 @@ def execute(action: Mapping[str, Any], *, mode: str = "dry_run") -> dict[str, An
             "mode": "probe",
             "action": action.get("action"),
             "create_task": False,
+            "note_channel": NOTE_CHANNEL,
             "plan": plan,
             "executed": False,
             "note": (
-                "Probe mode opens the task read-only and reports the assignee "
-                "control markup. SELECTORS are UNCONFIRMED until a probe "
-                "proves them on the live Test EZLynx task dialog."
+                "Probe mode opens the task read-only and reports the comment "
+                "box and assignee control markup. SELECTORS are UNCONFIRMED "
+                "until a probe proves them on the live Test EZLynx task dialog."
             ),
             "selectors": dict(SELECTORS),
             "selectors_status": STATUS,
@@ -113,6 +110,7 @@ def execute(action: Mapping[str, Any], *, mode: str = "dry_run") -> dict[str, An
                 "mode": "live",
                 "action": action.get("action"),
                 "create_task": False,
+                "note_channel": NOTE_CHANNEL,
                 "executed": False,
                 "refused": (
                     "SELECTORS are UNCONFIRMED. A live run is refused until "
@@ -124,6 +122,7 @@ def execute(action: Mapping[str, Any], *, mode: str = "dry_run") -> dict[str, An
             "mode": "live",
             "action": action.get("action"),
             "create_task": False,
+            "note_channel": NOTE_CHANNEL,
             "executed": False,
             "refused": "Live browser execution is wired to the confirmed selectors.",
         }
@@ -131,6 +130,7 @@ def execute(action: Mapping[str, Any], *, mode: str = "dry_run") -> dict[str, An
         "mode": mode,
         "action": action.get("action"),
         "create_task": False,
+        "note_channel": NOTE_CHANNEL,
         "executed": False,
         "refused": f"Unknown mode {mode!r}.",
     }
@@ -146,7 +146,7 @@ def main() -> int:
         "--mode",
         choices=("dry_run", "probe", "live"),
         default="dry_run",
-        help="dry_run logs the plan; probe reads the task UI; live reassigns.",
+        help="dry_run logs the plan; probe reads the task UI; live posts the comment and reassigns.",
     )
     args = parser.parse_args()
     with open(args.action_json, encoding="utf-8") as handle:

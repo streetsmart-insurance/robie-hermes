@@ -904,31 +904,32 @@ class PolicyChangeTaskActionTests(unittest.TestCase):
         self.assertFalse(outcome["executed"])
         self.assertIn("UNCONFIRMED", outcome["refused"])
 
-    def test_file_result_note_requires_readback(self):
-        from robie_job_engine.policy_change_task_action import file_result_note
+    def test_note_channel_is_task_comment(self):
+        from robie_job_engine.policy_change_task_action import NOTE_CHANNEL
 
-        class NoIdClient:
-            def append_note(self, discussion_id, body):
-                return {"ok": True}
+        self.assertEqual(NOTE_CHANNEL, "task_comment")
+        result = run_confirmation(clean_packet(), writes=DisabledWrites())
+        self.assertEqual(result["task_action"]["note_channel"], "task_comment")
 
-        with self.assertRaises(RuntimeError):
-            file_result_note(NoIdClient(), "discussion-100", "Plain result.\n" + NOTE_SIGNATURE)
+    def test_validate_note_for_task(self):
+        from robie_job_engine.policy_change_task_action import validate_note_for_task
 
-        class IdClient:
-            def append_note(self, discussion_id, body):
-                self.seen = (discussion_id, body)
-                return {"note_id": "note-999"}
-
-        client = IdClient()
-        note_id = file_result_note(client, "discussion-100", "Plain result.\n" + NOTE_SIGNATURE)
-        self.assertEqual(note_id, "note-999")
-        self.assertEqual(client.seen[0], "discussion-100")
-        self.assertTrue(client.seen[1].endswith(NOTE_SIGNATURE))
-
+        good = "Plain result.\n" + NOTE_SIGNATURE
+        self.assertEqual(validate_note_for_task(good), good)
         with self.assertRaises(ValueError):
-            file_result_note(IdClient(), "", "Plain result.\n" + NOTE_SIGNATURE)
+            validate_note_for_task("")
         with self.assertRaises(ValueError):
-            file_result_note(IdClient(), "discussion-100", "No signature here.")
+            validate_note_for_task("No signature here.")
+
+    def test_executor_plan_posts_comment_then_reassigns(self):
+        from robie_job_engine.policy_change_task_executor import execute
+
+        result = run_confirmation(clean_packet(), writes=DisabledWrites())
+        outcome = execute(result["task_action"], mode="dry_run")
+        plan_text = "\n".join(outcome["plan"])
+        self.assertIn("task comment", plan_text)
+        self.assertIn("csr-maria", plan_text)
+        self.assertEqual(outcome["note_channel"], "task_comment")
 
     def test_verifier_rejects_task_creation(self):
         from robie_job_engine.policy_change_confirmation import (

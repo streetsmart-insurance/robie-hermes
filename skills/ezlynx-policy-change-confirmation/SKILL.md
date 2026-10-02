@@ -13,7 +13,7 @@ Trigger: a CSR assigns an existing policy-change task to ROBIE.
 
 The job resolves one case and the original assigner from the assignment event. It reads the request, the issued endorsement, and the EZLynx record, then drafts a comparison and a note. The note ends with `ROBIE was here`.
 
-When the check finishes, or when ROBIE is not sure, the task goes back to the person who assigned it to ROBIE. A new task is never created. The plain-English result note is filed to the applicant's existing discussion through the Discussion API (read-back of the note id is required); the reassignment runs in the box browser because EZLynx has no Task API, with the assignee read back afterwards.
+When the check finishes, or when ROBIE is not sure, the task goes back to the person who assigned it to ROBIE. A new task is never created. The plain-English result note is posted as a comment on the task and read back; the reassignment runs in the box browser because EZLynx has no Task API, with the assignee read back afterwards.
 
 The producer confirms and closes. This pilot does not upload a file, change a label, email, submit a portal, change the policy, confirm, or close.
 
