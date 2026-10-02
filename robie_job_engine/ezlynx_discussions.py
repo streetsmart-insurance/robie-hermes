@@ -559,14 +559,28 @@ def select_discussion_for_note(
         # negations and substrings do not grant write authority.
         import re
         def selected(text, *, answer=False):
-            normalized = " ".join(text.casefold().replace("’", "'").split()).strip(" .!\"'")
-            if re.search(r"\b(?:not|never|avoid|except|don't|dont|instead)\b", normalized):
-                return False
-            if answer and normalized == hint:
+            normalized = " ".join(text.casefold().replace("’", "'").split())
+            if answer and normalized.strip(" .!\"'") == hint:
                 return True
-            return bool(re.search(r"\b(?:use|select|choose|in|to)\s+(?:the\s+)?(?:discussion\s+)?[\"']?"
-                                  + re.escape(hint) + r"[\"']?(?:\s+discussion)?(?:[.!]|$)", normalized))
-        if not (any(selected(text) for text in texts) or selected(clarification, answer=True)):
+            # Quoted note bodies are data, never selection instructions.
+            # Conservatively omit quoted titles too: an exact clarification
+            # or an unquoted outer instruction can supply the selection.
+            outer = re.sub(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)', ' ', normalized)
+            if any(token in outer for token in ('"', '“', '”', '`')):
+                return False  # incomplete quote: cannot establish outer text
+            if re.search(r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
+                         r"|\bask me\b|\bwhich discussion\b", outer):
+                return False
+            # Unquoted payload introductions terminate the authority-bearing
+            # instruction too; wording inside the payload cannot select a row.
+            outer = re.split(r"\b(?:with text|note text|note body|saying|that says)\b", outer, maxsplit=1)[0].strip()
+            title = r"(?:the\s+)?(?:discussion\s+)?" + re.escape(hint) + r"(?:\s+discussion)?\s*(?:[.!;]|$)"
+            return bool(re.search(r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+" + title, outer)
+                        or re.search(r"(?:^|[.!;])\s*(?:please\s+)?(?:add|file|post|append|put|write|record)\b[^.!;?]*\b(?:in|to)\s+" + title, outer))
+        # The current clarification supersedes the original selection. Do not
+        # borrow an older affirmative instruction after a new uncertain reply.
+        authorized = selected(clarification, answer=True) if clarification else any(selected(text) for text in texts)
+        if not authorized:
             raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
                 "discussion title was not selected by the requester; refusing to guess",
                 matches=recent_discussion_titles(rows))

@@ -692,3 +692,65 @@ def test_session_stamp_never_claims_another_thread_agent(tmp_path):
     chat._event_session_key = lambda event: threaded
     remember_session_owner(chat, event, 'owner', 'generation')
     assert list(chat._robie_session_owners) == [threaded]
+
+
+@pytest.mark.parametrize('instruction,single,expected_posts', [
+    ('Add a note to applicant 26356199 with text "Forwarded the paperwork to New Business." Ask me which discussion to use', False, 0),
+    ('Add a note to applicant 26356199 with text "Forwarded the paperwork to New Business."', False, 0),
+    ('Add a note to applicant 26356199 with text “Use New Business.”', False, 0),
+    ('Use New Business. Add a note to applicant 26356199. Ask me which discussion to use', False, 0),
+    ('Use New Business. Add a note to applicant 26356199, but I am unsure', False, 0),
+    ('Use New Business. Add a note to applicant 26356199 with text "Forwarded the paperwork."', False, 1),
+    ('Add a note to applicant 26356199 in New Business with text "Forwarded the paperwork."', False, 1),
+    ('Add a note to applicant 26356199 with text "Forwarded the paperwork."', True, 1),
+])
+def test_actual_note_handler_never_selects_from_payload(tmp_path, monkeypatch, instruction, single, expected_posts):
+    from functools import partial
+    from test_tonight_fix_bundle import _load_hermes_tool, _restore_modules
+    from test_discussion_note_readback import LiveShapeClient
+    from robie_job_engine import ezlynx_api_only_writes as writes
+    from robie_job_engine.write_verification_loop import PLAN_CHECKPOINT
+    from robie_job_engine import ezlynx_write_scope
+    monkeypatch.setattr(ezlynx_write_scope, 'ALLOWED_EZLYNX_WRITE_APPLICANT_IDS', frozenset({'26356199'}))
+
+    class Client(LiveShapeClient):
+        def __init__(self):
+            super().__init__(post_body={'noteId': '701'})
+            self.title = self.after_title = 'New Business'
+        def get_discussions(self, applicant_id):
+            rows = super().get_discussions(applicant_id)
+            return rows if single else rows + [{'discussionId': 'another', 'title': 'Follow Up'}]
+        def get_discussion(self, discussion_id):
+            return {**super().get_discussion(discussion_id), 'applicantId': '26356199'}
+        def append_note(self, discussion_id, text, note_type='Note'):
+            self.body = text
+            return super().append_note(discussion_id, text, note_type)
+        def list_notes(self, discussion_id):
+            return [{'noteId': '701', 'noteText': self.body}] if self.posted else []
+
+    store = JobStore(str(tmp_path / 'jobs.db'))
+    owner = running(store, instruction, applicant_id='26356199')
+    generation = begin_model_generation(owner, store=store)
+    # A valid tool plan must never turn its model-generated hint into user authority.
+    store.checkpoint(owner, PLAN_CHECKPOINT, {'locked': True})
+    client = Client()
+    actual_api = partial(writes.add_note_to_discussion, discussion_client=client, ledger_path=tmp_path / 'ledger.json')
+    note, previous, created = _load_hermes_tool('quoted_payload_note_tool', 'ezlynx_note_tool.py')
+    try:
+        with patch.object(writes, 'add_note_to_discussion', side_effect=actual_api):
+            response = note.ezlynx_discussion_note_handler(
+                {'applicant_id': '26356199', 'note_text': 'Forwarded the paperwork to New Business.', 'title_hint': 'New Business'},
+                job_id=owner, db_path=str(store.path), outcome_poster=lambda *_args: None)
+        assert 'result' in response, response
+        assert client.posts == expected_posts, response
+        result = response['result']
+        if expected_posts:
+            assert result['status'] == 'filed'
+            assert result['read_back'] is True and result['note_id'] == '701'
+        else:
+            assert result['status'] == 'needs_discussion'
+            assert not result.get('read_back') and not result.get('note_id')
+            from robie_job_engine.turn_finalization import confirmed_write_this_turn
+            assert not confirmed_write_this_turn(store, owner)
+    finally:
+        _restore_modules(previous, created)
