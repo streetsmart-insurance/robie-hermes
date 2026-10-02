@@ -6,6 +6,7 @@ Synthetic case only. No live EZLynx, carrier, or Production call.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ from robie_job_engine.job_schema import get_bounded_job_schema
 from robie_job_engine.job_type_gate import production_hold_reason
 from robie_job_engine.models import JobStatus
 from robie_job_engine.policy_change_confirmation import (
+    EZLYNX_FILED_SOURCE,
     JOB_TYPE,
     NOTE_SIGNATURE,
     ROLE_DECISION,
@@ -24,6 +26,10 @@ from robie_job_engine.policy_change_confirmation import (
     PolicyChangeConfirmationWorker,
     progressive_access_proof,
     run_confirmation,
+)
+from robie_job_engine.policy_change_ezlynx_read import (
+    apply_ezlynx_read,
+    read_policy_change_context,
 )
 from robie_job_engine.store import JobStore
 
@@ -177,6 +183,17 @@ def clean_packet():
         "readback": {"ok": True, "document_id": "doc-100"},
         "directory_entry": {"document_download_route": "Progressive / Document Download"},
     }
+
+
+def three_jr_packet():
+    """The 2026-10-01 hermes-test-01 packet. Not a synthetic stand-in."""
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "policy_change_confirmation"
+        / "3jr-2026-10-01-packet.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _assert_plain_note(test, note):
@@ -452,12 +469,209 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
 
     def test_pilot_module_does_not_call_ezlynx_write_functions(self):
         source = Path("robie_job_engine/policy_change_confirmation.py").read_text(encoding="utf-8")
+        reader = Path("robie_job_engine/policy_change_ezlynx_read.py").read_text(encoding="utf-8")
         for banned in (
             "add_note_to_discussion",
             "upload_applicant_document",
             "file_note_to_existing_discussion",
+            "urlopen",
         ):
             self.assertNotIn(banned, source)
+            self.assertNotIn(banned, reader)
+
+    def test_three_jr_replay_flags_effective_date_mismatch(self):
+        packet = three_jr_packet()
+        writes = DisabledWrites()
+        result = run_confirmation(packet, writes=writes)
+        self.assertEqual(result["outcome"], "destination_unverified")
+        self.assertIn("carrier_correction_required", result["outcomes"])
+        self.assertFalse(result["review_ready"])
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["external_writes"], 0)
+        self.assertEqual(writes.performed, 0)
+        self.assertFalse(result["writes_enabled"])
+        self.assertFalse(result["carrier_pilot"]["confirmed"])
+        self.assertEqual(result["carrier_pilot"]["status"], "provisional")
+        self.assertIn("directory_route_verified", result["carrier_pilot"]["missing"])
+        self.assertEqual(result["carrier_source"]["label"], EZLYNX_FILED_SOURCE)
+        self.assertFalse(result["carrier_source"]["proves_directory_route"])
+        self.assertFalse(result["carrier_source"]["progressive_confirmed"])
+        self.assertFalse(result["carrier_source"]["directory_route_verified"])
+        self.assertFalse(result["live_carrier_retrieval"])
+        self.assertEqual(result["live_test"], "UNVERIFIED")
+        flagged = next(row for row in result["comparison"] if row["field"] == "effective_date")
+        self.assertEqual(flagged["verdict"], "mismatch")
+        self.assertTrue(flagged["date_mismatch"])
+        self.assertEqual(flagged["requested_effective_date"], "2026-06-22")
+        self.assertEqual(flagged["issued_effective_date"], "2026-09-16")
+        self.assertEqual(flagged["request"]["raw"], "06/22/2026")
+        self.assertEqual(flagged["carrier"]["raw"], "September 16, 2026")
+        self.assertEqual(flagged["ezlynx"]["state"], "missing")
+        self.assertIn("06/22/2026", result["note"])
+        self.assertIn("September 16, 2026", result["note"])
+        self.assertIn("already filed in EZLynx", result["note"])
+        self.assertIn("Progressive is not confirmed", result["note"])
+        self.assertTrue(result["note"].strip().endswith(NOTE_SIGNATURE))
+        for gap in (
+            "task_id",
+            "due_date",
+            "submission_evidence",
+            "ezlynx_vehicle_list",
+            "ezlynx_change_effective_date",
+        ):
+            self.assertIn(gap, result["unread"])
+        self.assertNotIn("assignee", result["unread"])
+        self.assertEqual(writes.refused, [])
+
+    def test_snapshot_reads_task_vehicles_and_change_date_without_inventing(self):
+        note = (
+            "pls call progressive and see if they willing to backdate "
+            "removing vehicle to the effective date of the policy term 2026 "
+            "if not close out task TY"
+        )
+        context = read_policy_change_context(
+            {
+                "applicant_id": "182400439",
+                "policy_id": "71575837",
+                "policy_number": "860521214",
+                "notes": [{"id": "1133255175", "body": note}],
+                "tasks": [
+                    {
+                        "TaskId": "task-3jr",
+                        "DueDate": "10/07/2026",
+                        "AssignedUserId": "eimy-1",
+                        "AssignedUserName": "Eimy Ramos",
+                        "ApplicantId": "182400439",
+                        "PolicyNumber": "860521214",
+                    },
+                    {
+                        "TaskId": "other-task",
+                        "DueDate": "10/08/2026",
+                        "AssignedUserName": "Someone Else",
+                        "PolicyNumber": "999",
+                    },
+                ],
+                "policy": {
+                    "transactions": [
+                        {"type": "Policy Change", "TransactionDate": "2026-09-25"}
+                    ]
+                },
+            }
+        )
+        self.assertEqual(context["task_id"], "task-3jr")
+        self.assertEqual(context["due_date"], "10/07/2026")
+        self.assertEqual(context["assignee_name"], "Eimy Ramos")
+        self.assertEqual(context["assignee_id"], "eimy-1")
+        self.assertEqual(context["submission_evidence"], "")
+        self.assertEqual(context["change_effective_date"], "")
+        self.assertEqual(context["transaction_date"], "2026-09-25")
+        self.assertFalse(context["transaction_date_used_as_change_effective"])
+        self.assertEqual(context["writes"], 0)
+        self.assertIn("submission_evidence", context["unread"])
+        self.assertIn("ezlynx_change_effective_date", context["unread"])
+        self.assertIn("ezlynx_vehicle_list", context["unread"])
+
+        ambiguous = read_policy_change_context(
+            {
+                "policy_number": "860521214",
+                "tasks": [
+                    {"TaskId": "a", "PolicyNumber": "860521214", "DueDate": "10/01/2026"},
+                    {"TaskId": "b", "PolicyNumber": "860521214", "DueDate": "10/02/2026"},
+                ],
+            }
+        )
+        self.assertEqual(ambiguous["task_id"], "")
+        self.assertIn("task_id", ambiguous["unread"])
+
+        packet = three_jr_packet()
+        packet["ezlynx_snapshot"] = {
+            "applicant_id": "182400439",
+            "policy_number": "860521214",
+            "policy_id": "71575837",
+            "tasks": [
+                {
+                    "TaskId": "task-3jr",
+                    "DueDate": "10/07/2026",
+                    "AssignedUserName": "Eimy Ramos",
+                    "PolicyNumber": "860521214",
+                }
+            ],
+            "policy": {
+                "ChangeEffectiveDate": "09/16/2026",
+                "transactions": [
+                    {"type": "Policy Change", "TransactionDate": "2026-09-25"}
+                ],
+                "vehicles": [
+                    {
+                        "Year": "2002",
+                        "Make": "Ford",
+                        "Model": "Econoline",
+                        "VIN": "1FMRE11L12HB45846",
+                        "Status": "removed",
+                    }
+                ],
+            },
+        }
+        filled = apply_ezlynx_read(packet, packet["ezlynx_snapshot"])
+        self.assertEqual(filled["case"]["task_id"], "task-3jr")
+        self.assertEqual(filled["case"]["due_date"], "10/07/2026")
+        self.assertEqual(filled["case"]["submission_evidence"], "")
+        self.assertEqual(filled["ezlynx_record"]["transaction_date"], "2026-09-25")
+        self.assertEqual(
+            filled["ezlynx_record"]["fields"]["effective_date"]["raw"],
+            "09/16/2026",
+        )
+        self.assertEqual(filled["ezlynx_record"]["vehicles"][0]["vin"], "1FMRE11L12HB45846")
+        writes = DisabledWrites()
+        result = run_confirmation(packet, writes=writes)
+        flagged = next(row for row in result["comparison"] if row["field"] == "effective_date")
+        self.assertEqual(flagged["verdict"], "mismatch")
+        self.assertEqual(flagged["requested_effective_date"], "2026-06-22")
+        self.assertEqual(flagged["issued_effective_date"], "2026-09-16")
+        self.assertEqual(flagged["ezlynx"]["normalized"], "2026-09-16")
+        self.assertEqual(result["flags"][0]["code"], "effective_date_mismatch")
+        self.assertNotIn("task_id", result["unread"])
+        self.assertNotIn("due_date", result["unread"])
+        self.assertNotIn("ezlynx_vehicle_list", result["unread"])
+        self.assertNotIn("ezlynx_change_effective_date", result["unread"])
+        self.assertIn("submission_evidence", result["unread"])
+        self.assertFalse(result["carrier_pilot"]["confirmed"])
+        self.assertEqual(result["external_writes"], 0)
+        self.assertEqual(writes.performed, 0)
+
+    def test_live_retrieval_without_a_filed_endorsement_still_stops(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["retrieve_live"] = True
+        packet["carrier_proof"] = {
+            "worker_identity": "SSRobie",
+            "environment": "TEST",
+            "host": "hermes-test-01",
+            "directory_route_verified": False,
+            "genuine_issued_endorsement": True,
+            "endorsement_document_id": "doc-100",
+            "source": "fao_memo",
+            "memo_only": True,
+        }
+        result = run_confirmation(packet)
+        self.assertEqual(result["outcome"], "retrieval_blocked")
+        self.assertEqual(result["comparison"], [])
+        self.assertFalse(result["carrier_pilot"]["confirmed"])
+        self.assertIsNone(result["carrier_source"])
+
+    def test_filed_endorsement_does_not_verify_the_directory_route(self):
+        proof = progressive_access_proof(
+            {
+                "worker_identity": "SSRobie",
+                "environment": "TEST",
+                "host": "hermes-test-01",
+                "directory_route_verified": True,
+                "genuine_issued_endorsement": True,
+                "endorsement_document_id": "823968766",
+                "source": EZLYNX_FILED_SOURCE,
+            }
+        )
+        self.assertFalse(proof["confirmed"])
+        self.assertIn("directory_route_verified", proof["missing"])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ assigner still receives the result. That role choice is resolved.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -25,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
+from .policy_change_ezlynx_read import apply_ezlynx_read
 
 
 JOB_TYPE = "policy_change_confirmation"
@@ -33,6 +35,11 @@ CHECKPOINT = "policy_change_confirmation_packet"
 PROVISIONAL_CARRIER = "Progressive"
 NOTE_SIGNATURE = "ROBIE was here"
 WRITES_ENABLED = False
+EZLYNX_FILED_SOURCE = "ezlynx_filed_carrier_document"
+FILED_SOURCE_STATEMENT = (
+    "This endorsement was already filed in EZLynx. The live carrier download "
+    "route was not checked, and Progressive is not confirmed."
+)
 
 ROLE_DECISION = {
     "status": "resolved",
@@ -214,6 +221,10 @@ def progressive_access_proof(proof: Mapping[str, Any] | None) -> dict[str, Any]:
         missing.append("memo_retrieval_is_not_an_endorsement")
     if not str(supplied.get("endorsement_document_id") or "").strip():
         missing.append("endorsement_document_id")
+    # A document already stored in EZLynx is not a walk of the Directory route.
+    if supplied.get("source") == EZLYNX_FILED_SOURCE and supplied.get("directory_route_walked") is not True:
+        if "directory_route_verified" not in missing:
+            missing.append("directory_route_verified")
     confirmed = not missing
     return {
         "carrier": PROVISIONAL_CARRIER,
@@ -303,6 +314,8 @@ def source_hash(packet: Mapping[str, Any]) -> str:
         "exclusions": packet.get("exclusions"),
         "write_claim": packet.get("write_claim"),
         "open_change_request_form": packet.get("open_change_request_form"),
+        "ezlynx_snapshot": packet.get("ezlynx_snapshot"),
+        "carrier_proof": packet.get("carrier_proof"),
     }
     return hashlib.sha256(_json(material).encode()).hexdigest()
 
@@ -475,6 +488,23 @@ def _row_verdict(kind: str, request: dict[str, Any] | None, carrier: dict[str, A
 
     if any(item.get("state") == "unknown" for item in packed.values()):
         return "unknown", "unparsed" if kind == "address" else "none", packed["request"], packed["carrier"], packed["ezlynx"]
+    present = [name for name in ("request", "carrier", "ezlynx") if packed[name].get("state") == "present"]
+    if len(present) >= 2 and any(item.get("state") == "missing" for item in packed.values()):
+        mismatched = False
+        unknown_pair = False
+        for left_name, right_name in zip(present, present[1:]):
+            verdict, _rule, _left, _right = _compare_pair(
+                kind, packed[left_name]["raw"], packed[right_name]["raw"]
+            )
+            if verdict == "mismatch":
+                mismatched = True
+            elif verdict == "unknown":
+                unknown_pair = True
+        if mismatched:
+            return "mismatch", "none", packed["request"], packed["carrier"], packed["ezlynx"]
+        if unknown_pair:
+            return "unknown", "unparsed", packed["request"], packed["carrier"], packed["ezlynx"]
+        return "missing", "none", packed["request"], packed["carrier"], packed["ezlynx"]
     if any(item.get("state") == "missing" for item in packed.values()):
         return "missing", "none", packed["request"], packed["carrier"], packed["ezlynx"]
     if all(item.get("state") == "not_applicable" for item in packed.values()):
@@ -505,9 +535,14 @@ def _explain(label: str, verdict: str, request: Mapping[str, Any], carrier: Mapp
     if verdict == "normalized_match":
         return f"The {label} matches after ordinary formatting is ignored."
     if verdict == "mismatch":
+        def _shown(side: Mapping[str, Any]) -> Any:
+            if side.get("state") == "missing" or side.get("raw") in (None, ""):
+                return "not read"
+            return side.get("raw")
+
         return (
-            f"The {label} differs. Request: {request.get('raw')}. "
-            f"Endorsement: {carrier.get('raw')}. EZLynx: {ezlynx.get('raw')}."
+            f"The {label} differs. Request: {_shown(request)}. "
+            f"Endorsement: {_shown(carrier)}. EZLynx: {_shown(ezlynx)}."
         )
     if verdict == "missing":
         return f"The {label} is missing from one of the three sources."
@@ -530,19 +565,31 @@ def build_comparison(packet: Mapping[str, Any]) -> list[dict[str, Any]]:
         verdict, rule, req, car, ez = _row_verdict(
             kind, _cell(request, key), _cell(carrier, key), _cell(ezlynx, key)
         )
-        rows.append(
-            {
-                "field_group": group,
-                "field": key,
-                "label": label,
-                "request": req,
-                "carrier": car,
-                "ezlynx": ez,
-                "normalization": rule,
-                "verdict": verdict,
-                "explanation": _explain(label, verdict, req, car, ez, rule),
-            }
-        )
+        row = {
+            "field_group": group,
+            "field": key,
+            "label": label,
+            "request": req,
+            "carrier": car,
+            "ezlynx": ez,
+            "normalization": rule,
+            "verdict": verdict,
+            "explanation": _explain(label, verdict, req, car, ez, rule),
+        }
+        if key == "effective_date":
+            requested = req.get("normalized")
+            issued = car.get("normalized")
+            if (
+                req.get("state") == "present"
+                and car.get("state") == "present"
+                and requested
+                and issued
+                and requested != issued
+            ):
+                row["date_mismatch"] = True
+                row["requested_effective_date"] = requested
+                row["issued_effective_date"] = issued
+        rows.append(row)
     linked = packet.get("linked_applicant") if isinstance(packet.get("linked_applicant"), Mapping) else None
     if linked and not _blank(linked.get("name")):
         insured = _cell(request, "named_insured")
@@ -798,6 +845,8 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
         problems = [row for row in rows if row.get("verdict") not in {"exact_match", "normalized_match", "not_applicable"}]
         if problems:
             exceptions = " ".join(row["explanation"] for row in problems)
+        elif result.get("outcome") != "ready_for_human_review" and result.get("reason"):
+            exceptions = str(result.get("reason"))
         else:
             exceptions = "No exceptions."
     else:
@@ -812,6 +861,9 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
         )
     else:
         documents = "The endorsement file name, folder, and label were not recorded."
+    source = result.get("carrier_source")
+    if isinstance(source, Mapping) and source.get("statement"):
+        documents = f"{documents} {source.get('statement')}"
     follow_up = packet.get("follow_up_date") or "not set"
     sections = [
         ("Policy and effective date", f"{insured}, policy {number}, term {term}, effective {effective}."),
@@ -831,6 +883,81 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
         lines.append("")
     lines.append(NOTE_SIGNATURE)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def ezlynx_filed_carrier_source(packet: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Accept an endorsement already filed in EZLynx when the Directory route cannot run.
+
+    The label is not proof that the live Directory route works, and it does
+    not confirm Progressive.
+    """
+    proof = packet.get("carrier_proof") if isinstance(packet.get("carrier_proof"), Mapping) else {}
+    document = packet.get("carrier_document") if isinstance(packet.get("carrier_document"), Mapping) else {}
+    filing = packet.get("filing") if isinstance(packet.get("filing"), Mapping) else {}
+    source = str(proof.get("source") or document.get("source") or "").strip()
+    if source != EZLYNX_FILED_SOURCE:
+        return None
+    if proof.get("memo_only") is True or proof.get("genuine_issued_endorsement") is not True:
+        return None
+    if document.get("issued") is not True:
+        return None
+    kind = str(document.get("kind") or "").strip().casefold()
+    if kind in _NOT_ISSUED:
+        return None
+    document_id = str(
+        proof.get("endorsement_document_id")
+        or filing.get("document_id")
+        or document.get("source_id")
+        or ""
+    ).strip()
+    if not document_id:
+        return None
+    return {
+        "label": EZLYNX_FILED_SOURCE,
+        "document_id": document_id,
+        "directory_route_verified": False,
+        "proves_directory_route": False,
+        "progressive_confirmed": False,
+        "statement": FILED_SOURCE_STATEMENT,
+    }
+
+
+def read_gaps(packet: Mapping[str, Any]) -> list[str]:
+    """Fields this packet still does not have. Blank stays blank."""
+    case = packet.get("case") if isinstance(packet.get("case"), Mapping) else {}
+    task = packet.get("task") if isinstance(packet.get("task"), Mapping) else {}
+    record = packet.get("ezlynx_record") if isinstance(packet.get("ezlynx_record"), Mapping) else {}
+    gaps = []
+    if _blank(case.get("task_id")) and _blank(packet.get("task_id")) and _blank(task.get("id")):
+        gaps.append("task_id")
+    if _blank(case.get("due_date")):
+        gaps.append("due_date")
+    if _blank(task.get("current_owner_id")) and _blank(task.get("assignee_id")) and _blank(task.get("assignee_name")):
+        gaps.append("assignee")
+    if _blank(case.get("submission_evidence")):
+        gaps.append("submission_evidence")
+    if not record.get("vehicles"):
+        gaps.append("ezlynx_vehicle_list")
+    effective = _cell(record, "effective_date")
+    if effective is None or _blank(effective.get("raw")):
+        gaps.append("ezlynx_change_effective_date")
+    return gaps
+
+
+def _destination_failure(packet: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Return (reason, assigner id, assigner name). Reason is empty when the case is exact."""
+    problems = _case_problems(packet)
+    event = _assignment_event(packet)
+    task = packet.get("task") if isinstance(packet.get("task"), Mapping) else {}
+    owner_known = event is not None and _is_robie(task.get("current_owner_id")) and _is_robie(event.get("current_owner_id"))
+    if problems or not owner_known:
+        return "The task assignment does not identify one exact case assigned to ROBIE.", "", ""
+    assert event is not None
+    assigner_id, assigner_name = _resolve_assigner(packet, event)
+    discussion_problem = _discussion_problem(packet)
+    if not assigner_id or discussion_problem:
+        return discussion_problem or "The original assigner is not on the assignment event.", "", ""
+    return "", assigner_id, assigner_name
 
 
 def _finish(
@@ -868,10 +995,17 @@ def _finish(
         elif row.get("verdict") == "unrequested_change" and row.get("side") == "ezlynx":
             outcome = "ezlynx_correction_required"
         elif row.get("verdict") == "mismatch":
-            request_raw = (row.get("request") or {}).get("raw")
-            carrier_raw = (row.get("carrier") or {}).get("raw")
-            ez_raw = (row.get("ezlynx") or {}).get("raw")
-            if request_raw == carrier_raw and carrier_raw != ez_raw:
+            request_cell = row.get("request") or {}
+            carrier_cell = row.get("carrier") or {}
+            ez_cell = row.get("ezlynx") or {}
+            request_raw = request_cell.get("raw")
+            carrier_raw = carrier_cell.get("raw")
+            ez_raw = ez_cell.get("raw")
+            carrier_present = carrier_cell.get("state") == "present"
+            ez_present = ez_cell.get("state") == "present"
+            if carrier_present and ez_present and request_raw == carrier_raw and carrier_raw != ez_raw:
+                outcome = "ezlynx_correction_required"
+            elif not carrier_present and ez_present and request_raw != ez_raw:
                 outcome = "ezlynx_correction_required"
         exceptions.append(
             {
@@ -890,7 +1024,19 @@ def _finish(
                 },
             }
         )
-    if headline != "ready_for_human_review" and not exceptions:
+    if reason and not any(item.get("summary") == reason for item in exceptions):
+        exceptions.insert(
+            0,
+            {
+                "summary": reason,
+                "field": "",
+                "verdict": "",
+                "owner": _exception_owner(headline),
+                "next_action": _next_action(headline, assigner_name),
+                "evidence": {"target": blocked_target} if blocked_target else {},
+            },
+        )
+    elif headline != "ready_for_human_review" and not exceptions:
         exceptions.append(
             {
                 "summary": reason or result_sentence,
@@ -901,7 +1047,26 @@ def _finish(
                 "evidence": {"target": blocked_target} if blocked_target else {},
             }
         )
-    carrier_pilot = progressive_access_proof(None)
+    proof_input = packet.get("carrier_proof") if isinstance(packet.get("carrier_proof"), Mapping) else None
+    carrier_pilot = progressive_access_proof(proof_input)
+    carrier_source = ezlynx_filed_carrier_source(packet)
+    if carrier_source is not None:
+        carrier_pilot = dict(carrier_pilot)
+        carrier_pilot["confirmed"] = False
+        carrier_pilot["status"] = "provisional"
+        carrier_pilot["carrier_source"] = carrier_source["label"]
+    flags = []
+    for row in comparison or []:
+        if row.get("date_mismatch"):
+            flags.append(
+                {
+                    "code": "effective_date_mismatch",
+                    "requested": row.get("requested_effective_date"),
+                    "issued": row.get("issued_effective_date"),
+                    "ezlynx": (row.get("ezlynx") or {}).get("normalized"),
+                    "field": "effective_date",
+                }
+            )
     draft = {
         "outcome": headline,
         "outcomes": unique,
@@ -930,6 +1095,9 @@ def _finish(
         ),
         "role_decision": dict(ROLE_DECISION),
         "carrier_pilot": carrier_pilot,
+        "carrier_source": carrier_source,
+        "flags": flags,
+        "unread": read_gaps(packet),
         "live_carrier_retrieval": False,
         "live_test": "UNVERIFIED",
         "result_sentence": result_sentence,
@@ -996,9 +1164,10 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
             replayed=False,
         )
 
+    filed_source = ezlynx_filed_carrier_source(packet)
     if packet.get("retrieve_live") is True:
         proof = progressive_access_proof(packet.get("carrier_proof") if isinstance(packet.get("carrier_proof"), Mapping) else None)
-        if not proof["confirmed"]:
+        if not proof["confirmed"] and filed_source is None:
             return _finish(
                 packet,
                 outcomes=["retrieval_blocked"],
@@ -1012,52 +1181,24 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
                 replayed=False,
             )
 
-    problems = _case_problems(packet)
-    event = _assignment_event(packet)
-    task = packet.get("task") if isinstance(packet.get("task"), Mapping) else {}
-    if problems or event is None or not _is_robie(task.get("current_owner_id")) or not _is_robie(event.get("current_owner_id") if event else ""):
-        return _finish(
-            packet,
-            outcomes=["destination_unverified"],
-            comparison=[],
-            comparison_complete=False,
-            assigner_id="",
-            assigner_name="",
-            reason="The task assignment does not identify one exact case assigned to ROBIE.",
-            writes=writes,
-            output_id=None,
-            replayed=False,
-        )
-    assert event is not None
-    assigner_id, assigner_name = _resolve_assigner(packet, event)
-    discussion_problem = _discussion_problem(packet)
-    if not assigner_id or discussion_problem:
-        return _finish(
-            packet,
-            outcomes=["destination_unverified"],
-            comparison=[],
-            comparison_complete=False,
-            assigner_id="",
-            assigner_name="",
-            reason=discussion_problem or "The original assigner is not on the assignment event.",
-            writes=writes,
-            output_id=None,
-            replayed=False,
-        )
-    reread_problem = _reread_problem(packet, event)
-    if reread_problem:
-        return _finish(
-            packet,
-            outcomes=["stale_context"],
-            comparison=[],
-            comparison_complete=False,
-            assigner_id=assigner_id,
-            assigner_name=assigner_name,
-            reason=reread_problem,
-            writes=writes,
-            output_id=None,
-            replayed=False,
-        )
+    destination_reason, assigner_id, assigner_name = _destination_failure(packet)
+    if not destination_reason:
+        event = _assignment_event(packet)
+        assert event is not None
+        reread_problem = _reread_problem(packet, event)
+        if reread_problem:
+            return _finish(
+                packet,
+                outcomes=["stale_context"],
+                comparison=[],
+                comparison_complete=False,
+                assigner_id=assigner_id,
+                assigner_name=assigner_name,
+                reason=reread_problem,
+                writes=writes,
+                output_id=None,
+                replayed=False,
+            )
     if packet.get("ui_stuck") is True:
         return _finish(
             packet,
@@ -1113,12 +1254,22 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
         elif verdict == "unrequested_change":
             outcomes.append("carrier_correction_required")
         elif verdict == "mismatch":
-            request_raw = (row.get("request") or {}).get("normalized")
-            carrier_raw = (row.get("carrier") or {}).get("normalized")
-            ez_raw = (row.get("ezlynx") or {}).get("normalized")
-            if request_raw != carrier_raw:
+            request_cell = row.get("request") or {}
+            carrier_cell = row.get("carrier") or {}
+            ez_cell = row.get("ezlynx") or {}
+            request_raw = request_cell.get("normalized")
+            carrier_raw = carrier_cell.get("normalized")
+            ez_raw = ez_cell.get("normalized")
+            if request_cell.get("state") == "present" and carrier_cell.get("state") == "present" and request_raw != carrier_raw:
                 outcomes.append("carrier_correction_required")
-            if carrier_raw != ez_raw:
+            if carrier_cell.get("state") == "present" and ez_cell.get("state") == "present" and carrier_raw != ez_raw:
+                outcomes.append("ezlynx_correction_required")
+            if (
+                request_cell.get("state") == "present"
+                and ez_cell.get("state") == "present"
+                and carrier_cell.get("state") != "present"
+                and request_raw != ez_raw
+            ):
                 outcomes.append("ezlynx_correction_required")
         elif verdict == "unknown":
             outcomes.append("evidence_invalid")
@@ -1129,6 +1280,8 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
     filing = packet.get("filing") if isinstance(packet.get("filing"), Mapping) else {}
     if filing.get("verified") is not True:
         outcomes.append("evidence_invalid")
+    if destination_reason:
+        outcomes.append("destination_unverified")
     if not outcomes:
         outcomes.append("ready_for_human_review")
     return _finish(
@@ -1138,9 +1291,9 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
         comparison_complete=True,
         assigner_id=assigner_id,
         assigner_name=assigner_name,
-        reason="",
+        reason=destination_reason,
         writes=writes,
-        output_id=str(uuid.uuid4()),
+        output_id=None if destination_reason else str(uuid.uuid4()),
         replayed=False,
     )
 
@@ -1157,6 +1310,10 @@ def run_confirmation(
         ledger = ConfirmationLedger()
     if writes is None:
         writes = DisabledWrites()
+    packet = copy.deepcopy(dict(packet))
+    snapshot = packet.get("ezlynx_snapshot")
+    if isinstance(snapshot, Mapping) and not isinstance(packet.get("ezlynx_read"), Mapping):
+        packet = apply_ezlynx_read(packet, snapshot)
     key = case_key(packet)
     digest = source_hash(packet)
     existing = ledger.get(key)

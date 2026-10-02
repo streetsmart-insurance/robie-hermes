@@ -18,3 +18,9 @@ The producer confirms and closes. The original assigner receives the result. Thi
 Do not open a new Change Request form. Do not use this job in place of the weekly overdue policy-change checker.
 
 Progressive is the provisional carrier. Do not treat a memo retrieval as an issued endorsement. Production stays closed until Test evidence exists.
+
+An endorsement already filed on the EZLynx documents can be read when the live Directory download route cannot be walked. Label that source as an EZLynx-filed endorsement. It does not prove the Directory route and it does not confirm Progressive.
+
+EZLynx has no Task API. Read the task id, due date, assignee, and submission evidence from a snapshot of the task already on screen. Read the vehicle list and the change effective date from a snapshot of the policy. A transaction date is not the change effective date. A discussion note is not submission evidence. Do not invent either one.
+
+Do not build a login that reads or types a For Agents Only email code. That path is design only: `docs/PROGRESSIVE_FAO_EMAIL_OTP.md`.
