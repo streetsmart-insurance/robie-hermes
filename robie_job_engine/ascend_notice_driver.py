@@ -159,6 +159,115 @@ def _gmail_text_from_payload(payload: dict[str, Any]) -> str:
     return "\n".join(texts).strip()
 
 
+class MultiMailboxNoticeSource:
+    """Scan multiple employee mailboxes via domain-wide delegation.
+
+    Iterates over each mailbox, fetching unread Ascend notices. Each
+    notice tracks which mailbox it came from. Marking processed only
+    affects the source mailbox.
+    """
+
+    def __init__(
+        self,
+        *,
+        mailboxes: list[str],
+        query: str = DEFAULT_QUERY,
+        service_account_email: str = "",
+        service_factory: Callable[[str, str], Any] | None = None,
+        max_results: int = 25,
+        allow_modify: bool = False,
+    ) -> None:
+        self.mailboxes = [m.strip() for m in mailboxes if m.strip()]
+        self.query = query
+        self.service_account_email = service_account_email
+        self._service_factory = service_factory
+        self.max_results = max_results
+        self.allow_modify = allow_modify
+        self._services: dict[str, Any] = {}
+
+    def _service_for(self, mailbox: str) -> Any:
+        if mailbox not in self._services:
+            factory = self._service_factory
+            if factory is None:
+                from .gmail_accountability import build_notice_gmail_service
+
+                allow_modify = self.allow_modify
+
+                def factory(service_account_email: str, mailbox: str) -> Any:
+                    return build_notice_gmail_service(
+                        service_account_email, mailbox, modify=allow_modify
+                    )
+            if not self.service_account_email:
+                raise RuntimeError(
+                    "ROBIE_GMAIL_DELEGATION_SA is not configured; "
+                    "cannot open the delegated Gmail service"
+                )
+            self._services[mailbox] = factory(self.service_account_email, mailbox)
+        return self._services[mailbox]
+
+    def fetch_notices(self) -> list[EmailNotice]:
+        notices: list[EmailNotice] = []
+        for mailbox in self.mailboxes:
+            try:
+                service = self._service_for(mailbox)
+            except Exception as exc:
+                logger.warning("Skipping mailbox %s: %s", mailbox, type(exc).__name__)
+                continue
+            try:
+                listed = (
+                    service.users()
+                    .messages()
+                    .list(userId="me", q=self.query, maxResults=self.max_results)
+                    .execute()
+                    .get("messages", [])
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Mailbox %s list failed: %s", mailbox, type(exc).__name__
+                )
+                continue
+            for item in listed:
+                message_id = str(item.get("id") or "")
+                if not message_id:
+                    continue
+                try:
+                    full = (
+                        service.users()
+                        .messages()
+                        .get(userId="me", id=message_id, format="full")
+                        .execute()
+                    )
+                except Exception:
+                    continue
+                headers = {
+                    h.get("name", "").lower(): h.get("value", "")
+                    for h in (full.get("payload", {}).get("headers") or [])
+                    if isinstance(h, dict)
+                }
+                notice = EmailNotice(
+                    message_id=f"{mailbox}:{message_id}",
+                    subject=headers.get("subject", ""),
+                    body=_gmail_text_from_payload(full.get("payload", {})),
+                    internal_date=str(full.get("internalDate") or ""),
+                )
+                # Track source mailbox for mark_processed
+                notice._source_mailbox = mailbox  # type: ignore[attr-defined]
+                notice._source_msg_id = message_id  # type: ignore[attr-defined]
+                notices.append(notice)
+        return notices
+
+    def mark_processed(self, message_id: str) -> None:
+        # message_id is "mailbox:actual_id"
+        if ":" in message_id:
+            mailbox, actual_id = message_id.split(":", 1)
+            service = self._service_for(mailbox)
+            service.users().messages().modify(
+                userId="me",
+                id=actual_id,
+                body={"removeLabelIds": ["UNREAD"]},
+            ).execute()
+
+
 class NullNoticeSource:
     """No-op source for callers that already hold the email (mailbox watcher)."""
 
@@ -637,16 +746,27 @@ def build_live_context(
     query: str,
     dry_run: bool,
     due_days: int,
+    mailboxes: list[str] | None = None,
 ) -> DriverContext:
     """Assemble real clients from Secret Manager / env. Raises with a clear
     message when required configuration is missing (fail closed)."""
     service_account = str(os.environ.get("ROBIE_GMAIL_DELEGATION_SA") or "").strip()
-    source = GmailNoticeSource(
-        mailbox=mailbox,
-        query=query,
-        service_account_email=service_account,
-        allow_modify=_notice_allow_modify(dry_run=dry_run),
-    )
+    # Multi-mailbox mode: scan all employee mailboxes via domain-wide delegation.
+    # Falls back to single mailbox for backwards compatibility.
+    if mailboxes:
+        source: NoticeSource = MultiMailboxNoticeSource(
+            mailboxes=mailboxes,
+            query=query,
+            service_account_email=service_account,
+            allow_modify=_notice_allow_modify(dry_run=dry_run),
+        )
+    else:
+        source = GmailNoticeSource(
+            mailbox=mailbox,
+            query=query,
+            service_account_email=service_account,
+            allow_modify=_notice_allow_modify(dry_run=dry_run),
+        )
     return build_processing_context(dry_run=dry_run, due_days=due_days, source=source)
 
 
@@ -664,6 +784,12 @@ def main(argv: list[str] | None = None) -> int:
         "ASCEND_DRIVER_LIVE=1) the driver runs in dry-run mode and writes nothing.",
     )
     parser.add_argument("--mailbox", default=os.environ.get("ASCEND_DRIVER_MAILBOX", DEFAULT_MAILBOX))
+    parser.add_argument(
+        "--mailboxes",
+        default=os.environ.get("ASCEND_DRIVER_MAILBOXES", ""),
+        help="Comma-separated list of mailboxes to scan via domain-wide delegation. "
+        "When set, overrides --mailbox and scans all listed mailboxes.",
+    )
     parser.add_argument("--query", default=os.environ.get("ASCEND_DRIVER_QUERY", DEFAULT_QUERY))
     parser.add_argument(
         "--due-days",
@@ -680,8 +806,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("LIVE MODE: notes will be filed and Zapier tasks fired")
 
     try:
+        mailboxes = [m.strip() for m in (args.mailboxes or "").split(",") if m.strip()]
         ctx = build_live_context(
-            mailbox=args.mailbox, query=args.query, dry_run=dry_run, due_days=args.due_days
+            mailbox=args.mailbox,
+            query=args.query,
+            dry_run=dry_run,
+            due_days=args.due_days,
+            mailboxes=mailboxes or None,
         )
         summary = run_driver(ctx)
     except Exception as exc:  # noqa: BLE001 - top-level fail closed
