@@ -564,7 +564,12 @@ class EzlynxApiClient:
         Added for the verified writers (discussion notes). ``path`` is
         relative to the API origin, e.g. ``"/DiscussionApi/discussions/v1/notes"``.
         Fail-closed: transport and HTTP errors raise EzlynxApiError.
+        The driver lease is checked here so a patched caller cannot skip it.
         """
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        assert_write_checks_intact()
+        driver_gate_for_write()
         url = self._origin() + "/" + str(path or "").lstrip("/")
         data = json.dumps(payload).encode("utf-8")
         headers = {

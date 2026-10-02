@@ -476,6 +476,16 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # select_discussion_for_note. The write-scope guard refuses
     # non-allowlisted applicants; phone numbers in the body raise. Both are
     # caught below and become a skip, never a silent write.
+    # The shared EZLynx seat is gated before the note and again before Zapier.
+    # TEST holding the lease must stop a Prod notice from filing or firing.
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+    from .safety_seal import driver_gate_for_write
+
+    try:
+        driver_gate_for_write()
+    except EzlynxDriverGateRefused as exc:
+        result.reason = f"driver_gate_refused: {exc}"
+        return result
     try:
         filed = discussions.file_note_to_existing_discussion(
             ctx.discussion_client,
@@ -532,7 +542,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         )
         result.detail["task_payload"] = payload
         try:
+            driver_gate_for_write()
             task_fired = zapier_tasks.fire_task(dict(payload), dry_run=ctx.dry_run)
+        except EzlynxDriverGateRefused as exc:
+            result.reason = f"driver_gate_refused: {exc}"
+            return result
         except (ValueError, RuntimeError) as exc:
             result.reason = f"zapier_fire_failed: {exc}"
             return result

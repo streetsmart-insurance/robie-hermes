@@ -1783,4 +1783,12 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
         "cancelled",
         {"by": "/stop", "reason": "Cancelled."},
     )
+    try:
+        from .chat_queue import DurableChatEventQueue
+
+        DurableChatEventQueue(str(getattr(store, "path", "") or "")).deactivate_job_links(
+            job_id
+        )
+    except Exception:
+        pass
     return reply

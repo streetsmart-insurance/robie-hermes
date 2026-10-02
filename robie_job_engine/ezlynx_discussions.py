@@ -347,6 +347,13 @@ class DiscussionApiClient:
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        # Last step before HTTP. A patched allowlist or readback check
+        # raises here, and the driver lease is read again.
+        assert_write_checks_intact()
+        driver_gate_for_write()
+        _refuse_hard_blocked_job()
         return self._request_json(
             "POST",
             self._base() + path.lstrip("/"),
@@ -370,7 +377,9 @@ class DiscussionApiClient:
         if not applicant:
             raise DiscussionApiError(None, "applicant id is required")
         parsed = self._get("v8/discussions/by-applicant", {"applicantId": applicant})
-        return _normalize_record_list(parsed)
+        rows = _normalize_record_list(parsed)
+        _remember_discussions_for_choice(rows)
+        return rows
 
     def get_discussion(self, discussion_id: str) -> dict[str, Any]:
         """Single discussion by id (v8 discussions/:discussionId)."""
@@ -390,11 +399,13 @@ class DiscussionApiClient:
         """Append a note to an EXISTING discussion (v8 discussions/:id/notes).
 
         Never creates a discussion. The body is refused when it contains a
-        phone-number-like value.
+        phone-number-like value. Several discussions the user did not name
+        are refused here too, so agent code cannot pick one after listing them.
         """
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")
+        _refuse_unasked_discussion(discussion)
         text = reject_phone_numbers(body).strip()
         if not text:
             raise DiscussionApiError(None, "note body is required")
@@ -510,6 +521,134 @@ def ambiguous_discussion_question(titles: list[str], hint: str = "") -> str:
     return f"Which {subject} should I use: {choices}?"
 
 
+def _job_request_text() -> str | None:
+    """The ask stored on this turn's job, or None when there is no job.
+
+    A model-supplied discussion title is not the user's choice. The hint
+    counts only when this text contains it. No job means a system caller
+    (the notice driver, a unit test) and the hint stands, unless this
+    process is the agent interpreter.
+    """
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return None
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return None
+    payload = dict(job.get("payload") or {})
+    parts = [
+        str(payload.get(key) or "")
+        for key in ("request_text", "text", "prompt", "original_text")
+    ]
+    return "\n".join(parts)
+
+
+def authorized_discussion_hint(title_hint: str | None) -> str:
+    """Hint the user actually wrote. An invented title does not choose."""
+    hint = " ".join(str(title_hint or "").split()).strip()
+    if not hint:
+        return ""
+    user = _job_request_text()
+    if user is None:
+        from .safety_seal import agent_interpreter
+
+        if agent_interpreter():
+            return ""
+        return hint
+    if hint.casefold() in " ".join(user.split()).casefold():
+        return hint
+    return ""
+
+
+def _choice_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    chosen: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or is_untitled_discussion(row):
+            continue
+        title = discussion_title_of(row)
+        ident = discussion_id_of(row)
+        if not title or not ident or ident in seen:
+            continue
+        seen.add(ident)
+        chosen.append({"discussion_id": ident, "title": title})
+    return chosen
+
+
+def _remember_discussions_for_choice(rows: list[dict[str, Any]]) -> None:
+    """Remember a multi-discussion list so a later append cannot pick one."""
+    chosen = _choice_rows(rows)
+    if len(chosen) < 2:
+        return
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        JobStore(db_path).checkpoint(
+            job_id,
+            "discussion_choices",
+            {"matches": [row["title"] for row in chosen], "rows": chosen},
+        )
+    except Exception:
+        return
+
+
+def _refuse_hard_blocked_job() -> None:
+    """A hard block on the ask refuses the write even from agent code."""
+    user = _job_request_text()
+    if not user:
+        return
+    from .safety_seal import hard_block_for_write
+
+    blocked = hard_block_for_write(user)
+    if blocked:
+        raise DiscussionApiError(None, blocked)
+
+
+def _refuse_unasked_discussion(discussion_id: str) -> None:
+    """Several remembered discussions require the user to name one."""
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        note = JobStore(db_path).get_checkpoint(job_id, "discussion_choices") or {}
+    except Exception:
+        return
+    rows = [row for row in (note.get("rows") or []) if isinstance(row, dict)]
+    if len(rows) < 2:
+        return
+    target = str(discussion_id or "").strip()
+    user = _job_request_text() or ""
+    folded = " ".join(user.split()).casefold()
+    named = [
+        row
+        for row in rows
+        if str(row.get("title") or "").strip()
+        and str(row.get("title") or "").strip().casefold() in folded
+    ]
+    if len(named) == 1 and str(named[0].get("discussion_id") or "") == target:
+        return
+    titles = [str(row.get("title") or "").strip() for row in rows if str(row.get("title") or "").strip()]
+    raise DiscussionSelectionError(
+        AMBIGUOUS_DISCUSSIONS,
+        ambiguous_discussion_question(titles),
+        matches=titles,
+    )
+
+
 def select_discussion_for_note(
     discussions: list[dict[str, Any]] | None, *, title_hint: str | None = None
 ) -> dict[str, Any]:
@@ -538,7 +677,7 @@ def select_discussion_for_note(
         )
     if len(rows) == 1:
         return rows[0]
-    hint = str(title_hint or "").strip().lower()
+    hint = authorized_discussion_hint(title_hint).lower()
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
@@ -921,6 +1060,16 @@ def file_note_to_existing_discussion(
         )
     try:
         created = client.append_note(discussion_id, text, note_type=note_type)
+    except DiscussionSelectionError as exc:
+        return {
+            "status": "pending",
+            "reason_code": exc.code,
+            "reason": str(exc),
+            "applicant_id": applicant,
+            "discussion_id": None,
+            "note_id": None,
+            "matches": list(getattr(exc, "matches", []) or []),
+        }
     except Exception:
         try:
             undo_unconfirmed_note(
@@ -1122,6 +1271,43 @@ def _new_note_identity(
     return None
 
 
+def _persist_landed_note(result: dict[str, Any]) -> None:
+    """A note id that came back is on the job, even if a later step fails."""
+    note_id = str(result.get("note_id") or "").strip()
+    status = str(result.get("status") or "")
+    if not note_id or status not in {"filed", "sent", "held", "already_posted"}:
+        return
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        store = JobStore(db_path)
+        current = store.get_checkpoint(job_id, "discussion_note") or {}
+        if str(current.get("note_id") or "").strip() == note_id and current.get("note_text"):
+            return
+        store.checkpoint(
+            job_id,
+            "discussion_note",
+            {
+                "status": "filed" if status == "filed" else status,
+                "note_id": note_id,
+                "discussion_id": result.get("discussion_id"),
+                "discussion_title": result.get("discussion_title"),
+                "applicant_id": result.get("applicant_id"),
+                "note_text": str(result.get("note_text") or current.get("note_text") or ""),
+                "read_back": bool(result.get("read_back")),
+                "verified_by": result.get("verified_by"),
+                "reason": result.get("reason"),
+            },
+        )
+    except Exception:
+        return
+
+
 def _note_result(
     status: str,
     *,
@@ -1153,6 +1339,7 @@ def _note_result(
         result["idempotent"] = True
     if response is not None:
         result["response"] = response
+    _persist_landed_note(result)
     return result
 
 

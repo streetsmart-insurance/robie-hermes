@@ -967,6 +967,11 @@ def write_landed(store: Any, job: Mapping[str, Any]) -> bool:
         return False
     note = store.get_checkpoint(job_id, "discussion_note") or {}
     status = str(note.get("status") or "")
+    note_id = str(note.get("note_id") or "").strip()
+    # A copied earlier note id (already on the ledger) is not a write this job made.
+    matched_prior = status == "already_posted" or bool(note.get("idempotent"))
+    if note_id and not matched_prior and note.get("wrote") is not False:
+        return True
     if status == "filed" and (note.get("read_back") or note.get("note_id")):
         return True
     for kind in ("document_upload", "uploaded_document", "ezlynx_document"):

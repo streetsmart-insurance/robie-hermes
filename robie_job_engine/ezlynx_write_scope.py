@@ -339,6 +339,12 @@ def applicant_is_write_allowed(value: object) -> bool:
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
+    from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+    # The driver lease and the startup snapshot are checked before the
+    # allowlist global. Agent code that widens that global fails here.
+    assert_write_checks_intact()
+    driver_gate_for_write()
     applicant_id = normalize_applicant_id(value)
     if not applicant_is_write_allowed(applicant_id):
         display = applicant_id or "<missing>"

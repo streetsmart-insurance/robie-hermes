@@ -327,11 +327,10 @@ def refuse_untrusted_applicant(
     from .client_name_lookup import trusted_applicant_ids
 
     trusted = set(trusted_applicant_ids(store, job))
-    # A named lookup still drops a docs id. A write job that was opened
-    # with a digit account may file on that same account.
-    opened = str(dict(job.get("payload") or {}).get("applicant_id") or "").strip()
-    if opened.isdigit():
-        trusted.add(opened)
+    # A payload id is not enough. The user has to have typed it, or a live
+    # name search on this job has to have bound it. A fixture id stuffed
+    # onto the payload (220250093) stays untrusted when the ask only
+    # names a person.
     if applicant in trusted:
         return None
     name = person_named_in_job(job) or "that client"

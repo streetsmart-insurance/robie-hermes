@@ -107,6 +107,48 @@ def job_is_client_policy_lookup(job: dict[str, Any] | None) -> bool:
     return False
 
 
+_LOOK_UP_NAME = re.compile(
+    r"\b(?:look\s*up|lookup|find|search(?:\s+for)?)\s+"
+    r"([A-Za-z][A-Za-z']+(?:\s+[A-Za-z][A-Za-z']+){1,3})\b",
+    re.IGNORECASE,
+)
+
+
+def person_to_look_up(text: str) -> str | None:
+    """A person named by 'look up john smith' or a policy-fact question.
+
+    A write ('add a note for') is not this lookup. The name is not an
+    applicant id, and the reply must not ask for one.
+    """
+    raw = " ".join(str(text or "").split())
+    if not raw or _WRITE.search(raw):
+        return None
+    named = client_name_from_lookup(raw)
+    if named:
+        return named
+    match = _LOOK_UP_NAME.search(raw)
+    if not match:
+        return None
+    name = " ".join(match.group(1).split()).strip(" .?")
+    tokens = [token for token in name.split() if token]
+    if len(tokens) < 2:
+        return None
+    if any(token.casefold() in {"the", "a", "an", "account", "policy", "client", "this", "that"} for token in tokens):
+        return None
+    return name or None
+
+
+def job_is_person_lookup(job: dict[str, Any] | None) -> bool:
+    """True for 'look up john smith' as well as a policy-number question."""
+    if job_is_client_policy_lookup(job):
+        return True
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("request_text", "text", "prompt", "original_text"):
+        if person_to_look_up(str(payload.get(key) or "")):
+            return True
+    return False
+
+
 def client_name_from_lookup(text: str) -> str | None:
     """The client named in a policy-fact question, or None when this is a write."""
     raw = " ".join(str(text or "").split())
@@ -1109,6 +1151,9 @@ def prepare_named_write_client(
             name=name,
         )
         return None
+    # A name with no account number must not keep a fixture id that was
+    # copied onto the payload from the open tab or a file.
+    _drop_untrusted_binding(store, job)
     runner = searcher or _SEARCHER_OVERRIDE
     if runner is None and _running_under_test():
         return None
@@ -1195,7 +1240,7 @@ def prepare_named_client_lookup(
     None says so. An id from docs, a runbook, or an earlier chat is dropped.
     """
     job = store.get_job(job_id)
-    if not job_is_client_policy_lookup(job):
+    if not job_is_person_lookup(job):
         return None
     note = _search_note(store, job_id)
     if note.get("resolved"):
@@ -1205,7 +1250,8 @@ def prepare_named_client_lookup(
     name = ""
     payload = dict(job.get("payload") or {})
     for key in ("request_text", "text", "prompt", "original_text"):
-        name = client_name_from_lookup(str(payload.get(key) or "")) or ""
+        text = str(payload.get(key) or "")
+        name = client_name_from_lookup(text) or person_to_look_up(text) or ""
         if name:
             break
     user_id = user_message_applicant(job)

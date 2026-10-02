@@ -579,6 +579,45 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("robie_env", publish.call_args.kwargs)
 
+    def test_robie_test_marker_publishes_test_and_plain_text_does_not(self):
+        received = "google.workspace.chat.event.v1.received"
+        marked = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "space": {"name": "spaces/AAQAZbLJO78"},
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/1",
+                    "text": "[[robie-test]] add a note for Buster Brown",
+                },
+            },
+            received,
+        )
+        self.assertEqual(marked["robie_env"], "test")
+        prefixed = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/2",
+                    "text": "robie-test: look up john smith",
+                },
+            },
+            received,
+        )
+        self.assertEqual(prefixed["robie_env"], "test")
+        plain = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "space": {"name": "spaces/AAQAZbLJO78"},
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/3",
+                    "text": "add a note for Buster Brown",
+                },
+            },
+            received,
+        )
+        self.assertNotIn("robie_env", plain)
+        self.assertEqual(plain, {"ce-type": received})
+
 
 def _signing_material():
     from cryptography import x509

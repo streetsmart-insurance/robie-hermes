@@ -667,7 +667,24 @@ class JobStore:
         if status in TERMINAL_STATUSES:
             self._stop_capture([job_id])
             self._release_turn_lock(job_id)
+            if status == JobStatus.CANCELLED or (
+                status == JobStatus.FAILED and "cancel" in str(error or "").casefold()
+            ):
+                self._clear_cancelled_conversation_link(job_id)
         return job
+
+    def _clear_cancelled_conversation_link(self, job_id: str) -> None:
+        """A cancelled job must not stay the active conversation link.
+
+        Preflight treats an active link to a terminal job as a failure.
+        /stop used to leave that row active=1.
+        """
+        try:
+            from .chat_queue import DurableChatEventQueue
+
+            DurableChatEventQueue(str(self.path)).deactivate_job_links(job_id)
+        except Exception:
+            return
 
     def _release_turn_lock(self, job_id: str) -> None:
         """A terminal job does not keep the Chat turn lock.

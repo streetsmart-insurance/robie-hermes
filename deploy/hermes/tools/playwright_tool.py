@@ -539,6 +539,15 @@ try:
         except Exception:
             _trace_mgr = None
     try:
+        os.environ["ROBIE_AGENT_CODE"] = "1"
+        from robie_job_engine.safety_seal import install_agent_seal
+        install_agent_seal()
+    except Exception as exc:
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: safety seal did not install; "
+            "refusing to run agent code"
+        ) from exc
+    try:
         exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
     except Exception as exc:
         relabel_user_exec_exception(exc)
@@ -771,6 +780,7 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
 
     wrapper = _playwright_exec_wrapper()
     env = os.environ.copy()
+    env["ROBIE_AGENT_CODE"] = "1"
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
     if job_id:
         env["ROBIE_JOB_ID"] = job_id
