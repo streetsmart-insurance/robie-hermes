@@ -1827,19 +1827,25 @@ class ProveSessionReleaseTests(unittest.TestCase):
         # Keep subreaper state isolated from the rest of the test runner.
         if os.environ.get("ROBIE_TEST_RECORDING_SUBREAPER") != "1":
             child_code = """
-import ctypes, os, unittest
+import ctypes, os, sys, unittest
+# unittest discovery adds tests/ only to the parent interpreter's sys.path.
+# Bootstrap that same import root explicitly in this isolated interpreter.
+sys.path.insert(0, os.path.join(os.getcwd(), "tests"))
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
     error = ctypes.get_errno()
     raise OSError(error, os.strerror(error))
 os.environ["ROBIE_TEST_RECORDING_SUBREAPER"] = "1"
-unittest.main(module="tests.test_tonight_fix_bundle", argv=[
+unittest.main(module="test_tonight_fix_bundle", argv=[
     "recording-reaper-proof",
     "ProveSessionReleaseTests.test_stop_kills_the_recording_process_group",
 ])
 """
             result = subprocess.run(
                 [sys.executable, "-c", child_code], cwd=str(ROOT),
+                # Keep the hosted CI root-only path even when a local runner
+                # supplies PYTHONPATH=.:tests, so this import regression stays covered.
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
                 capture_output=True, text=True, timeout=15,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
