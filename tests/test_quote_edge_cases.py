@@ -163,3 +163,39 @@ class TestRevisionMarker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAgencyFeeConfirmation(unittest.TestCase):
+    def test_fee_confirmation_asked_when_other_questions(self):
+        # Explicit fee + other HITL reasons -> confirmation bundled in
+        q = _extract(
+            "Insured Name: Test LLC\nCarrier: TestCarrier\n"
+            "Agency Fee: $350\n"
+            "Quote Date: 01/15/2026\n"  # expired -> triggers HITL
+            "Premium: $5,000.00\n"
+        )
+        self.assertIn("agency_fee_confirm", q.hitl_reasons)
+        self.assertIn("quote_expired", q.hitl_reasons)
+
+    def test_no_confirmation_when_no_other_questions(self):
+        q = _extract(
+            "Insured Name: Test LLC\nCarrier: TestCarrier\n"
+            "Agency Fee: $350\n"
+            "Commission: 10%\n"
+            "Premium: $5,000.00\n"
+            "Effective: 01/01/2027\nExpiration: 01/01/2028\n"
+        )
+        # No other questions, so no confirmation needed
+        self.assertNotIn("agency_fee_confirm", q.hitl_reasons)
+
+    def test_confirmation_cleared_on_yes(self):
+        ext = QuoteExtractor()
+        q = _extract(
+            "Insured Name: Test LLC\nCarrier: TestCarrier\n"
+            "Agency Fee: $350\n"
+            "Quote Date: 01/15/2026\n"
+            "Premium: $5,000.00\n"
+        )
+        self.assertIn("agency_fee_confirm", q.hitl_reasons)
+        q = ext.apply_user_clarifications(q, "yes, fee is correct")
+        self.assertNotIn("agency_fee_confirm", q.hitl_reasons)

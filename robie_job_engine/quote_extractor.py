@@ -67,6 +67,9 @@ class ExtractedQuote:
     expiration_date: str = ""
     pure_premium_cents: int = 0
     agency_fees_cents: int = 35000  # Default $350.00
+    # True when the fee was explicitly found in the quote (not defaulted).
+    # Used to decide whether to ask for confirmation.
+    agency_fee_explicit: bool = False
     commission_rate: Optional[float] = None
     surplus_lines_tax_cents: int = 0
     surplus_lines_tax_addressed: bool = False
@@ -594,10 +597,13 @@ class QuoteExtractor:
         )
         if fee_match:
             quote.agency_fees_cents = _parse_dollars_to_cents(fee_match.group(1))
+            quote.agency_fee_explicit = True
         elif re.search(r"no\s+agency\s+fee|fee\s*:\s*\$0", combined_text, re.IGNORECASE):
             quote.agency_fees_cents = 0
+            quote.agency_fee_explicit = True
         elif re.search(r"\$\s*350(?:\.00)?", combined_text):
             quote.agency_fees_cents = 35000
+            quote.agency_fee_explicit = True
 
         # 9. Parameter 2: Commission Rate
         comm_match = re.search(
@@ -1007,6 +1013,12 @@ class QuoteExtractor:
             except ValueError:
                 pass
 
+        # Agency fee confirmation: when we're already asking clarifications,
+        # confirm the fee amount. Money the client pays should never be
+        # assumed, even when extracted from the quote.
+        if reasons and quote.agency_fee_explicit and "agency_fee_confirm" not in reasons:
+            reasons.append("agency_fee_confirm")
+
         quote.hitl_reasons = reasons
         self._sync_hitl_questions(quote)
 
@@ -1016,6 +1028,11 @@ class QuoteExtractor:
         for reason in quote.hitl_reasons:
             if reason == "agency_fee_unspecified":
                 questions.append("1. Agency Fee: Is there an agency fee? (Default is $350.00, or specify amount)")
+            elif reason == "agency_fee_confirm":
+                questions.append(
+                    f"Agency Fee Confirmation: I found an agency fee of ${quote.agency_fees_cents / 100:,.2f}. "
+                    "Is that correct, or should it be a different amount?"
+                )
             elif reason == "commission_rate_unspecified":
                 questions.append("2. Commission Rate: What is the commission rate for this policy? (e.g., 10%, 12%, 15%)")
             elif reason == "surplus_lines_tax_verification":
@@ -1073,24 +1090,40 @@ class QuoteExtractor:
         # 1. Agency fee
         if re.search(r"\b(?:no\s+(?:agency\s+)?fee|\$0(?:\.00)?|zero\s+fee)\b", text, re.IGNORECASE):
             quote.agency_fees_cents = 0
+            quote.agency_fee_explicit = True
             if "agency_fee_unspecified" in quote.hitl_reasons:
                 quote.hitl_reasons.remove("agency_fee_unspecified")
+            if "agency_fee_confirm" in quote.hitl_reasons:
+                quote.hitl_reasons.remove("agency_fee_confirm")
+        elif re.search(r"\b(?:yes|correct|confirmed|that's right|looks good)\b", text, re.IGNORECASE) and "agency_fee_confirm" in quote.hitl_reasons:
+            # User confirmed the fee amount; mark explicit.
+            quote.agency_fee_explicit = True
+            quote.hitl_reasons.remove("agency_fee_confirm")
         else:
             fee_before = re.search(r"\$\s*([\d,]+(?:\.\d{2})?)\s*(?:agency\s+fee|broker\s+fee|fee)", text, re.IGNORECASE)
             fee_after = re.search(r"(?:agency\s+fee|broker\s+fee|fee)\s*(?:is|of|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)", text, re.IGNORECASE)
             fee_make = re.search(r"\bmake\s+(?:the\s+)?(?:agency\s+)?fee\s*\$?\s*([\d,]+(?:\.\d{2})?)", text, re.IGNORECASE)
             if fee_make:
                 quote.agency_fees_cents = _parse_dollars_to_cents(fee_make.group(1))
+                quote.agency_fee_explicit = True
                 if "agency_fee_unspecified" in quote.hitl_reasons:
                     quote.hitl_reasons.remove("agency_fee_unspecified")
+                if "agency_fee_confirm" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("agency_fee_confirm")
             elif fee_before:
                 quote.agency_fees_cents = _parse_dollars_to_cents(fee_before.group(1))
+                quote.agency_fee_explicit = True
                 if "agency_fee_unspecified" in quote.hitl_reasons:
                     quote.hitl_reasons.remove("agency_fee_unspecified")
+                if "agency_fee_confirm" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("agency_fee_confirm")
             elif fee_after and fee_after.group(1):
                 quote.agency_fees_cents = _parse_dollars_to_cents(fee_after.group(1))
+                quote.agency_fee_explicit = True
                 if "agency_fee_unspecified" in quote.hitl_reasons:
                     quote.hitl_reasons.remove("agency_fee_unspecified")
+                if "agency_fee_confirm" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("agency_fee_confirm")
             elif re.search(r"\b(?:standard|default|yes)\b", text, re.IGNORECASE) and "agency_fee_unspecified" in quote.hitl_reasons:
                 quote.agency_fees_cents = self.default_agency_fee_cents
                 quote.hitl_reasons.remove("agency_fee_unspecified")
