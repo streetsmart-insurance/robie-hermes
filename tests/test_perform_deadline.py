@@ -67,7 +67,18 @@ class PerformDeadlineTests(unittest.TestCase):
         self.store = JobStore(self.db)
 
     def tearDown(self):
-        self.tmp.cleanup()
+        # The ceiling test's worker keeps writing the sqlite wal after the
+        # engine returns. Cleanup can see the directory fill back up.
+        last: BaseException | None = None
+        for _ in range(25):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(0.05)
+        if last is not None:
+            raise last
 
     def test_overdue_and_submission_audit_keep_120s_idle_and_3600s_ceiling(self):
         for action_type in (
