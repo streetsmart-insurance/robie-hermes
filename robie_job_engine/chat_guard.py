@@ -1008,6 +1008,12 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         from .client_name_lookup import prepare_named_client_lookup
 
         prepare_named_client_lookup(store, job_id)
+        from .write_verification_loop import is_ezlynx_write_job
+
+        if is_ezlynx_write_job(job):
+            from .client_name_lookup import prepare_named_write_client
+
+            prepare_named_write_client(store, job_id)
         job = store.get_job(job_id)
     if job["status"] == JobStatus.FAILED:
         if is_action_gate_refusal(job):
@@ -1091,6 +1097,33 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
                 "the wrong field, fix that field once. If it refuses again, stop. "
                 "Do not call the tool again."
             )
+            from .live_turn_guard import person_named_in_job
+
+            named = person_named_in_job(job)
+            bound = str(dict(job.get("payload") or {}).get("applicant_id") or "").strip()
+            search_note = store.get_checkpoint(job_id, "client_name_search") or {}
+            asked = str(search_note.get("user_line") or "").strip()
+            if asked and str(search_note.get("source") or "") in {
+                "several",
+                "linked",
+                "sign_in",
+            }:
+                lines.append(
+                    "The name search already ran. Do not guess an applicant id. "
+                    f"Reply with exactly: {asked}"
+                )
+            elif named and bound.isdigit():
+                lines.append(
+                    f"The applicant id {bound} came from the EZLynx name search "
+                    f"for {named}. Do not ask the user for an applicant id."
+                )
+            elif named:
+                lines.append(
+                    f"The request names {named}. Run a live EZLynx name search "
+                    "for that person. Do not ask the user for an applicant id. "
+                    "Do not put the person's name in applicant_id. Do not take "
+                    "an applicant id from repo, fixture, or release files."
+                )
     lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
     from .runtime_env import playground_enabled
@@ -1122,7 +1155,7 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Never claim success from modal text, a local DOM value, quote data, or your own prior action. If any requested field is absent, say the action is not verified.",
         "Do not write that you identified a carrier, are Filling Policy Shell, filled, saved, or uploaded unless a destination-action checkpoint already exists. With no destination-action checkpoint and no destination-verified evidence, say you were stuck and made no verified progress.",
         "If the request is ambiguous and does not name a client, policy, carrier, or task, stop immediately and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <what is missing>. Ask one plain-English question. Do not investigate the server, read source code, read jobs.db, or open token files.",
-        "Do not read Robie's own source, jobs.db, .hermes/google_token.json, or any token file during a job. Do not grep the server. Use the purpose-built tool named in the task.",
+        "Do not read Robie's own source, jobs.db, .hermes/google_token.json, or any token file during a job. Do not grep the server. Do not use search_files on tests, fixtures, or release directories. Use the purpose-built tool named in the task.",
         "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
         "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
         "If a write is PLAYWRIGHT_BLOCKED or a modal cannot be uniquely named, stop, describe the dialog title and visible labels only (no passwords), ask Gemini for one unique field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use .first/.nth/.last.",
@@ -1408,8 +1441,28 @@ def open_chat_job(
         except KeyError:
             active_for_turn = None
     from .chat_job_controls import waiting_job_to_bind
+    from .live_turn_guard import accept_clarify_thread_reply, clarify_job_for_reply
 
     bind_target = waiting_job_to_bind(store, text, inbound_thread_id)
+    if bind_target is None:
+        bind_target = clarify_job_for_reply(store, text, inbound_thread_id)
+    if bind_target is not None and accept_clarify_thread_reply(
+        store, bind_target, text, message_id
+    ):
+        try:
+            queue.link_conversation_job(
+                conversation_id=context_key,
+                job_id=bind_target["id"],
+                message_id=message_id,
+                event_id=message_id,
+                relation="CONTINUATION",
+            )
+        except Exception:
+            logger.warning(
+                "clarify reply stayed on job %s; conversation link was not added",
+                bind_target["id"],
+            )
+        return bind_target["id"]
     continue_clarification = bool(
         bind_target is not None
         and not conversation_must_start_fresh(store, bind_target)
@@ -2272,10 +2325,13 @@ def _render_chat_terminal(
         if content_is_only_progress(content) or is_refused_tool_text(content):
             text = COULD_NOT_FINISH
             return text if text.endswith("\n") else text + "\n"
-        answer = str(content or "").strip() or "Answered."
-        if not answer.lower().startswith("answered"):
-            answer = f"Answered. {answer}"
-        text = format_user_reply(answer)
+        from .live_turn_guard import format_complete_answer
+
+        text = format_complete_answer(str(content or ""))
+        if not text:
+            from .turn_finalization import COULD_NOT_FINISH as _could_not
+
+            text = _could_not
         return text if text.endswith("\n") else text + "\n"
     from .runtime_env import playground_enabled
     from .write_verification_loop import (

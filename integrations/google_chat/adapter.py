@@ -1984,14 +1984,35 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     bool(job_id) and str(job_id) != owner_id
                 )
                 if not other_live:
+                    from robie_job_engine.chat_turn_control import (
+                        job_turn_is_alive,
+                        stop_reply_line,
+                    )
+
+                    if not job_turn_is_alive(self, event, owner_id, store):
+                        self._post_stop_confirmation_now(
+                            source.chat_id,
+                            ALREADY_FINISHED_REPLY,
+                            thread_id,
+                            owner_id,
+                            kind="stop",
+                        )
+                        self._clear_space_typing(source.chat_id)
+                        return
+                    # The row is already CANCELLED. The agent turn is not.
+                    # "That job already finished." used to leave the turn
+                    # blocked in clarify, and the timeout then wrote a note.
                     self._post_stop_confirmation_now(
                         source.chat_id,
-                        ALREADY_FINISHED_REPLY,
+                        stop_reply_line(owner_id),
                         thread_id,
                         owner_id,
                         kind="stop",
                     )
                     self._clear_space_typing(source.chat_id)
+                    await self._terminate_running_agent(
+                        event, owner_id, reason="/stop"
+                    )
                     return
             elif owner_id not in cancel_ids:
                 cancel_ids = [owner_id]
@@ -3572,6 +3593,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 ),
         )
         await self._bind_inbound_job_thread(event, job_id)
+        if job_id:
+            injected = await asyncio.to_thread(
+                lambda: JobStore(ROBIE_JOB_DB).get_checkpoint(
+                    job_id, "clarify_reply_injected"
+                )
+            )
+            if isinstance(injected, dict) and str(injected.get("message_id") or "") == str(
+                message_id
+            ):
+                # The waiting turn consumes this reply. A new session would
+                # lose the link and leave the original job blocked in clarify.
+                return
         related_only = chat_message_is_related_only(
             text,
             expected_attachment_count=attachment_count,
@@ -5361,6 +5394,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 stop_recordings_for_jobs,
             )
 
+            from robie_job_engine.live_turn_guard import note_clarify_pending
+
+            note_clarify_pending(JobStore(ROBIE_JOB_DB), job_id, question)
             if mark_job_waiting_for_user(JobStore(ROBIE_JOB_DB), job_id, question):
                 status = str(
                     JobStore(ROBIE_JOB_DB).get_job(job_id).get("status") or ""

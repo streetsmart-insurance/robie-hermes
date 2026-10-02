@@ -206,10 +206,10 @@ def render_answer_only(
     else:
         decision = None
         jev_line = "Jev was not asked. The end-state report is off."
-    summary = answer or "Answered."
-    from .user_reply import format_user_reply
+    summary = answer or ""
+    from .live_turn_guard import format_complete_answer
 
-    user_text = format_user_reply(summary if summary.lower().startswith("answered") else f"Answered. {summary}")
+    user_text = format_complete_answer(summary) or summary
     if not user_text.endswith("\n"):
         user_text += "\n"
     audit = "\n".join(

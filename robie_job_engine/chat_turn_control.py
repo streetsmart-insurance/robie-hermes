@@ -544,14 +544,33 @@ def release_finished_job_session(
             stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
         except Exception:
             pass
+    threads: list[str] = []
+    if db_path and job_id:
+        try:
+            from .chat_thread import read_job_chat_thread
+            from .store import JobStore
+
+            stored = str(read_job_chat_thread(JobStore(db_path), str(job_id)) or "")
+        except Exception:
+            stored = ""
+        if stored:
+            threads.append(stored)
     for adapter in list(_CHAT_ADAPTERS):
-        _release_adapter_job(adapter, str(job_id), cancel_turn=stop_agent)
+        _release_adapter_job(
+            adapter, str(job_id), cancel_turn=stop_agent, threads=threads
+        )
 
 
-def _release_adapter_job(adapter: Any, job_id: str, *, cancel_turn: bool) -> None:
+def _release_adapter_job(
+    adapter: Any,
+    job_id: str,
+    *,
+    cancel_turn: bool,
+    threads: list[str] | None = None,
+) -> None:
     turns = getattr(adapter, "_gateway_turns", None)
     chat_ids: list[str] = []
-    threads: list[str] = []
+    threads = list(threads or [])
     if isinstance(turns, dict):
         for key, record in list(turns.items()):
             if not isinstance(record, dict):
@@ -574,20 +593,21 @@ def _release_adapter_job(adapter: Any, job_id: str, *, cancel_turn: bool) -> Non
     keys: list[str] = []
     for chat_id in chat_ids:
         for key in _iter_live_session_keys(adapter):
-            matched = _key_matches_chat(key, chat_id, "") or any(
-                _key_matches_chat(key, chat_id, thread) for thread in threads
-            )
+            matched = any(
+                _key_matches_stop(key, chat_id, thread) for thread in threads
+            ) or _key_matches_chat(key, chat_id, "")
             if matched and key not in keys:
                 keys.append(key)
     if keys:
         _release_session_leases(adapter, keys)
-        if cancel_turn:
-            agent = None
-            for key in keys:
-                agent = _running_agent_for_key(adapter, key)
-                if agent is not None:
-                    break
-            _unblock_parked_waits(adapter, agent, keys)
+        agent = None
+        for key in keys:
+            agent = _running_agent_for_key(adapter, key)
+            if agent is not None:
+                break
+        # A terminal job must fail a parked clarify. Leaving the wait up
+        # lets the 60-minute timeout return and the model write anyway.
+        _unblock_parked_waits(adapter, agent, keys)
     for chat_id in chat_ids:
         release_chat_lock(adapter, chat_id, job_id)
 
@@ -765,6 +785,24 @@ def _event_chat_thread(event: Any) -> tuple[str, str]:
     )
 
 
+def _key_matches_stop(key: str, chat_id: str, thread_id: str) -> bool:
+    """True when this session key is the stopped job's thread.
+
+    The stored thread is ``spaces/<id>/threads/<tail>``. The Hermes key
+    often carries only that tail, so a full-string match is not enough.
+    """
+    if _key_matches_chat(key, chat_id, thread_id):
+        return True
+    text = str(key or "")
+    if not text or (chat_id and chat_id not in text):
+        return False
+    thread = str(thread_id or "")
+    if thread and thread in text:
+        return True
+    tail = thread.rstrip("/").split("/")[-1]
+    return bool(tail) and tail in text
+
+
 def _key_matches_chat(key: str, chat_id: str, thread_id: str) -> bool:
     """True when this live session key is the one for this chat.
 
@@ -847,6 +885,79 @@ def _key_is_running(adapter: Any, key: str) -> bool:
         if task is not None and not getattr(task, "done", lambda: True)():
             return True
     return False
+
+
+def stop_session_keys(
+    adapter: Any,
+    event: Any,
+    job_id: str | None = None,
+    store: Any = None,
+) -> tuple[str, str, list[str]]:
+    """``(resolved, derived, keys)`` for the job being stopped.
+
+    A top-level ``/stop`` has an empty thread, so the adapter fallback is
+    ``chat:spaces/<id>:``. That key does not own the thread turn. The
+    resolved key is the live ``agent:`` session for the job's thread.
+    """
+    derived = session_key_from_adapter(adapter, event)
+    chat_id, thread_id = _event_chat_thread(event)
+    threads: list[str] = []
+    if thread_id:
+        threads.append(thread_id)
+    if store is not None and job_id:
+        try:
+            from .chat_thread import read_job_chat_thread
+
+            stored = str(read_job_chat_thread(store, str(job_id)) or "")
+        except Exception:
+            stored = ""
+        if stored and stored not in threads:
+            threads.append(stored)
+    turns = getattr(adapter, "_gateway_turns", None)
+    if isinstance(turns, dict) and job_id:
+        for key, record in turns.items():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("job_id") or "") != str(job_id):
+                continue
+            if isinstance(key, tuple) and key and not chat_id:
+                chat_id = str(key[0])
+            if isinstance(key, tuple) and len(key) > 1 and key[1]:
+                extra = str(key[1])
+                if extra not in threads:
+                    threads.append(extra)
+    matched: list[str] = []
+    for key in _iter_live_session_keys(adapter):
+        if chat_id and chat_id not in str(key):
+            continue
+        if threads:
+            if any(_key_matches_stop(key, chat_id, thread) for thread in threads):
+                matched.append(key)
+        elif _key_is_running(adapter, key):
+            matched.append(key)
+    agent_keys = [key for key in matched if str(key).startswith("agent:")]
+    if agent_keys:
+        resolved = agent_keys[0]
+    elif matched:
+        resolved = matched[0]
+    else:
+        resolved, _ignored = resolve_running_session_key(adapter, event)
+    keys: list[str] = []
+    for key in (resolved, derived, *matched):
+        if key and key not in keys:
+            keys.append(key)
+    return resolved, derived, keys
+
+
+def job_turn_is_alive(
+    adapter: Any,
+    event: Any,
+    job_id: str | None,
+    store: Any = None,
+) -> bool:
+    """True when this job's agent is still running after the row was closed."""
+    _resolved, _derived, keys = stop_session_keys(adapter, event, job_id, store)
+    return any(_key_is_running(adapter, key) for key in keys)
 
 
 def resolve_running_session_key(adapter: Any, event: Any) -> tuple[str, str]:
@@ -1002,12 +1113,9 @@ def sent_message_id(result: Any) -> str:
 
 def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
     """Block a tool call when this job was stopped or hit the ceiling."""
-    job_id = str(
-        (kwargs or {}).get("job_id")
-        or os.environ.get("ROBIE_JOB_ID")
-        or os.environ.get("JOB_ID")
-        or ""
-    ).strip()
+    from .live_turn_guard import acting_job_id
+
+    job_id = acting_job_id(kwargs)
     db_path = str(
         (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()
@@ -1522,7 +1630,7 @@ async def terminate_gateway_agent(
     runner interrupt cannot finish in-process.
     """
     request_agent_stop(job_id)
-    resolved, derived = resolve_running_session_key(adapter, event)
+    resolved, derived, keys = stop_session_keys(adapter, event, job_id, store)
     chat_id, _thread_id = _event_chat_thread(event)
     logger.warning(
         "stop session keys resolved=%s derived=%s chat=%s reason=%s",
@@ -1562,9 +1670,6 @@ async def terminate_gateway_agent(
             except Exception:
                 pass
     source = getattr(event, "source", None)
-    keys = [resolved]
-    if derived and derived not in keys:
-        keys.append(derived)
     for key in _iter_live_session_keys(adapter):
         if _key_matches_chat(key, chat_id, _thread_id) and key not in keys:
             keys.append(key)

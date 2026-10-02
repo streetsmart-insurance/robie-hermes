@@ -683,7 +683,19 @@ class JobStore:
                 release_finished_job_session,
             )
 
-            release_finished_job_session(self.path, job_id, stop_agent=False)
+            status = ""
+            try:
+                status = str((self.get_job(job_id) or {}).get("status") or "")
+            except Exception:
+                status = ""
+            # CANCELLED sets the stop flag so a later tool call cannot write.
+            # COMPLETE and UNVERIFIED do not: the confirmation send still posts.
+            # Every terminal status still drops the session lease and the clarify.
+            release_finished_job_session(
+                self.path,
+                job_id,
+                stop_agent=status == "CANCELLED",
+            )
             kill_agent_processes(job_id)
         except Exception:
             logger.debug("turn lock release failed job=%s", job_id, exc_info=True)

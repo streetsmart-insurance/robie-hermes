@@ -1012,12 +1012,9 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
 
     kwargs = dict(kwargs or {})
     args = dict(args or {})
-    job_id = str(
-        kwargs.get("job_id")
-        or _os.environ.get("ROBIE_JOB_ID")
-        or _os.environ.get("JOB_ID")
-        or ""
-    ).strip()
+    from .live_turn_guard import acting_job_id
+
+    job_id = acting_job_id(dict(kwargs))
     db_path = str(kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
     if not job_id or not db_path:
         return NO_ACTIVE_JOB_WRITE
@@ -1048,7 +1045,21 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         return blocked
     if not is_ezlynx_write_job(job):
         return None
+    from .live_turn_guard import person_named_in_job, refuse_untrusted_applicant
+
+    if person_named_in_job(job):
+        from .client_name_lookup import prepare_named_write_client
+
+        held = prepare_named_write_client(store, job_id)
+        if held:
+            return held
+        job = store.get_job(job_id)
     if plan_is_locked(store, job_id):
+        untrusted = refuse_untrusted_applicant(
+            store, job, str(args.get("applicant_id") or "")
+        )
+        if untrusted:
+            return untrusted
         return None
     statement = coerce_tool_plan(args.get("plan"), args)
     problem = plan_field_problem(statement)
@@ -1069,4 +1080,16 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     )
     if count >= MAX_SAME_REFUSAL:
         return plan_stop_refusal(problem)
+    from .live_turn_guard import name_placed_in_applicant_id, person_named_in_job
+
+    named = person_named_in_job(job) or name_placed_in_applicant_id(
+        args.get("applicant_id")
+    )
+    if named and problem in {"target", "plan"}:
+        return (
+            "The plan field target is wrong. "
+            f"The request names {named}. Search EZLynx for that name. "
+            "Do not ask the user for an applicant id. "
+            "Do not put the name in applicant_id. The write was not sent."
+        )
     return plan_refusal(problem)

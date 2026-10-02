@@ -756,6 +756,10 @@ def file_note_to_existing_discussion(
     and blocks a repost until a person says yes or the 24-hour question
     window passes. If that ledger write fails, nothing is posted.
 
+    A job that is not RUNNING does not reach the API. The check is the
+    status on the job row at this moment, not the status from when the
+    turn started.
+
     Returns a result dict with ``status`` one of ``filed`` / ``pending`` /
     ``held`` / ``dry_run``, plus ``applicant_id``, ``discussion_id``,
     ``note_id`` and a human-readable ``reason``.
@@ -894,6 +898,11 @@ def file_note_to_existing_discussion(
             discussion_id=discussion_id,
             title=title,
         )
+    from .live_turn_guard import assert_live_write_allowed
+
+    # Re-read the job now. A cancel that landed during the discussion
+    # lookup must not reach DiscussionApi.
+    assert_live_write_allowed()
     try:
         prior_row = begin_unconfirmed_note(
             applicant,

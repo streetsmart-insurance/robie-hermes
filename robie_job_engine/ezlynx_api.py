@@ -940,6 +940,9 @@ class EzlynxApiClient:
         Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
         200 body is a numeric document id. Never uploads to a live applicant.
         """
+        from .live_turn_guard import assert_live_write_allowed
+
+        assert_live_write_allowed()
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
         if not name:

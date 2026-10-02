@@ -389,10 +389,59 @@ def install_tool_call_text_guard() -> None:
     if callable(original_exec):
 
         def execute(self: Any, *args: Any, **kwargs: Any) -> Any:
-            job_id = current_model_job_id()
+            from .live_turn_guard import (
+                blocked_file_search,
+                contains_clarify_timeout,
+                end_job_after_clarify_timeout,
+                neutralize_clarify_timeout,
+                note_clarify_pending,
+                reset_turn_job,
+                set_turn_job,
+                stamp_agent_once,
+            )
+
+            job_id = stamp_agent_once(self) or current_model_job_id()
+            token = set_turn_job(job_id)
+            blocked = blocked_file_search(args) or blocked_file_search(kwargs)
+            if blocked:
+                reset_turn_job(token)
+                end_tool_call_message(job_id)
+                return blocked
+            from .live_turn_guard import iter_tool_calls, take_stashed_clarify_reply
+
+            if any(
+                str(name).casefold() == "clarify"
+                for name, _arguments in (
+                    *iter_tool_calls(args),
+                    *iter_tool_calls(kwargs),
+                )
+            ):
+                try:
+                    from .store import JobStore
+
+                    db_path = str(os.environ.get("ROBIE_JOB_DB") or "")
+                    if job_id and db_path:
+                        note_clarify_pending(JobStore(db_path), job_id)
+                except Exception:
+                    pass
             try:
-                return original_exec(self, *args, **kwargs)
+                result = original_exec(self, *args, **kwargs)
+                stashed = take_stashed_clarify_reply(job_id)
+                if stashed:
+                    return stashed
+                if job_id and contains_clarify_timeout(result):
+                    try:
+                        from .store import JobStore
+
+                        db_path = str(os.environ.get("ROBIE_JOB_DB") or "")
+                        if db_path:
+                            end_job_after_clarify_timeout(JobStore(db_path), job_id)
+                    except Exception:
+                        pass
+                    result = neutralize_clarify_timeout(result)
+                return result
             finally:
+                reset_turn_job(token)
                 end_tool_call_message(job_id)
 
         execute._robie_tool_text_guard = True  # type: ignore[attr-defined]

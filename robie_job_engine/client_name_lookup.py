@@ -1056,6 +1056,129 @@ def _remember_search(
     )
 
 
+def _running_under_test() -> bool:
+    """The suite must not open a live EZLynx page to resolve a name."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    import sys
+
+    command = " ".join(sys.argv).casefold()
+    return "pytest" in command or "unittest" in command
+
+
+def prepare_named_write_client(
+    store: Any,
+    job_id: str,
+    *,
+    searcher: Callable[[str], dict[str, Any]] | None = None,
+) -> str | None:
+    """Name-search before a write when the request names a person and no id.
+
+    One match is bound onto the job. Several matches ask which account.
+    A missing browser in tests does not ask the user for an applicant id.
+    """
+    from .live_turn_guard import person_named_in_job
+
+    job = store.get_job(job_id)
+    name = person_named_in_job(job) or ""
+    if not name:
+        return None
+    note = _search_note(store, job_id)
+    if list(note.get("applicant_ids") or []) and str(note.get("source") or "") in {
+        "search",
+        "user_message",
+    }:
+        return None
+    if str(note.get("source") or "") in {"several", "linked"}:
+        return _consume_client_choice(store, job_id)
+    explicit = user_message_applicant(job)
+    if explicit:
+        payload = dict(job.get("payload") or {})
+        payload["applicant_id"] = explicit
+        payload["client_name"] = name
+        store.update_payload(job_id, payload)
+        _remember_search(
+            store,
+            job_id,
+            source="user_message",
+            applicant_ids=[explicit],
+            name=name,
+        )
+        return None
+    runner = searcher or _SEARCHER_OVERRIDE
+    if runner is None and _running_under_test():
+        return None
+    if runner is None:
+        runner = default_searcher
+    try:
+        outcome = dict(runner(name) or {})
+    except Exception:
+        outcome = {"status": "error", "matches": []}
+    status = str(outcome.get("status") or "error").casefold()
+    matches = [row for row in (outcome.get("matches") or []) if isinstance(row, dict)]
+    if status == "sign_in":
+        from .user_reply import SIGN_IN_QUESTION
+
+        _remember_search(
+            store,
+            job_id,
+            source="sign_in",
+            applicant_ids=[],
+            user_line=SIGN_IN_QUESTION,
+            name=name,
+        )
+        return SIGN_IN_QUESTION
+    if status != "ok":
+        return None
+    named, linked = _split_name_matches(name, matches)
+    if len(named) == 1:
+        applicant = str(named[0].get("applicant_id") or "").strip()
+        payload = dict(store.get_job(job_id).get("payload") or {})
+        payload["applicant_id"] = applicant
+        payload["client_name"] = name
+        store.update_payload(job_id, payload)
+        _remember_search(
+            store,
+            job_id,
+            source="search",
+            applicant_ids=[applicant],
+            name=name,
+            matches=[_stored_match(named[0])],
+        )
+        return None
+    if len(named) > 1:
+        shown = [_stored_match(row) for row in named[:5]]
+        line = which_client_question(name, shown)
+        _remember_search(
+            store,
+            job_id,
+            source="several",
+            applicant_ids=[],
+            user_line=line,
+            name=name,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
+            matches=shown,
+            list_kind="named",
+        )
+        return line
+    if linked:
+        shown = [_stored_match(row) for row in linked[:5]]
+        line = linked_accounts_question(name, shown)
+        _remember_search(
+            store,
+            job_id,
+            source="linked",
+            applicant_ids=[],
+            user_line=line,
+            name=name,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
+            matches=shown,
+            list_kind="linked",
+        )
+        return line
+    return None
+
+
 def prepare_named_client_lookup(
     store: Any,
     job_id: str,

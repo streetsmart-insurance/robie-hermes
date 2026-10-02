@@ -265,12 +265,9 @@ def _file_note(args: dict) -> dict:
 def _note_job(kwargs: dict) -> tuple[str, str]:
     import os
 
-    job_id = str(
-        (kwargs or {}).get("job_id")
-        or os.environ.get("ROBIE_JOB_ID")
-        or os.environ.get("JOB_ID")
-        or ""
-    ).strip()
+    from robie_job_engine.live_turn_guard import acting_job_id
+
+    job_id = acting_job_id(kwargs)
     db_path = str(
         (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()

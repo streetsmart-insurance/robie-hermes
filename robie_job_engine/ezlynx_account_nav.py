@@ -394,19 +394,26 @@ def account_nav_contract_lines(
 
 def _refuse_untrusted_named_lookup(url: object) -> str | None:
     """A named-client job may open only this search or the user's own id."""
-    job_id = os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
-    db_path = os.environ.get("ROBIE_JOB_DB") or ""
+    from .live_turn_guard import acting_db_path, acting_job_id, refuse_untrusted_applicant
+
+    job_id = acting_job_id()
+    db_path = acting_db_path()
     if not job_id or not db_path:
         return None
     try:
         from .client_name_lookup import refuse_named_lookup_navigation
+        from .ezlynx_write_scope import applicant_id_from_ezlynx_url
         from .store import JobStore
 
         store = JobStore(db_path)
         job = store.get_job(job_id)
     except Exception:
         return None
-    return refuse_named_lookup_navigation(store, job, str(url or ""))
+    named = refuse_named_lookup_navigation(store, job, str(url or ""))
+    if named:
+        return named
+    applicant = str(applicant_id_from_ezlynx_url(str(url or "")) or "").strip()
+    return refuse_untrusted_applicant(store, job, applicant)
 
 
 def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
