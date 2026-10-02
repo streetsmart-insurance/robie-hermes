@@ -100,6 +100,9 @@ class ExtractedQuote:
     # clarification reply (e.g. "producer: Matthew Mancina"). Resolved
     # against Ascend users on resume; the workflow asks when unresolvable.
     producer_hint: Optional[str] = None
+    # Set when the sender confirms creating a second agreement for a policy
+    # number that already has one (duplicate guard bypass).
+    duplicate_confirmed: bool = False
 
     @property
     def total_premium_cents(self) -> int:
@@ -288,7 +291,12 @@ def strip_email_reply_history(text: str) -> str:
 
 
 def extract_text_from_pdf(pdf_bytes_or_path: bytes | Path | str) -> str:
-    """Extract plain text from PDF using pypdf."""
+    """Extract plain text from PDF using pypdf.
+
+    Returns a [PDF_NO_TEXT_EXTRACTED] marker when the PDF has no selectable
+    text (scanned/image PDF) so callers can ask the sender for the numbers
+    instead of treating it as an empty quote.
+    """
     try:
         from pypdf import PdfReader
         if isinstance(pdf_bytes_or_path, (str, Path)):
@@ -296,7 +304,10 @@ def extract_text_from_pdf(pdf_bytes_or_path: bytes | Path | str) -> str:
         else:
             reader = PdfReader(io.BytesIO(pdf_bytes_or_path))
         pages_text = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages_text)
+        text = "\n".join(pages_text).strip()
+        if not text:
+            return "[PDF_NO_TEXT_EXTRACTED: the PDF appears to be a scanned image with no selectable text]"
+        return text
     except Exception as e:
         return f"[PDF_EXTRACTION_ERROR: {e}]"
 
@@ -779,6 +790,10 @@ class QuoteExtractor:
             producer = _parse_producer_answer(text)
             if producer:
                 quote.producer_hint = producer
+        if not quote.duplicate_confirmed and re.search(
+            r"(?i)\bconfirm\s+duplicate\b", text
+        ):
+            quote.duplicate_confirmed = True
 
         # Re-evaluate HITL status and dynamically synchronize remaining questions
         self._sync_hitl_questions(quote)

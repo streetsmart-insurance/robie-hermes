@@ -124,6 +124,13 @@ class TestQuoteExtractor(unittest.TestCase):
         )
         self.assertEqual(resolved2.producer_hint, "matthew@streetsmart.insurance")
 
+    def test_clarification_parses_confirm_duplicate(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "Yes, confirm duplicate - please create it"
+        )
+        self.assertTrue(resolved.duplicate_confirmed)
+
     def test_clarification_does_not_overwrite_existing_values(self):
         quote = ExtractedQuote(
             insured_name="Acme Hauling LLC",
@@ -189,6 +196,7 @@ class TestAscendWorkflowManager(unittest.TestCase):
             "44444444-4444-4444-4444-444444444444",
             {"id": "44444444-4444-4444-4444-444444444444"},
         )
+        self.mock_client.find_program_by_policy.return_value = None
 
         self.mock_ezlynx_poster = MagicMock()
         self.mock_ezlynx_poster.post_agreement_note.return_value = {"status": "success", "note_id": 9999}
@@ -340,6 +348,7 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
             "44444444-4444-4444-4444-444444444444",
             {"id": "44444444-4444-4444-4444-444444444444"},
         )
+        self.mock_client.find_program_by_policy.return_value = None
         self.mock_ezlynx_poster = MagicMock()
         self.manager = AscendWorkflowManager(
             client_factory=lambda: self.mock_client,
@@ -451,6 +460,63 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
         self.mock_client.create_program.assert_called_once()
         payload = self.mock_client.create_program.call_args[0][0]
         self.assertEqual(payload["producer_id"], "bbbbbbbb-2222-2222-2222-222222222222")
+
+    def test_ambiguous_carrier_asks_with_options(self):
+        # Two carriers match: must ask with the options, not take the first.
+        self.mock_client.search_carriers.return_value = [
+            {"identifier": "carrier-a-123", "title": "Nautilus Insurance Company"},
+            {"identifier": "carrier-b-456", "title": "Nautilus Specialty Insurance"},
+        ]
+        quote = self._clear_quote()
+        quote.carrier_identifier = ""
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("2 carriers", res.reply_email_body)
+        self.assertIn("Nautilus Specialty Insurance", res.reply_email_body)
+        self.mock_client.create_program.assert_not_called()
+
+    def test_unmatched_wholesaler_asks(self):
+        # Named wholesaler with no Ascend match: ask, don't silently drop it.
+        self.mock_client.search_wholesalers.return_value = []
+        quote = self._clear_quote()
+        quote.wholesaler_name = "Nonexistent Wholesale Inc"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("wholesaler", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
+
+    def test_duplicate_policy_number_asks_before_creating(self):
+        # A program already exists for this policy: ask, don't double-create.
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1", "program_id": "existing-prog-1"}
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("already", res.reply_email_body.lower())
+        self.assertIn("APX-8831", res.reply_email_body)
+        self.mock_client.create_program.assert_not_called()
+
+    def test_confirm_duplicate_bypasses_duplicate_guard(self):
+        # Sender confirms: the second agreement proceeds.
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1", "program_id": "existing-prog-1"}
+        quote = self._clear_quote()
+        quote.duplicate_confirmed = True
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.mock_client.create_program.assert_called_once()
+
+    def test_scanned_pdf_asks_for_text(self):
+        # PDF with no selectable text: clear message, not a field-by-field ask.
+        quote = self._clear_quote()
+        quote.raw_text = "[PDF_NO_TEXT_EXTRACTED: the PDF appears to be a scanned image]"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("scanned", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
 
     def test_partial_billables_are_an_error_not_completed(self):
         # Defense in depth: even if a worker ever reports success with fewer

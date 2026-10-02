@@ -280,14 +280,66 @@ class AscendWorkflowManager:
         """Execute Ascend program creation and post the link into EZLynx."""
         client = self.client_factory()
 
+        # 0. Scanned PDF guard: if the quote came from a PDF with no selectable
+        # text, say so plainly instead of asking for every field one by one.
+        if "[PDF_NO_TEXT_EXTRACTED" in (quote.raw_text or ""):
+            subject = f"Couldn't read the attached quote: {quote.insured_name or 'Insurance Quote'}"
+            body_lines = [
+                f"Hi {sender_name or 'Team'},",
+                "",
+                "The attached PDF appears to be a scanned image with no selectable text, "
+                "so I couldn't read the quote from it. I haven't created the agreement.",
+                "",
+                "• Could you reply with the quote details as text (carrier, coverage, premium, "
+                "agency fee, commission rate, effective date, and producer)?",
+                "  (Or attach a text-based PDF and I will read it directly.)",
+                "",
+                "Best,",
+                "Robie AI",
+            ]
+            return WorkflowResult(
+                status="NEEDS_CLARIFICATION",
+                quote=quote,
+                reply_email_subject=subject,
+                reply_email_body="\n".join(body_lines),
+            )
+
         # 1. Match Carrier Identifier. Never invent one: a guessed identifier
         # 422s ("Carrier is invalid") and the failure used to be reported as
-        # success. No match -> ask the sender.
+        # success. No match -> ask the sender. Multiple matches -> also ask:
+        # silently taking the first hit misattributes the agreement.
         carrier_identifier = quote.carrier_identifier
         if not carrier_identifier and quote.carrier_name:
             carriers = client.search_carriers(quote.carrier_name)
-            if carriers:
+            if len(carriers) == 1:
                 carrier_identifier = carriers[0].get("identifier")
+            elif len(carriers) > 1:
+                options = "\n".join(
+                    f"  • {c.get('title') or c.get('name') or '(untitled)'}"
+                    for c in carriers[:8]
+                )
+                subject = f"Which carrier for Ascend agreement: {quote.insured_name}"
+                body_lines = [
+                    f"Hi {sender_name or 'Team'},",
+                    "",
+                    f"\"{quote.carrier_name}\" matched {len(carriers)} carriers in Ascend, "
+                    "so I haven't created the agreement.",
+                    "",
+                    options,
+                    "",
+                    "• Which one is correct? (Reply with the exact name or carrier identifier.)",
+                    "",
+                    "Please reply directly to this email with your answer, and I will generate the Ascend agreement and file it into EZLynx.",
+                    "",
+                    "Best,",
+                    "Robie AI",
+                ]
+                return WorkflowResult(
+                    status="NEEDS_CLARIFICATION",
+                    quote=quote,
+                    reply_email_subject=subject,
+                    reply_email_body="\n".join(body_lines),
+                )
         if not carrier_identifier:
             subject = f"Need carrier name for Ascend agreement: {quote.insured_name}"
             body_lines = [
@@ -310,13 +362,39 @@ class AscendWorkflowManager:
                 reply_email_body="\n".join(body_lines),
             )
 
-        # 2. Match Wholesaler Identifier
+        # 2. Match Wholesaler Identifier. A named wholesaler that doesn't match
+        # is asked about, not silently dropped: dropping it could misattribute
+        # commission on the billable.
         wholesaler_identifier = quote.wholesaler_identifier
         if not wholesaler_identifier and quote.wholesaler_name:
             clean_wholesaler = quote.wholesaler_name.split("|")[0].strip()
             wholesalers = client.search_wholesalers(clean_wholesaler)
-            if wholesalers:
+            if len(wholesalers) == 1:
                 wholesaler_identifier = wholesalers[0].get("identifier")
+            else:
+                # No match or ambiguous: ask rather than silently dropping a
+                # named wholesaler.
+                subject = f"Need wholesaler for Ascend agreement: {quote.insured_name}"
+                body_lines = [
+                    f"Hi {sender_name or 'Team'},",
+                    "",
+                    f"I couldn't match the wholesaler \"{quote.wholesaler_name}\" in Ascend, "
+                    "so I haven't created the agreement.",
+                    "",
+                    "• What is the exact wholesaler name as it appears in Ascend (or the wholesaler identifier)?",
+                    "  (Or reply \"no wholesaler\" and I will proceed without one.)",
+                    "",
+                    "Please reply directly to this email with your answer, and I will generate the Ascend agreement and file it into EZLynx.",
+                    "",
+                    "Best,",
+                    "Robie AI",
+                ]
+                return WorkflowResult(
+                    status="NEEDS_CLARIFICATION",
+                    quote=quote,
+                    reply_email_subject=subject,
+                    reply_email_body="\n".join(body_lines),
+                )
 
         # 3. Resolve Producer & Account Manager. Never substitute: an unmatched
         # sender used to silently become Robie AI via a hardcoded user id,
@@ -397,6 +475,34 @@ class AscendWorkflowManager:
         )
 
         # 5. Build Create Payload
+        # Duplicate guard: if a program already exists for this policy number,
+        # ask before creating another. Resubmits happen (forwarded twice,
+        # retried after a timeout); a silent second program double-bills.
+        # A sender-confirmed duplicate ("confirm duplicate" in a reply) bypasses.
+        if quote.policy_number and not quote.duplicate_confirmed:
+            existing = client.find_program_by_policy(quote.policy_number)
+            if existing:
+                existing_id = existing.get("id") or existing.get("program_id")
+                subject = f"Agreement already exists for policy {quote.policy_number}"
+                body_lines = [
+                    f"Hi {sender_name or 'Team'},",
+                    "",
+                    f"There is already an Ascend agreement for policy \"{quote.policy_number}\" "
+                    f"(program {existing_id}), so I haven't created another one.",
+                    "",
+                    "• If you meant to create a second agreement for this policy, reply \"confirm duplicate\" "
+                    "and I will proceed.",
+                    "",
+                    "Best,",
+                    "Robie AI",
+                ]
+                return WorkflowResult(
+                    status="NEEDS_CLARIFICATION",
+                    quote=quote,
+                    program_id=str(existing_id) if existing_id else None,
+                    reply_email_subject=subject,
+                    reply_email_body="\n".join(body_lines),
+                )
         billable_ident = quote.policy_number or f"Q-{int(time.time())}"
         payload = {
             "execute": True,
