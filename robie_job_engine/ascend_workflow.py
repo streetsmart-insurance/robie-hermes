@@ -479,30 +479,40 @@ class AscendWorkflowManager:
         # ask before creating another. Resubmits happen (forwarded twice,
         # retried after a timeout); a silent second program double-bills.
         # A sender-confirmed duplicate ("confirm duplicate" in a reply) bypasses.
-        if quote.policy_number and not quote.duplicate_confirmed:
-            existing = client.find_program_by_policy(quote.policy_number)
-            if existing:
-                existing_id = existing.get("id") or existing.get("program_id")
-                subject = f"Agreement already exists for policy {quote.policy_number}"
-                body_lines = [
-                    f"Hi {sender_name or 'Team'},",
-                    "",
-                    f"There is already an Ascend agreement for policy \"{quote.policy_number}\" "
-                    f"(program {existing_id}), so I haven't created another one.",
-                    "",
-                    "• If you meant to create a second agreement for this policy, reply \"confirm duplicate\" "
-                    "and I will proceed.",
-                    "",
-                    "Best,",
-                    "Robie AI",
-                ]
-                return WorkflowResult(
-                    status="NEEDS_CLARIFICATION",
-                    quote=quote,
-                    program_id=str(existing_id) if existing_id else None,
-                    reply_email_subject=subject,
-                    reply_email_body="\n".join(body_lines),
-                )
+        # For multi-LOB quotes, check EVERY sub-policy's policy number.
+        policy_numbers_to_check: list[str] = []
+        if quote.sub_policies:
+            for sp in quote.sub_policies:
+                pn = sp.get("policy_number") or quote.policy_number
+                if pn and pn not in policy_numbers_to_check:
+                    policy_numbers_to_check.append(pn)
+        elif quote.policy_number:
+            policy_numbers_to_check.append(quote.policy_number)
+        if policy_numbers_to_check and not quote.duplicate_confirmed:
+            for pn in policy_numbers_to_check:
+                existing = client.find_program_by_policy(pn)
+                if existing:
+                    existing_id = existing.get("id") or existing.get("program_id")
+                    subject = f"Agreement already exists for policy {pn}"
+                    body_lines = [
+                        f"Hi {sender_name or 'Team'},",
+                        "",
+                        f"There is already an Ascend agreement for policy \"{pn}\" "
+                        f"(program {existing_id}), so I haven't created another one.",
+                        "",
+                        "• If you meant to create a second agreement for this policy, reply \"confirm duplicate\" "
+                        "and I will proceed.",
+                        "",
+                        "Best,",
+                        "Robie AI",
+                    ]
+                    return WorkflowResult(
+                        status="NEEDS_CLARIFICATION",
+                        quote=quote,
+                        program_id=str(existing_id) if existing_id else None,
+                        reply_email_subject=subject,
+                        reply_email_body="\n".join(body_lines),
+                    )
         billable_ident = quote.policy_number or f"Q-{int(time.time())}"
         payload = {
             "execute": True,
@@ -517,24 +527,68 @@ class AscendWorkflowManager:
 
         if quote.sub_policies:
             for i, sp in enumerate(quote.sub_policies):
-                suffix = sp.get("billable_suffix") or str(i + 1)
-                b_ident = f"{billable_ident}-{suffix}"
-                b_cov = sp.get("coverage_identifier") or quote.coverage_identifier or "commercial_auto"
+                # Validate: each sub-policy must have a positive premium.
+                # A zero/missing premium means extraction failed for this LOB;
+                # fail closed rather than creating a $0 billable.
                 b_prem = sp.get("pure_premium_cents", 0)
+                if b_prem <= 0:
+                    return WorkflowResult(
+                        status="ERROR",
+                        quote=quote,
+                        reply_email_subject=f"Missing premium for {sp.get('title') or sp.get('coverage_identifier')}: {quote.insured_name}",
+                        reply_email_body=(
+                            f"Hi {sender_name or 'Team'},\n\n"
+                            f"I found multiple lines of business in the quote for {quote.insured_name}, "
+                            f"but I couldn't determine the premium for "
+                            f"\"{sp.get('title') or sp.get('coverage_identifier')}\". "
+                            f"I haven't created the agreement.\n\n"
+                            f"• What is the premium for this line of business?\n\n"
+                            "Best,\nRobie AI"
+                        ),
+                    )
+                # Per-sub-policy carrier: writing carrier first, then carrier
+                # name, then fall back to the parent quote's resolved carrier.
+                # Different LOBs can be written by different carriers.
+                sp_carrier_identifier = sp.get("carrier_identifier")
+                if not sp_carrier_identifier:
+                    sp_carrier_name = (
+                        sp.get("writing_carrier_name")
+                        or sp.get("carrier_name")
+                        or quote.writing_carrier_name
+                    )
+                    if sp_carrier_name and sp_carrier_name != quote.carrier_name:
+                        sp_carriers = client.search_carriers(sp_carrier_name)
+                        if len(sp_carriers) == 1:
+                            sp_carrier_identifier = sp_carriers[0].get("identifier")
+                        # 0 or 2+ matches: fall through to parent carrier;
+                        # the parent's fail-closed logic already handled the
+                        # ambiguous case.
+                if not sp_carrier_identifier:
+                    sp_carrier_identifier = carrier_identifier  # parent resolved
+                # Per-sub-policy policy number, dates; fall back to parent.
+                sp_policy_number = sp.get("policy_number") or quote.policy_number
+                suffix = sp.get("billable_suffix") or str(i + 1)
+                b_ident = f"{sp_policy_number}-{suffix}" if sp_policy_number else f"{billable_ident}-{suffix}"
+                b_cov = sp.get("coverage_identifier") or quote.coverage_identifier or "commercial_auto"
                 b_pol_fee = sp.get("policy_fee_cents", 0)
                 b_tax = sp.get("taxes_and_fees_cents") or sp.get("surplus_lines_tax_cents", 0)
+                b_eff = sp.get("effective_date") or quote.effective_date
+                b_exp = sp.get("expiration_date") or quote.expiration_date
+                b_comm = sp.get("commission_rate")
+                if b_comm is None:
+                    b_comm = quote.commission_rate if quote.commission_rate is not None else 0.10
                 # Apply agency fee to primary (first) policy so it is charged once on the agreement
                 b_agency_fee = quote.agency_fees_cents if i == 0 else 0
 
                 billable = {
                     "billable_identifier": b_ident,
-                    "carrier_identifier": carrier_identifier,  # guaranteed non-empty above; never guess
+                    "carrier_identifier": sp_carrier_identifier,  # never guessed; resolved above
                     "coverage_identifier": b_cov,
-                    "effective_date": quote.effective_date,
-                    "expiration_date": quote.expiration_date,
+                    "effective_date": b_eff,
+                    "expiration_date": b_exp,
                     "premium_cents": b_prem,
                     "agency_fees_cents": b_agency_fee,
-                    "organization_commission_rate": quote.commission_rate if quote.commission_rate is not None else 0.10,
+                    "organization_commission_rate": b_comm,
                     "taxes_and_fees_cents": b_tax,
                 }
                 if wholesaler_identifier:

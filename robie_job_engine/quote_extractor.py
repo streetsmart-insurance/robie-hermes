@@ -566,6 +566,13 @@ class QuoteExtractor:
                 if general_premium:
                     quote.pure_premium_cents = _parse_dollars_to_cents(general_premium.group(1))
 
+        # 7b. General multi-LOB detection: if the MTC+PD special case did not
+        # fire, look for multiple distinct coverage sections, each with its
+        # own premium. Each becomes a sub-policy → separate billable under
+        # one program. Never blend LOBs into a single billable.
+        if not quote.sub_policies:
+            self._detect_multiple_lobs(quote, text)
+
         # 8. Parameter 1: Agency Fee
         fee_match = re.search(
             r"(?:Agency\s+Fee|Producer\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
@@ -780,6 +787,118 @@ class QuoteExtractor:
         )
         if wc_match:
             quote.writing_carrier_name = wc_match.group(1).strip()
+
+    def _detect_multiple_lobs(self, quote: ExtractedQuote, text: str) -> None:
+        """Detect multiple lines of business in one quote document.
+
+        Each distinct coverage section with its own premium becomes a
+        sub-policy. Each sub-policy carries its own policy number, carrier
+        (writing carrier), dates, and commission rate when present —
+        falling back to the parent quote's values. Sections without a
+        detectable premium are skipped (they cannot become billables).
+        """
+        # Split text into candidate sections by coverage headers.
+        # A header is a line that is mostly a coverage name.
+        sections: list[tuple[str, str]] = []  # (coverage_ident, section_text)
+        lines = text.splitlines()
+        current_ident: str | None = None
+        current_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip().lower()
+            matched_ident: str | None = None
+            # Header heuristic: line is short and matches/contains a coverage name
+            if len(stripped) < 60:
+                for cov_title, cov_ident in COVERAGE_MAP.items():
+                    if len(cov_title) >= 4 and cov_title in stripped:
+                        # Avoid matching inside longer unrelated phrases
+                        matched_ident = cov_ident
+                        break
+            if matched_ident and matched_ident != current_ident:
+                if current_ident and current_lines:
+                    sections.append((current_ident, "\n".join(current_lines)))
+                current_ident = matched_ident
+                current_lines = [line]
+            elif current_ident:
+                current_lines.append(line)
+        if current_ident and current_lines:
+            sections.append((current_ident, "\n".join(current_lines)))
+
+        # Deduplicate: keep first occurrence of each coverage
+        seen: set[str] = set()
+        unique_sections: list[tuple[str, str]] = []
+        for ident, sec_text in sections:
+            if ident not in seen:
+                seen.add(ident)
+                unique_sections.append((ident, sec_text))
+
+        # Need at least 2 sections with premiums to be multi-LOB
+        candidates: list[dict] = []
+        for ident, sec_text in unique_sections:
+            prem = re.search(
+                r"(?:premium|total|cost)[\s:]*\$?\s*([\d,]+(?:\.\d{2})?)",
+                sec_text,
+                re.IGNORECASE,
+            )
+            if not prem:
+                continue
+            premium_cents = _parse_dollars_to_cents(prem.group(1))
+            if premium_cents <= 0:
+                continue
+            sp: dict = {
+                "coverage_identifier": ident,
+                "title": ident.replace("_", " ").title(),
+                "pure_premium_cents": premium_cents,
+                "billable_suffix": ident[:3].upper(),
+            }
+            # Per-section policy number
+            pol = re.search(
+                r"(?:Policy\s+(?:#|Number|No)|Quote\s+(?:#|Number))[\s:]+([A-Z0-9\-_]+)",
+                sec_text,
+                re.IGNORECASE,
+            )
+            if pol:
+                sp["policy_number"] = pol.group(1).strip()
+            # Per-section carrier (writing carrier for this LOB)
+            carr = re.search(
+                r"(?:Carrier|Insurer|Writing\s+Company)[\s:]+([^\n\r,]+)",
+                sec_text,
+                re.IGNORECASE,
+            )
+            if carr:
+                sp["carrier_name"] = carr.group(1).strip()
+            wc = re.search(
+                r"(?:writing\s+(?:company|carrier|insurer)|underwritten\s+by)"
+                r"\s*(?:is|:|=)?\s*([^\n\r,]+)",
+                sec_text,
+                re.IGNORECASE,
+            )
+            if wc:
+                sp["writing_carrier_name"] = wc.group(1).strip()
+            # Per-section dates
+            eff = re.search(
+                r"effect(?:ive)?(?:\s+date)?\s*:\s*(\d{1,2}/\d{1,2}/\d{4})",
+                sec_text,
+                re.IGNORECASE,
+            )
+            exp = re.search(
+                r"expir(?:ation|y)(?:\s+date)?\s*:\s*(\d{1,2}/\d{1,2}/\d{4})",
+                sec_text,
+                re.IGNORECASE,
+            )
+            try:
+                if eff:
+                    sp["effective_date"] = datetime.strptime(eff.group(1), "%m/%d/%Y").date().isoformat()
+                if exp:
+                    sp["expiration_date"] = datetime.strptime(exp.group(1), "%m/%d/%Y").date().isoformat()
+            except ValueError:
+                pass
+            candidates.append(sp)
+
+        if len(candidates) >= 2:
+            quote.sub_policies = candidates
+            # Parent premium becomes the sum for display; each billable keeps
+            # its own premium.
+            quote.pure_premium_cents = sum(c["pure_premium_cents"] for c in candidates)
 
     def _evaluate_hitl_requirements(self, quote: ExtractedQuote, combined_text: str) -> None:
         reasons: list[str] = []
