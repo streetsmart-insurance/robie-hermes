@@ -21,10 +21,15 @@ def test_workflow_is_protected_main_test_only_and_read_only():
     assert "rm -" not in text
 
 
-def test_workflow_only_runs_read_only_inspection_commands():
+def test_workflow_streams_bounded_collector_and_retains_failed_evidence():
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "systemctl cat robie-gateway" in text
-    assert "systemctl list-units" in text
-    assert "ss -tln" in text
-    assert "pgrep -fa" in text
-    assert "::notice::" in text
+    assert "systemctl cat" not in text
+    assert "pgrep -fa" not in text
+    assert "exit 0" not in text
+    assert "set -euo pipefail" in text
+    assert "< scripts/diagnose_test_release_readonly.py" in text
+    assert "python3 -I -B -" in text
+    assert "OSLOGIN_SSH_KEY_TTL: 1h" in text
+    assert "inputs.temporary_ssh_key_approved == true" in text
+    assert "if: always()" in text
+    assert "test-release-snapshot.json" in text
