@@ -270,7 +270,7 @@ class UserReplyTests(unittest.TestCase):
         self.assertGreaterEqual(len(sites), 8)
         missing = []
         for path, name, source in sites:
-            if "format_user_reply" in source:
+            if "format_user_reply" in source or "format_outbound_reply" in source:
                 continue
             if (path, name) in EXEMPT_SENDS:
                 continue

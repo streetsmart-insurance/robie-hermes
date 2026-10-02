@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import unittest
 from email.message import Message
 from pathlib import Path
