@@ -259,6 +259,18 @@ def archive_bytes(directory_fd, name, limit):
         return data
 
 
+def archive_digest_before(data, deadline):
+    hasher = hashlib.sha256()
+    view = memoryview(data)
+    for offset in range(0, len(view), 1024 * 1024):
+        require(time.monotonic() <= deadline, 'archive_search_limit')
+        hasher.update(view[offset:offset + 1024 * 1024])
+        require(time.monotonic() <= deadline, 'archive_search_limit')
+    value = hasher.hexdigest()
+    require(time.monotonic() <= deadline, 'archive_search_limit')
+    return value
+
+
 def find_rollback_archive(root, staging, commit, sha, output):
     """Search release-storage layouts only, never source/runtime/home trees.
 
@@ -269,7 +281,7 @@ def find_rollback_archive(root, staging, commit, sha, output):
     name = f'robie-hermes-{commit[:12]}.tgz'
     layout = re.compile(r'(?:[0-9a-f]{12,40}|robie-hermes-[0-9a-f]{12}|archives|packages|retained|releases|deployments)')
     search = {'roots': [str(p) for p in roots], 'entries': 0, 'candidates': 0,
-              'bytes_read': 0, 'complete': False, 'scope': 'release_storage_layouts_only'}
+              'bytes_reserved': 0, 'complete': False, 'scope': 'release_storage_layouts_only'}
     output['archive_search'] = search
     deadline = time.monotonic() + SEARCH_SECONDS
     incomplete = False
@@ -286,15 +298,22 @@ def find_rollback_archive(root, staging, commit, sha, output):
                     search['candidates'] += 1
                     require(search['candidates'] <= SEARCH_CANDIDATES, 'archive_search_limit')
                     try:
-                        remaining = MAX_EXPANDED - search['bytes_read']
-                        require(remaining > 0, 'archive_search_limit')
-                        data = archive_bytes(fd, name, min(MAX_ARCHIVE, remaining))
-                        search['bytes_read'] += len(data)
-                        require(search['bytes_read'] <= MAX_EXPANDED and time.monotonic() <= deadline,
+                        remaining = MAX_EXPANDED - search['bytes_reserved']
+                        require(remaining > 1, 'archive_search_limit')
+                        limit = min(MAX_ARCHIVE, remaining - 1)
+                        # Reserve the complete possible read, including the extra
+                        # growth-detection byte. Failed reads never refund budget.
+                        search['bytes_reserved'] += limit + 1
+                        data = archive_bytes(fd, name, limit)
+                        require(time.monotonic() <= deadline, 'archive_search_limit')
+                        require(search['bytes_reserved'] + 257 <= MAX_EXPANDED,
                                 'archive_search_limit')
+                        search['bytes_reserved'] += 257
                         checksum = archive_bytes(fd, name + '.sha256', 256).decode().split()
-                        require(checksum == [sha, name] and digest(data) == sha,
+                        require(time.monotonic() <= deadline, 'archive_search_limit')
+                        require(checksum == [sha, name] and archive_digest_before(data, deadline) == sha,
                                 'rollback_archive_digest')
+                        require(time.monotonic() <= deadline, 'archive_search_limit')
                         return path / name, data
                     except Refused as exc:
                         if str(exc) == 'archive_search_limit':

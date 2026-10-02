@@ -411,6 +411,75 @@ class TestReadonlyRelease(unittest.TestCase):
                 self.assertIn('durable_work', report['checks'])
                 self.assertIn('policy_skill', report['checks'])
 
+    def test_checksum_read_crossing_deadline_cannot_report_a_match(self):
+        now = [0.0]
+        read = audit.archive_bytes
+        def delayed_checksum(fd, name, limit):
+            data = read(fd, name, limit)
+            if name.endswith('.sha256'):
+                now[0] = 11.0
+            return data
+        with patch.object(audit.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(audit, 'archive_bytes', side_effect=delayed_checksum):
+            report = self.collect()
+        self.assertIn('archive_search_limit', report['errors'])
+        self.assertFalse(report['checks']['release']['archive_search'].get('matched', False))
+        self.assertFalse(report['snapshot_verified'])
+        self.assertIn('durable_work', report['checks'])
+
+    def test_archive_hash_checks_deadline_after_each_bounded_chunk(self):
+        now = [0.0]
+        hasher = Mock()
+        sizes = []
+        def delayed_update(chunk):
+            sizes.append(len(chunk))
+            now[0] = 11.0
+        hasher.update.side_effect = delayed_update
+        with patch.object(audit.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(audit.hashlib, 'sha256', return_value=hasher):
+            with self.assertRaisesRegex(audit.Refused, 'archive_search_limit'):
+                audit.archive_digest_before(b'x' * (2 * 1024 * 1024), 10.0)
+        self.assertEqual(sizes, [1024 * 1024])
+        hasher.hexdigest.assert_not_called()
+
+    def test_digest_completion_crossing_deadline_cannot_report_a_match(self):
+        now = [0.0]
+        calculate = audit.archive_digest_before
+        def delayed_digest(data, deadline):
+            result = calculate(data, deadline)
+            now[0] = 11.0
+            return result
+        with patch.object(audit.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(audit, 'archive_digest_before', side_effect=delayed_digest):
+            report = self.collect()
+        self.assertIn('archive_search_limit', report['errors'])
+        self.assertFalse(report['checks']['release']['archive_search'].get('matched', False))
+        self.assertFalse(report['snapshot_verified'])
+
+    def test_rejected_growing_reads_still_consume_aggregate_budget(self):
+        from types import SimpleNamespace
+        import stat
+        for name in ('b' * 40, 'c' * 40):
+            self.write(self.staging / name / self.archive.name, b'x' * 9)
+        self.archive.write_bytes(b'x' * 9)
+        real_read = audit.archive_bytes
+        attempted_bytes = []
+        def growing_read(fd, name, limit):
+            attempted_bytes.append(min(9, limit + 1))
+            # The regular file now has 9 bytes despite its earlier small stat.
+            with patch.object(audit.os, 'fstat', return_value=SimpleNamespace(
+                    st_mode=stat.S_IFREG, st_size=0)):
+                return real_read(fd, name, limit)
+        output = {}
+        with patch.object(audit, 'MAX_ARCHIVE', 8), \
+                patch.object(audit, 'MAX_EXPANDED', 16), \
+                patch.object(audit, 'archive_bytes', side_effect=growing_read):
+            with self.assertRaisesRegex(audit.Refused, 'archive_search_limit'):
+                audit.find_rollback_archive(self.root, self.staging, self.commit, '0' * 64, output)
+        self.assertEqual(attempted_bytes, [9, 7])
+        self.assertEqual(output['archive_search']['bytes_reserved'], 16)
+        self.assertFalse(output['archive_search'].get('matched', False))
+
     def test_driver_conflict_still_collects_other_evidence(self):
         self.driver.update(state='IN', holder='PRODUCTION', clear=False)
         self.refused('driver_conflict_or_expired')
