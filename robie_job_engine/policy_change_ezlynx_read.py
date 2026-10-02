@@ -265,8 +265,10 @@ def read_task_request(task: Mapping[str, Any] | None) -> dict[str, Any]:
     """Read one EZLynx task as a request source. Does not call EZLynx.
 
     The due date stays a due date. It is not the requested effective date.
-    A date is taken only from an explicit requested-effective-date field.
-    Title, description, and comments are kept as written. They are not parsed.
+    An explicit requested-effective-date field is kept when the snapshot
+    has one. Title, description, and comments are kept as written. A later
+    step may use one complete date from that text. This function does not
+    choose among dates and does not guess a year.
     """
     row = task if isinstance(task, Mapping) else {}
     return {

@@ -6,9 +6,11 @@ the carrier-issued endorsement, and the EZLynx record, and drafts a
 plain-English note ending with "ROBIE was here".
 
 When the check finishes — or when ROBIE is not sure — the task goes back
-to the person who assigned it. A new task is never created. The note is
-filed to the applicant's existing discussion through the Discussion API;
-the reassignment runs in the box browser because EZLynx has no Task API.
+to the person who assigned it. A task created already assigned to ROBIE
+goes back to its creator, and that hand-back is a judgment call. A new
+task is never created. The result note is posted as a comment on the
+task. The reassignment runs in the box browser because EZLynx has no
+Task API. A hold names the person who owns the task now.
 
 This is not the weekly 4359 overdue checker and not
 ``policy_change_verification``. Those paths stay as they are.
@@ -42,6 +44,16 @@ PROVISIONAL_CARRIER = "Progressive"
 NOTE_SIGNATURE = "ROBIE was here"
 WRITES_ENABLED = False
 REQUEST_SOURCE_UNCLEAR = "request source unclear (e.g. call recording)"
+REQUEST_SOURCE_UNCLEAR_OTHER = "request source unclear"
+_UNCLEAR_REQUEST_MARKS = frozenset({REQUEST_SOURCE_UNCLEAR, REQUEST_SOURCE_UNCLEAR_OTHER})
+DATE_CHECK_SKIPPED_NONE = (
+    "The task text does not contain one complete effective date, so the "
+    "task-versus-request date check was skipped."
+)
+DATE_CHECK_SKIPPED_MANY = (
+    "The task text contains more than one date, so the task-versus-request "
+    "date check was skipped. No date was chosen."
+)
 EZLYNX_FILED_SOURCE = "ezlynx_filed_carrier_document"
 FILED_SOURCE_STATEMENT = (
     "This endorsement was already filed in EZLynx. The live carrier download "
@@ -189,6 +201,18 @@ _DATE_FORMATS = (
     "%m/%d/%y",
     "%B %d, %Y",
     "%b %d, %Y",
+)
+
+# A complete date only. "6/22" has no year and is not a date.
+_TASK_DATE_RE = re.compile(
+    r"\b(?:"
+    r"\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"\s+\d{1,2},\s+\d{4}"
+    r")\b",
+    re.IGNORECASE,
 )
 
 _BASIS_ALIASES = {
@@ -750,27 +774,39 @@ def _reread_problem(packet: Mapping[str, Any], event: Mapping[str, Any]) -> str 
     return None
 
 
+def _recording_request(request: Mapping[str, Any]) -> bool:
+    """True only when the request source itself is a call recording.
+
+    A carrier-download task is not a call recording, even when the written
+    request is missing or undated.
+    """
+    label = str(request.get("source") or request.get("kind") or "").strip().casefold()
+    if label in {"carrier_download", "carrier-download", "carrier download"}:
+        return False
+    return request.get("recording") is True or label in _UNWRITTEN_REQUEST_SOURCES
+
+
 def unclear_written_request(packet: Mapping[str, Any]) -> str | None:
     """Hold when no written request states an effective date.
 
-    A call recording is not a written request. This does not read a recording,
-    and it does not copy a date from the carrier or from EZLynx.
+    The call-recording example is used only when the source is a recording.
+    This does not read a recording, and it does not copy a date from the
+    carrier, from EZLynx, or from the task.
     """
     request = packet.get("request") if isinstance(packet.get("request"), Mapping) else None
     if not request:
-        return REQUEST_SOURCE_UNCLEAR
-    label = str(request.get("source") or request.get("kind") or "").strip().casefold()
-    if request.get("recording") is True or label in _UNWRITTEN_REQUEST_SOURCES:
+        return REQUEST_SOURCE_UNCLEAR_OTHER
+    if _recording_request(request):
         return REQUEST_SOURCE_UNCLEAR
     if request.get("written") is False:
-        return REQUEST_SOURCE_UNCLEAR
+        return REQUEST_SOURCE_UNCLEAR_OTHER
     cell = _cell(request, "effective_date")
     raw = None if cell is None else cell.get("raw")
     if _blank(raw):
-        return REQUEST_SOURCE_UNCLEAR
+        return REQUEST_SOURCE_UNCLEAR_OTHER
     normalized, rule = _normalize("date", raw)
     if rule == "unparsed" or _blank(normalized):
-        return REQUEST_SOURCE_UNCLEAR
+        return REQUEST_SOURCE_UNCLEAR_OTHER
     return None
 
 
@@ -794,14 +830,79 @@ def _merge_task_request(packet: Mapping[str, Any]) -> dict[str, Any]:
         merged.setdefault(key, "")
     merged.setdefault("comments", [])
     merged.setdefault("attachments", [])
+    classified = _task_date_classification(merged)
+    merged["date_check"] = classified["status"]
+    if classified["status"] == "one" and _blank(merged.get("requested_effective_date")):
+        merged["requested_effective_date"] = classified["raw"]
     merged["writes"] = 0
     return merged
+
+
+def _task_prose_parts(task: Mapping[str, Any]) -> list[str]:
+    """Title, description, and comment text. The due date is not included."""
+    parts: list[str] = []
+    for key in ("title", "description"):
+        text = str(task.get(key) or "").strip()
+        if text:
+            parts.append(text)
+    comments = task.get("comments")
+    if isinstance(comments, list):
+        for item in comments:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+                continue
+            if isinstance(item, Mapping):
+                text = str(item.get("text") or item.get("body") or "").strip()
+                if text:
+                    parts.append(text)
+    return parts
+
+
+def _complete_dates(text: str) -> list[tuple[str, str]]:
+    """Complete dates in ``text``, as (raw, normalized). A year is required."""
+    found: list[tuple[str, str]] = []
+    for match in _TASK_DATE_RE.finditer(text):
+        raw = _collapse(match.group(0))
+        candidate = raw.title() if raw[:1].isalpha() else raw
+        normalized, rule = _normalize("date", candidate)
+        if rule == "unparsed" or _blank(normalized):
+            continue
+        found.append((raw, str(normalized)))
+    return found
+
+
+def _task_date_classification(task: Mapping[str, Any]) -> dict[str, str]:
+    """One date from the task, or a skip.
+
+    EZLynx tasks have no requested-date field. A single complete date in
+    the title, description, or comments is used. An explicit field counts
+    too. Zero complete dates, or more than one distinct date, is a skip.
+    The due date is never scanned.
+    """
+    parts = _task_prose_parts(task)
+    by_norm: dict[str, str] = {}
+    field = str(task.get("requested_effective_date") or "").strip()
+    if field:
+        normalized, rule = _normalize("date", field)
+        if rule != "unparsed" and not _blank(normalized):
+            by_norm[str(normalized)] = field
+    for raw, normalized in _complete_dates("\n".join(parts)):
+        by_norm.setdefault(normalized, raw)
+    if len(by_norm) == 1:
+        normalized = next(iter(by_norm))
+        return {"status": "one", "raw": by_norm[normalized], "normalized": normalized, "sentence": ""}
+    if len(by_norm) > 1:
+        return {"status": "many", "raw": "", "normalized": "", "sentence": DATE_CHECK_SKIPPED_MANY}
+    if parts:
+        return {"status": "none", "raw": "", "normalized": "", "sentence": DATE_CHECK_SKIPPED_NONE}
+    return {"status": "absent", "raw": "", "normalized": "", "sentence": ""}
 
 
 def read_request_sources(packet: Mapping[str, Any]) -> dict[str, Any]:
     """Client Center request, discussion notes, and the EZLynx task.
 
-    Discussion text and task prose are not searched for a date.
+    Discussion notes are not searched for a date. Task title, description,
+    and comments are, and only a single complete date is kept.
     """
     request = packet.get("request") if isinstance(packet.get("request"), Mapping) else {}
     cell = _cell(request, "effective_date")
@@ -834,29 +935,44 @@ def task_date_disagreement(packet: Mapping[str, Any]) -> dict[str, Any] | None:
     """Flag a date conflict between the written request and the EZLynx task.
 
     Returns nothing when the written request is unclear, so a task date is
-    not used to fill that gap. A task due date is not a requested date.
+    not used to fill that gap. Returns nothing when the task text has no
+    single complete date; that skip is recorded separately. A task due date
+    is not a requested date.
     """
     if unclear_written_request(packet):
         return None
     request = packet.get("request") if isinstance(packet.get("request"), Mapping) else {}
     cell = _cell(request, "effective_date")
     client_raw = None if cell is None else cell.get("raw")
-    task_raw = _merge_task_request(packet).get("requested_effective_date")
-    if _blank(client_raw) or _blank(task_raw):
+    classified = _task_date_classification(_merge_task_request(packet))
+    if classified["status"] != "one" or _blank(client_raw) or _blank(classified["raw"]):
         return None
     client_norm, client_rule = _normalize("date", client_raw)
-    task_norm, task_rule = _normalize("date", task_raw)
-    if client_rule == "unparsed" or task_rule == "unparsed":
+    if client_rule == "unparsed" or _blank(client_norm):
         return None
-    if client_norm == task_norm:
+    if client_norm == classified["normalized"]:
         return None
     return {
         "code": "task_request_date_disagreement",
         "client_request": client_norm,
-        "ezlynx_task": task_norm,
+        "ezlynx_task": classified["normalized"],
         "client_request_raw": client_raw,
-        "ezlynx_task_raw": task_raw,
+        "ezlynx_task_raw": classified["raw"],
     }
+
+
+def task_date_skip(packet: Mapping[str, Any]) -> dict[str, str] | None:
+    """Say when the task-versus-request date check cannot be made.
+
+    An unclear written request stays on its own hold. A task with no title,
+    description, or comments, and no explicit date, is not mentioned.
+    """
+    if unclear_written_request(packet):
+        return None
+    classified = _task_date_classification(_merge_task_request(packet))
+    if classified["status"] not in {"none", "many"}:
+        return None
+    return {"code": "task_request_date_check_skipped", "reason": classified["sentence"]}
 
 
 def _document_problem(packet: Mapping[str, Any]) -> str | None:
@@ -961,14 +1077,17 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     insured = _present_raw(_cell(request, "named_insured")) or "The named insured"
     number = case.get("policy_number") or _present_raw(_cell(request, "policy_number")) or "an unnamed policy"
     term = case.get("term") or ""
-    if result.get("request_source") == REQUEST_SOURCE_UNCLEAR:
+    if result.get("request_source") in _UNCLEAR_REQUEST_MARKS:
         effective = "not stated"
         requested = (
-            f"{REQUEST_SOURCE_UNCLEAR}. A person needs to review this. "
+            f"{result.get('request_source')}. A person needs to review this. "
             "No date was guessed."
         )
     else:
-        effective = case.get("requested_effective_date") or ""
+        effective = str(case.get("requested_effective_date") or "").strip()
+        if not effective:
+            cell = _cell(request, "effective_date")
+            effective = "" if cell is None else str(cell.get("raw") or "").strip()
         requested = str(request.get("summary") or "").strip() or "The requested change was not spelled out."
     issued = str(carrier.get("summary") or "").strip()
     if not issued:
@@ -1004,6 +1123,16 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     else:
         matches = "The comparison is not finished."
         exceptions = "The check stopped before every item was compared."
+    skipped = next(
+        (
+            item
+            for item in (result.get("flags") or [])
+            if isinstance(item, Mapping) and item.get("code") == "task_request_date_check_skipped"
+        ),
+        None,
+    )
+    if skipped and skipped.get("reason") and str(skipped.get("reason")) not in exceptions:
+        exceptions = f"{exceptions} {skipped.get('reason')}".strip()
     if filing:
         documents = (
             f"Saved name: {filing.get('name') or 'not recorded'}. "
@@ -1017,8 +1146,17 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     if isinstance(source, Mapping) and source.get("statement"):
         documents = f"{documents} {source.get('statement')}"
     follow_up = packet.get("follow_up_date") or "not set"
+    if result.get("request_source") in _UNCLEAR_REQUEST_MARKS:
+        policy_line = f"{insured}, policy {number}, term {term}, effective {effective}."
+    elif not str(effective).strip():
+        policy_line = (
+            f"{insured}, policy {number}, term {term}. "
+            "The requested effective date is not known."
+        )
+    else:
+        policy_line = f"{insured}, policy {number}, term {term}, effective {effective}."
     sections = [
-        ("Policy and effective date", f"{insured}, policy {number}, term {term}, effective {effective}."),
+        ("Policy and effective date", policy_line),
         ("Requested", requested),
         ("Carrier issued", issued),
         ("EZLynx recorded", recorded),
@@ -1222,6 +1360,9 @@ def _finish(
     disagreement = task_date_disagreement(packet)
     if disagreement:
         flags.append(disagreement)
+    skipped_date = task_date_skip(packet)
+    if skipped_date:
+        flags.append(skipped_date)
     draft = {
         "outcome": headline,
         "outcomes": unique,
@@ -1259,8 +1400,8 @@ def _finish(
         "result_sentence": result_sentence,
         "next_action": _next_action(headline, assigner_name),
         "reason": reason,
-        "request_source": REQUEST_SOURCE_UNCLEAR if reason == REQUEST_SOURCE_UNCLEAR else None,
-        "hold_for_human": reason == REQUEST_SOURCE_UNCLEAR,
+        "request_source": reason if reason in _UNCLEAR_REQUEST_MARKS else None,
+        "hold_for_human": reason in _UNCLEAR_REQUEST_MARKS,
         "blocked_target": blocked_target,
         "case_key": case_key(packet),
         "source_hash": source_hash(packet),

@@ -21,7 +21,9 @@ from robie_job_engine.policy_change_confirmation import (
     JOB_TYPE,
     NOTE_SIGNATURE,
     REQUEST_SOURCE_UNCLEAR,
+    REQUEST_SOURCE_UNCLEAR_OTHER,
     ROLE_DECISION,
+    draft_note,
     ConfirmationLedger,
     DisabledWrites,
     PolicyChangeConfirmationWorker,
@@ -723,10 +725,14 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         )
         due_result = run_confirmation(due_only)
         self.assertFalse(any(item["code"] == "task_request_date_disagreement" for item in due_result["flags"]))
+        self.assertTrue(any(item["code"] == "task_request_date_check_skipped" for item in due_result["flags"]))
         self.assertEqual(due_result["outcome"], "ready_for_human_review")
         self.assertEqual(due_result["request_sources"]["ezlynx_task"]["requested_effective_date"], "")
         self.assertEqual(due_result["request_sources"]["ezlynx_task"]["due_date"], "2026-04-01")
         self.assertNotIn("Neither date was chosen.", due_result["note"])
+        self.assertIn("task-versus-request date check was skipped", due_result["note"])
+        self.assertNotIn("2026-04-01", due_result["note"])
+        self.assertIn("No exceptions.", due_result["note"])
 
         same = copy.deepcopy(clean_packet())
         same["task"]["requested_effective_date"] = "March 1, 2026"
@@ -789,7 +795,8 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         missing["request"] = {}
         missing["case"]["requested_effective_date"] = "2026-03-01"
         missing_result = run_confirmation(missing)
-        self.assertEqual(missing_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertEqual(missing_result["request_source"], REQUEST_SOURCE_UNCLEAR_OTHER)
+        self.assertNotIn("call recording", missing_result["note"].casefold())
         self.assertTrue(missing_result["hold_for_human"])
         self.assertEqual(missing_result["comparison"], [])
         self.assertNotIn("2026-03-01", missing_result["note"])
@@ -800,7 +807,8 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         undated["case"]["requested_effective_date"] = ""
         undated["carrier_document"]["fields"]["effective_date"]["raw"] = "2026-04-01"
         undated_result = run_confirmation(undated)
-        self.assertEqual(undated_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertEqual(undated_result["request_source"], REQUEST_SOURCE_UNCLEAR_OTHER)
+        self.assertNotIn("call recording", undated_result["note"].casefold())
         self.assertTrue(undated_result["hold_for_human"])
         self.assertEqual(undated_result["comparison"], [])
         self.assertNotIn("2026-04-01", undated_result["note"])
@@ -858,20 +866,26 @@ class PolicyChangeTaskActionTests(unittest.TestCase):
         packet = copy.deepcopy(clean_packet())
         packet["assignment_events"] = []
         packet["case"]["original_assigner_id"] = ""
+        packet["task"]["created_by"] = ""
         result = run_confirmation(packet, writes=DisabledWrites())
         action = result["task_action"]
         self.assertEqual(action["action"], "hold")
         self.assertIs(action["create_task"], False)
+        self.assertFalse(action["judgment_call"])
         self.assertNotIn("to_assigner_id", action)
+        self.assertIn("stays with ROBIE", action["reason"])
 
     def test_hold_when_assigner_is_robie(self):
         packet = copy.deepcopy(clean_packet())
         packet["assignment_events"][0]["previous_owner_id"] = "SSRobie"
         packet["assignment_events"][0]["previous_owner_name"] = "SSRobie"
+        packet["task"]["created_by"] = ""
         result = run_confirmation(packet, writes=DisabledWrites())
         action = result["task_action"]
         self.assertEqual(action["action"], "hold")
         self.assertIs(action["create_task"], False)
+        self.assertFalse(action["judgment_call"])
+        self.assertIn("stays with ROBIE", action["reason"])
 
     def test_create_task_is_always_false(self):
         for packet in (clean_packet(), three_jr_packet()):
@@ -930,6 +944,169 @@ class PolicyChangeTaskActionTests(unittest.TestCase):
         self.assertIn("task comment", plan_text)
         self.assertIn("csr-maria", plan_text)
         self.assertEqual(outcome["note_channel"], "task_comment")
+
+    def test_hold_names_the_person_who_owns_the_task(self):
+        from robie_job_engine.policy_change_task_executor import describe_plan
+
+        result = run_confirmation(three_jr_packet(), writes=DisabledWrites())
+        action = result["task_action"]
+        self.assertEqual(action["action"], "hold")
+        self.assertIs(action["create_task"], False)
+        self.assertIn("stays with Eimy Ramos", action["reason"])
+        self.assertNotIn("stays with ROBIE", action["reason"])
+        plan = "\n".join(describe_plan(action))
+        self.assertIn("stays with Eimy Ramos", plan)
+        self.assertNotIn("stays with ROBIE", plan)
+        self.assertEqual(result["external_writes"], 0)
+
+    def test_call_recording_wording_only_for_a_call_recording(self):
+        download = copy.deepcopy(clean_packet())
+        download["request"]["source"] = "carrier_download"
+        download["request"]["written"] = False
+        held = run_confirmation(download, writes=DisabledWrites())
+        self.assertEqual(held["request_source"], REQUEST_SOURCE_UNCLEAR_OTHER)
+        self.assertTrue(held["hold_for_human"])
+        self.assertNotIn("call recording", held["note"].casefold())
+        self.assertNotIn("call recording", held["task_action"]["reason"].casefold())
+        self.assertIn("request source unclear", held["note"])
+        self.assertEqual(held["external_writes"], 0)
+
+        blocked = copy.deepcopy(clean_packet())
+        blocked["request"]["source"] = "carrier-download"
+        blocked["carrier_document"] = {}
+        blocked["directory_entry"] = {"document_download_route": "progressive"}
+        blocked_result = run_confirmation(blocked, writes=DisabledWrites())
+        self.assertEqual(blocked_result["outcome"], "retrieval_blocked")
+        self.assertIsNone(blocked_result["request_source"])
+        self.assertNotIn("call recording", blocked_result["note"].casefold())
+
+        recording = copy.deepcopy(clean_packet())
+        recording["request"]["source"] = "call recording"
+        recording_result = run_confirmation(recording, writes=DisabledWrites())
+        self.assertEqual(recording_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertIn("call recording", recording_result["note"])
+
+    def test_blank_requested_date_uses_plain_wording(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["case"]["requested_effective_date"] = ""
+        packet["request"]["fields"]["effective_date"]["raw"] = ""
+        note = draft_note(
+            packet,
+            {
+                "request_source": None,
+                "comparison_complete": False,
+                "comparison": [],
+                "flags": [],
+                "outcome": "retrieval_blocked",
+                "result_sentence": "A person needs to look at this.",
+            },
+        )
+        self.assertNotIn("effective .", note)
+        self.assertIn("The requested effective date is not known.", note)
+        self.assertTrue(note.strip().endswith(NOTE_SIGNATURE))
+
+    def test_task_date_is_taken_from_task_text_or_the_check_is_skipped(self):
+        dated = copy.deepcopy(clean_packet())
+        dated["task"]["description"] = "Client asked for the change effective June 22, 2026."
+        dated_result = run_confirmation(dated, writes=DisabledWrites())
+        flagged = next(
+            item for item in dated_result["flags"] if item["code"] == "task_request_date_disagreement"
+        )
+        self.assertEqual(flagged["client_request"], "2026-03-01")
+        self.assertEqual(flagged["ezlynx_task"], "2026-06-22")
+        self.assertEqual(flagged["ezlynx_task_raw"], "June 22, 2026")
+        self.assertIn("Neither date was chosen.", dated_result["note"])
+        self.assertIn("request_unclear", dated_result["outcomes"])
+        self.assertEqual(
+            dated_result["request_sources"]["ezlynx_task"]["requested_effective_date"],
+            "June 22, 2026",
+        )
+        self.assertEqual(dated_result["external_writes"], 0)
+
+        titled = copy.deepcopy(clean_packet())
+        titled["task"]["title"] = "Delete the van effective 06/22/2026"
+        titled_result = run_confirmation(titled, writes=DisabledWrites())
+        self.assertEqual(
+            next(item for item in titled_result["flags"] if item["code"] == "task_request_date_disagreement")[
+                "ezlynx_task"
+            ],
+            "2026-06-22",
+        )
+
+        commented = copy.deepcopy(clean_packet())
+        commented["task"]["comments"] = [{"id": "c9", "text": "Use September 16, 2026."}]
+        commented_result = run_confirmation(commented, writes=DisabledWrites())
+        self.assertEqual(
+            next(
+                item
+                for item in commented_result["flags"]
+                if item["code"] == "task_request_date_disagreement"
+            )["ezlynx_task"],
+            "2026-09-16",
+        )
+
+        blank = copy.deepcopy(clean_packet())
+        blank["task"]["title"] = "Download the carrier endorsement"
+        blank["task"]["description"] = "No date in this task."
+        blank["task"]["due_date"] = "2026-04-01"
+        blank_result = run_confirmation(blank, writes=DisabledWrites())
+        self.assertFalse(
+            any(item["code"] == "task_request_date_disagreement" for item in blank_result["flags"])
+        )
+        skipped = next(item for item in blank_result["flags"] if item["code"] == "task_request_date_check_skipped")
+        self.assertIn("skipped", skipped["reason"])
+        self.assertEqual(blank_result["outcome"], "ready_for_human_review")
+        self.assertNotIn("request_unclear", blank_result["outcomes"])
+        self.assertIn("No exceptions.", blank_result["note"])
+        self.assertIn("task-versus-request date check was skipped", blank_result["note"])
+        self.assertNotIn("2026-04-01", blank_result["note"])
+        self.assertEqual(blank_result["request_sources"]["ezlynx_task"]["requested_effective_date"], "")
+
+        many = copy.deepcopy(clean_packet())
+        many["task"]["description"] = "Could be 06/22/2026 or September 16, 2026."
+        many_result = run_confirmation(many, writes=DisabledWrites())
+        self.assertFalse(
+            any(item["code"] == "task_request_date_disagreement" for item in many_result["flags"])
+        )
+        self.assertIn("more than one date", many_result["note"])
+        self.assertIn("No date was chosen.", many_result["note"])
+        self.assertNotIn("Neither date was chosen.", many_result["note"])
+        self.assertEqual(many_result["outcome"], "ready_for_human_review")
+
+        quiet = run_confirmation(clean_packet(), writes=DisabledWrites())
+        self.assertFalse(any(item["code"] == "task_request_date_check_skipped" for item in quiet["flags"]))
+        self.assertNotIn("date check was skipped", quiet["note"])
+        self.assertIn("No exceptions.", quiet["note"])
+
+    def test_task_created_already_assigned_to_robie_hands_back_to_creator(self):
+        from robie_job_engine.policy_change_task_executor import execute
+
+        packet = copy.deepcopy(clean_packet())
+        packet["assignment_events"] = []
+        packet["case"]["original_assigner_id"] = ""
+        packet["task"]["current_owner_id"] = "Robie"
+        packet["task"]["created_by"] = "Carlo"
+        packet["task"]["created_by_name"] = "Carlo"
+        packet["reread"]["current_owner_id"] = "Robie"
+        writes = DisabledWrites()
+        result = run_confirmation(packet, writes=writes)
+        action = result["task_action"]
+        self.assertEqual(action["action"], "reassign_back")
+        self.assertEqual(action["to_assigner_name"], "Carlo")
+        self.assertTrue(action["judgment_call"])
+        self.assertIs(action["create_task"], False)
+        self.assertIsNone(result["result_recipient"])
+        self.assertIn("judgment call", action["reason"].casefold())
+        self.assertNotIn("create", action["action"])
+        outcome = execute(action, mode="dry_run")
+        plan = "\n".join(outcome["plan"])
+        self.assertFalse(outcome["executed"])
+        self.assertIs(outcome["create_task"], False)
+        self.assertIn("judgment call", plan.casefold())
+        self.assertIn("Carlo", plan)
+        self.assertIn("A new task is never created.", plan)
+        self.assertEqual(writes.performed, 0)
+        self.assertEqual(result["external_writes"], 0)
 
     def test_verifier_rejects_task_creation(self):
         from robie_job_engine.policy_change_confirmation import (

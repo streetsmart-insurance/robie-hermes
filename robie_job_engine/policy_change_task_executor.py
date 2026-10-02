@@ -58,19 +58,28 @@ def describe_plan(action: Mapping[str, Any]) -> list[str]:
     _log(lines, f"task_action={kind} create_task={action.get('create_task')} note_channel={NOTE_CHANNEL}")
     if kind == "hold":
         _log(lines, f"HOLD: {action.get('reason')}")
-        _log(lines, "No comment posted. No reassignment. The task stays with ROBIE.")
+        stay = str(action.get("stays_with") or "The current owner was not named.")
+        _log(lines, f"No comment posted. No reassignment. {stay}")
         return lines
     if kind != "reassign_back":
         _log(lines, f"UNKNOWN action {kind!r}: refusing.")
         return lines
     note = str(action.get("note") or "")
     signed = note.strip().endswith(NOTE_SIGNATURE)
+    who = "the creator" if action.get("judgment_call") else "the original assigner"
+    if action.get("judgment_call"):
+        _log(
+            lines,
+            "Judgment call: this task was created already assigned to ROBIE. "
+            f"Handing it back to {action.get('to_assigner_name')} is a judgment call.",
+        )
+        _log(lines, "Dry run flags this judgment call. A new task is never created.")
     _log(lines, f"task_id={action.get('task_id')}")
-    _log(lines, f"1. Open the task in the box browser and confirm it is still assigned to ROBIE. Stop if it is not.")
+    _log(lines, "1. Open the task in the box browser and confirm it is still assigned to ROBIE. Stop if it is not.")
     _log(lines, f"2. Post the result note as a task comment (signed: {signed}). Refuse when the signature is missing.")
     _log(lines, "3. Read the comment back. It must carry the note text and the signature.")
     _log(lines, f"4. Set the assignee to {action.get('to_assigner_name')!r} (id {action.get('to_assigner_id')!r}) and save.")
-    _log(lines, "5. Read the assignee back. It must name the original assigner.")
+    _log(lines, f"5. Read the assignee back. It must name {who}.")
     _log(lines, "A new task is never created.")
     return lines
 

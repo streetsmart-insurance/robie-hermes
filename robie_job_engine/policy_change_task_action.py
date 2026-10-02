@@ -41,9 +41,14 @@ def _is_robie(value: Any) -> bool:
     return str(value or "").strip().casefold() in _ROBIE_OWNERS
 
 
+def _task(packet: Mapping[str, Any]) -> Mapping[str, Any]:
+    task = packet.get("task")
+    return task if isinstance(task, Mapping) else {}
+
+
 def _task_id(packet: Mapping[str, Any]) -> str:
     case = packet.get("case") if isinstance(packet.get("case"), Mapping) else {}
-    task = packet.get("task") if isinstance(packet.get("task"), Mapping) else {}
+    task = _task(packet)
     for source in (packet, case, task):
         for key in ("task_id", "id", "TaskId"):
             value = str(source.get(key) or "").strip()
@@ -52,14 +57,101 @@ def _task_id(packet: Mapping[str, Any]) -> str:
     return ""
 
 
+def _current_owner(packet: Mapping[str, Any]) -> str:
+    """The person who owns the task now, by name when the snapshot has one."""
+    task = _task(packet)
+    for key in ("current_owner_name", "assignee_name", "current_owner_id", "assignee_id"):
+        value = str(task.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _stay_sentence(owner: str) -> str:
+    if not owner:
+        return "The current owner was not named."
+    if _is_robie(owner):
+        return "The task stays with ROBIE."
+    return f"The task stays with {owner}."
+
+
+def _hold_reason(owner: str) -> str:
+    stay = _stay_sentence(owner)
+    if owner and not _is_robie(owner):
+        return (
+            f"The task is not assigned to ROBIE. {stay} "
+            "Nothing was posted and nothing was reassigned."
+        )
+    return (
+        "The person who assigned this task could not be identified exactly. "
+        f"{stay} Nothing was posted and nothing was reassigned."
+    )
+
+
+def _human_previous_owner(packet: Mapping[str, Any]) -> bool:
+    """True when an assignment event names a person other than ROBIE."""
+    events = packet.get("assignment_events")
+    if not isinstance(events, list):
+        return False
+    for item in events:
+        if not isinstance(item, Mapping):
+            continue
+        previous = str(item.get("previous_owner_id") or "").strip()
+        name = str(item.get("previous_owner_name") or "").strip()
+        if (previous and not _is_robie(previous)) or (name and not _is_robie(name)):
+            return True
+    return False
+
+
+def _creator(packet: Mapping[str, Any]) -> tuple[str, str]:
+    """Return (id, name) for the person who created the task.
+
+    A ROBIE creator is not a person to hand the task back to.
+    """
+    task = _task(packet)
+    name = str(task.get("created_by_name") or "").strip()
+    created = str(task.get("created_by_id") or task.get("created_by") or "").strip()
+    if _is_robie(created) or _is_robie(name):
+        return "", ""
+    if name and created and created != name:
+        return created, name
+    if name:
+        return name, name
+    if created:
+        return created, created
+    return "", ""
+
+
+def _created_already_assigned_to_robie(packet: Mapping[str, Any]) -> bool:
+    """True when ROBIE owns the task and no person handed it over.
+
+    Par-Troy was created by Carlo already assigned to Robie. There is no
+    human previous owner on that task.
+    """
+    if not _is_robie(_current_owner(packet)):
+        return False
+    return not _human_previous_owner(packet)
+
+
+def _hold(action: dict[str, Any], packet: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    owner = _current_owner(packet)
+    action["action"] = "hold"
+    action["judgment_call"] = False
+    action["create_task"] = False
+    action["current_owner"] = owner
+    action["stays_with"] = _stay_sentence(owner)
+    action["reason"] = reason
+    return action
+
+
 def build_task_action(packet: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
     """Decide what happens to the task after the check. Never creates a task.
 
     Returns a reassign_back action when the original assigner is known
-    exactly, otherwise a hold action that leaves the task with ROBIE for a
-    person. The ``create_task`` key is always False; no other value is
-    possible. The note travels in the action for the executor to post as a
-    task comment.
+    exactly. A task created already assigned to ROBIE, with no person who
+    handed it over, goes back to its creator. That hand-back is a judgment
+    call. Every other unfinished case is a hold, and the hold names the
+    person who owns the task now. The ``create_task`` key is always False.
     """
     packet = packet if isinstance(packet, Mapping) else {}
     result = result if isinstance(result, Mapping) else {}
@@ -69,29 +161,41 @@ def build_task_action(packet: Mapping[str, Any], result: Mapping[str, Any]) -> d
     action: dict[str, Any] = {
         "version": TASK_ACTION_VERSION,
         "create_task": False,
+        "judgment_call": False,
         "note_channel": NOTE_CHANNEL,
         "task_id": _task_id(packet),
     }
     if not note:
-        action["action"] = "hold"
-        action["reason"] = (
+        return _hold(
+            action,
+            packet,
             "No result note was drafted, so nothing was posted and the task "
-            "was not reassigned. A person needs to look at this."
+            f"was not reassigned. {_stay_sentence(_current_owner(packet))}",
         )
-        return action
     recipient = result.get("result_recipient")
     recipient = recipient if isinstance(recipient, Mapping) else {}
     assigner_id = str(recipient.get("id") or "").strip()
     assigner_name = str(recipient.get("name") or "").strip()
     if not assigner_id or _is_robie(assigner_id) or _is_robie(assigner_name):
-        action["action"] = "hold"
-        action["reason"] = (
-            "The person who assigned this task could not be identified "
-            "exactly, so the task stays with ROBIE for a person to handle. "
-            "Nothing was posted and nothing was reassigned."
-        )
-        return action
+        if _created_already_assigned_to_robie(packet):
+            creator_id, creator_name = _creator(packet)
+            if creator_id and creator_name:
+                action["action"] = "reassign_back"
+                action["judgment_call"] = True
+                action["create_task"] = False
+                action["to_assigner_id"] = creator_id
+                action["to_assigner_name"] = creator_name
+                action["note"] = note
+                action["reason"] = (
+                    "This task was created already assigned to ROBIE. "
+                    f"Handing it back to {creator_name} is a judgment call. "
+                    "A new task was not created."
+                )
+                return action
+        return _hold(action, packet, _hold_reason(_current_owner(packet)))
     action["action"] = "reassign_back"
+    action["judgment_call"] = False
+    action["create_task"] = False
     action["to_assigner_id"] = assigner_id
     action["to_assigner_name"] = assigner_name
     action["note"] = note
