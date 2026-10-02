@@ -47,6 +47,13 @@ CHAT_WEBHOOK_URL = os.environ.get("ROBIE_TASK_VERIFY_CHAT_WEBHOOK_URL", "") or o
     "ROBIE_GOOGLE_CHAT_WEBHOOK_URL", ""
 )
 
+# Mailbox receiving the hourly "ROBIE task report CSV" emails (Applied
+# Reporting scheduled send, set up by Carlo). The CertGmailAdapter default
+# is the certificates@ mailbox, which never receives this report.
+REPORT_MAILBOX = os.environ.get(
+    "ROBIE_TASK_REPORT_MAILBOX", "robie@streetsmart.insurance"
+)
+
 
 def send_chat_alert(text: str) -> bool:
     if not CHAT_WEBHOOK_URL:
@@ -67,39 +74,70 @@ def send_chat_alert(text: str) -> bool:
         return False
 
 
+def _iter_csv_attachments(full_msg: dict) -> "list[tuple[str, str]]":
+    """Yield (filename, attachment_id) for CSV attachments in a Gmail full message.
+
+    Walks MIME parts recursively; the adapter only exposes get_full_message
+    and get_attachment_bytes (there is no search()/attachments() method).
+    """
+    found: "list[tuple[str, str]]" = []
+    stack = list((full_msg.get("payload", {}) or {}).get("parts", []) or [])
+    while stack:
+        part = stack.pop()
+        filename = part.get("filename", "") or ""
+        body = part.get("body", {}) or {}
+        if filename.lower().endswith(".csv") and body.get("attachmentId"):
+            found.append((filename, body["attachmentId"]))
+        stack.extend(part.get("parts", []) or [])
+    return found
+
+
 def fetch_report_csv(subject: str) -> tuple[bytes | None, str]:
     """Fetch the latest task-report CSV attachment from the report mailbox.
 
     Returns (content, detail). Content is None when the report is missing or
     stale. Uses the same keyless-delegated Gmail pattern as the 4359 worker.
+
+    NOTE (2026-10-01): CertGmailAdapter exposes list_message_ids /
+    get_full_message / get_attachment_bytes -- it has no search() or
+    attachments() method. A previous version called those and every
+    verification run failed with
+    "AttributeError: 'CertGmailAdapter' object has no attribute 'search'".
     """
     try:
         sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
         from robie_job_engine.cert_gmail_adapter import CertGmailAdapter
 
-        adapter = CertGmailAdapter.with_dwd()
+        adapter = CertGmailAdapter.with_dwd(REPORT_MAILBOX)
     except Exception as exc:
         return None, f"gmail adapter unavailable: {type(exc).__name__}: {exc}"
 
     try:
         # Find the latest email with the report subject; pull its CSV attachment.
-        msgs = adapter.search(f'subject:"{subject}" newer_than:1d', max_results=5)
-        if not msgs:
+        ids, _ = adapter.list_message_ids(
+            f'subject:"{subject}" newer_than:1d', None, page_size=5
+        )
+        if not ids:
             return None, f"no email with subject {subject!r} in the last day"
-        for msg in msgs:
-            for att in adapter.attachments(msg["id"]):
-                name = att.get("filename", "")
-                if name.lower().endswith(".csv"):
-                    age_h = (
-                        datetime.now(timezone.utc)
-                        - datetime.fromisoformat(msg["internalDate"])
-                    ).total_seconds() / 3600
-                    if age_h > REPORT_MAX_AGE_HOURS:
-                        return None, (
-                            f"latest report {name!r} is {age_h:.1f}h old "
-                            f"(limit {REPORT_MAX_AGE_HOURS}h)"
-                        )
-                    return att["data"], f"{name} ({age_h:.1f}h old)"
+        for gmail_id in ids:
+            full = adapter.get_full_message(gmail_id)
+            csv_atts = _iter_csv_attachments(full)
+            if not csv_atts:
+                continue
+            name, attachment_id = csv_atts[0]
+            # internalDate is millis since epoch as a string.
+            internal_ms = int(full.get("internalDate", "0") or 0)
+            age_h = (
+                datetime.now(timezone.utc)
+                - datetime.fromtimestamp(internal_ms / 1000, tz=timezone.utc)
+            ).total_seconds() / 3600
+            if age_h > REPORT_MAX_AGE_HOURS:
+                return None, (
+                    f"latest report {name!r} is {age_h:.1f}h old "
+                    f"(limit {REPORT_MAX_AGE_HOURS}h)"
+                )
+            data = adapter.get_attachment_bytes(gmail_id, attachment_id)
+            return data, f"{name} ({age_h:.1f}h old)"
         return None, "no CSV attachment found on recent report emails"
     except Exception as exc:
         return None, f"report fetch failed: {type(exc).__name__}: {exc}"

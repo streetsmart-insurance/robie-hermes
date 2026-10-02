@@ -312,24 +312,34 @@ def ensure_ezlynx_session(
 
 
 def main() -> None:
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
     parser = argparse.ArgumentParser(description="Ensure the Hermes EZLynx session is authenticated")
     parser.add_argument(
         "--cdp-url",
         default=os.environ.get("ROBIE_BROWSER_CDP_URL", "http://127.0.0.1:9222"),
     )
     args = parser.parse_args()
-    browser = PlaywrightEzlynxSession(args.cdp_url)
     try:
-        state = ensure_ezlynx_session(browser)
-        print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+        with exclusive_session():
+            browser = PlaywrightEzlynxSession(args.cdp_url)
+            try:
+                state = ensure_ezlynx_session(browser)
+                print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+            finally:
+                browser.close()
+    except EzlynxDriverGateRefused as exc:
+        print(json.dumps({"ezlynx_session": "DRIVER_NOT_IN", "error": str(exc)}, sort_keys=True))
+        raise SystemExit(4)
+    except EzlynxSessionLockTimeout:
+        print(json.dumps({"ezlynx_session": "LOCK_TIMEOUT"}, sort_keys=True))
+        raise SystemExit(5)
     except InteractiveAuthenticationRequired:
         print(json.dumps({"ezlynx_session": SessionState.INTERACTIVE_AUTH_REQUIRED.value}, sort_keys=True))
         raise SystemExit(2)
     except SessionVerificationFailed as exc:
         print(json.dumps({"ezlynx_session": SessionState.UNVERIFIED.value, "error": str(exc)}, sort_keys=True))
         raise SystemExit(3)
-    finally:
-        browser.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,24 @@
+[Unit]
+Description=Alert when ROBIE Production remains on the EZLynx login page
+After=network-online.target robie-ezlynx-browser.service
+Wants=network-online.target
+ConditionHost=hermes-poc-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-health.env
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_login_page_alert
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+
+[Install]
+WantedBy=multi-user.target

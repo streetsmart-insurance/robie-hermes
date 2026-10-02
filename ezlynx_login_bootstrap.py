@@ -211,6 +211,16 @@ def ensure_login_form(page) -> None:
 
 def main() -> int:
     from playwright.sync_api import sync_playwright
+    from robie_job_engine.ezlynx_driver_gate import (
+        EzlynxDriverGateRefused,
+        require_driver_in,
+    )
+
+    try:
+        require_driver_in()
+    except EzlynxDriverGateRefused as exc:
+        print(str(exc))
+        return 28
 
     try:
         # Verify the OAuth identity before retrieving credentials or requesting

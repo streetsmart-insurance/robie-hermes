@@ -1,4 +1,4 @@
-name: Diagnose Test VM gateway and browser setup (read-only)
+name: Diagnose Test release snapshot (read-only host checks)
 
 on:
   workflow_dispatch:
@@ -7,6 +7,17 @@ on:
         description: Type DIAGNOSE_TEST_GATEWAY_AND_BROWSER
         required: true
         type: string
+      temporary_ssh_key_approved:
+        description: Approved one-hour OS Login key registration for this Test-only read
+        required: true
+        default: false
+        type: boolean
+
+      release_handover:
+        description: Check fixed 592e148 and 73e720 handover paths without directory scanning
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -16,7 +27,8 @@ jobs:
   diagnose:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'DIAGNOSE_TEST_GATEWAY_AND_BROWSER'
+      inputs.confirmation == 'DIAGNOSE_TEST_GATEWAY_AND_BROWSER' &&
+      inputs.temporary_ssh_key_approved == true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: Test
@@ -24,7 +36,9 @@ jobs:
       PROJECT_ID: streetsmart-hermes-poc
       ZONE: us-east1-b
       TEST_VM: hermes-test-01
+      OSLOGIN_SSH_KEY_TTL: 1h
     steps:
+      - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
@@ -34,26 +48,60 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
           test "${TEST_VM}" = hermes-test-01
-      - name: Inventory robie-gateway unit, browser process, and CDP listener
+          test "${PROJECT_ID}" = streetsmart-hermes-poc
+          test "${ZONE}" = us-east1-b
+      - name: Require effective OS Login before publishing any key
         shell: bash
         run: |
-          set +e -uo pipefail
-          escape() {
-            printf '%s' "$1" | sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g'
+          set -euo pipefail
+          instance_oslogin=$(gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(metadata.items.filter("key=enable-oslogin").map().extract(key).flatten(),metadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          effective_oslogin="${instance_oslogin}"
+          if [[ -z "${instance_oslogin}" || "${instance_oslogin}" == $'\t' ]]; then
+            effective_oslogin=$(gcloud compute project-info describe --project="${PROJECT_ID}" \
+              --format='value(commonInstanceMetadata.items.filter("key=enable-oslogin").map().extract(key).flatten(),commonInstanceMetadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          fi
+          [[ "${effective_oslogin^^}" == $'ENABLE-OSLOGIN\tTRUE' ]] || {
+            echo 'Effective OS Login is not verified enabled; refusing key registration and SSH' >&2
+            exit 2
           }
-          out=$(gcloud compute ssh "${TEST_VM}" \
+      - name: Prepare approved expiring OS Login key
+        run: bash scripts/ensure-gcloud-ssh-key.sh
+      - name: Collect bounded Test snapshot without remote installation
+        shell: bash
+        env:
+          RELEASE_HANDOVER: ${{ inputs.release_handover }}
+        run: |
+          set -euo pipefail
+          handover_flag=''
+          case "${RELEASE_HANDOVER:-false}" in
+            true) handover_flag=' --release-handover' ;;
+            false) ;;
+            *) exit 2 ;;
+          esac
+          sha256sum scripts/diagnose_test_release_readonly.py > "${RUNNER_TEMP}/collector.sha256"
+          printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/controller-commit.txt"
+          gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command='
-              echo "--- systemctl cat robie-gateway ---";
-              systemctl cat robie-gateway 2>&1;
-              echo "--- all chrome/browser/ezlynx-related units ---";
-              systemctl list-units --type=service --all --no-pager 2>&1 | grep -iE "chrome|browser|ezlynx" || echo "(none found)";
-              echo "--- listener on CDP port 9222 ---";
-              (ss -tln 2>&1 | grep ":9222" || echo "(nothing listening on 9222)");
-              echo "--- chrome/chromium processes ---";
-              (pgrep -fa "chrome|chromium" 2>&1 || echo "(no chrome/chromium process found)");
-            ' 2>&1)
-          code=$?
-          echo "::notice::Test VM gateway/browser inventory (ssh exit ${code}): $(escape "$out")"
-          exit 0
+            --ssh-key-file="${HOME}/.ssh/google_compute_engine" \
+            --ssh-key-expire-after="${OSLOGIN_SSH_KEY_TTL}" \
+            --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 \
+            --command='test "$(hostname -s)" = hermes-test-01 && sudo -n env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 python3 -I -B -'"${handover_flag}" \
+            < scripts/diagnose_test_release_readonly.py \
+            | tee "${RUNNER_TEMP}/test-release-snapshot.json"
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["host"] == "hermes-test-01" and r["snapshot_verified"] is True and r["deployment_authorized"] is False and r["errors"] == []' \
+            "${RUNNER_TEMP}/test-release-snapshot.json"
+      - name: Retain selected evidence including failed snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-release-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/test-release-snapshot.json
+            ${{ runner.temp }}/collector.sha256
+            ${{ runner.temp }}/controller-commit.txt
+          retention-days: 14
+          if-no-files-found: warn
