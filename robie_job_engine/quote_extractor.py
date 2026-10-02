@@ -1270,9 +1270,15 @@ class QuoteExtractor:
             if re.search(r"\bstill\s+valid\b|\buse\s+it\b|\bproceed\b|\byes\b", text, re.IGNORECASE):
                 quote.hitl_reasons.remove("quote_expired")
 
-        # 10. Backdated effective date: explicit confirmation proceeds.
+        # 10. Backdated effective date: explicit confirmation proceeds,
+        # or user supplies a new date.
         if "effective_date_backdated" in quote.hitl_reasons:
-            if re.search(r"\bproceed\b|\bconfirm\b|\byes\b|\buse\s+(?:that|this)\s+date\b", text, re.IGNORECASE):
+            new_dates = re.findall(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text)
+            if new_dates:
+                # User provided a new effective date
+                quote.effective_date = _format_iso_date(new_dates[0])
+                quote.hitl_reasons.remove("effective_date_backdated")
+            elif re.search(r"\bproceed\b|\bconfirm\b|\byes\b|\buse\s+(?:that|this)\s+date\b", text, re.IGNORECASE):
                 quote.hitl_reasons.remove("effective_date_backdated")
 
         # 11. Reversed dates: sender supplies corrected dates.
