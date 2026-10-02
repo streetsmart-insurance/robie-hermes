@@ -68,3 +68,19 @@ class EzlynxApiClientReadPort:
             for r in rows
             if isinstance(r, dict)
         ]
+
+    def get_discussion(self, discussion_id: str) -> dict[str, Any]:
+        """One discussion, notes included. Used to re-read a note write.
+
+        A policy search is the wrong key for a discussion note. This GET is
+        the readback for that write.
+        """
+        from .ezlynx_api_only_writes import load_discussion_api_config
+        from .ezlynx_discussions import DiscussionApiClient
+
+        client = getattr(self, "_discussion_client", None)
+        if client is None:
+            client = DiscussionApiClient(load_discussion_api_config())
+            self._discussion_client = client
+        record = client.get_discussion(discussion_id)
+        return record if isinstance(record, dict) else {}

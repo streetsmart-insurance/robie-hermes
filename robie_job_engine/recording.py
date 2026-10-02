@@ -23,8 +23,38 @@ DEFAULT_RECORDING_ROOT = "/opt/streetsmart-hermes/robie-job-engine/data/recordin
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 
 
+def touch_browser_capture_stop_files(db_path: str, job_id: str) -> None:
+    """Tell browser_capture and ffmpeg to stop. The stop file is the signal."""
+    if not db_path or not job_id:
+        return
+    try:
+        rows = RecordingStore(db_path).list_for_job(job_id)
+    except Exception:
+        return
+    for row in rows:
+        stop = str(row.get("stop_file") or "").strip()
+        if not stop:
+            continue
+        try:
+            path = Path(stop)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+        except OSError:
+            continue
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _safe(value: str) -> str:
@@ -337,6 +367,33 @@ class RecordingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def sweep_stale_recordings(self) -> list[str]:
+        """Fail RECORDING rows whose capture process is gone.
+
+        A live pid is left alone. Rows with no pid, or a pid that is not
+        running, are not still recording.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, capture_pid, status FROM job_recordings"
+            ).fetchall()
+        swept: list[str] = []
+        for row in rows:
+            if str(row["status"] or "").casefold() != "recording":
+                continue
+            pid = int(row["capture_pid"] or 0)
+            if pid and _pid_alive(pid):
+                continue
+            self.update(
+                row["id"],
+                status="FAILED",
+                failure="no capture process",
+                failure_stage="SWEEP",
+                stopped_at=_now(),
+            )
+            swept.append(str(row["id"]))
+        return swept
+
     def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
         """Return every recording segment for a Job, oldest segment first."""
         with self._connect() as conn:
@@ -518,6 +575,12 @@ class RecordingManager:
             self.start(job_id)
         except Exception:
             pass
+
+    def sweep_stale_recordings(self) -> list[str]:
+        try:
+            return self.store.sweep_stale_recordings()
+        except Exception:
+            return []
 
     def safe_stop(self, job_id: str, final_job_status: str) -> None:
         try:

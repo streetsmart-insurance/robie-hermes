@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -448,6 +449,16 @@ def persist_playwright_exec_finish(
             status = "error"
         else:
             status = "ok"
+    error_text = ""
+    if isinstance(payload, dict):
+        error_text = str(payload.get("error") or "")
+    if status == "error" and re.search(
+        r"PLAYWRIGHT_BLOCKED|do not drive ezlynx screens by hand|"
+        r"playwright_exec is refused|POLICY_SETUP_ORDER",
+        error_text,
+        re.IGNORECASE,
+    ):
+        status = "refused"
     try:
         JobStore(db_path).update_playwright_exec(row_id, status=status, result=payload)
     except Exception:

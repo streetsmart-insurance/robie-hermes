@@ -34,10 +34,12 @@ def _read_state(path: Path) -> dict[str, Any]:
 
 
 def post_webhook(text: str) -> None:
+    from .user_reply import format_user_reply
+
     webhook = os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
     if not webhook:
         raise RuntimeError("ROBIE_GOOGLE_CHAT_WEBHOOK_URL is not configured")
-    body = json.dumps({"text": text}).encode("utf-8")
+    body = json.dumps({"text": format_user_reply(text)}).encode("utf-8")
     request = Request(
         webhook,
         data=body,

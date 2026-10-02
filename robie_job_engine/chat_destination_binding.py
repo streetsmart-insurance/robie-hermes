@@ -274,6 +274,57 @@ def read_exec_rows(store: Any, job_id: str) -> list[dict[str, Any]]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+_WRITE_CALL = re.compile(
+    r"\.(?:click|dblclick|fill|type|press|check|uncheck|select_option|set_input_files)\s*\(",
+    re.IGNORECASE,
+)
+_REFUSED_EXEC = re.compile(
+    r"PLAYWRIGHT_BLOCKED|do not drive ezlynx screens by hand|"
+    r"playwright_exec is refused|POLICY_SETUP_ORDER|EZLYNX_WRITE_SCOPE_REFUSED|"
+    r"refused before it started|No Playwright code provided",
+    re.IGNORECASE,
+)
+
+
+def _row_blob(row: dict[str, Any]) -> str:
+    code = str(row.get("code_preview") or "")
+    result = row.get("result_json")
+    if result is None:
+        result = row.get("result")
+    if not isinstance(result, str):
+        try:
+            result = json.dumps(result or "")
+        except Exception:
+            result = str(result or "")
+    return f"{code}\n{result}"
+
+
+def _row_was_refused(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").casefold()
+    if status in {"refused", "blocked"}:
+        return True
+    if status != "ok" and _REFUSED_EXEC.search(_row_blob(row)):
+        return True
+    return False
+
+
+def row_claims_ezlynx_write(row: dict[str, Any]) -> bool:
+    """A click or a fill is a write. A refused call and a page open are not."""
+    if _row_was_refused(row):
+        return False
+    return _WRITE_CALL.search(str(row.get("code_preview") or "")) is not None
+
+
+def _worker_claimed_a_result(claimed: dict[str, Any] | None) -> bool:
+    """True when the worker named a policy, a note, or a document."""
+    claimed = dict(claimed or {})
+    if str(claimed.get("policy_number") or "").strip():
+        return True
+    if str(claimed.get("discussion_title") or "").strip():
+        return True
+    return any(str(name).strip() for name in (claimed.get("document_names") or []))
+
+
 def bind_destination_for_job(
     store: Any, job: dict[str, Any], claimed: dict[str, Any] | None = None
 ) -> DestinationBinding:
@@ -281,10 +332,27 @@ def bind_destination_for_job(
 
     Writes nothing when the binding is refused — a refused binding must
     leave the job exactly as verifiable (or not) as it already was, so a
-    later run can try again with better evidence.
+    later run can try again with better evidence. A refused tool call is
+    not a write. A read-only page open is not a write by itself; it only
+    identifies the account when the worker has also claimed a result.
     """
     job_id = job["id"]
-    binding = derive_destination(read_exec_rows(store, job_id), claimed)
+    recorded = read_exec_rows(store, job_id)
+    rows = [row for row in recorded if row_claims_ezlynx_write(row)]
+    if not rows and _worker_claimed_a_result(claimed):
+        # The page open is not the write. It tells the verifier which
+        # account the worker's claim has to match.
+        rows = [
+            row
+            for row in recorded
+            if not _row_was_refused(row)
+            and str(row.get("status") or "").casefold() == "ok"
+        ]
+    if not rows:
+        return DestinationBinding(
+            refusal="read-only or refused browser activity is not a write"
+        )
+    binding = derive_destination(rows, claimed)
     if not binding.bindable:
         return binding
 

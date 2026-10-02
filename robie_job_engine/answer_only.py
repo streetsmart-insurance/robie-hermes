@@ -89,6 +89,24 @@ POLICY_CHANGE_ROUTE = (
     "Do not read Robie's source, jobs.db, or token files."
 )
 
+DISCUSSION_NOTE_ROUTE = (
+    "Route: discussion note. This is an EZLynx write. "
+    "Use ezlynx_discussion_note once, on the existing discussion named in "
+    "the request. Do not create a discussion. Do not post the note twice. "
+    "Pass plan as an object with three fields: "
+    "write is the string \"discussion note\" (not an object), "
+    "target is an object whose discussion is the existing title "
+    "(for example \"follw up 1\"), "
+    "and values is an object whose note_text is the exact note "
+    "(not a string). "
+    "If the tool says the plan field is wrong, fix the plan and call the tool again. "
+    "Do not tell the user the note was filed until the tool says it was. "
+    "If the tool says the note was posted or is verifying, stop. "
+    "Do not use Playwright Add Note or Save Note. "
+    "Do not bind, take payment, or email the client. "
+    "Do not read Robie's source, jobs.db, or token files."
+)
+
 _VERIFIER_NOISE = re.compile(r"file-mutation verifier", re.IGNORECASE)
 
 _ADDRESS_COMPLETION_CLAIMS = (
@@ -253,10 +271,42 @@ def strip_blank_saved_span(text: str) -> str:
     return cleaned.strip()
 
 FORBIDDEN_READ_RULE = (
-    "Do not read Robie's own source, jobs.db, .hermes/google_token.json, "
-    "or any token file during a job. Do not grep the server. "
+    "Do not read Robie's own source, the repository, tests, fixtures, "
+    "scripts, jobs.db, .hermes/google_token.json, or any token file during a job. "
+    "Do not grep the server. Do not answer from test files. "
+    "If a live EZLynx lookup fails, say that it failed. "
     "Use the purpose-built tool named in the task."
 )
+
+FIXTURE_POLICY_MARKER = "BB-2026-ASC-001"
+LIVE_LOOKUP_FAILED = (
+    "The live EZLynx lookup failed. I cannot report a record from test files."
+)
+_INTERNAL_USER_MARKER = re.compile(
+    r"(?:ROBIE_BLOCKED|PLAYWRIGHT_BLOCKED)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_internal_user_markers(text: str) -> str:
+    """Drop worker markers on the way out to a CSR. Detection uses the raw text."""
+    cleaned = _INTERNAL_USER_MARKER.sub("", str(text or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    return cleaned.strip()
+
+
+_ZERO_WIDTH_CHARS = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
+
+
+def scrub_user_reply(text: str) -> str:
+    """User text only. Fixture policy numbers are not agency records."""
+    raw = str(text or "").translate(_ZERO_WIDTH_CHARS)
+    if FIXTURE_POLICY_MARKER in raw:
+        return LIVE_LOOKUP_FAILED
+    from .chat_job_controls import plain_missing_field_question
+
+    return plain_missing_field_question(strip_internal_user_markers(raw))
 
 
 def _normalized(text: str) -> str:
@@ -320,14 +370,20 @@ def is_certificate_or_policy_change(text: str) -> bool:
 
 
 def purpose_built_instructions(text: str) -> str:
-    """Name the existing tool. Empty when this is not a cert or policy change."""
+    """Name the existing tool. Empty when this is not a cert, note, or policy change."""
     normalized = _normalized(_ask_body(text))
-    from .request_routing import _is_certificate_request, _is_policy_change_request
+    from .request_routing import (
+        _is_certificate_request,
+        _is_discussion_note_request,
+        _is_policy_change_request,
+    )
 
     if _is_certificate_request(normalized):
         return CERT_ROUTE
     if _is_policy_change_request(normalized) or "mailing address" in normalized:
         return POLICY_CHANGE_ROUTE
+    if _is_discussion_note_request(normalized):
+        return DISCUSSION_NOTE_ROUTE
     return ""
 
 
@@ -369,12 +425,109 @@ def is_informational_ask(text: str) -> bool:
     return asks
 
 
-def is_answer_only_job(job: dict[str, Any] | None) -> bool:
+ANSWER_LOCATOR = "answer:question"
+
+
+def is_answered_without_write(job: dict[str, Any] | None) -> bool:
+    """A question that never tried an EZLynx write."""
     payload = dict((job or {}).get("payload") or {})
-    if payload.get("answer_only"):
-        return True
     if str((job or {}).get("action_type") or "").startswith("ezlynx."):
         return False
+    if payload.get("answered") or payload.get("answer_only"):
+        return True
+    text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
+    return is_informational_ask(str(text))
+
+
+def mark_answered_question(store: Any, job_id: str, answer: str) -> dict[str, Any]:
+    """Close a question as answered. This is not an EZLynx write receipt.
+
+    The ledger is COMPLETE so health counts do not call it UNVERIFIED.
+    The answer text stays on the reply. The evidence only records that a
+    question was answered and nothing was written.
+    """
+    from .models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence
+    from .store import utc_now
+
+    job = store.get_job(job_id)
+    payload = dict(job.get("payload") or {})
+    payload["answer_only"] = True
+    payload["answered"] = True
+    payload["locator"] = {"locator": ANSWER_LOCATOR}
+    store.update_payload(job_id, payload)
+    store.checkpoint(
+        job_id,
+        "action",
+        {
+            "action": "answer",
+            "destination": {"locator": ANSWER_LOCATOR},
+        },
+    )
+    store.checkpoint(
+        job_id,
+        "answer_only_close",
+        {"reason": "answered", "wrote": False},
+    )
+    expected = {
+        "status": "answered",
+        "outcome": "answered",
+        "locator": ANSWER_LOCATOR,
+        "content": "answered",
+    }
+    captured = utc_now()
+    store.add_evidence(
+        job_id,
+        True,
+        VerificationEvidence(
+            method="answer_text",
+            source="question",
+            expected=expected,
+            observed=dict(expected),
+            authoritative=True,
+            captured_at=captured,
+            locator=ANSWER_LOCATOR,
+        ),
+    )
+    current = JobStatus(store.get_job(job_id)["status"])
+    if current == JobStatus.COMPLETE:
+        return store.get_job(job_id)
+    if current != JobStatus.VERIFYING:
+        store.transition(
+            job_id,
+            JobStatus.VERIFYING,
+            expected={current},
+            release_lease=True,
+        )
+    store.transition(
+        job_id,
+        JobStatus.COMPLETE,
+        expected={JobStatus.VERIFYING},
+        authority=VERIFIER_AUTHORITY,
+        release_lease=True,
+    )
+    del answer
+    return store.get_job(job_id)
+
+
+def action_claims_mutation(action: dict[str, Any] | None) -> bool:
+    """True when this checkpoint is a note or document write, not a search."""
+    dest = dict((action or {}).get("destination") or {})
+    if str(dest.get("note_text") or "").strip():
+        return True
+    docs = dest.get("document_names") or []
+    return bool(docs)
+
+
+def is_answer_only_job(job: dict[str, Any] | None) -> bool:
+    payload = dict((job or {}).get("payload") or {})
+    if str((job or {}).get("action_type") or "").startswith("ezlynx."):
+        return False
+    if payload.get("answer_only"):
+        return True
+    from .client_name_lookup import job_is_named_lookup
+
+    if job_is_named_lookup(job):
+        return True
     text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
     return is_informational_ask(str(text))
 
@@ -397,7 +550,7 @@ class SkipDestinationReadback(_outcome_verifier_type()):
         self.reader = getattr(inner, "reader", inner)
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> Any:
-        if is_answer_only_job(job):
+        if is_answer_only_job(job) and not action_claims_mutation(action):
             from .models import VerificationEvidence, VerificationResult
 
             return VerificationResult(

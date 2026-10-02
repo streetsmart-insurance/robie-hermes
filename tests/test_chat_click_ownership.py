@@ -329,7 +329,8 @@ def test_matching_env_decision_without_a_row_still_replies(tmp_path, monkeypatch
     assert "not supported" not in gateway.patches[0][1]["text"].lower()
 
 
-def test_owned_decision_click_still_replies(tmp_path):
+def test_owned_decision_click_still_replies(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     import sqlite3
 
     db = tmp_path / "owner.db"

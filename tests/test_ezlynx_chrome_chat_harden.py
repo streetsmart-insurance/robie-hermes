@@ -345,7 +345,7 @@ class UnverifiedUnmaskTests(unittest.TestCase):
             self.assertEqual(job["status"], JobStatus.FAILED.value)
             self.assertNotEqual(job["status"], JobStatus.UNVERIFIED.value)
             self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
-            self.assertIn("FAILED", response)
+            self.assertIn("Failed.", response)
             self.assertIn("ECONNREFUSED", job["last_error"])
             self.assertNotIn("no structured destination action checkpoint", job["last_error"])
             self.assertIsNone(JobStore(db).get_checkpoint(job_id, "action"))
@@ -364,7 +364,7 @@ class UnverifiedUnmaskTests(unittest.TestCase):
             job = JobStore(db).get_job(job_id)
             self.assertEqual(job["status"], JobStatus.UNVERIFIED.value)
             self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
-            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Not verified.", response)
             self.assertIn("no structured destination action checkpoint", job["last_error"])
             self.assertNotIn("I did it", response)
 
