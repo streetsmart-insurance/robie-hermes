@@ -103,6 +103,27 @@ class ExtractedQuote:
     # Set when the sender confirms creating a second agreement for a policy
     # number that already has one (duplicate guard bypass).
     duplicate_confirmed: bool = False
+    # Down payment / deposit the client already paid directly to the carrier.
+    # The financed amount is total minus this; never finance the full premium
+    # when a deposit was paid or the client double-pays.
+    down_payment_cents: int = 0
+    down_payment_detected: bool = False
+    # Quote issuance date (YYYY-MM-DD) and revision marker ("v2", "revised").
+    # Used to detect superseded quotes and expired quotes (>30 days).
+    quote_date: str = ""
+    quote_revision: str = ""
+    # Line items extracted from the quote for total-cross-check. Each dict
+    # has "label" and "amount_cents". If the stated total disagrees with the
+    # line-item sum beyond a rounding tolerance, the workflow asks the sender.
+    line_items: list[dict[str, Any]] = field(default_factory=list)
+    stated_total_cents: Optional[int] = None
+    # All named insured entities found on the quote. More than one means the
+    # workflow must ask which entity signs the finance agreement.
+    named_insureds: list[str] = field(default_factory=list)
+    # Writing carrier (the insurer actually on the policy), distinct from the
+    # master company / group (carrier_name) and the wholesaler. The Ascend
+    # billable uses the writing carrier's identifier.
+    writing_carrier_name: str = ""
 
     @property
     def total_premium_cents(self) -> int:
@@ -118,6 +139,12 @@ class ExtractedQuote:
     @property
     def total_payable_cents(self) -> int:
         return self.total_premium_cents
+
+    @property
+    def financed_amount_cents(self) -> int:
+        """Amount actually financed: total minus any down payment already
+        paid to the carrier. Never finance money the client already paid."""
+        return max(0, self.total_premium_cents - self.down_payment_cents)
 
     @property
     def has_terrorism(self) -> bool:
@@ -443,6 +470,29 @@ class QuoteExtractor:
                 quote.expiration_date = exp
             except ValueError:
                 pass
+        else:
+            # Labeled dates: "Effective: 01/01/2027", "Expiration Date: 01/01/2028".
+            eff_match = re.search(
+                r"effect(?:ive)?(?:\s+date)?\s*:\s*(\d{1,2}/\d{1,2}/\d{4})",
+                text,
+                re.IGNORECASE,
+            )
+            exp_match = re.search(
+                r"expir(?:ation|y)(?:\s+date)?\s*:\s*(\d{1,2}/\d{1,2}/\d{4})",
+                text,
+                re.IGNORECASE,
+            )
+            try:
+                if eff_match:
+                    quote.effective_date = datetime.strptime(
+                        eff_match.group(1), "%m/%d/%Y"
+                    ).date().isoformat()
+                if exp_match:
+                    quote.expiration_date = datetime.strptime(
+                        exp_match.group(1), "%m/%d/%Y"
+                    ).date().isoformat()
+            except ValueError:
+                pass
         
         if not quote.effective_date:
             today = date.today()
@@ -631,9 +681,105 @@ class QuoteExtractor:
             if quote.total_with_terrorism_cents:
                 quote.pure_premium_cents = quote.total_with_terrorism_cents
 
-        # 12. Evaluate Clarity & HITL Questions
+        # 12. Edge-case fields: down payment, quote date/revision, line items,
+        # named insureds, writing carrier.
+        self._extract_edge_case_fields(quote, combined_text)
+
+        # 13. Evaluate Clarity & HITL Questions
         self._evaluate_hitl_requirements(quote, combined_text)
         return quote
+
+    def _extract_edge_case_fields(self, quote: ExtractedQuote, text: str) -> None:
+        # Down payment / deposit already paid to the carrier. Patterns like
+        # "down payment: $2,500", "deposit paid $1,000", "25% down ($2,500)".
+        dp_match = re.search(
+            r"(?:down\s*payment|deposit|amount\s+paid|paid\s+to\s+carrier)"
+            r"\s*(?:is|of|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            text,
+            re.IGNORECASE,
+        )
+        if dp_match:
+            quote.down_payment_cents = _parse_dollars_to_cents(dp_match.group(1))
+            quote.down_payment_detected = True
+        else:
+            # "25% down" without a dollar amount: flag for clarification.
+            pct_down = re.search(r"(\d+(?:\.\d+)?)\s*%\s*down", text, re.IGNORECASE)
+            if pct_down:
+                quote.down_payment_detected = True  # amount unknown
+
+        # Quote date: "Quote Date: 09/15/2026", "Dated: September 15, 2026".
+        date_match = re.search(
+            r"(?:quote\s+date|dated?|issued)[:\s]+"
+            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|"
+            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})",
+            text,
+            re.IGNORECASE,
+        )
+        if date_match:
+            quote.quote_date = _format_iso_date(date_match.group(1))
+
+        # Revision marker: "revised", "v2", "version 3", "amended".
+        rev_match = re.search(
+            r"\b(revised|amended|v\s*(\d+)|version\s*(\d+)|rev\s*(\d+))\b",
+            text,
+            re.IGNORECASE,
+        )
+        if rev_match:
+            quote.quote_revision = rev_match.group(0).strip()
+
+        # Line items for total cross-check: lines like "General Liability ... $5,000.00".
+        # Only capture lines with a dollar amount that look like coverage rows.
+        for line in text.splitlines():
+            li = re.search(
+                r"^\s*([A-Za-z][A-Za-z\s&/\-]{3,40}?)\s+\$?\s*([\d,]+\.\d{2})\s*$",
+                line.strip(),
+            )
+            if li:
+                label = li.group(1).strip()
+                if len(label) > 3 and "total" not in label.lower():
+                    quote.line_items.append(
+                        {"label": label, "amount_cents": _parse_dollars_to_cents(li.group(2))}
+                    )
+
+        # Stated total: "Total Premium: $12,500.00", "Grand Total $12,500".
+        total_match = re.search(
+            r"(?:total\s+(?:premium|due|amount)|grand\s+total|amount\s+due)"
+            r"\s*(?:is|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            text,
+            re.IGNORECASE,
+        )
+        if total_match:
+            quote.stated_total_cents = _parse_dollars_to_cents(total_match.group(1))
+
+        # Named insureds: capture "Named Insured:" lines and DBA mentions.
+        # Multiple distinct entities trigger a clarification question.
+        seen: set[str] = set()
+        for pat in [
+            r"Named\s+Insured\s*:\s*([^\n\r,]+)",
+            r"Insured\s+Name\s*:\s*([^\n\r,]+)",
+        ]:
+            for m in re.finditer(pat, text, re.IGNORECASE):
+                name = m.group(1).strip()
+                if name and name.lower() not in seen and len(name) > 2:
+                    seen.add(name.lower())
+                    quote.named_insureds.append(name)
+        # DBA: "ABC LLC DBA XYZ Corp" counts as a second entity.
+        dba_match = re.search(r"\bDBA\s+([^\n\r,]+)", text, re.IGNORECASE)
+        if dba_match:
+            dba_name = dba_match.group(1).strip()
+            if dba_name and dba_name.lower() not in seen and len(dba_name) > 2:
+                quote.named_insureds.append(dba_name)
+
+        # Writing carrier: the insurer actually on the policy, e.g.
+        # "Writing Company: Berkley Aspire" vs the master group "Berkley".
+        wc_match = re.search(
+            r"(?:writing\s+(?:company|carrier|insurer)|underwritten\s+by|policy\s+issued\s+by)"
+            r"\s*(?:is|:|=)?\s*([^\n\r,]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if wc_match:
+            quote.writing_carrier_name = wc_match.group(1).strip()
 
     def _evaluate_hitl_requirements(self, quote: ExtractedQuote, combined_text: str) -> None:
         reasons: list[str] = []
@@ -655,6 +801,52 @@ class QuoteExtractor:
         if quote.has_terrorism_options and quote.terrorism_included is None:
             reasons.append("dual_terrorism_options_present")
 
+        # Question 5: Down payment detected but amount unknown (e.g. "25% down"
+        # with no dollar figure). Financing the full premium would double-charge.
+        if quote.down_payment_detected and quote.down_payment_cents == 0:
+            reasons.append("down_payment_amount_unknown")
+
+        # Question 6: Conflicting totals — stated total disagrees with the
+        # line-item sum by more than $1.00 (rounding tolerance).
+        if quote.stated_total_cents is not None and quote.line_items:
+            line_sum = sum(li["amount_cents"] for li in quote.line_items)
+            if abs(line_sum - quote.stated_total_cents) > 100:
+                reasons.append("conflicting_totals")
+
+        # Question 7: Multiple named insureds — which entity signs the
+        # finance agreement?
+        if len(quote.named_insureds) > 1:
+            reasons.append("multiple_named_insureds")
+
+        # Question 8: Expired quote — issued more than 30 days ago. Rates may
+        # not hold; confirm the quote is still valid.
+        if quote.quote_date:
+            try:
+                qd = date.fromisoformat(quote.quote_date)
+                if (date.today() - qd).days > 30:
+                    reasons.append("quote_expired")
+            except ValueError:
+                pass
+
+        # Question 9: Backdated effective date — policy already started.
+        if quote.effective_date:
+            try:
+                ed = date.fromisoformat(quote.effective_date)
+                if ed < date.today():
+                    reasons.append("effective_date_backdated")
+            except ValueError:
+                pass
+
+        # Question 10: Reversed or missing dates.
+        if quote.effective_date and quote.expiration_date:
+            try:
+                ed = date.fromisoformat(quote.effective_date)
+                xd = date.fromisoformat(quote.expiration_date)
+                if xd <= ed:
+                    reasons.append("dates_reversed")
+            except ValueError:
+                pass
+
         quote.hitl_reasons = reasons
         self._sync_hitl_questions(quote)
 
@@ -673,6 +865,38 @@ class QuoteExtractor:
                 without_str = f"${quote.total_without_terrorism_cents / 100:,.2f}" if quote.total_without_terrorism_cents else "Without TRIA"
                 questions.append(
                     f"4. Terrorism Coverage: The quote includes options {with_str} and {without_str}. Which coverage should be applied to the Ascend agreement?"
+                )
+            elif reason == "down_payment_amount_unknown":
+                questions.append(
+                    "5. Down Payment: The quote mentions a down payment was made, but I couldn't find the dollar amount. "
+                    "How much was already paid to the carrier? (I'll finance only the remaining balance.)"
+                )
+            elif reason == "conflicting_totals":
+                line_sum = sum(li["amount_cents"] for li in quote.line_items)
+                questions.append(
+                    f"6. Conflicting Totals: The quote's stated total (${quote.stated_total_cents / 100:,.2f}) "
+                    f"doesn't match the sum of its line items (${line_sum / 100:,.2f}). Which total is correct?"
+                )
+            elif reason == "multiple_named_insureds":
+                names = ", ".join(f'"{n}"' for n in quote.named_insureds)
+                questions.append(
+                    f"7. Named Insured: The quote lists multiple entities ({names}). "
+                    "Which entity should sign the finance agreement?"
+                )
+            elif reason == "quote_expired":
+                questions.append(
+                    f"8. Quote Age: This quote is dated {quote.quote_date}, more than 30 days ago. "
+                    "Is it still valid, or is there a newer version?"
+                )
+            elif reason == "effective_date_backdated":
+                questions.append(
+                    f"9. Effective Date: The policy effective date ({quote.effective_date}) is in the past. "
+                    "Should I proceed with this date?"
+                )
+            elif reason == "dates_reversed":
+                questions.append(
+                    f"10. Dates: The expiration date ({quote.expiration_date}) is not after the effective date "
+                    f"({quote.effective_date}). What are the correct dates?"
                 )
         quote.hitl_questions = questions
         quote.requires_hitl = len(questions) > 0
@@ -794,6 +1018,64 @@ class QuoteExtractor:
             r"(?i)\bconfirm\s+duplicate\b", text
         ):
             quote.duplicate_confirmed = True
+
+        # 6. Down payment amount answer (e.g. "$2,500 was paid", "down payment 2500").
+        if "down_payment_amount_unknown" in quote.hitl_reasons:
+            dp_answer = re.search(
+                r"(?:down\s*payment|deposit|paid)\s*(?:was|is|of|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                text,
+                re.IGNORECASE,
+            )
+            if dp_answer:
+                quote.down_payment_cents = _parse_dollars_to_cents(dp_answer.group(1))
+                quote.hitl_reasons.remove("down_payment_amount_unknown")
+            elif re.search(r"\bno\s+(?:down\s+payment|deposit)\b|\$0", text, re.IGNORECASE):
+                quote.down_payment_cents = 0
+                quote.down_payment_detected = False
+                quote.hitl_reasons.remove("down_payment_amount_unknown")
+
+        # 7. Conflicting totals answer: sender picks the correct total.
+        if "conflicting_totals" in quote.hitl_reasons:
+            line_sum = sum(li["amount_cents"] for li in quote.line_items)
+            pick_line = re.search(r"\bline\s*items?\b", text, re.IGNORECASE)
+            pick_stated = re.search(r"\bstated\s+total\b", text, re.IGNORECASE)
+            explicit = re.search(r"\$?\s*([\d,]+(?:\.\d{2})?)", text)
+            if pick_line:
+                quote.stated_total_cents = line_sum
+                quote.hitl_reasons.remove("conflicting_totals")
+            elif pick_stated and quote.stated_total_cents:
+                quote.hitl_reasons.remove("conflicting_totals")
+            elif explicit:
+                quote.stated_total_cents = _parse_dollars_to_cents(explicit.group(1))
+                quote.hitl_reasons.remove("conflicting_totals")
+
+        # 8. Named insured answer: sender picks the signing entity.
+        if "multiple_named_insureds" in quote.hitl_reasons:
+            for name in quote.named_insureds:
+                if name.lower() in text.lower():
+                    quote.insured_name = name
+                    quote.named_insureds = [name]
+                    quote.hitl_reasons.remove("multiple_named_insureds")
+                    break
+
+        # 9. Expired quote answer: "still valid" / "use it" proceeds; anything
+        # mentioning a newer quote keeps the question open.
+        if "quote_expired" in quote.hitl_reasons:
+            if re.search(r"\bstill\s+valid\b|\buse\s+it\b|\bproceed\b|\byes\b", text, re.IGNORECASE):
+                quote.hitl_reasons.remove("quote_expired")
+
+        # 10. Backdated effective date: explicit confirmation proceeds.
+        if "effective_date_backdated" in quote.hitl_reasons:
+            if re.search(r"\bproceed\b|\bconfirm\b|\byes\b|\buse\s+(?:that|this)\s+date\b", text, re.IGNORECASE):
+                quote.hitl_reasons.remove("effective_date_backdated")
+
+        # 11. Reversed dates: sender supplies corrected dates.
+        if "dates_reversed" in quote.hitl_reasons:
+            dates = re.findall(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text)
+            if len(dates) >= 2:
+                quote.effective_date = _format_iso_date(dates[0])
+                quote.expiration_date = _format_iso_date(dates[1])
+                quote.hitl_reasons.remove("dates_reversed")
 
         # Re-evaluate HITL status and dynamically synchronize remaining questions
         self._sync_hitl_questions(quote)

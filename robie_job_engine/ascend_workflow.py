@@ -543,13 +543,16 @@ class AscendWorkflowManager:
                     billable["policy_fee_cents"] = b_pol_fee
                 payload["billables"].append(billable)
         else:
+            # Financed premium: subtract any down payment already paid to the
+            # carrier so the client is never double-charged.
+            financed_premium = max(0, quote.pure_premium_cents - quote.down_payment_cents)
             billable = {
                 "billable_identifier": billable_ident,
                 "carrier_identifier": carrier_identifier,  # guaranteed non-empty above; never guess
                 "coverage_identifier": quote.coverage_identifier or "commercial_auto",
                 "effective_date": quote.effective_date,
                 "expiration_date": quote.expiration_date,
-                "premium_cents": quote.pure_premium_cents,
+                "premium_cents": financed_premium,
                 "agency_fees_cents": quote.agency_fees_cents,
                 "organization_commission_rate": quote.commission_rate if quote.commission_rate is not None else 0.10,
                 "taxes_and_fees_cents": quote.surplus_lines_tax_cents,
