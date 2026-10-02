@@ -374,7 +374,7 @@ class QuoteExtractor:
             quote.insured_name = proposal_insured.group(1).strip()
         else:
             insured_match = re.search(
-                r"(?:Named\s+Insured|Insured\s+Name|Applicant|Account\s+Name)[ \t]*:[ \t]*([^\n\r,]+)",
+                r"(?:Named\s+Insured|Insured\s+Name|Applicant|Account\s+Name)[ \t]*:[ \t]*([^\n\r,]+?)(?=\s{2,}(?:Quote\s+Date|Mailing\s+Address|Policy\b)|\r?(\n|$))",
                 text,
                 re.IGNORECASE,
             )
@@ -449,13 +449,17 @@ class QuoteExtractor:
                 break
 
         # 5. Policy / Quote Number
+        # The captured value must contain a digit — form artifacts like
+        # "Policy Number\nPantoja" (a label with stray text) are not policies.
         pol_match = re.search(
-            r"(?:Quote\s+#|Quote\s+Number|Quote\s+ID|Policy\s+#|Policy\s+Number|Reference\s+#)[:\s]+([A-Z0-9\-_]+)",
+            r"(?:Quote\s+#|Quote\s+Number|Quote\s+ID|Policy\s+#|Policy\s+Number|Reference\s*:?\s*#?)[:\s]+([A-Z0-9\-_]+)",
             text,
             re.IGNORECASE,
         )
         if pol_match:
-            quote.policy_number = pol_match.group(1).strip()
+            candidate = pol_match.group(1).strip()
+            if any(c.isdigit() for c in candidate):
+                quote.policy_number = candidate
 
         # 6. Effective / Expiration Dates
         dates_match = re.search(
@@ -551,20 +555,29 @@ class QuoteExtractor:
             ]
         else:
             premium_match = re.search(
-                r"(?:Pure\s+Premium|Base\s+Premium|Coverage\s+Premium|Policy\s+Premium):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                r"(?:Pure\s+Premium|Base\s+Premium|Coverage\s+Premium|Policy\s+Premium|Advance\s+Premium):\s*\$\s*([\d,]+(?:\.\d{2})?)",
                 text,
                 re.IGNORECASE,
             )
             if premium_match:
                 quote.pure_premium_cents = _parse_dollars_to_cents(premium_match.group(1))
             else:
-                general_premium = re.search(
-                    r"(?:Premium|Total\s+Cost|Total\s+Due):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                # "Total Premium $2,552.00" — require $ sign to avoid matching "25%"
+                total_prem = re.search(
+                    r"Total\s+Premium\s*\$\s*([\d,]+(?:\.\d{2})?)",
                     text,
                     re.IGNORECASE,
                 )
-                if general_premium:
-                    quote.pure_premium_cents = _parse_dollars_to_cents(general_premium.group(1))
+                if total_prem:
+                    quote.pure_premium_cents = _parse_dollars_to_cents(total_prem.group(1))
+                else:
+                    general_premium = re.search(
+                        r"(?:Premium|Total\s+Cost|Total\s+Due):\s*\$\s*([\d,]+(?:\.\d{2})?)",
+                        text,
+                        re.IGNORECASE,
+                    )
+                    if general_premium:
+                        quote.pure_premium_cents = _parse_dollars_to_cents(general_premium.group(1))
 
         # 7b. General multi-LOB detection: if the MTC+PD special case did not
         # fire, look for multiple distinct coverage sections, each with its
@@ -736,6 +749,10 @@ class QuoteExtractor:
 
         # Line items for total cross-check: lines like "General Liability ... $5,000.00".
         # Only capture lines with a dollar amount that look like coverage rows.
+        # Skip coverage limits ("Each Occurrence $1,000,000"), deductibles,
+        # aggregates — those are limits, not premiums.
+        limit_words = ("occurrence", "aggregate", "deductible", "limit", "each",
+                       "per occurrence", "general aggregate")
         for line in text.splitlines():
             li = re.search(
                 r"^\s*([A-Za-z][A-Za-z\s&/\-]{3,40}?)\s+\$?\s*([\d,]+\.\d{2})\s*$",
@@ -743,7 +760,10 @@ class QuoteExtractor:
             )
             if li:
                 label = li.group(1).strip()
-                if len(label) > 3 and "total" not in label.lower():
+                label_lower = label.lower()
+                if len(label) > 3 and "total" not in label_lower:
+                    if any(w in label_lower for w in limit_words):
+                        continue
                     quote.line_items.append(
                         {"label": label, "amount_cents": _parse_dollars_to_cents(li.group(2))}
                     )
@@ -760,10 +780,12 @@ class QuoteExtractor:
 
         # Named insureds: capture "Named Insured:" lines and DBA mentions.
         # Multiple distinct entities trigger a clarification question.
+        # Stop at field boundaries like "Quote Date:" that share the line.
         seen: set[str] = set()
+        boundary = r"(?=\s{2,}(?:Quote\s+Date|Mailing\s+Address|Policy\b)|\r?(\n|$))"
         for pat in [
-            r"Named\s+Insured\s*:\s*([^\n\r,]+)",
-            r"Insured\s+Name\s*:\s*([^\n\r,]+)",
+            rf"Named\s+Insured\s*:\s*([^\n\r,]+?){boundary}",
+            rf"Insured\s+Name\s*:\s*([^\n\r,]+?){boundary}",
         ]:
             for m in re.finditer(pat, text, re.IGNORECASE):
                 name = m.group(1).strip()
