@@ -1221,3 +1221,40 @@ def named_lookup_read_state(store: Any, job: dict[str, Any] | None) -> str:
     if saw_sign_in:
         return "sign_in"
     return "none"
+
+
+def write_client_name(job: dict[str, Any]) -> str | None:
+    text = _original_ask(job)
+    match = re.search(
+        r"\b(?:for|about|named)\s+([a-z][a-z']+\s+[a-z][a-z']+)", text, re.I
+    )
+    if not match or match.group(1).split()[0].casefold() in {"the", "this", "that", "a", "an", "my", "our"}:
+        return None
+    return match.group(1)
+
+
+def prepare_named_write_client(store: Any, job_id: str) -> str | None:
+    """Discard fixture bindings; use only an explicitly injected name search.
+
+    No browser attachment is introduced by this Chat reconciliation.
+    """
+    job = store.get_job(job_id)
+    name = write_client_name(job)
+    if not name:
+        return None
+    _drop_untrusted_binding(store, job)
+    if trusted_applicant_ids(store, job):
+        return None
+    if _SEARCHER_OVERRIDE is None:
+        return "I could not resolve that client from an authorized EZLynx search."
+    outcome = dict(_SEARCHER_OVERRIDE(name) or {})
+    matches = [row for row in outcome.get("matches", [])
+               if isinstance(row, dict) and account_name_matches(name, str(row.get("name") or ""))]
+    if outcome.get("status") != "ok" or len(matches) != 1:
+        return "Which client should I use?"
+    bind_named_client(store, job_id, name=name, matches=matches)
+    applicant = str((store.get_job(job_id).get("payload") or {}).get("applicant_id") or "")
+    if not applicant:
+        return "Which client should I use?"
+    _remember_search(store, job_id, source="search", applicant_ids=[applicant], name=name, matches=matches)
+    return None

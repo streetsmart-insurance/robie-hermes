@@ -697,9 +697,9 @@ def _click_routed_to_this_gateway(parameters: Dict[str, str]) -> bool:
     )
 
     stamped = str(parameters.get("robie_env") or "").strip()
-    if not stamped:
+    if "robie_env" not in parameters:
         return current_robie_env() in PRODUCTION_ENV_NAMES
-    return stamped == (chat_routing_env() or "")
+    return stamped in {"test", "prod"} and stamped == (chat_routing_env() or "")
 
 
 def _decision_owned_by_gateway(adapter: Any, decision_id: str) -> bool:
@@ -1991,14 +1991,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     bool(job_id) and str(job_id) != owner_id
                 )
                 if not other_live:
+                    from robie_job_engine.chat_turn_control import job_turn_is_alive, stop_reply_line
+
+                    alive = job_turn_is_alive(self, event, owner_id, store)
+                    if owner_status == JobStatus.CANCELLED:
+                        fail_cancelled_chat_job(store, owner_id)
                     self._post_stop_confirmation_now(
                         source.chat_id,
-                        ALREADY_FINISHED_REPLY,
+                        stop_reply_line(owner_id) if alive else ALREADY_FINISHED_REPLY,
                         thread_id,
                         owner_id,
                         kind="stop",
                     )
                     self._clear_space_typing(source.chat_id)
+                    if alive:
+                        await self._terminate_running_agent(event, owner_id, reason="/stop")
                     return
             elif owner_id not in cancel_ids:
                 cancel_ids = [owner_id]
@@ -2854,6 +2861,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             # --- Card-click events ---
             if _card_event_payload(envelope) is not None or "widget" in ce_type or "card" in ce_type.lower():
+                from robie_job_engine.runtime_env import chat_routing_env
+
+                params = _card_parameters(_card_event_payload(envelope) or {})
+                stamp = attrs.get("robie_env", params.get("robie_env", "prod"))
+                if (stamp not in {"prod", "test"} or stamp != chat_routing_env()
+                        or ("robie_env" in params and params["robie_env"] != stamp)):
+                    message.ack()
+                    return
                 self._schedule_pubsub_processing(
                     self._handle_card_event(envelope, notify=True), message
                 )
@@ -2892,7 +2907,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 enriched_env["space"] = space
 
             self._schedule_pubsub_processing(
-                self._dispatch_message(msg_with_space, enriched_env),
+                self._dispatch_message(msg_with_space, enriched_env, routing_attributes=attrs),
                 message,
                 msg_name,
             )
@@ -2965,7 +2980,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # still decides: our environment falls through to the resolver,
             # the other environment is acked with no patch.
             if (
-                not _decision_owned_by_gateway(self, decision_id)
+                ("robie_env" in parameters or not _decision_owned_by_gateway(self, decision_id))
                 and not _click_routed_to_this_gateway(parameters)
             ):
                 logger.info(
@@ -2976,7 +2991,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 return None
         elif action == "robie_confirmation_decision":
             confirmation_id, owned = _confirmation_owned_by_gateway(self, parameters)
-            if not owned:
+            if not owned or ("robie_env" in parameters and not _click_routed_to_this_gateway(parameters)):
                 if not _click_routed_to_this_gateway(parameters):
                     logger.info(
                         "[GoogleChat] confirmation click not owned here action=%s ref=%s",
@@ -3016,21 +3031,28 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if not clarify_id or not choice or clarify_id not in self._clarify_state:
                     response = "That question has expired. Please ask ROBIE again."
                 else:
-                    from tools.clarify_gateway import (
-                        mark_awaiting_text,
-                        resolve_gateway_clarify,
-                    )
+                    from tools.clarify_gateway import resolve_gateway_clarify
                     custom_text = _card_form_text(payload, "custom_text")
                     if choice == "__other__" and not custom_text:
-                        waiting = mark_awaiting_text(clarify_id)
-                        response = (
-                            "Type your answer in a new message."
-                            if waiting
-                            else "That question has expired. Please ask ROBIE again."
-                        )
+                        response = "Reply in this question's thread with your answer."
+
                     else:
                         answer = custom_text if choice == "__other__" else choice
-                        resolved = bool(answer) and resolve_gateway_clarify(clarify_id, str(answer))
+                        from robie_job_engine.chat_clarification import deliver_reply
+                        from robie_job_engine.runtime_env import chat_routing_env
+                        from robie_job_engine.store import JobStore
+
+                        user = payload.get("user") or {}
+                        message = payload.get("message") or {}
+                        resolved = bool(answer) and deliver_reply(
+                            JobStore(_gateway_job_db_path(self)),
+                            thread=str((message.get("thread") or {}).get("name") or ""),
+                            actor=str(user.get("email") or user.get("name") or ""),
+                            environment=chat_routing_env() or "",
+                            message_id=str(envelope.get("eventTime") or payload.get("eventTime") or "") + ":" + clarify_id + ":" + str(answer),
+                            text=str(answer), resolve=resolve_gateway_clarify,
+                            clarify_id=clarify_id,
+                        ) == "delivered"
                         if resolved:
                             self._clarify_state.pop(clarify_id, None)
                             response = f"Choice recorded: {answer}"
@@ -3168,21 +3190,49 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         return True, ""
 
-    async def _dispatch_message(self, msg: Dict[str, Any], envelope: Dict[str, Any]) -> None:
+    async def _dispatch_message(self, msg: Dict[str, Any], envelope: Dict[str, Any], *, routing_attributes: Optional[Dict[str, str]] = None) -> None:
         """Translate a Chat message payload to a MessageEvent and hand off.
 
         Intercepts the ``/setup-files`` admin command BEFORE the agent
         sees it — that's a bot-local OAuth setup flow, not a prompt.
         Everything else flows to ``handle_message`` as normal.
         """
+        from robie_job_engine.chat_environment import route_message
+        from robie_job_engine.runtime_env import chat_routing_env
+
+        route, clean_msg = route_message(msg, routing_attributes)
+        if route != chat_routing_env():
+            _log_inbound_drop("foreign or invalid message environment")
+            return
+        # Normalize before event creation, commands, classification and job creation.
+        msg = clean_msg
         try:
             event = await self._build_message_event(msg, envelope)
             if event is None:
                 _log_inbound_drop("message could not be read")
                 return
 
-            # Short-circuit /setup-files before the agent dispatch.
+            # A live clarify reply wakes its exact owner before any busy/defer
+            # or generic resume path can start a second agent session.
             text = (event.text or "").strip()
+            from robie_job_engine.chat_turn_control import is_stop_command
+            if event.source and not is_stop_command(text) and not text.startswith("/"):
+                from robie_job_engine.chat_clarification import deliver_reply
+                def resolve_gateway_clarify(clarify_id, answer):
+                    from tools.clarify_gateway import resolve_gateway_clarify as resolve
+                    return resolve(clarify_id, answer)
+
+                result = await asyncio.to_thread(
+                    deliver_reply, JobStore(ROBIE_JOB_DB),
+                    thread=str(getattr(event.source, "thread_id", None) or ""),
+                    actor=str(getattr(event.source, "user_id", None) or ""),
+                    environment=route, message_id=str(event.message_id or ""),
+                    text=text, resolve=resolve_gateway_clarify,
+                )
+                if result != "absent":
+                    return
+
+            # Short-circuit /setup-files before the agent dispatch.
             queue = None
             context = None
             interaction = {}
@@ -3575,6 +3625,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 ),
         )
         await self._bind_inbound_job_thread(event, job_id)
+        if job_id and event.source:
+            from robie_job_engine.runtime_env import chat_routing_env
+            store = JobStore(ROBIE_JOB_DB)
+            if not store.get_checkpoint(job_id, "chat_request_owner"):
+                store.checkpoint(job_id, "chat_request_owner", {
+                    "actor": str(getattr(event.source, "user_id", None) or ""),
+                    "environment": chat_routing_env(),
+                })
         related_only = chat_message_is_related_only(
             text,
             expected_attachment_count=attachment_count,
@@ -5368,6 +5426,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if not job_id:
             return
         try:
+            pending = JobStore(ROBIE_JOB_DB).get_checkpoint(job_id, "chat_live_question") or {}
+            if pending.get("open"):
+                return
             from robie_job_engine.chat_job_controls import (
                 mark_job_waiting_for_user,
                 stop_recordings_for_jobs,
@@ -5436,7 +5497,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         from robie_job_engine.user_reply import format_user_reply
 
         question = format_user_reply(question)
-        self._mark_clarify_waiting(chat_id, question)
+        from robie_job_engine.turn_finalization import bound_model_context
+        from robie_job_engine.chat_clarification import register_question
+
+        owner, generation, owner_db = bound_model_context()
+        registered = bool(owner and generation and owner_db) and register_question(
+            JobStore(owner_db), owner, generation, clarify_id
+        )
+        if not registered:
+            self._mark_clarify_waiting(chat_id, question)
         if not choices:
             return await super().send_clarify(
                 chat_id, question, choices, clarify_id, session_key, metadata

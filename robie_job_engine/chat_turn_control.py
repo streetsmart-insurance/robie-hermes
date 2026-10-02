@@ -991,14 +991,17 @@ def sent_message_id(result: Any) -> str:
 
 def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
     """Block a tool call when this job was stopped or hit the ceiling."""
+    from .turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
     job_id = str(
-        (kwargs or {}).get("job_id")
+        owner or (kwargs or {}).get("job_id")
         or os.environ.get("ROBIE_JOB_ID")
         or os.environ.get("JOB_ID")
         or ""
     ).strip()
     db_path = str(
-        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+        owner_db or (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()
     store = None
     if job_id and db_path:
@@ -1008,6 +1011,20 @@ def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
             store = JobStore(db_path)
         except Exception:
             store = None
+    stopped = agent_output_blocked(job_id, store)
+    if stopped:
+        return stopped
+    if job_id:
+        try:
+            job = store.get_job(job_id) if store is not None else None
+            if not job or JobStatus(job['status']) in TERMINAL_STATUSES:
+                return 'JOB_TOOL_REFUSED: no active job; job already finished or is unavailable.'
+            if owner:
+                state = store.get_checkpoint(owner, "model_generation") or {}
+                if not state.get("running") or state.get("generation") != _generation:
+                    return 'JOB_TOOL_REFUSED: generation is no longer running.'
+        except Exception:
+            return 'JOB_TOOL_REFUSED: job state could not be read.'
     return agent_output_blocked(job_id, store)
 
 
@@ -1035,13 +1052,16 @@ _TOOL_PROGRESS_LINE = re.compile(
 
 
 def is_tool_progress_text(text: str) -> bool:
-    """True for a raw tool-progress bubble. It is not a reply to the person."""
+    """True for a raw tool-progress bubble. It is not a reply to the person.
+
+    A run of these lines is still progress when there are more than a handful.
+    Job 598820fc stored seven ``\U0001F3AD playwright_exec`` lines and that count used
+    to fall through as an answer.
+    """
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
-    if not lines or len(lines) > 6:
+    if not lines:
         return False
-    if sum(len(line) for line in lines) > 800:
-        return False
-    return all(_TOOL_PROGRESS_LINE.match(line) for line in lines)
+    return all(_line_is_tool_trace(line) for line in lines)
 
 
 _HEARTBEAT_LINE = re.compile(
@@ -1064,10 +1084,14 @@ _STATUS_ONLY = frozenset(
 def is_progress_heartbeat_or_thinking(text: str) -> bool:
     """True for a progress, heartbeat, or thinking line. Never a final answer.
 
-    ``⏳ Working — 6 min — iteration 21/500, clarify`` is the gateway
+    ``\u23F3 Working \u2014 6 min \u2014 iteration 21/500, clarify`` is the gateway
     talking to itself. It must not be stored as the reply or close the job.
     """
-    if is_tool_progress_text(text) or is_gateway_status_notice(text):
+    if (
+        is_tool_progress_text(text)
+        or content_is_only_progress(text)
+        or is_gateway_status_notice(text)
+    ):
         return True
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
     if not lines or len(lines) > 3:
@@ -1082,7 +1106,7 @@ def is_progress_heartbeat_or_thinking(text: str) -> bool:
         "",
         body,
     ).strip()
-    folded = stripped.casefold().rstrip(".… ")
+    folded = stripped.casefold().rstrip(".\u2026 ")
     return folded in _STATUS_ONLY
 
 
@@ -1096,10 +1120,11 @@ def is_refused_tool_text(text: str) -> bool:
     if not body or len(body) > 2500:
         return False
     folded = body.casefold()
-    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
-    # Only the tool-refusal text handed back mid-turn is skipped here.
-    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
-        return False
+    # These are tool results handed back mid-turn, including when the tool
+    # prefixes them with PLAYWRIGHT_BLOCKED. Job 598820fc closed COMPLETE on
+    # "do not guess an EZLynx search URL" while the agent was still calling tools.
+    if "do not guess an ezlynx search url" in folded:
+        return True
     if "do not drive ezlynx screens by hand" in folded:
         return True
     if "playwright_exec is refused" in folded:
@@ -1110,6 +1135,10 @@ def is_refused_tool_text(text: str) -> bool:
         return True
     if "this action was refused before it started" in folded:
         return True
+    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
+    # Only the tool-refusal text handed back mid-turn is skipped here.
+    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
+        return False
     return False
 
 
@@ -1468,7 +1497,7 @@ async def terminate_gateway_agent(
     runner interrupt cannot finish in-process.
     """
     request_agent_stop(job_id)
-    resolved, derived = resolve_running_session_key(adapter, event)
+    resolved, derived, keys = stop_session_keys(adapter, event, job_id, store)
     chat_id, _thread_id = _event_chat_thread(event)
     logger.warning(
         "stop session keys resolved=%s derived=%s chat=%s reason=%s",
@@ -1508,12 +1537,6 @@ async def terminate_gateway_agent(
             except Exception:
                 pass
     source = getattr(event, "source", None)
-    keys = [resolved]
-    if derived and derived not in keys:
-        keys.append(derived)
-    for key in _iter_live_session_keys(adapter):
-        if _key_matches_chat(key, chat_id, _thread_id) and key not in keys:
-            keys.append(key)
     tasks = _tasks_for_keys(adapter, keys)
     captured = _capture_session_task(adapter, event, resolved)
     if captured is not None and captured not in tasks:
@@ -1610,6 +1633,9 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
+        if status == JobStatus.CANCELLED:
+            from .chat_queue import DurableChatEventQueue
+            DurableChatEventQueue(str(store.path)).deactivate_job_links(job_id)
         return ALREADY_FINISHED_REPLY
     reply = stop_reply_line(job_id)
     store.transition(
@@ -1624,4 +1650,120 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
         "cancelled",
         {"by": "/stop", "reason": "Cancelled."},
     )
+    from .chat_queue import DurableChatEventQueue
+
+    DurableChatEventQueue(str(store.path)).deactivate_job_links(job_id)
     return reply
+
+
+def _line_is_tool_trace(line: str) -> bool:
+    return _TOOL_PROGRESS_LINE.match(line.strip()) is not None
+
+
+def _line_is_heartbeat(line: str) -> bool:
+    """One Working\u2026 / thinking / iteration line. Not a sentence that mentions work."""
+    body = line.strip()
+    if not body or len(body) > 240:
+        return False
+    if _HEARTBEAT_LINE.search(body):
+        return True
+    stripped = re.sub(
+        r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+",
+        "",
+        body,
+    ).strip()
+    folded = stripped.casefold().rstrip(".\u2026 ")
+    return folded in _STATUS_ONLY
+
+
+def content_is_only_progress(text: str) -> bool:
+    """True when every line is a tool trace or a Working\u2026 heartbeat.
+
+    That text is never an answer and never finalizes a job by itself.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(_line_is_tool_trace(line) or _line_is_heartbeat(line) for line in lines)
+
+
+def stop_session_keys(
+    adapter: Any,
+    event: Any,
+    job_id: str | None = None,
+    store: Any = None,
+) -> tuple[str, str, list[str]]:
+    """``(resolved, derived, keys)`` for the job being stopped.
+
+    A top-level ``/stop`` has an empty thread, so the adapter fallback is
+    ``chat:spaces/<id>:``. That key does not own the thread turn. The
+    resolved key is the live ``agent:`` session for the job's thread.
+    """
+    derived = session_key_from_adapter(adapter, event)
+    chat_id, thread_id = _event_chat_thread(event)
+    threads: list[str] = []
+    if thread_id:
+        threads.append(thread_id)
+    if store is not None and job_id:
+        try:
+            from .chat_thread import read_job_chat_thread
+
+            stored = str(read_job_chat_thread(store, str(job_id)) or "")
+        except Exception:
+            stored = ""
+        if stored and stored not in threads:
+            threads.append(stored)
+    turns = getattr(adapter, "_gateway_turns", None)
+    if isinstance(turns, dict) and job_id:
+        for key, record in turns.items():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("job_id") or "") != str(job_id):
+                continue
+            if isinstance(key, tuple) and key and not chat_id:
+                chat_id = str(key[0])
+            if isinstance(key, tuple) and len(key) > 1 and key[1]:
+                extra = str(key[1])
+                if extra not in threads:
+                    threads.append(extra)
+    matched: list[str] = []
+    for key in _iter_live_session_keys(adapter):
+        if chat_id and chat_id not in str(key):
+            continue
+        if threads:
+            if any(_key_matches_stop(key, chat_id, thread) for thread in threads):
+                matched.append(key)
+        elif _key_is_running(adapter, key):
+            matched.append(key)
+    agent_keys = [key for key in matched if str(key).startswith("agent:")]
+    if agent_keys:
+        resolved = agent_keys[0]
+    elif matched:
+        resolved = matched[0]
+    else:
+        resolved = derived if not threads or any(_key_matches_stop(derived, chat_id, thread) for thread in threads) else ""
+    keys: list[str] = []
+    for key in (resolved, *matched):
+        if key and key not in keys:
+            keys.append(key)
+    return resolved, derived, keys
+
+
+def job_turn_is_alive(
+    adapter: Any,
+    event: Any,
+    job_id: str | None,
+    store: Any = None,
+) -> bool:
+    """True when this job's agent is still running after the row was closed."""
+    _resolved, _derived, keys = stop_session_keys(adapter, event, job_id, store)
+    return any(_key_is_running(adapter, key) for key in keys)
+
+
+def _key_matches_stop(key: str, chat_id: str, thread_id: str) -> bool:
+    if _key_matches_chat(key, chat_id, thread_id):
+        return True
+    if not chat_id or chat_id not in str(key) or not thread_id:
+        return False
+    tail = thread_id.rstrip('/').split('/')[-1]
+    return str(key).endswith('/threads/' + tail) or str(key).endswith(':' + tail)

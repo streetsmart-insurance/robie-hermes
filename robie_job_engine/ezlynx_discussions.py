@@ -316,6 +316,10 @@ class DiscussionApiClient:
         if authenticated:
             headers["Authorization"] = f"Bearer {self.get_token()}"
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+
+                assert_chat_write_allowed()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -539,6 +543,22 @@ def select_discussion_for_note(
     if len(rows) == 1:
         return rows[0]
     hint = str(title_hint or "").strip().lower()
+    from .turn_finalization import bound_model_context
+
+    owner, generation, owner_db = bound_model_context()
+    if owner and hint:
+        from .store import JobStore
+        store = JobStore(owner_db)
+        job = store.get_job(owner)
+        payload = job.get("payload") or {}
+        reply = store.get_checkpoint(owner, "clarification_reply") or {}
+        authorized_text = " ".join(str(payload.get(key) or "") for key in ("request_text", "original_text"))
+        if reply.get("generation") == generation:
+            authorized_text += " " + str(reply.get("text") or "")
+        if hint not in " ".join(authorized_text.casefold().split()):
+            raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
+                "discussion title was not selected by the requester; refusing to guess",
+                matches=recent_discussion_titles(rows))
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
@@ -746,6 +766,8 @@ def file_note_to_existing_discussion(
     a later retry must not silently send again, even after the daily window.
     Explicit, separately authorized repost approval remains a caller boundary.
     """
+    from .chat_write_boundary import assert_chat_applicant
+    assert_chat_applicant(applicant_id)
     applicant = require_allowed_ezlynx_write_applicant(applicant_id)
     text = reject_phone_numbers(note_body).strip()
     if not text:

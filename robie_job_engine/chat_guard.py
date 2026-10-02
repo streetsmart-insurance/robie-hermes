@@ -1008,6 +1008,10 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         from .client_name_lookup import prepare_named_client_lookup
 
         prepare_named_client_lookup(store, job_id)
+        from .write_verification_loop import is_ezlynx_write_job
+        if is_ezlynx_write_job(job):
+            from .client_name_lookup import prepare_named_write_client
+            prepare_named_write_client(store, job_id)
         job = store.get_job(job_id)
     if job["status"] == JobStatus.FAILED:
         if is_action_gate_refusal(job):
@@ -3008,11 +3012,13 @@ def _guard_chat_response_impl(
         is_progress_heartbeat_or_thinking,
         is_refused_tool_text,
         is_tool_progress_text,
+        content_is_only_progress,
     )
 
     # A refused tool call and a raw progress line go back to the model.
     # They are not the reply, not a write, and they do not end the job.
-    if is_tool_progress_text(content) or is_refused_tool_text(content):
+    if (is_tool_progress_text(content) or is_refused_tool_text(content)
+            or ("\n" in str(content) and content_is_only_progress(content))):
         return ""
     if is_gateway_status_notice(content):
         return ""

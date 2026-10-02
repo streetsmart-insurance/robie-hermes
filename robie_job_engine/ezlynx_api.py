@@ -531,6 +531,10 @@ class EzlynxApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+
+                assert_chat_write_allowed()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -614,6 +618,10 @@ class EzlynxApiClient:
         raises EzlynxApiError as before (status is in the exception).
         """
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+
+                assert_chat_write_allowed()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             http_status = None
             status_source = None
@@ -940,6 +948,8 @@ class EzlynxApiClient:
         Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
         200 body is a numeric document id. Never uploads to a live applicant.
         """
+        from .chat_write_boundary import assert_chat_applicant
+        assert_chat_applicant(applicant_id)
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
         if not name:

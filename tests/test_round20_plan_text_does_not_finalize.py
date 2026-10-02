@@ -47,7 +47,7 @@ def _address_job(store: JobStore) -> str:
         "ezlynx.policy_change",
         {
             "text": (
-                "Change the mailing address for Buster Brown to "
+                "Change the mailing address for Buster Brown applicant 220250093 to "
                 "100 Test Mailing Rd and note the request"
             ),
             "account_name": "Buster Brown",

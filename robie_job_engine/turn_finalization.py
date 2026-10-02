@@ -517,6 +517,12 @@ def install_tool_call_text_guard() -> None:
         def execute(self: Any, *args: Any, **kwargs: Any) -> Any:
             job_id = current_model_job_id()
             try:
+                owner, generation, owner_db = bound_model_context()
+                if owner:
+                    from .chat_turn_control import refuse_current_tool_call
+                    refusal = refuse_current_tool_call()
+                    if refusal:
+                        raise RuntimeError(refusal)
                 return original_exec(self, *args, **kwargs)
             finally:
                 end_tool_call_message(job_id)
@@ -536,3 +542,11 @@ def _agent_class() -> Any:
         if cls is not None and hasattr(cls, "_emit_interim_assistant_message"):
             return cls
     return None
+
+
+def bound_model_context() -> tuple[str, str, str]:
+    """Exact job, generation and database carried by this execution context.
+
+    Unlike legacy current_model_job_id, this never falls back to process env.
+    """
+    return _GENERATION_CONTEXT.get() or ('', '', '')

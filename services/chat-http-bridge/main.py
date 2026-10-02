@@ -538,10 +538,9 @@ def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str
     exactly ``test`` or ``prod``. Clicks without that parameter stay
     untagged.
 
-    Ordinary messages stay untagged unless the Chat space is listed in
-    ``ROBIE_TEST_CHAT_SPACES``. A space that is not listed is never
-    tagged ``test``, even if the message carries a ``robie_env``
-    parameter. The default empty list matches a Prod filter of
+    Ordinary messages stay untagged unless their first non-mention token
+    is ``[[robie-test]]`` / ``robie-test:`` or the Chat space is listed in
+    ``ROBIE_TEST_CHAT_SPACES``. Message parameters cannot select Test. The default empty list matches a Prod filter of
     ``attributes.robie_env = "prod" OR NOT attributes:robie_env``.
     """
     attrs = {"ce-type": event_type}
@@ -550,6 +549,12 @@ def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str
         if env in _ROUTING_ENVS:
             attrs["robie_env"] = env
         return attrs
+    message = event.get("message") or {}
+    for key in ("argumentText", "text"):
+        text = re.sub(r"^(?:<users/[^>]+>|@robie)\s*", "", str(message.get(key) or "").lstrip(), flags=re.I)
+        if re.match(r"^(?:\[\[robie-test\]\]|robie-test:)(?=\s|$)", text, flags=re.I):
+            attrs["robie_env"] = "test"
+            return attrs
     space = _event_space_name(event)
     if space and space in _configured_test_chat_spaces():
         attrs["robie_env"] = "test"

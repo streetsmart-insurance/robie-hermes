@@ -67,6 +67,16 @@ class BridgeTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         return main.app.test_client().post(path, json=payload, headers=headers)
 
+    def test_message_test_marker_after_mention_and_argument_text(self):
+        for message in (
+            {"text": "[[robie-test]] hello"},
+            {"text": "<users/bot> [[robie-test]] hello"},
+            {"text": "@robie hello", "argumentText": "robie-test: hello"},
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(main._routing_attributes({"message": message}, "MESSAGE")["robie_env"], "test")
+        self.assertNotIn("robie_env", main._routing_attributes({"message": {"text": "hello"}}, "MESSAGE"))
+
     def test_addon_message_payload_is_normalized_for_legacy_hermes(self):
         payload = {
             "authorizationEventObject": {"userOAuthToken": "redacted-test-token"},

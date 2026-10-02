@@ -1010,15 +1010,18 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     """
     import os as _os
 
+    from .turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
     kwargs = dict(kwargs or {})
     args = dict(args or {})
     job_id = str(
-        kwargs.get("job_id")
+        owner or kwargs.get("job_id")
         or _os.environ.get("ROBIE_JOB_ID")
         or _os.environ.get("JOB_ID")
         or ""
     ).strip()
-    db_path = str(kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
+    db_path = str(owner_db or kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
     if not job_id or not db_path:
         return NO_ACTIVE_JOB_WRITE
     from .store import JobStore
@@ -1048,6 +1051,13 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         return blocked
     if not is_ezlynx_write_job(job):
         return None
+    from .client_name_lookup import trusted_applicant_ids
+
+    applicant = str(args.get("applicant_id") or "").strip()
+    from .client_name_lookup import write_client_name
+    named_request = write_client_name(job)
+    if named_request and applicant and applicant not in trusted_applicant_ids(store, job):
+        return "EZLYNX_APPLICANT_UNTRUSTED: resolve this job's applicant from its request or an authorized name search; never use a fixture id."
     if plan_is_locked(store, job_id):
         return None
     statement = coerce_tool_plan(args.get("plan"), args)
