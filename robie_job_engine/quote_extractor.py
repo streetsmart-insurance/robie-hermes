@@ -767,7 +767,10 @@ class QuoteExtractor:
                     if any(w in label_lower for w in limit_words):
                         continue
                     amount = _parse_dollars_to_cents(li.group(2))
-                    key = (label_lower, amount)
+                    # Normalize label for dedup: "Surplus Line Tax" vs
+                    # "Surplus Lines Tax" are the same fee listed twice.
+                    norm_label = re.sub(r"s\b", "", label_lower)
+                    key = (norm_label, amount)
                     if key in seen_items:
                         continue  # duplicate line (fee schedules often repeat)
                     seen_items.add(key)
