@@ -480,6 +480,52 @@ class TestReadonlyRelease(unittest.TestCase):
         self.assertEqual(output['archive_search']['bytes_reserved'], 16)
         self.assertFalse(output['archive_search'].get('matched', False))
 
+    def test_bad_first_small_archive_does_not_hide_later_exact_match(self):
+        data = b'archive'
+        sha = hashlib.sha256(data).hexdigest()
+        self.archive.write_bytes(data)
+        bad_checksum = ('0' * 64 + '  ' + self.archive.name + '\n').encode()
+        Path(str(self.archive) + '.sha256').write_bytes(bad_checksum)
+        # Roots are searched in order, so staging's bad candidate comes first.
+        good = self.root / 'deployments' / self.short / self.archive.name
+        checksum = (sha + '  ' + good.name + '\n').encode()
+        self.write(good, data)
+        self.write(Path(str(good) + '.sha256'), checksum)
+        output = {}
+        path, found = audit.find_rollback_archive(self.root, self.staging, self.commit, sha, output)
+        self.assertEqual((path, found), (good, data))
+        self.assertEqual(output['archive_search']['candidates'], 2)
+        self.assertTrue(output['archive_search']['matched'])
+        self.assertEqual(output['archive_search']['bytes_reserved'],
+                         2 * len(data) + len(bad_checksum) + len(checksum))
+
+    def test_failed_growing_checksum_keeps_its_reserved_charge(self):
+        from types import SimpleNamespace
+        import stat
+        self.archive.write_bytes(b'archive')
+        Path(str(self.archive) + '.sha256').write_bytes(b'x' * 258)
+        second = self.root / 'deployments' / self.short / self.archive.name
+        self.write(second, b'archive')
+        self.write(Path(str(second) + '.sha256'), b'unread')
+        read = audit.archive_bytes
+        checksum_calls = []
+        def growing_checksum(fd, name, limit):
+            if name.endswith('.sha256'):
+                checksum_calls.append(name)
+                with patch.object(audit.os, 'fstat', return_value=SimpleNamespace(
+                        st_mode=stat.S_IFREG, st_size=0)):
+                    return read(fd, name, limit)
+            return read(fd, name, limit)
+        output = {}
+        with patch.object(audit, 'MAX_ARCHIVE', 8), \
+                patch.object(audit, 'MAX_EXPANDED', 280), \
+                patch.object(audit, 'archive_bytes', side_effect=growing_checksum):
+            with self.assertRaisesRegex(audit.Refused, 'archive_search_limit'):
+                audit.find_rollback_archive(self.root, self.staging, self.commit, '0' * 64, output)
+        self.assertEqual(len(checksum_calls), 1)
+        self.assertEqual(output['archive_search']['bytes_reserved'], 7 + 257 + 7)
+        self.assertFalse(output['archive_search'].get('matched', False))
+
     def test_driver_conflict_still_collects_other_evidence(self):
         self.driver.update(state='IN', holder='PRODUCTION', clear=False)
         self.refused('driver_conflict_or_expired')

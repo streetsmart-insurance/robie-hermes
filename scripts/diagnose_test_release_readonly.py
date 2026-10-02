@@ -302,14 +302,18 @@ def find_rollback_archive(root, staging, commit, sha, output):
                         require(remaining > 1, 'archive_search_limit')
                         limit = min(MAX_ARCHIVE, remaining - 1)
                         # Reserve the complete possible read, including the extra
-                        # growth-detection byte. Failed reads never refund budget.
+                        # growth-detection byte. Only a successful bounded read
+                        # proves unused capacity can be refunded.
                         search['bytes_reserved'] += limit + 1
                         data = archive_bytes(fd, name, limit)
+                        search['bytes_reserved'] -= limit + 1 - len(data)
                         require(time.monotonic() <= deadline, 'archive_search_limit')
                         require(search['bytes_reserved'] + 257 <= MAX_EXPANDED,
                                 'archive_search_limit')
                         search['bytes_reserved'] += 257
-                        checksum = archive_bytes(fd, name + '.sha256', 256).decode().split()
+                        checksum_data = archive_bytes(fd, name + '.sha256', 256)
+                        search['bytes_reserved'] -= 257 - len(checksum_data)
+                        checksum = checksum_data.decode().split()
                         require(time.monotonic() <= deadline, 'archive_search_limit')
                         require(checksum == [sha, name] and archive_digest_before(data, deadline) == sha,
                                 'rollback_archive_digest')
