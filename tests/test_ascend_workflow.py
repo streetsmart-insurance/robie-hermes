@@ -74,7 +74,7 @@ class TestQuoteExtractor(unittest.TestCase):
         quote = self.extractor.extract_from_text(SAMPLE_AMBIGUOUS_QUOTE)
         self.assertTrue(quote.requires_hitl)
 
-        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism. Address: 123 Main St, Newark, NJ 07101. Contact: John Doe, john@acme.com, 555-0100"
+        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism. Address: 123 Main St, Newark, NJ 07101. Contact: John Doe, john@acme.com, 555-010-1234"
         resolved = self.extractor.apply_user_clarifications(quote, reply)
         self.assertFalse(resolved.requires_hitl)
         self.assertEqual(resolved.agency_fees_cents, 35000)

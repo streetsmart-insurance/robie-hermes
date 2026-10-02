@@ -210,6 +210,30 @@ def _parse_carrier_answer(text: str) -> tuple[Optional[str], Optional[str]]:
     return name, identifier
 
 
+def _is_address_complete(address: dict | None) -> bool:
+    """Check if address has all required fields: street, city, state, zip."""
+    if not address:
+        return False
+    return bool(
+        address.get("mailing_address_street_one")
+        and address.get("mailing_address_city")
+        and address.get("mailing_address_state")
+        and address.get("mailing_address_zip_code")
+    )
+
+
+def _is_contact_complete(contact: dict | None) -> bool:
+    """Check if contact has all required fields: phone, email, and name."""
+    if not contact:
+        return False
+    has_name = (
+        contact.get("first_name")
+        or contact.get("last_name")
+        or contact.get("full_name")
+    )
+    return bool(contact.get("phone") and contact.get("email") and has_name)
+
+
 def _parse_address_answer(text: str) -> dict[str, str]:
     """Parse a US mailing address from a clarification reply into Ascend keys.
 
@@ -727,11 +751,11 @@ class QuoteExtractor:
         # 12b. Insured address/contact from user instruction (if provided upfront).
         # This allows the initial request to include them, avoiding a HITL round-trip.
         if clean_user_instruction:
-            if not quote.mailing_address:
+            if not _is_address_complete(quote.mailing_address):
                 address = _parse_address_answer(clean_user_instruction)
                 if address:
                     quote.mailing_address = address
-            if not quote.primary_contact:
+            if not _is_contact_complete(quote.primary_contact):
                 contact = _parse_contact_answer(clean_user_instruction)
                 if contact:
                     quote.primary_contact = contact
@@ -1047,9 +1071,10 @@ class QuoteExtractor:
         # Question 11: Insured address/contact missing — Ascend requires
         # mailing address and primary contact to create the insured.
         # Fail closed: ask for it rather than proceeding with placeholders.
-        if not quote.mailing_address:
+        # Address requires: street, city, state, zip. Contact requires: phone, email, name.
+        if not _is_address_complete(quote.mailing_address):
             reasons.append("insured_address_missing")
-        if not quote.primary_contact:
+        if not _is_contact_complete(quote.primary_contact):
             reasons.append("insured_contact_missing")
 
         quote.hitl_reasons = reasons
@@ -1236,18 +1261,30 @@ class QuoteExtractor:
                 quote.carrier_identifier = carrier_identifier
             elif carrier_name and not quote.carrier_name:
                 quote.carrier_name = carrier_name
-        if not quote.mailing_address:
+        if not _is_address_complete(quote.mailing_address):
             address = _parse_address_answer(text)
             if address:
-                quote.mailing_address = address
-                if "insured_address_missing" in quote.hitl_reasons:
-                    quote.hitl_reasons.remove("insured_address_missing")
-        if not quote.primary_contact:
+                # Merge: only fill in missing fields, never overwrite existing
+                merged = dict(quote.mailing_address or {})
+                for k, v in address.items():
+                    if v and not merged.get(k):
+                        merged[k] = v
+                quote.mailing_address = merged
+                if _is_address_complete(quote.mailing_address):
+                    if "insured_address_missing" in quote.hitl_reasons:
+                        quote.hitl_reasons.remove("insured_address_missing")
+        if not _is_contact_complete(quote.primary_contact):
             contact = _parse_contact_answer(text)
             if contact:
-                quote.primary_contact = contact
-                if "insured_contact_missing" in quote.hitl_reasons:
-                    quote.hitl_reasons.remove("insured_contact_missing")
+                # Merge: only fill in missing fields, never overwrite existing
+                merged = dict(quote.primary_contact or {})
+                for k, v in contact.items():
+                    if v and not merged.get(k):
+                        merged[k] = v
+                quote.primary_contact = merged
+                if _is_contact_complete(quote.primary_contact):
+                    if "insured_contact_missing" in quote.hitl_reasons:
+                        quote.hitl_reasons.remove("insured_contact_missing")
         if not quote.applicant_id_hint:
             hint = _parse_applicant_id_hint(text)
             if hint:
