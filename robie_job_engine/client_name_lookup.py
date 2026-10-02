@@ -303,11 +303,10 @@ def _search_note(store: Any, job_id: str) -> dict[str, Any]:
 
 
 def trusted_applicant_ids(store: Any, job: dict[str, Any] | None) -> list[str]:
-    """Ids this job may open.
+    """Ids a named lookup may open: this job's search, or an id the user typed.
 
-    A live name search, an id the user typed, or the digit id the job was
-    opened with. An id the model picked out of a fixture file is none of
-    those, so it is not trusted.
+    A digit already stored on the payload is not trusted here. Named lookups
+    drop a docs or fixture id. Write jobs decide that case separately.
     """
     if not job:
         return []
@@ -321,11 +320,6 @@ def trusted_applicant_ids(store: Any, job: dict[str, Any] | None) -> list[str]:
             token = str(item or "").strip()
             if token and token not in found:
                 found.append(token)
-    payload = dict(job.get("payload") or {})
-    for key in ("applicant_id", "ezlynx_applicant_id", "account_id"):
-        token = str(payload.get(key) or "").strip()
-        if token.isdigit() and token not in found:
-            found.append(token)
     return found
 
 
