@@ -1059,10 +1059,14 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         if held:
             return held
         job = store.get_job(job_id)
+    from .live_turn_guard import refuse_tab_applicant
+
+    applicant = str(args.get("applicant_id") or "")
+    tab_refusal = refuse_tab_applicant(store, job, applicant)
+    if tab_refusal:
+        return tab_refusal
     if plan_is_locked(store, job_id):
-        untrusted = refuse_untrusted_applicant(
-            store, job, str(args.get("applicant_id") or "")
-        )
+        untrusted = refuse_untrusted_applicant(store, job, applicant)
         if untrusted:
             return untrusted
         return None

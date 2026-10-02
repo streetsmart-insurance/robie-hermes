@@ -42,6 +42,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -70,6 +71,119 @@ class DiscussionApiError(RuntimeError):
     def __init__(self, status: int | None, message: str) -> None:
         self.status = status
         super().__init__(message)
+
+
+# A 404 or 405 is a miss. Two misses, or a different guessed path after
+# one miss, stop the next call before HTTP. A later 2xx clears the count
+# so one miss does not stick for the life of the process.
+_DISCUSSION_MISS_LIMIT = 2
+_discussion_miss_lock = threading.Lock()
+_discussion_misses: list[tuple[str, int]] = []
+_KNOWN_DISCUSSION_COLLECTIONS = (
+    "/v8/discussions/ids-by-applicant",
+    "/v8/discussions/by-applicant",
+    "/v8/discussions/with-note",
+)
+_KNOWN_DISCUSSION_ID = re.compile(
+    r"/v8/discussions/(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?:/notes)?$",
+    re.IGNORECASE,
+)
+
+
+def reset_discussion_api_misses() -> None:
+    """Drop the 404/405 count. Tests call this so one case cannot poison the next."""
+    with _discussion_miss_lock:
+        _discussion_misses.clear()
+
+
+def discussion_api_path(url: str) -> str:
+    path = urlparse(str(url or "")).path or ""
+    return path.rstrip("/")
+
+
+def is_discussion_api_url(url: str) -> bool:
+    raw = str(url or "")
+    folded = raw.casefold()
+    if "discussionapi" in folded:
+        return True
+    path = discussion_api_path(raw).casefold()
+    return "/v8/discussions" in path or "/discussions/" in path
+
+
+def is_known_discussion_path(url: str) -> bool:
+    """A path this client actually calls. Anything else after a miss is a guess."""
+    path = discussion_api_path(url).casefold()
+    index = path.find("/v8/discussions")
+    if index < 0:
+        return False
+    suffix = path[index:]
+    if suffix in _KNOWN_DISCUSSION_COLLECTIONS:
+        return True
+    return _KNOWN_DISCUSSION_ID.fullmatch(suffix) is not None
+
+
+def _stop_guessing_message(url: str, status: int) -> str:
+    path = discussion_api_path(url) or str(url or "")
+    return (
+        f"DiscussionApi returned HTTP {int(status)} for {path}. "
+        "Stop. Do not guess another path. Report this error."
+    )
+
+
+def arm_discussion_api_call(url: str) -> None:
+    """Raise before HTTP when this call is still guessing after a 404 or 405.
+
+    Two misses stop the next call. One miss still allows the same path, or
+    another path this client already knows. A different path is a guess.
+    """
+    if not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        misses = list(_discussion_misses)
+    if not misses:
+        return
+    prior_url, status = misses[-1]
+    if len(misses) >= _DISCUSSION_MISS_LIMIT:
+        raise DiscussionApiError(status, _stop_guessing_message(prior_url, status))
+    prior = discussion_api_path(prior_url).casefold()
+    current = discussion_api_path(url).casefold()
+    if current != prior and not is_known_discussion_path(url):
+        raise DiscussionApiError(status, _stop_guessing_message(prior_url, status))
+
+
+def record_discussion_api_miss(url: str, status: int) -> None:
+    """Count one HTTP 404 or 405. Other statuses are not path guesses."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return
+    if code not in {404, 405} or not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        _discussion_misses.append((str(url or ""), code))
+
+
+def note_discussion_api_success(url: str) -> None:
+    """A real DiscussionApi response clears the miss count."""
+    if not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        _discussion_misses.clear()
+
+
+def response_status(result: Any) -> int | None:
+    """Status from a Playwright response, whether ``status`` is a value or a method."""
+    status = getattr(result, "status", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:
+            return None
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
 
 
 class DiscussionSelectionError(RuntimeError):
@@ -305,6 +419,7 @@ class DiscussionApiClient:
         authenticated: bool = True,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> Any:
+        arm_discussion_api_call(url)
         headers = dict(headers)
         try:
             extra = self._session_headers(url)
@@ -319,6 +434,8 @@ class DiscussionApiClient:
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
+            if exc.code in {404, 405}:
+                record_discussion_api_miss(url, exc.code)
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -333,6 +450,7 @@ class DiscussionApiClient:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise DiscussionApiError(None, "Discussion API returned non-JSON") from exc
+        note_discussion_api_success(url)
         return parsed
 
     def _base(self) -> str:

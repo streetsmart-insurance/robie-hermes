@@ -1969,11 +1969,45 @@ class GoogleChatAdapter(BasePlatformAdapter):
             stored = read_job_chat_thread(store, waiting_id)
             if thread_id and stored == thread_id:
                 in_this_thread.append(waiting_id)
-        # Top-level /stop cancels every waiting job for this person in the
-        # space. A /stop inside one thread cancels that thread's job.
+        # Top-level /stop cancels every active job for this person in the
+        # space, including the one that is RUNNING. A /stop inside one
+        # thread cancels that thread's job. Chat gives a top-level /stop
+        # its own new thread, so that thread key is not the running agent.
         cancel_ids = in_this_thread if thread_id and in_this_thread else waiting_ids
         if not thread_id:
             cancel_ids = waiting_ids
+        if thread_owner is None:
+            from robie_job_engine.chat_job_controls import active_jobs_for_requester
+
+            for ident in active_jobs_for_requester(
+                ROBIE_JOB_DB, source.chat_id, requester
+            ):
+                if ident not in cancel_ids:
+                    cancel_ids.append(ident)
+            for ident in cancel_ids:
+                try:
+                    if store.get_job(ident)["status"] == JobStatus.RUNNING.value:
+                        job_id = ident
+                        idle_reply = None
+                        break
+                except Exception:
+                    continue
+            for turn_key, turn in list(self._gateway_turns.items()):
+                if not isinstance(turn_key, tuple) or str(turn_key[0]) != str(source.chat_id):
+                    continue
+                turn_job = str((turn or {}).get("job_id") or "")
+                if turn_job and turn_job not in cancel_ids:
+                    continue
+                self._gateway_turns.pop(turn_key, None)
+                task = (turn or {}).get("task")
+                if (
+                    task is not None
+                    and task is not asyncio.current_task()
+                    and not getattr(task, "done", lambda: True)()
+                ):
+                    cancel_task = getattr(task, "cancel", None)
+                    if callable(cancel_task):
+                        cancel_task()
         if thread_owner is not None:
             from robie_job_engine.models import TERMINAL_STATUSES
 
@@ -3568,6 +3602,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _open_and_run_chat_job(self, event: MessageEvent, text: str) -> None:
         """Open one job and run it. Caller has already decided this turn may start."""
+        source = getattr(event, "source", None)
+        from robie_job_engine.chat_turn_control import SENDER_REFUSED, sender_is_allowed
+
+        # The allowlist is checked before a job exists. An unlisted sender
+        # used to get the stuck-job line ("a CSR should take a look").
+        if not sender_is_allowed(
+            getattr(source, "user_id", None) if source else None,
+            getattr(source, "user_name", None) if source else None,
+        ):
+            self._post_stop_confirmation_now(
+                getattr(source, "chat_id", None) if source else None,
+                SENDER_REFUSED,
+                getattr(source, "thread_id", None) if source else None,
+                None,
+                kind="notice",
+            )
+            return
         message_id = event.message_id or f"unidentified:{id(event)}"
         text = redact_text(text)
         await self._announce_expired_questions(event)
@@ -5123,9 +5174,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
             content = await asyncio.to_thread(
                 guard_chat_response, ROBIE_JOB_DB, job_id, content
             )
-        from robie_job_engine.user_reply import format_user_reply
+        from robie_job_engine.user_reply import format_outbound_reply
 
-        content = format_user_reply(content)
+        # Status lines still collapse to one sentence. A question's answer
+        # is already the whole reply, and collapsing it kept paragraph one.
+        answer_job = None
+        if job_id and delivery_kind not in {
+            "idle_stop",
+            "busy",
+            "stop",
+            "ceiling",
+            "hard_block",
+            "notice",
+        }:
+            try:
+                answer_job = JobStore(ROBIE_JOB_DB).get_job(job_id)
+            except Exception:
+                answer_job = None
+        content = format_outbound_reply(content, answer_job)
         if agent_reply and job_id:
             from robie_job_engine.turn_finalization import (
                 engine_question_already_sent,

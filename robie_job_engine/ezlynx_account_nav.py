@@ -438,8 +438,24 @@ def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
             attempted_urls=attempted,
             known_account_id=known or scope.get("_robie_known_account_id"),
         )
+        from .ezlynx_discussions import (
+            arm_discussion_api_call,
+            note_discussion_api_success,
+            record_discussion_api_miss,
+            response_status,
+        )
+
+        # A DiscussionApi 404/405 is recorded. The next guessed path raises
+        # here, before the browser asks for it.
+        arm_discussion_api_call(str(url or ""))
         attempted.append(str(url or ""))
-        return original(self, url, *args, **kwargs)
+        result = original(self, url, *args, **kwargs)
+        status = response_status(result)
+        if status in {404, 405}:
+            record_discussion_api_miss(str(url or ""), status)
+        elif status is not None and 200 <= status < 400:
+            note_discussion_api_success(str(url or ""))
+        return result
 
     wrapped.__name__ = getattr(original, "__name__", "goto")
     wrapped.__qualname__ = getattr(original, "__qualname__", "goto")

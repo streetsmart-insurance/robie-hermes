@@ -27,7 +27,11 @@ DISCUSSION_NOTE_SCHEMA = {
         "properties": {
             "applicant_id": {
                 "type": "string",
-                "description": "EZLynx applicant/account id (e.g. 220250093).",
+                "description": (
+                    "EZLynx applicant id from the user's message or this job's "
+                    "client lookup. Never use an id from the open browser tab, "
+                    "a tool example, or a fixture account."
+                ),
             },
             "note_text": {
                 "type": "string",

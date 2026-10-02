@@ -3070,6 +3070,36 @@ def guard_chat_response(
         _release_session_if_terminal(db_path, job_id)
 
 
+def _sign_in_after_recovery(
+    store: JobStore,
+    job_id: str,
+    *,
+    db_path: str,
+    recordings: RecordingManager | None,
+) -> str:
+    """Sign in with the stored credentials before asking the user.
+
+    Recovery runs only when this environment holds the driver lease.
+    A recovered session leaves the job running so the work can be tried
+    again. The user is asked only when that attempt fails.
+    """
+    from .session_recovery import DRIVER_NOT_HELD, prepare_chat_sign_in
+    from .user_reply import SIGN_IN_QUESTION
+
+    decision = prepare_chat_sign_in(store, job_id)
+    if decision == "rerun":
+        return ""
+    if decision == "refused":
+        line = DRIVER_NOT_HELD
+        return line if line.endswith("\n") else line + "\n"
+    from .chat_job_controls import mark_job_waiting_for_user
+
+    mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
+    recordings = recordings or RecordingManager(db_path)
+    recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
+    return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
+
+
 def _chat_blocker_redirect(
     store: JobStore,
     job: dict[str, Any],
@@ -3216,29 +3246,18 @@ def _guard_chat_response_impl(
     posture = sign_out_posture(content)
     if posture == "suppress":
         return ""
-    if posture == "post" and JobStatus(job["status"]) in {
-        JobStatus.PENDING,
-        JobStatus.RUNNING,
-        JobStatus.VERIFYING,
-    }:
-        from .chat_job_controls import mark_job_waiting_for_user
-
-        mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
-        recordings = recordings or RecordingManager(db_path)
-        recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
-        return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
     sign_in = plain_clarify_or_sign_in(content)
-    if sign_in == SIGN_IN_QUESTION and JobStatus(job["status"]) in {
-        JobStatus.PENDING,
-        JobStatus.RUNNING,
-        JobStatus.VERIFYING,
-    }:
-        from .chat_job_controls import mark_job_waiting_for_user
-
-        mark_job_waiting_for_user(store, job_id, SIGN_IN_QUESTION)
-        recordings = recordings or RecordingManager(db_path)
-        recordings.safe_stop(job_id, JobStatus.NEEDS_CLARIFICATION.value)
-        return SIGN_IN_QUESTION if SIGN_IN_QUESTION.endswith("\n") else SIGN_IN_QUESTION + "\n"
+    if (
+        (posture == "post" or sign_in == SIGN_IN_QUESTION)
+        and JobStatus(job["status"]) in {
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+            JobStatus.VERIFYING,
+        }
+    ):
+        return _sign_in_after_recovery(
+            store, job_id, db_path=db_path, recordings=recordings
+        )
     from .chat_job_controls import outbound_is_clarify
     from .turn_finalization import model_generation_is_running
 

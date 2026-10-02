@@ -444,6 +444,33 @@ STOPPED_OUTPUT = (
 BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
 NOTHING_RUNNING_REPLY = "Nothing is running right now."
 ALREADY_FINISHED_REPLY = "That job already finished."
+SENDER_REFUSED = "I can't take messages from this sender."
+
+
+def sender_is_allowed(user_id: str | None, user_name: str | None = None) -> bool:
+    """True when this Chat sender may open a job.
+
+    An empty ``GOOGLE_CHAT_ALLOWED_USERS`` does not invent a deny. A
+    configured list is checked before a job exists, so a stranger does
+    not get a stuck-job reply.
+    """
+    allow_all = os.environ.get("GOOGLE_CHAT_ALLOW_ALL_USERS", "").strip().casefold()
+    if allow_all in {"1", "true", "yes", "on"}:
+        return True
+    raw = os.environ.get("GOOGLE_CHAT_ALLOWED_USERS", "")
+    allowed = {
+        part.strip().casefold()
+        for part in raw.replace(";", ",").split(",")
+        if part.strip()
+    }
+    if not allowed:
+        return True
+    candidates = {
+        str(user_id or "").strip().casefold(),
+        str(user_name or "").strip().casefold(),
+    }
+    candidates.discard("")
+    return bool(candidates & allowed)
 
 
 def stop_reply_line(job_id: str) -> str:
@@ -926,9 +953,20 @@ def stop_session_keys(
                 extra = str(key[1])
                 if extra not in threads:
                     threads.append(extra)
+    space_wide = False
+    if store is not None and chat_id:
+        from .chat_thread import job_for_chat_thread
+
+        # A top-level /stop arrives on Chat's new thread, which owns no job.
+        # That key is not the running agent. Stop every live session in the space.
+        owned = job_for_chat_thread(store, thread_id) if thread_id else None
+        space_wide = owned is None
     matched: list[str] = []
     for key in _iter_live_session_keys(adapter):
         if chat_id and chat_id not in str(key):
+            continue
+        if space_wide:
+            matched.append(key)
             continue
         if threads:
             if any(_key_matches_stop(key, chat_id, thread) for thread in threads):

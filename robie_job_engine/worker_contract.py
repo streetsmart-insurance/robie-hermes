@@ -263,6 +263,28 @@ def _playground_informational_close(*, action: Any, action_type: str) -> bool:
     return True
 
 
+def _question_only_job(store: Any, job_id: str) -> bool:
+    """True when this job is a question, not an EZLynx write."""
+    try:
+        job = store.get_job(job_id)
+    except Exception:
+        return False
+    from .answer_only import is_answer_only_job, is_informational_ask
+
+    if is_answer_only_job(job):
+        return True
+    if str((job or {}).get("action_type") or "").startswith("ezlynx."):
+        return False
+    payload = dict((job or {}).get("payload") or {})
+    text = (
+        payload.get("request_text")
+        or payload.get("text")
+        or payload.get("prompt")
+        or ""
+    )
+    return is_informational_ask(str(text))
+
+
 def has_destination_action_checkpoint(store: Any, job_id: str) -> bool:
     action = store.get_checkpoint(job_id, "action")
     return bool(action)
@@ -285,6 +307,14 @@ def sanitize_worker_response(
     from .hitl import hitl_text_is_slang_or_blame, sanitize_hitl_chat_text
 
     text = str(content or "")
+    if _question_only_job(store, job_id):
+        # A plain question has no destination to prove. Rewriting the
+        # answer into "no verified destination progress" hid the reply.
+        return {
+            "response_text": text,
+            "rewritten": False,
+            "reason": "question-only job; destination evidence is not required",
+        }
     if hitl_text_is_slang_or_blame(text):
         return {
             "response_text": sanitize_hitl_chat_text(text, job_id=str(job_id or "")),

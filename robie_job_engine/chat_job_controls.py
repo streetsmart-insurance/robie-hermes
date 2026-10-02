@@ -366,6 +366,48 @@ def close_declined_note_repost(store: Any, job_id: str, text: str) -> str | None
     return LEFT_AS_IS
 
 
+def active_jobs_for_requester(
+    db_path: str,
+    conversation_id: str,
+    requester: str | None = None,
+) -> list[str]:
+    """Jobs still in progress in this space for the person who said stop.
+
+    Includes a RUNNING job. ``waiting_jobs_for_requester`` does not, and a
+    top-level /stop used to leave that job going.
+    """
+    if not db_path or not conversation_id:
+        return []
+    from .store import JobStore
+
+    who = " ".join(str(requester or "").casefold().split())
+    store = JobStore(db_path)
+    found: list[str] = []
+    statuses = {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+        JobStatus.NEEDS_CLARIFICATION,
+        JobStatus.AWAITING_HUMAN_INPUT,
+    }
+    for job in store.list_jobs_by_status(statuses):
+        payload = dict(job.get("payload") or {})
+        space = str(payload.get("conversation_id") or "")
+        if space and space != conversation_id:
+            continue
+        owner = " ".join(
+            str(payload.get("requested_by") or payload.get("requester_user_id") or "")
+            .casefold()
+            .split()
+        )
+        if who and owner and who not in owner and owner not in who:
+            continue
+        job_id = str(job.get("id") or "")
+        if job_id:
+            found.append(job_id)
+    return found
+
+
 def waiting_jobs_for_requester(
     db_path: str,
     conversation_id: str,

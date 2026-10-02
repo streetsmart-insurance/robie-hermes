@@ -313,6 +313,45 @@ def name_placed_in_applicant_id(value: Any) -> str | None:
     return " ".join(tokens)
 
 
+def applicant_ids_on_open_tabs(store: Any, job_id: str) -> list[str]:
+    """Applicant ids seen on this job's browser pages. Not a trusted source."""
+    from .chat_destination_binding import extract_ezlynx_urls
+    from .ezlynx_write_scope import applicant_id_from_ezlynx_url
+
+    found: list[str] = []
+    try:
+        rows = store.list_playwright_exec(str(job_id or ""))
+    except Exception:
+        rows = []
+    for url in extract_ezlynx_urls(rows):
+        applicant = str(applicant_id_from_ezlynx_url(url) or "").strip()
+        if applicant and applicant not in found:
+            found.append(applicant)
+    return found
+
+
+def refuse_tab_applicant(
+    store: Any,
+    job: dict[str, Any] | None,
+    applicant_id: str,
+) -> str | None:
+    """Refuse an account id copied from the open browser tab."""
+    applicant = str(applicant_id or "").strip()
+    if store is None or not job or not applicant:
+        return None
+    from .client_name_lookup import trusted_applicant_ids
+
+    if applicant in set(trusted_applicant_ids(store, job)):
+        return None
+    if applicant not in applicant_ids_on_open_tabs(store, str(job.get("id") or "")):
+        return None
+    return (
+        f"{APPLICANT_UNTRUSTED}: applicant {applicant} came from the open "
+        "browser tab. Use an id from the user's message or this job's "
+        "client lookup. Do not take it from the tab."
+    )
+
+
 def refuse_untrusted_applicant(
     store: Any,
     job: dict[str, Any] | None,
@@ -567,7 +606,6 @@ def format_complete_answer(content: str) -> str:
         return ""
     shown = format_user_reply(raw, collapse=False)
     shown = _ANSWERED.sub("", str(shown or "").strip()).strip()
-    if len(shown) <= 900:
-        return shown
-    trimmed = shown[:897].rsplit(" ", 1)[0].rstrip(".,;:")
-    return trimmed + "."
+    # The whole answer is delivered. Chat splits it into 4000-character
+    # messages. Cutting it here dropped every paragraph after the first.
+    return shown
