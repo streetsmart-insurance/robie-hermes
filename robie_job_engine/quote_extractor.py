@@ -1015,8 +1015,8 @@ class QuoteExtractor:
 
         # Agency fee confirmation: when we're already asking clarifications,
         # confirm the fee amount. Money the client pays should never be
-        # assumed, even when extracted from the quote.
-        if reasons and quote.agency_fee_explicit and "agency_fee_confirm" not in reasons:
+        # assumed — whether defaulted or extracted.
+        if reasons and "agency_fee_unspecified" not in reasons and "agency_fee_confirm" not in reasons:
             reasons.append("agency_fee_confirm")
 
         quote.hitl_reasons = reasons

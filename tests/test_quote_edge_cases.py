@@ -199,3 +199,13 @@ class TestAgencyFeeConfirmation(unittest.TestCase):
         self.assertIn("agency_fee_confirm", q.hitl_reasons)
         q = ext.apply_user_clarifications(q, "yes, fee is correct")
         self.assertNotIn("agency_fee_confirm", q.hitl_reasons)
+
+    def test_defaulted_fee_confirmation_asked(self):
+        # No fee in quote (defaulted to $350) + other questions -> confirm
+        q = _extract(
+            "Insured Name: Test LLC\nCarrier: TestCarrier\n"
+            "Quote Date: 01/15/2026\n"  # expired -> triggers HITL
+            "Premium: $5,000.00\n"
+        )
+        # agency_fee_unspecified should fire (no fee mention), not confirm
+        self.assertIn("agency_fee_unspecified", q.hitl_reasons)
