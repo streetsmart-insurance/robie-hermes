@@ -398,6 +398,22 @@ def _is_question(norm: str) -> bool:
     )
 
 
+def _is_reply_request(norm: str) -> bool:
+    """Detect a request for Robie to reply (not to send an email to someone else).
+
+    "Please reply to this email" = the user wants a reply, allow it.
+    "Email this to jake@" = the user wants Robie to send an email, block it.
+    """
+    # Explicit reply requests: reply/respond to this thread/email/message
+    if re.search(
+        r"\b(?:please\s+)?(?:reply|respond)\s+(?:to\s+)?(?:this\s+)?(?:email|thread|message)\b",
+        norm,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def _blocked(norm: str) -> tuple[str, str] | None:
     if _SOURCE.search(norm):
         return (
@@ -598,6 +614,10 @@ def classify_playground_request(text: str) -> Decision:
         return allowed
     if _LOOKUP.search(original):
         return Decision(LOOKUP, proposal=_base_proposal(LOOKUP, original))
+    # Reply requests are not write actions (2026-10-02 fix: "reply to this
+    # email" was blocked because "email" matched the write-verb list).
+    if _is_reply_request(norm):
+        return Decision(SOP, proposal=_base_proposal(SOP, original))
     if _WRITE_VERB.search(norm) and not _is_question(norm):
         return Decision(
             BLOCKED,
