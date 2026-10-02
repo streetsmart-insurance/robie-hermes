@@ -27,6 +27,25 @@ and temporary SSH registration. This change does not grant or create access.
    permissions if local unit definitions must be moved to establish masks;
    ordinary `systemctl mask` can refuse a locally defined unit. Never overwrite
    such a definition or remove a preexisting mask.
+   **Before masking the gateway**, capture its original `ExecStart` interpreter
+   invocation (the venv `bin/python` path, not its resolved system Python).
+   Using the reviewed candidate's `scripts/test_stopped_install.py`, capture:
+
+   ```bash
+   gateway_exec="$(systemctl show robie-gateway -p ExecStart --value --no-pager)"
+   gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
+   python3 - scripts/test_stopped_install.py "${gateway_python}" <<'PY_CAPTURE'
+   import json, runpy, sys
+   helper = runpy.run_path(sys.argv[1])
+   print(json.dumps(helper['interpreter_identity'](sys.argv[2]), sort_keys=True))
+   PY_CAPTURE
+   ```
+
+   Preserve that JSON as `gateway_interpreter` in the receipt below. It binds
+   the invocation path, resolved executable path and SHA-256, and presence/hash
+   of both applicable `pyvenv.cfg` locations. Do not substitute shell Python or
+   guess a path after masking. If already masked without a capture, stop for
+   operator review; the installer never unmasks to discover `ExecStart`.
 2. Fence the identified scheduled and external/direct producers. The guarded
    unit list includes the Test gateway (and alternate gateway name), scheduler,
    Test keepalive, email watcher, and cron daemons. Masking cron holds **all Test
@@ -47,6 +66,15 @@ and temporary SSH registration. This change does not grant or create access.
      "version": 1,
      "host": "hermes-test-01",
      "release_sha256": "<exact archive SHA-256>",
+     "gateway_interpreter": {
+       "invocation": "<original absolute ExecStart Python path>",
+       "resolved": "<resolved executable path>",
+       "sha256": "<executable SHA-256>",
+       "venv_metadata": {
+         "<invocation directory>/pyvenv.cfg": null,
+         "<invocation parent directory>/pyvenv.cfg": "<SHA-256 or null if absent>"
+       }
+     },
      "external_producers_fenced": true,
      "approved_outage_reference": "<approval/evidence reference>",
      "prior_units": {
@@ -63,8 +91,10 @@ and temporary SSH registration. This change does not grant or create access.
    The example is a schema, not a ready-to-run receipt. Populate actual values,
    including `not-found` for absent units. The receipt is an operator attestation
    of external fencing, not independently inferred proof that no direct runner
-   exists. The installer independently checks persistent masks, inactive units
-   and database idleness; a receipt alone never passes those checks.
+   exists. The installer independently checks persistent masks, inactive units,
+   database idleness, and the captured interpreter identity; a receipt alone never
+   passes those checks. Flush/fsync the completed receipt and its directory before
+   handing control to the installer.
 
 ## Install and inspect without starting anything
 
@@ -74,10 +104,23 @@ exact-archive path plus `--skip-policy-setup --keep-stopped`.
 
 The archive digest, candidate verification, dependency-import smoke checks,
 official overlay installation and rollback paths remain in use. Before these
-operations, the stopped guard saves unit states, the exact hold receipt, and
-hashes of existing durable rows to
+operations, a read-only guard from the digest-checked archive rejects any
+existing `official-install-proof:<short>` idempotency key, regardless of its
+status/action, and rejects missing/changed interpreter metadata. This happens
+before release extraction or any installer mutation. A same-SHA stopped retry
+cannot overwrite a previous live proof. Normal live installation is unchanged.
+
+The stopped guard then saves unit states, the exact hold receipt, hashes of
+existing durable rows, and a `rollback` object to
 `releases/<short>/stopped-install-before.json`. This file is exclusive: a retry
-cannot overwrite earlier evidence. After installation it checks those rows
+cannot overwrite earlier evidence. The `rollback` object contains both prior
+resolved pointer targets and link paths, policy-skip/restart-false arguments,
+and the runtime drop-in's prior presence, destination, backup path and SHA-256
+(`null` when absent). A present drop-in is copied exclusively before the JSON
+snapshot; both files and their parent directory are fsynced before verification,
+dependency installation, pointer/overlay changes or drop-in replacement. An
+interrupted snapshot creation fails closed on retry; inspect the saved files.
+After installation it checks those rows
 again. Official installation may add its own proof job/checkpoints; existing
 rows must not change. Unknown/missing required schemas and any active run,
 including an expired reservation, fail closed. No job repair is attempted.
@@ -102,8 +145,18 @@ There is intentionally no workflow input that releases this hold.
 1. Read the saved snapshot and hold receipt. Verify the exact current pointers,
    archive digest and durable-row preservation using the saved guard snapshot.
    For a failed/partial install, use the existing reviewed rollback helper with
-   its ninth argument `false` (do not restart), and restore the saved runtime
-   drop-in. Inspect overlay consistency before any start.
+   its arguments from `snapshot.rollback`: `old_current`, `old_releases_current`,
+   `old_policy_skill_target`, `current_link`, `releases_current_link`,
+   `policy_skill_link`, `gateway_unit`, `false`, `false`. No previous shell
+   variables are needed. First restore `rollback.runtime_dropin`: for `present`,
+   verify the backup at `snapshot` against `sha256`, then call
+   `restore_file_snapshot present <snapshot> <destination>`; for `absent`, call
+   `restore_file_snapshot absent <snapshot> <destination>`. Run only
+   `systemctl daemon-reload`, then `rollback_test_release` with those nine
+   arguments. These helpers are in `scripts/lib/test-release-rollback.sh`.
+   Missing/mismatched evidence requires inspection, never a guessed restore.
+   Inspect overlay consistency before any start; pointer/config rollback does
+   not itself certify overlays or restore/rewrite the durable database.
 2. Obtain explicit approval for the exact release to resume and for the backlog
    that would execute. Starting the gateway can immediately consume the existing
    note and other queued work. **Do not resume the candidate just to run Buster.**

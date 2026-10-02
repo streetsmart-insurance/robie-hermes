@@ -16,6 +16,7 @@ import stat
 import subprocess
 
 ROOT = Path('/opt/streetsmart-hermes-test')
+RUNTIME_DROPIN = Path('/etc/systemd/system/robie-gateway.service.d/zz-robie-test-release-runtime.conf')
 UNITS = (
     'robie-gateway.service', 'hermes-gateway.service',
     'robie-scheduler.timer', 'robie-scheduler.service',
@@ -31,6 +32,65 @@ REQUIRED = {
     'checkpoints': {'id', 'job_id'}, 'job_intake': {'job_id'},
     'attempts': {'id', 'job_id'},
 }
+
+
+def interpreter_identity(invocation):
+    """Capture before masking; preserve the invocation path for venv semantics."""
+    path = Path(invocation)
+    if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError('Gateway interpreter unavailable')
+    resolved = path.resolve(strict=True)
+    # CPython checks alongside the invocation and one directory above it.
+    configs = [path.parent / 'pyvenv.cfg', path.parent.parent / 'pyvenv.cfg']
+    return {'invocation': str(path), 'resolved': str(resolved),
+            'sha256': hashlib.sha256(resolved.read_bytes()).hexdigest(),
+            'venv_metadata': {str(config): hashlib.sha256(config.read_bytes()).hexdigest()
+                              if config.exists() or config.is_symlink() else None for config in configs}}
+
+
+def verify_interpreter(data):
+    if not isinstance(data, dict) or not data.get('invocation'):
+        raise ValueError('Missing captured gateway interpreter')
+    if interpreter_identity(data['invocation']) != data:
+        raise ValueError('Gateway interpreter or venv metadata changed')
+    return data['invocation']
+
+
+def fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def rollback_inputs(target):
+    """Save config bytes and exact pointer targets before installer mutations."""
+    current = (ROOT / 'current').resolve(strict=True)
+    releases_current = (ROOT / 'releases/current').resolve(strict=True)
+    if current != releases_current:
+        raise ValueError('Test rollback pointers disagree')
+    backup = target.parent / ('.pre-' + target.parent.name + '-gateway-runtime.conf')
+    config = {'destination': str(RUNTIME_DROPIN), 'state': 'absent',
+              'snapshot': str(backup), 'sha256': None}
+    if RUNTIME_DROPIN.is_symlink():
+        raise ValueError('Runtime drop-in must not be a symlink')
+    if RUNTIME_DROPIN.exists():
+        content = RUNTIME_DROPIN.read_bytes()
+        with backup.open('xb') as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        fsync_directory(backup.parent)
+        config.update(state='present', sha256=hashlib.sha256(content).hexdigest())
+    return {'old_current': str(current), 'old_releases_current': str(releases_current),
+            'current_link': str(ROOT / 'current'),
+            'releases_current_link': str(ROOT / 'releases/current'),
+            'old_policy_skill_target': '',
+            'policy_skill_link': str(ROOT / '.hermes/skills/ezlynx-policy-setup'),
+            'gateway_unit': 'robie-gateway', 'restore_policy_skill': False,
+            'restart_gateway': False, 'runtime_dropin': config}
 
 
 def hold_receipt(path, digest):
@@ -51,6 +111,7 @@ def hold_receipt(path, digest):
                 or not isinstance(prior.get('mask_preexisting'), bool)
                 or not isinstance(prior.get('unit_backup'), str)):
             raise ValueError('Unknown prior unit state; refuse unverifiable restoration')
+    verify_interpreter(data.get('gateway_interpreter'))
     return data
 
 
@@ -77,7 +138,7 @@ def unit_snapshot(runner=subprocess.run, unit_dir=Path('/etc/systemd/system')):
     return result
 
 
-def database_snapshot(path, proof_key=''):
+def database_snapshot(path, proof_key='', *, reject_existing_proof=False):
     """Hash existing rows only; never expose payloads or reconcile expired runs."""
     if not path.is_file() or path.is_symlink():
         raise ValueError('Regular existing Test database required')
@@ -88,6 +149,9 @@ def database_snapshot(path, proof_key=''):
             columns = {row[1] for row in con.execute(f'PRAGMA table_info({table})')}
             if not expected <= columns:
                 raise ValueError('Unknown or missing schema: ' + table)
+        if reject_existing_proof and con.execute(
+                'SELECT 1 FROM jobs WHERE idempotency_key=? LIMIT 1', (proof_key,)).fetchone():
+            raise ValueError('Existing official install proof key; stopped install refused')
         states = {
             'jobs': ('status', {'PENDING', 'RUNNING', 'VERIFYING', 'PAUSED', 'WAITING',
                 'RETRY_WAIT', 'AWAITING_HUMAN_INPUT', 'NEEDS_AUTH', 'NEEDS_SKILL',
@@ -154,6 +218,7 @@ def main():
     parser.add_argument('--snapshot', required=True)
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--verify', action='store_true')
+    parser.add_argument('--preflight', action='store_true')
     args = parser.parse_args()
     if os.geteuid() != 0 or socket.gethostname().split('.')[0] != 'hermes-test-01':
         raise SystemExit('Root on Test required')
@@ -163,7 +228,13 @@ def main():
     units = unit_snapshot()
     receipt = hold_receipt(ROOT / 'deployments/stopped-install-hold.json', args.sha256)
     database = database_snapshot(ROOT / 'robie-job-engine/data/jobs.db',
-                                 'official-install-proof:' + target.parent.name)
+                                 'official-install-proof:' + target.parent.name,
+                                 reject_existing_proof=not args.verify)
+    if args.preflight:
+        if target.exists():
+            raise ValueError('Stopped snapshot already exists')
+        print(verify_interpreter(receipt['gateway_interpreter']))
+        return
     if args.verify:
         before = json.loads(target.read_text())
         if before['units'] != units:
@@ -173,13 +244,19 @@ def main():
         verify_preserved(before['database'], database)
         print('TEST INSTALLED STOPPED: persistent masks intact; existing durable rows preserved; NOT LIVE')
     else:
+        # Refuse before even replacing a previous config backup.
+        if target.exists():
+            raise ValueError('Stopped snapshot already exists')
+        rollback = rollback_inputs(target)
         # Exclusive creation prevents a retry from silently replacing evidence.
         with target.open('x') as output:
             os.chmod(target, 0o600)
             json.dump({'units': units, 'hold_receipt': receipt, 'database': database, 'live': False,
-                       'automatic_resume': False}, output, sort_keys=True)
+                       'automatic_resume': False, 'rollback': rollback}, output, sort_keys=True)
             output.flush()
             os.fsync(output.fileno())
+        fsync_directory(target.parent)
+        fsync_directory(target.parent.parent)
 
 
 if __name__ == '__main__':
