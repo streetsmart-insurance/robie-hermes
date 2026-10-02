@@ -1040,7 +1040,7 @@ _TOOL_PROGRESS_LINE = re.compile(
     r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)?"
     r"(?:playwright_exec|ezlynx_discussion_note|ezlynx_document_upload|"
     r"web_search|terminal|execute_code|read_file|gemini_unique_field)\b"
-    r"(?:\s*[:\uFF1A].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
+    r"(?:\s*[:：].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
     re.IGNORECASE,
 )
 
@@ -1092,7 +1092,7 @@ def content_is_only_progress(text: str) -> bool:
 _HEARTBEAT_LINE = re.compile(
     r"\b(?:"
     r"iteration\s+\d+\s*/\s*\d+"
-    r"|(?:working|thinking)\s*[\u2014\u2013\-]\s*\d+"
+    r"|(?:working|thinking)\s*[—–\-]\s*\d+"
     r")",
     re.IGNORECASE,
 )
