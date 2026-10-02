@@ -637,19 +637,32 @@ class QuoteExtractor:
                 quote.surplus_lines_tax_addressed = True
 
             stamping_match = re.search(
-                r"(?:Stamping\s+Fee)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                r"(?:Stamping\s+Fee)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
                 combined_text,
                 re.IGNORECASE,
             )
+            if not stamping_match:
+                stamping_match = re.search(
+                    r"Stamping\s+Fee\s*\n\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                    combined_text,
+                    re.IGNORECASE,
+                )
             if stamping_match:
                 quote.surplus_lines_tax_cents += _parse_dollars_to_cents(stamping_match.group(1))
 
-            # Other fees
+            # Other fees (label and amount may be on separate lines)
             pol_fee_match = re.search(
-                r"(?:Policy\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-                text,
+                r"(?:Policy\s+Fee)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                combined_text,
                 re.IGNORECASE,
             )
+            if not pol_fee_match:
+                # Try label on one line, amount on the next
+                pol_fee_match = re.search(
+                    r"Policy\s+Fee\s*\n\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                    combined_text,
+                    re.IGNORECASE,
+                )
             if pol_fee_match:
                 quote.policy_fee_cents = _parse_dollars_to_cents(pol_fee_match.group(1))
             broker_fee_match = re.search(
