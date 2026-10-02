@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
-from .policy_change_ezlynx_read import apply_ezlynx_read
+from .policy_change_ezlynx_read import apply_ezlynx_read, read_task_request
 
 
 JOB_TYPE = "policy_change_confirmation"
@@ -768,6 +768,91 @@ def unclear_written_request(packet: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _merge_task_request(packet: Mapping[str, Any]) -> dict[str, Any]:
+    """The EZLynx task already on the packet. A blank field stays blank."""
+    stored = packet.get("ezlynx_task") if isinstance(packet.get("ezlynx_task"), Mapping) else {}
+    direct = read_task_request(packet.get("task") if isinstance(packet.get("task"), Mapping) else None)
+    merged = dict(stored)
+    for key, value in direct.items():
+        if value not in (None, "", [], {}):
+            merged[key] = value
+    for key in (
+        "task_id",
+        "title",
+        "description",
+        "assignee_id",
+        "assignee_name",
+        "due_date",
+        "requested_effective_date",
+    ):
+        merged.setdefault(key, "")
+    merged.setdefault("comments", [])
+    merged.setdefault("attachments", [])
+    merged["writes"] = 0
+    return merged
+
+
+def read_request_sources(packet: Mapping[str, Any]) -> dict[str, Any]:
+    """Client Center request, discussion notes, and the EZLynx task.
+
+    Discussion text and task prose are not searched for a date.
+    """
+    request = packet.get("request") if isinstance(packet.get("request"), Mapping) else {}
+    cell = _cell(request, "effective_date")
+    notes = []
+    discussions = packet.get("discussions")
+    if isinstance(discussions, list):
+        for item in discussions:
+            if not isinstance(item, Mapping):
+                continue
+            notes.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "title": str(item.get("title") or ""),
+                    "body": str(item.get("body") or ""),
+                }
+            )
+    return {
+        "client_center": {
+            "source_id": str(request.get("source_id") or ""),
+            "source": str(request.get("source") or request.get("kind") or ""),
+            "requested_effective_date": "" if cell is None else str(cell.get("raw") or ""),
+        },
+        "discussion_notes": notes,
+        "ezlynx_task": _merge_task_request(packet),
+        "writes": 0,
+    }
+
+
+def task_date_disagreement(packet: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Flag a date conflict between the written request and the EZLynx task.
+
+    Returns nothing when the written request is unclear, so a task date is
+    not used to fill that gap. A task due date is not a requested date.
+    """
+    if unclear_written_request(packet):
+        return None
+    request = packet.get("request") if isinstance(packet.get("request"), Mapping) else {}
+    cell = _cell(request, "effective_date")
+    client_raw = None if cell is None else cell.get("raw")
+    task_raw = _merge_task_request(packet).get("requested_effective_date")
+    if _blank(client_raw) or _blank(task_raw):
+        return None
+    client_norm, client_rule = _normalize("date", client_raw)
+    task_norm, task_rule = _normalize("date", task_raw)
+    if client_rule == "unparsed" or task_rule == "unparsed":
+        return None
+    if client_norm == task_norm:
+        return None
+    return {
+        "code": "task_request_date_disagreement",
+        "client_request": client_norm,
+        "ezlynx_task": task_norm,
+        "client_request_raw": client_raw,
+        "ezlynx_task_raw": task_raw,
+    }
+
+
 def _document_problem(packet: Mapping[str, Any]) -> str | None:
     document = packet.get("carrier_document")
     if not isinstance(document, Mapping) or not document:
@@ -895,6 +980,21 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
             exceptions = str(result.get("reason"))
         else:
             exceptions = "No exceptions."
+        disagreement = next(
+            (
+                item
+                for item in (result.get("flags") or [])
+                if isinstance(item, Mapping) and item.get("code") == "task_request_date_disagreement"
+            ),
+            None,
+        )
+        if disagreement:
+            sentence = (
+                "The EZLynx task and the client request give different effective dates. "
+                f"Client request: {disagreement.get('client_request_raw')}. "
+                f"Task: {disagreement.get('ezlynx_task_raw')}. Neither date was chosen."
+            )
+            exceptions = sentence if exceptions == "No exceptions." else f"{exceptions} {sentence}"
     else:
         matches = "The comparison is not finished."
         exceptions = "The check stopped before every item was compared."
@@ -1113,6 +1213,9 @@ def _finish(
                     "field": "effective_date",
                 }
             )
+    disagreement = task_date_disagreement(packet)
+    if disagreement:
+        flags.append(disagreement)
     draft = {
         "outcome": headline,
         "outcomes": unique,
@@ -1143,6 +1246,7 @@ def _finish(
         "carrier_pilot": carrier_pilot,
         "carrier_source": carrier_source,
         "flags": flags,
+        "request_sources": read_request_sources(packet),
         "unread": read_gaps(packet),
         "live_carrier_retrieval": False,
         "live_test": "UNVERIFIED",
@@ -1344,6 +1448,8 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
         outcomes.append("evidence_invalid")
     if destination_reason:
         outcomes.append("destination_unverified")
+    if task_date_disagreement(packet):
+        outcomes.append("request_unclear")
     if not outcomes:
         outcomes.append("ready_for_human_review")
     return _finish(

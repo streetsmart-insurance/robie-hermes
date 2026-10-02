@@ -18,6 +18,14 @@ from typing import Any, Mapping
 
 _TASK_ID_KEYS = ("task_id", "taskId", "TaskId", "TaskID", "id", "Id")
 _DUE_KEYS = ("due_date", "dueDate", "DueDate", "Due")
+_TITLE_KEYS = ("title", "Title", "task_title", "TaskTitle", "subject", "Subject")
+_DESCRIPTION_KEYS = ("description", "Description", "task_description", "TaskDescription", "details", "Details")
+_REQUESTED_DATE_KEYS = (
+    "requested_effective_date",
+    "RequestedEffectiveDate",
+    "requestedEffectiveDate",
+    "request_effective_date",
+)
 _ASSIGNEE_ID_KEYS = (
     "assignee_id",
     "assigned_user_id",
@@ -212,6 +220,69 @@ def _vehicles(policy: Mapping[str, Any]) -> list[dict[str, str]]:
     return vehicles
 
 
+def _comment_rows(task: Mapping[str, Any]) -> list[dict[str, str]]:
+    raw = None
+    for key in ("comments", "Comments", "comment", "Comment"):
+        if key in task:
+            raw = task.get(key)
+            break
+    rows: list[dict[str, str]] = []
+    items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            rows.append({"id": "", "text": item.strip()})
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        text = _first(item, ("text", "body", "comment", "Comment", "note", "Note"))
+        if text:
+            rows.append({"id": _text(item.get("id") or item.get("Id")), "text": text})
+    return rows
+
+
+def _attachment_rows(task: Mapping[str, Any]) -> list[dict[str, str]]:
+    raw = None
+    for key in ("attachments", "Attachments", "attachment", "Attachment"):
+        if key in task:
+            raw = task.get(key)
+            break
+    rows: list[dict[str, str]] = []
+    items = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            rows.append({"id": "", "name": item.strip()})
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        name = _first(item, ("name", "Name", "file_name", "FileName", "filename"))
+        document_id = _text(item.get("id") or item.get("Id") or item.get("document_id") or item.get("DocumentId"))
+        if name or document_id:
+            rows.append({"id": document_id, "name": name})
+    return rows
+
+
+def read_task_request(task: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Read one EZLynx task as a request source. Does not call EZLynx.
+
+    The due date stays a due date. It is not the requested effective date.
+    A date is taken only from an explicit requested-effective-date field.
+    Title, description, and comments are kept as written. They are not parsed.
+    """
+    row = task if isinstance(task, Mapping) else {}
+    return {
+        "task_id": _first(row, _TASK_ID_KEYS),
+        "title": _first(row, _TITLE_KEYS),
+        "description": _first(row, _DESCRIPTION_KEYS),
+        "comments": _comment_rows(row),
+        "assignee_id": _first(row, _ASSIGNEE_ID_KEYS),
+        "assignee_name": _first(row, _ASSIGNEE_NAME_KEYS),
+        "due_date": _first(row, _DUE_KEYS),
+        "attachments": _attachment_rows(row),
+        "requested_effective_date": _first(row, _REQUESTED_DATE_KEYS),
+        "writes": 0,
+    }
+
+
 def read_policy_change_context(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
     """Extract task, submission, vehicle, and change-effective fields.
 
@@ -234,10 +305,11 @@ def read_policy_change_context(snapshot: Mapping[str, Any] | None) -> dict[str, 
     change_effective = _change_effective_date(policy)
     transaction_date = _transaction_date(policy)
     submission = _submission_evidence(supplied, task)
-    task_id = _first(task, _TASK_ID_KEYS) if task is not None else ""
-    due_date = _first(task, _DUE_KEYS) if task is not None else ""
-    assignee_id = _first(task, _ASSIGNEE_ID_KEYS) if task is not None else ""
-    assignee_name = _first(task, _ASSIGNEE_NAME_KEYS) if task is not None else ""
+    task_request = read_task_request(task)
+    task_id = task_request["task_id"]
+    due_date = task_request["due_date"]
+    assignee_id = task_request["assignee_id"]
+    assignee_name = task_request["assignee_name"]
     unread: list[str] = []
     if not task_id:
         unread.append("task_id")
@@ -256,6 +328,7 @@ def read_policy_change_context(snapshot: Mapping[str, Any] | None) -> dict[str, 
         "due_date": due_date,
         "assignee_id": assignee_id,
         "assignee_name": assignee_name,
+        "task_request": task_request,
         "submission_evidence": submission,
         "vehicles": vehicles,
         "change_effective_date": change_effective,
@@ -327,6 +400,7 @@ def apply_ezlynx_read(packet: Mapping[str, Any], snapshot: Mapping[str, Any]) ->
             fields["vin"] = _cited(chosen[0]["vin"], "EZLynx vehicle list")
     if read["transaction_date"] and _blank(record.get("transaction_date")):
         record["transaction_date"] = read["transaction_date"]
+    updated["ezlynx_task"] = dict(read["task_request"])
     updated["ezlynx_read"] = read
     updated["ezlynx_snapshot"] = copy.deepcopy(dict(snapshot))
     return updated

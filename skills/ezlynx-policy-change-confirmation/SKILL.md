@@ -19,6 +19,8 @@ Do not open a new Change Request form. Do not use this job in place of the weekl
 
 The original request is not always a written Client Center form. If the only source is a call recording, or there is no clear written request with a requested effective date, mark the case `request source unclear (e.g. call recording)` and hold it for a person. Do not guess the date. Do not transcribe a recording.
 
+Also read the EZLynx task: title, description, comments, assignee, due date, and attachments, with the Client Center request and the discussion notes. The task due date is not the requested effective date. If the task and the client request state different effective dates, flag that disagreement. Do not pick one. A task date does not fill in an unclear written request.
+
 Progressive is the provisional carrier. Do not treat a memo retrieval as an issued endorsement. Production stays closed until Test evidence exists.
 
 An endorsement already filed on the EZLynx documents can be read when the live Directory download route cannot be walked. Label that source as an EZLynx-filed endorsement. It does not prove the Directory route and it does not confirm Progressive.

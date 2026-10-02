@@ -659,6 +659,93 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         self.assertFalse(result["carrier_pilot"]["confirmed"])
         self.assertIsNone(result["carrier_source"])
 
+    def test_task_and_client_request_date_disagreement_is_flagged(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["task"].update(
+            {
+                "title": "Add the truck",
+                "description": "The note below says effective 6/22. That sentence is not a date field.",
+                "comments": [{"id": "c1", "text": "Please use 6/22"}],
+                "attachments": [{"id": "att-1", "name": "client-request.pdf"}],
+                "assignee_name": "Maria Bara",
+                "due_date": "2026-03-05",
+                "requested_effective_date": "04/01/2026",
+            }
+        )
+        writes = DisabledWrites()
+        result = run_confirmation(packet, writes=writes)
+        flagged = next(item for item in result["flags"] if item["code"] == "task_request_date_disagreement")
+        self.assertEqual(flagged["client_request"], "2026-03-01")
+        self.assertEqual(flagged["ezlynx_task"], "2026-04-01")
+        self.assertEqual(flagged["client_request_raw"], "03/01/2026")
+        self.assertEqual(flagged["ezlynx_task_raw"], "04/01/2026")
+        self.assertIn("request_unclear", result["outcomes"])
+        self.assertNotEqual(result["outcome"], "ready_for_human_review")
+        self.assertFalse(result["review_ready"])
+        self.assertFalse(result["completed"])
+        self.assertIsNone(result["request_source"])
+        self.assertFalse(result["hold_for_human"])
+        self.assertFalse(result["carrier_pilot"]["confirmed"])
+        self.assertEqual(result["external_writes"], 0)
+        self.assertEqual(writes.performed, 0)
+        row = next(item for item in result["comparison"] if item["field"] == "effective_date")
+        self.assertEqual(row["request"]["raw"], "03/01/2026")
+        self.assertIn(row["verdict"], {"exact_match", "normalized_match"})
+        self.assertIn("Neither date was chosen.", result["note"])
+        self.assertIn("03/01/2026", result["note"])
+        self.assertIn("04/01/2026", result["note"])
+        self.assertNotIn("6/22", result["note"])
+        task = result["request_sources"]["ezlynx_task"]
+        self.assertEqual(task["title"], "Add the truck")
+        self.assertEqual(task["comments"][0]["text"], "Please use 6/22")
+        self.assertEqual(task["attachments"][0]["name"], "client-request.pdf")
+        self.assertEqual(task["assignee_name"], "Maria Bara")
+        self.assertEqual(task["due_date"], "2026-03-05")
+        self.assertEqual(result["request_sources"]["discussion_notes"][0]["body"], "Please add the truck.")
+        self.assertEqual(result["request_sources"]["writes"], 0)
+        held = PolicyChangeConfirmationWorker().perform(
+            {"action_type": JOB_TYPE, "payload": packet},
+            idempotency_key="task-date",
+        )
+        self.assertEqual(held.hold_status, JobStatus.NEEDS_CLARIFICATION)
+        self.assertEqual(held.detail["external_writes"], 0)
+
+        due_only = copy.deepcopy(clean_packet())
+        due_only["task"].update(
+            {
+                "title": "Add the truck",
+                "description": "effective 6/22",
+                "comments": ["use 6/22"],
+                "due_date": "2026-04-01",
+                "assignee_name": "Maria Bara",
+                "attachments": [{"name": "photo.pdf"}],
+            }
+        )
+        due_result = run_confirmation(due_only)
+        self.assertFalse(any(item["code"] == "task_request_date_disagreement" for item in due_result["flags"]))
+        self.assertEqual(due_result["outcome"], "ready_for_human_review")
+        self.assertEqual(due_result["request_sources"]["ezlynx_task"]["requested_effective_date"], "")
+        self.assertEqual(due_result["request_sources"]["ezlynx_task"]["due_date"], "2026-04-01")
+        self.assertNotIn("Neither date was chosen.", due_result["note"])
+
+        same = copy.deepcopy(clean_packet())
+        same["task"]["requested_effective_date"] = "March 1, 2026"
+        same_result = run_confirmation(same)
+        self.assertFalse(any(item["code"] == "task_request_date_disagreement" for item in same_result["flags"]))
+        self.assertEqual(same_result["outcome"], "ready_for_human_review")
+
+        recording = copy.deepcopy(clean_packet())
+        recording["request"]["source"] = "call_recording"
+        recording["task"]["requested_effective_date"] = "05/01/2026"
+        recording["case"]["requested_effective_date"] = "2026-05-01"
+        recording_result = run_confirmation(recording)
+        self.assertEqual(recording_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertTrue(recording_result["hold_for_human"])
+        self.assertFalse(any(item["code"] == "task_request_date_disagreement" for item in recording_result["flags"]))
+        self.assertNotIn("05/01/2026", recording_result["note"])
+        self.assertNotIn("2026-05-01", recording_result["note"])
+        self.assertFalse(recording_result["carrier_pilot"]["confirmed"])
+
     def test_unclear_request_source_holds_for_a_person_without_guessing(self):
         recording = copy.deepcopy(clean_packet())
         recording["request"]["source"] = "call_recording"
