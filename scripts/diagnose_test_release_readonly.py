@@ -5,6 +5,7 @@ It does not attest in-memory Python modules or hold intake/driver admission.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import gzip
 from http.client import HTTPConnection
@@ -25,6 +26,11 @@ from urllib.parse import quote
 ROOT = Path('/opt/streetsmart-hermes-test')
 STAGING = Path('/var/tmp/robie-test-deploy')
 HOST = 'hermes-test-01'
+HANDOVER_CURRENT = ('592e148ff1df640556c30aee4089fa7551db7e20',
+                    'fa468342bfe0d6e2083eb8af9282274e62d49fa353069a92c9d14e122db42964')
+HANDOVER_OLDER = ('73e720702350f908b2f5ebd5fe22c773b0b26c30',
+                  'edad5eff3f327ce0430c7751f36d33b8c667541ce15789eff2ec6738fe83d1b1')
+HANDOVER_ARCHIVE = Path('/tmp/robie-hermes-73e720702350.tgz')
 MAX_FILE = 2 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
@@ -256,7 +262,38 @@ def archive_bytes(directory_fd, name, limit):
         require(stat.S_ISREG(info.st_mode) and info.st_size <= limit, 'archive_file_type_or_size')
         data = stream.read(limit + 1)
         require(len(data) <= limit, 'archive_file_type_or_size')
+        after = os.fstat(stream.fileno())
+        linked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                  value.st_mtime_ns, value.st_ctime_ns)
+        require(identity(info) == identity(after) == identity(linked)
+                and len(data) == info.st_size, 'file_changed_during_read')
         return data
+
+
+def exact_bytes(path, limit=MAX_FILE):
+    fd = open_directory(path.parent)
+    try:
+        return archive_bytes(fd, path.name, limit)
+    finally:
+        os.close(fd)
+
+
+def exact_current_archive(root, staging, commit, sha, output):
+    # No directory enumeration, no /tmp fallback, no older-release substitution.
+    name = f'robie-hermes-{commit[:12]}.tgz'
+    paths = (staging / commit / name, staging / commit[:12] / name,
+             root / 'deployments' / commit[:12] / name,
+             root / 'releases' / commit[:12] / name)
+    output['exact_archive_paths'] = [str(path) for path in paths]
+    for path in paths:
+        try:
+            data = exact_bytes(path, MAX_ARCHIVE)
+        except FileNotFoundError:
+            continue
+        require(digest(data) == sha, 'rollback_archive_digest')
+        return path, data
+    raise Refused('current_archive_exact_paths_missing')
 
 
 def archive_digest_before(data, deadline):
@@ -361,31 +398,71 @@ def find_rollback_archive(root, staging, commit, sha, output):
     raise Refused(candidate_error or 'rollback_archive_not_found')
 
 
-def release_evidence(root, staging, live_gateway, output):
+def deployment_record(root, release, output, *, selected=False):
+    short = release.parent.name
+    evidence = json.loads(exact_bytes(root / f'deployments/{short}/test-deploy-evidence.json'))
+    commit = evidence['commit']
+    require(re.fullmatch('[0-9a-f]{40}', commit) is not None and commit.startswith(short), 'release_commit')
+    sha = exact_bytes(release / '.release-sha256', 128).decode().strip()
+    require(re.fullmatch('[0-9a-f]{64}', sha) is not None and evidence['release_sha256'] == sha, 'release_digest')
+    require(evidence['environment'] == 'Test' and evidence['host'] == HOST
+            and evidence['release_root'] == str(release), 'deployment_identity')
+    output.update(commit=commit, release_root=str(release), sha256=sha)
+    if selected:
+        previous = evidence.get('previous_release')
+        require(isinstance(previous, str) and re.fullmatch(
+            re.escape(str(root)) + r'/releases/([0-9a-f]{12})/robie-hermes-\1', previous),
+            'previous_release_unverified')
+        output['previous_release'] = previous
+        runtime = evidence.get('gateway_playwright_runtime') or {}
+        require(runtime.get('root') == str(release / '.gateway-runtime')
+                and re.fullmatch('[0-9a-f]{64}', str(runtime.get('content_digest', ''))),
+                'runtime_metadata_unverified')
+        output['recorded_runtime'] = {'root': runtime['root'], 'content_digest': runtime['content_digest']}
+        require(evidence.get('proof_path') == str(release / 'official-install-proof.json'), 'proof_path_invalid')
+    proof = json.loads(exact_bytes(release / 'official-install-proof.json'))
+    flip = json.loads(exact_bytes(release / 'official-install-flip.json'))
+    require(proof['sha'] == short and proof['done'] is True and proof['live'] is True
+            and proof['authorizes_complete'] is False and proof['proof']['live'] is True,
+            'stored_install_proof')
+    require(flip['sha'] == short and flip['release_root'] == str(release), 'flip_identity')
+    output['flip_at'] = timestamp(flip['flip_at']).isoformat()
+    output['stored_proof_live'] = True
+    return output
+
+
+def release_evidence(root, staging, live_gateway, output, *, handover=False):
     release = resolved(root / 'current', root)
     require(release == resolved(root / 'releases/current', root), 'pointers_disagree')
     match = re.fullmatch(r'robie-hermes-([0-9a-f]{12})', release.name)
     require(match is not None and release.parent.parent == root / 'releases', 'release_layout')
     short = match[1]
     require(release.parent.name == short, 'release_directory_sha')
-    evidence = read_json(root / f'deployments/{short}/test-deploy-evidence.json', root)
-    commit = evidence['commit']
-    require(re.fullmatch('[0-9a-f]{40}', commit) is not None and commit.startswith(short), 'release_commit')
-    sha = read_file(release / '.release-sha256', root, 128).decode().strip()
-    require(re.fullmatch('[0-9a-f]{64}', sha) is not None and evidence['release_sha256'] == sha, 'release_digest')
-    require(evidence['environment'] == 'Test' and evidence['host'] == HOST
-            and evidence['release_root'] == str(release), 'deployment_identity')
-    output.update(commit=commit, release_root=str(release), sha256=sha)
-    proof = read_json(release / 'official-install-proof.json', root)
-    flip = read_json(release / 'official-install-flip.json', root)
-    require(proof['sha'] == short and proof['done'] is True and proof['live'] is True
-            and proof['authorizes_complete'] is False and proof['proof']['live'] is True,
-            'stored_install_proof')
-    require(flip['sha'] == short and flip['release_root'] == str(release), 'flip_identity')
-    require(timestamp(live_gateway['active_enter']) > timestamp(flip['flip_at']), 'gateway_predates_flip')
-    output['stored_proof_live'] = True
-    archive, data = find_rollback_archive(root, staging, commit, sha, output)
+    if handover:
+        require(short == HANDOVER_CURRENT[0][:12], 'handover_current_mismatch')
+    deployment_record(root, release, output, selected=handover)
+    commit, sha = output['commit'], output['sha256']
+    if handover:
+        require((commit, sha) == HANDOVER_CURRENT, 'handover_current_mismatch')
+    require(timestamp(live_gateway['active_enter']) > timestamp(output['flip_at']), 'gateway_predates_flip')
+    locate = exact_current_archive if handover else find_rollback_archive
+    archive, data = locate(root, staging, commit, sha, output)
     output['rollback_archive'] = str(archive)
+    archived = archive_sources(data, short)
+    output['rollback_archive_verified'] = True
+    overlays = []
+    for source, dest, known_shim in OVERLAYS:
+        source_sha = digest(exact_bytes(release / source))
+        require(source_sha == archived[f'robie-hermes-{short}/{source}'], 'release_source_changed')
+        dest_sha = digest(read_file(root / '.hermes' / dest, root))
+        require(dest_sha in (source_sha, known_shim), 'overlay_mismatch')
+        overlays.append({'source': source, 'destination': dest, 'source_sha256': source_sha,
+                         'installed_sha256': dest_sha, 'mode': 'copy' if dest_sha == source_sha else 'reviewed_shim'})
+    output['overlays'] = overlays
+    return output
+
+
+def archive_sources(data, short):
     import io
     wanted = {f'robie-hermes-{short}/{source}': source for source, _, _ in OVERLAYS}
     archived = {}
@@ -416,20 +493,35 @@ def release_evidence(root, staging, live_gateway, output):
                         'archive_member_invalid')
                 archived[member.name] = digest(bundle.extractfile(member).read(MAX_FILE + 1))
     require(set(archived) == set(wanted), 'archive_sources_missing')
-    output['rollback_archive_verified'] = True
-    overlays = []
-    for source, dest, known_shim in OVERLAYS:
-        source_sha = digest(read_file(release / source, root, stable=True))
-        require(source_sha == archived[f'robie-hermes-{short}/{source}'], 'release_source_changed')
-        dest_sha = digest(read_file(root / '.hermes' / dest, root))
-        require(dest_sha in (source_sha, known_shim), 'overlay_mismatch')
-        overlays.append({'source': source, 'destination': dest, 'source_sha256': source_sha,
-                         'installed_sha256': dest_sha, 'mode': 'copy' if dest_sha == source_sha else 'reviewed_shim'})
-    output['overlays'] = overlays
+    return archived
+
+
+def handover_record(root, expected, output):
+    commit, sha = expected
+    release = root / 'releases' / commit[:12] / f'robie-hermes-{commit[:12]}'
+    deployment_record(root, release, output, selected=True)
+    require((output['commit'], output['sha256']) == (commit, sha), 'handover_record_mismatch')
     return output
 
 
-def collect(root=ROOT, staging=STAGING):
+def older_archive(root, output):
+    # Reported candidate only: never fills the current release's rollback result.
+    commit, sha = HANDOVER_OLDER
+    output.update(path=str(HANDOVER_ARCHIVE), rollback_selected=False,
+                  previous_release_suitability='UNVERIFIED')
+    data = exact_bytes(HANDOVER_ARCHIVE, MAX_ARCHIVE)
+    require(digest(data) == sha, 'older_archive_digest')
+    output['sha256'] = sha
+    archived = archive_sources(data, commit[:12])
+    release = root / 'releases' / commit[:12] / f'robie-hermes-{commit[:12]}'
+    for source, _, _ in OVERLAYS:
+        require(digest(exact_bytes(release / source)) == archived[f'robie-hermes-{commit[:12]}/{source}'],
+                'older_archive_source_changed')
+    output['selected_sources_match'] = True
+    return output
+
+
+def collect(root=ROOT, staging=STAGING, *, handover=False):
     report = {'schema': 1, 'collected_at': datetime.now(timezone.utc).isoformat(),
               'snapshot_verified': False, 'deployment_authorized': False,
               'loaded_process_modules': 'UNVERIFIED', 'intake_hold': 'NOT_ACQUIRED',
@@ -457,7 +549,13 @@ def collect(root=ROOT, staging=STAGING):
     release = check('pointer', lambda: {'path': str(resolved(root / 'current', root))})
     if initial and release:
         check('release', lambda: release_evidence(root, staging, initial,
-                                                 report['checks'].setdefault('release', {})))
+                                                 report['checks'].setdefault('release', {}), handover=handover))
+    if handover:
+        for name, expected in (('current_deployment_record', HANDOVER_CURRENT),
+                               ('older_deployment_record', HANDOVER_OLDER)):
+            check(name, lambda: handover_record(root, expected, report['checks'].setdefault(name, {})))
+        check('older_reported_archive', lambda: older_archive(
+            root, report['checks'].setdefault('older_reported_archive', {})))
     skill = check('policy_skill', lambda: policy(root))
     jobs = check('durable_work', lambda: database(root, Path(release['path']))) if release else None
     if jobs and not jobs['clear']:
@@ -477,13 +575,16 @@ def collect(root=ROOT, staging=STAGING):
     return report
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--release-handover', action='store_true')
+    args = parser.parse_args(argv)
     def timeout(*_):
         raise CollectorTimeout()
     signal.signal(signal.SIGALRM, timeout)
     signal.alarm(120)
     try:
-        report = collect()
+        report = collect(handover=args.release_handover)
     except CollectorTimeout:
         report = {'schema': 1, 'snapshot_verified': False, 'deployment_authorized': False,
                   'errors': ['collector_timeout']}

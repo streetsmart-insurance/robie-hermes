@@ -13,6 +13,12 @@ on:
         default: false
         type: boolean
 
+      release_handover:
+        description: Check fixed 592e148 and 73e720 handover paths without directory scanning
+        required: true
+        default: false
+        type: boolean
+
 permissions:
   contents: read
   id-token: write
@@ -66,8 +72,16 @@ jobs:
         run: bash scripts/ensure-gcloud-ssh-key.sh
       - name: Collect bounded Test snapshot without remote installation
         shell: bash
+        env:
+          RELEASE_HANDOVER: ${{ inputs.release_handover }}
         run: |
           set -euo pipefail
+          handover_flag=''
+          case "${RELEASE_HANDOVER:-false}" in
+            true) handover_flag=' --release-handover' ;;
+            false) ;;
+            *) exit 2 ;;
+          esac
           sha256sum scripts/diagnose_test_release_readonly.py > "${RUNNER_TEMP}/collector.sha256"
           printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/controller-commit.txt"
           gcloud compute ssh "${TEST_VM}" \
@@ -75,7 +89,7 @@ jobs:
             --ssh-key-file="${HOME}/.ssh/google_compute_engine" \
             --ssh-key-expire-after="${OSLOGIN_SSH_KEY_TTL}" \
             --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 \
-            --command='test "$(hostname -s)" = hermes-test-01 && sudo -n env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 python3 -I -B -' \
+            --command='test "$(hostname -s)" = hermes-test-01 && sudo -n env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 python3 -I -B -'"${handover_flag}" \
             < scripts/diagnose_test_release_readonly.py \
             | tee "${RUNNER_TEMP}/test-release-snapshot.json"
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["host"] == "hermes-test-01" and r["snapshot_verified"] is True and r["deployment_authorized"] is False and r["errors"] == []' \
