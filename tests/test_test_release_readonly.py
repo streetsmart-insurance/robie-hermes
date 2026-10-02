@@ -150,24 +150,95 @@ class TestReadonlyRelease(unittest.TestCase):
             conn.execute("UPDATE jobs SET status='SECRET_SENTINEL'")
         self.refused('job_status_unknown')
 
-    def test_wal_is_refused_without_changing_or_creating_sidecars(self):
-        for keep_writer_open in (True, False):
-            with self.subTest(keep_writer_open=keep_writer_open):
-                writer = sqlite3.connect(self.db)
-                try:
-                    writer.execute('PRAGMA journal_mode=WAL')
+    def test_wal_reads_committed_jobs_without_logical_writes_or_new_files(self):
+        writer = sqlite3.connect(self.db)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute("INSERT INTO jobs VALUES ('RUNNING',NULL,'SECRET_SENTINEL')")
+        writer.commit()
+        before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+        schema = writer.execute('SELECT name,sql FROM sqlite_master ORDER BY name').fetchall()
+        statements = []
+        real_connect = sqlite3.connect
+
+        def inspected_connect(filename, **kwargs):
+            self.assertTrue(filename.endswith('?mode=ro'))
+            conn = real_connect(filename, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        with patch.object(audit.sqlite3, 'connect', side_effect=inspected_connect):
+            report = self.collect()
+        self.assertIn('durable_work_not_quiescent', report['errors'])
+        self.assertEqual(report['checks']['durable_work']['jobs_by_status']['RUNNING'], 1)
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(report))
+        after = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+        self.assertEqual(set(before), set(after))
+        for name in before:
+            if not name.endswith('-shm'):  # Authorized SQLite reader coordination only.
+                self.assertEqual(before[name], after[name])
+        self.assertEqual(schema, writer.execute('SELECT name,sql FROM sqlite_master ORDER BY name').fetchall())
+        self.assertIn('PRAGMA query_only=ON', statements)
+        self.assertIn('BEGIN', statements)
+        self.assertTrue(all(s.startswith(('SELECT ', 'PRAGMA ', 'BEGIN')) for s in statements))
+
+    def test_wal_missing_sidecars_refuses_before_connect_without_creating_files(self):
+        writer = sqlite3.connect(self.db)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.close()
+        for present in (None, '-wal', '-shm'):
+            with self.subTest(present=present):
+                if present:
+                    Path(str(self.db) + present).touch()
+                before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+                with patch.object(audit.sqlite3, 'connect') as connect:
+                    self.refused('wal_sidecars_missing')
+                    connect.assert_not_called()
+                self.assertEqual(before, {p.name: p.read_bytes() for p in self.db.parent.iterdir()})
+                if present:
+                    Path(str(self.db) + present).unlink()
+
+    def test_wal_read_transaction_keeps_counts_consistent_during_writer_commit(self):
+        writer = sqlite3.connect(self.db)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute("INSERT INTO jobs VALUES ('COMPLETE',NULL,'SECRET_SENTINEL')")
+        writer.commit()
+
+        class SnapshotConnection(sqlite3.Connection):
+            def execute(conn, sql, *args):
+                cursor = super().execute(sql, *args)
+                if sql.startswith('SELECT status,COUNT(*)'):
                     writer.execute("INSERT INTO jobs VALUES ('RUNNING',NULL,'SECRET_SENTINEL')")
                     writer.commit()
-                    if not keep_writer_open:
-                        writer.close()
-                    before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
-                    with patch.object(audit.sqlite3, 'connect') as connect:
-                        self.refused('wal_inspection_requires_shared_memory_writes')
-                        connect.assert_not_called()
-                    after = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
-                    self.assertEqual(before, after)
-                finally:
-                    writer.close()
+                return cursor
+
+        real_connect = sqlite3.connect
+        with patch.object(audit.sqlite3, 'connect', side_effect=lambda filename, **kw: real_connect(filename, factory=SnapshotConnection, **kw)):
+            result = audit.database(self.root, self.release)
+        self.assertEqual(result['jobs_by_status'], {'COMPLETE': 2})
+        self.assertEqual(result['jobs_with_active_status_or_lease'], 0)
+        self.assertTrue(result['clear'])
+        self.assertEqual(writer.execute("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'").fetchone()[0], 1)
+
+    def test_wal_redirected_or_nonregular_sidecar_refuses_before_connect(self):
+        writer = sqlite3.connect(self.db)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.close()
+        Path(str(self.db) + '-wal').touch()
+        shm = Path(str(self.db) + '-shm')
+        for kind in ('symlink', 'fifo', 'directory'):
+            with self.subTest(kind=kind):
+                if kind == 'symlink':
+                    shm.symlink_to(self.db)
+                elif kind == 'fifo':
+                    os.mkfifo(shm)
+                else:
+                    shm.mkdir()
+                with patch.object(audit.sqlite3, 'connect') as connect:
+                    self.refused('wal_sidecars_invalid')
+                    connect.assert_not_called()
+                shm.rmdir() if kind == 'directory' else shm.unlink()
 
     def test_missing_archive_fails(self):
         self.archive.unlink()

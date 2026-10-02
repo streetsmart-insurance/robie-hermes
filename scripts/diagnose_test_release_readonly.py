@@ -161,15 +161,18 @@ def driver():
 def database(root, release):
     path = resolved(root / 'robie-job-engine/data/jobs.db', root)
     require(path.is_file(), 'database_missing')
-    # Even mode=ro can create WAL sidecars or update existing shared-memory
-    # read marks. This strictly read-only collector must not open a WAL DB.
+    # Normal SQLite reader locks/SHM read marks are permitted, logical writes
+    # are not. Require existing sidecars so a WAL read need not create them.
     # Never use immutable=1: it would silently omit committed WAL work.
     with path.open('rb') as stream:
         header = stream.read(100)
     require(len(header) == 100 and header[:16] == b'SQLite format 3\x00', 'database_header')
-    require(header[18:20] == b'\x01\x01'
-            and not Path(str(path) + '-wal').exists() and not Path(str(path) + '-shm').exists(),
-            'wal_inspection_requires_shared_memory_writes')
+    require(header[18:20] in (b'\x01\x01', b'\x02\x02'), 'database_journal_mode')
+    sidecars = [Path(str(path) + suffix) for suffix in ('-wal', '-shm')]
+    if header[18:20] == b'\x02\x02' or any(os.path.lexists(p) for p in sidecars):
+        require(all(p.exists() for p in sidecars), 'wal_sidecars_missing')
+        require(all(p.is_file() and not p.is_symlink() and resolved(p, root) == p
+                    for p in sidecars), 'wal_sidecars_invalid')
     conn = sqlite3.connect('file:' + quote(str(path)) + '?mode=ro', uri=True, timeout=2)
     try:
         conn.execute('PRAGMA query_only=ON')
