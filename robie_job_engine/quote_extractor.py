@@ -753,6 +753,7 @@ class QuoteExtractor:
         # aggregates — those are limits, not premiums.
         limit_words = ("occurrence", "aggregate", "deductible", "limit", "each",
                        "per occurrence", "general aggregate")
+        seen_items: set[tuple[str, int]] = set()
         for line in text.splitlines():
             li = re.search(
                 r"^\s*([A-Za-z][A-Za-z\s&/\-]{3,40}?)\s+\$?\s*([\d,]+\.\d{2})\s*$",
@@ -764,19 +765,33 @@ class QuoteExtractor:
                 if len(label) > 3 and "total" not in label_lower:
                     if any(w in label_lower for w in limit_words):
                         continue
+                    amount = _parse_dollars_to_cents(li.group(2))
+                    key = (label_lower, amount)
+                    if key in seen_items:
+                        continue  # duplicate line (fee schedules often repeat)
+                    seen_items.add(key)
                     quote.line_items.append(
-                        {"label": label, "amount_cents": _parse_dollars_to_cents(li.group(2))}
+                        {"label": label, "amount_cents": amount}
                     )
 
-        # Stated total: "Total Premium: $12,500.00", "Grand Total $12,500".
-        total_match = re.search(
-            r"(?:total\s+(?:premium|due|amount)|grand\s+total|amount\s+due)"
-            r"\s*(?:is|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+        # Stated total: prefer the grand total ("Total including Premium,
+        # Surcharges, Taxes and Fees $2,939.02") over "Total Premium".
+        grand_match = re.search(
+            r"total\s+including[^\n$]*\$\s*([\d,]+(?:\.\d{2})?)",
             text,
             re.IGNORECASE,
         )
-        if total_match:
-            quote.stated_total_cents = _parse_dollars_to_cents(total_match.group(1))
+        if grand_match:
+            quote.stated_total_cents = _parse_dollars_to_cents(grand_match.group(1))
+        else:
+            total_match = re.search(
+                r"(?:total\s+(?:premium|due|amount)|grand\s+total|amount\s+due)"
+                r"\s*(?:is|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                text,
+                re.IGNORECASE,
+            )
+            if total_match:
+                quote.stated_total_cents = _parse_dollars_to_cents(total_match.group(1))
 
         # Named insureds: capture "Named Insured:" lines and DBA mentions.
         # Multiple distinct entities trigger a clarification question.
