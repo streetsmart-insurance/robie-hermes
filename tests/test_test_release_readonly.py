@@ -1,4 +1,5 @@
 """Fixture-only diagnostics: no cloud, systemd, credentials, or client systems."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
@@ -167,7 +168,8 @@ class TestReadonlyRelease(unittest.TestCase):
             conn.set_trace_callback(statements.append)
             return conn
 
-        with patch.object(audit.sqlite3, 'connect', side_effect=inspected_connect):
+        with patch.object(audit, 'sqlite3', wraps=sqlite3) as collector_sqlite:
+            collector_sqlite.connect.side_effect = inspected_connect
             report = self.collect()
         self.assertIn('durable_work_not_quiescent', report['errors'])
         self.assertEqual(report['checks']['durable_work']['jobs_by_status']['RUNNING'], 1)
@@ -190,13 +192,15 @@ class TestReadonlyRelease(unittest.TestCase):
             with self.subTest(present=present):
                 if present:
                     Path(str(self.db) + present).touch()
-                before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
-                with patch.object(audit.sqlite3, 'connect') as connect:
-                    self.refused('wal_sidecars_missing')
-                    connect.assert_not_called()
-                self.assertEqual(before, {p.name: p.read_bytes() for p in self.db.parent.iterdir()})
-                if present:
-                    Path(str(self.db) + present).unlink()
+                try:
+                    before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+                    with patch.object(audit, 'sqlite3', wraps=sqlite3) as collector_sqlite:
+                        self.refused('wal_sidecars_missing')
+                        collector_sqlite.connect.assert_not_called()
+                    self.assertEqual(before, {p.name: p.read_bytes() for p in self.db.parent.iterdir()})
+                finally:
+                    if present:
+                        Path(str(self.db) + present).unlink()
 
     def test_wal_read_transaction_keeps_counts_consistent_during_writer_commit(self):
         writer = sqlite3.connect(self.db)
@@ -214,7 +218,8 @@ class TestReadonlyRelease(unittest.TestCase):
                 return cursor
 
         real_connect = sqlite3.connect
-        with patch.object(audit.sqlite3, 'connect', side_effect=lambda filename, **kw: real_connect(filename, factory=SnapshotConnection, **kw)):
+        with patch.object(audit, 'sqlite3', wraps=sqlite3) as collector_sqlite:
+            collector_sqlite.connect.side_effect = lambda filename, **kw: real_connect(filename, factory=SnapshotConnection, **kw)
             result = audit.database(self.root, self.release)
         self.assertEqual(result['jobs_by_status'], {'COMPLETE': 2})
         self.assertEqual(result['jobs_with_active_status_or_lease'], 0)
@@ -235,10 +240,23 @@ class TestReadonlyRelease(unittest.TestCase):
                     os.mkfifo(shm)
                 else:
                     shm.mkdir()
-                with patch.object(audit.sqlite3, 'connect') as connect:
-                    self.refused('wal_sidecars_invalid')
-                    connect.assert_not_called()
-                shm.rmdir() if kind == 'directory' else shm.unlink()
+                try:
+                    # Heartbeats use the same sqlite3 module in full discovery.
+                    # Replace only the collector's binding, never that shared module.
+                    with patch.object(audit, 'sqlite3', wraps=sqlite3) as collector_sqlite:
+                        def background_read():
+                            conn = sqlite3.connect(':memory:')
+                            try:
+                                return conn.execute('SELECT 1').fetchone()
+                            finally:
+                                conn.close()
+
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            self.assertEqual(pool.submit(background_read).result(timeout=5), (1,))
+                        self.refused('wal_sidecars_invalid')
+                        collector_sqlite.connect.assert_not_called()
+                finally:
+                    shm.rmdir() if kind == 'directory' else shm.unlink()
 
     def test_missing_archive_fails(self):
         self.archive.unlink()
