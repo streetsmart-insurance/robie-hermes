@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import tarfile
+import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -28,6 +29,10 @@ MAX_FILE = 2 * 1024 * 1024
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 20000
+SEARCH_ENTRIES = 2000
+SEARCH_CANDIDATES = 8
+SEARCH_SECONDS = 10
+SEARCH_DEPTH = 3
 POLICY_FILES = ('SKILL.md', 'references/profiles.json', 'references/selector-inventory.md')
 # Exact reviewed shim hashes from deploy_truth.zip_load_shim_source; no runtime import.
 OVERLAYS = (
@@ -43,7 +48,7 @@ OVERLAYS = (
 )
 STATES = {'PENDING', 'NEEDS_SKILL', 'NEEDS_CLARIFICATION', 'NEEDS_AUTH',
           'AWAITING_HUMAN_INPUT', 'WAITING', 'RUNNING', 'VERIFYING', 'RETRY_WAIT',
-          'PAUSED', 'COMPLETE', 'UNVERIFIED', 'FAILED'}
+          'PAUSED', 'COMPLETE', 'UNVERIFIED', 'FAILED', 'CANCELLED'}
 
 
 class Refused(Exception):
@@ -180,26 +185,41 @@ def database(root, release):
         conn.set_progress_handler(lambda: 1 if datetime.now(timezone.utc).timestamp() > deadline else 0, 10000)
         deadline = datetime.now(timezone.utc).timestamp() + 5
         conn.execute('BEGIN')
-        counts = dict(conn.execute('SELECT status,COUNT(*) FROM jobs GROUP BY status'))
-        require(set(counts) <= STATES, 'job_status_unknown')
+        def buckets(table, column, allowed):
+            # Identifiers are fixed call-site constants; unknown values never leave SQL.
+            allowed = sorted(allowed)
+            placeholders = ','.join('?' for _ in allowed)
+            return dict(conn.execute(
+                f'SELECT CASE WHEN {column} IN ({placeholders}) THEN {column} '
+                f'ELSE ? END AS bucket,COUNT(*) FROM {table} GROUP BY bucket',
+                (*allowed, 'UNKNOWN')))
+
+        counts = buckets('jobs', 'status', STATES)
         leases = conn.execute('''SELECT COUNT(*) FROM jobs WHERE status IN ('RUNNING','VERIFYING')
                                OR lease_owner IS NOT NULL''').fetchone()[0]
         pending = sum(count for state, count in counts.items() if state not in {'COMPLETE','FAILED','UNVERIFIED'})
-        queue = dict(conn.execute('SELECT state,COUNT(*) FROM chat_event_queue GROUP BY state'))
-        require(set(queue) <= {'QUEUED','INFLIGHT','AWAITING_HUMAN_INPUT','COMPLETE','FAILED'}, 'queue_state_unknown')
+        queue = buckets('chat_event_queue', 'state',
+                        {'QUEUED','INFLIGHT','AWAITING_HUMAN_INPUT','COMPLETE','FAILED'})
         queue_leases = conn.execute('SELECT COUNT(*) FROM chat_event_queue WHERE lease_owner IS NOT NULL').fetchone()[0]
         links = conn.execute('SELECT COUNT(*) FROM conversation_job_links WHERE active=1').fetchone()[0]
         outbox_present = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chat_reply_outbox'").fetchone()[0]
         if outbox_present:
-            replies = dict(conn.execute('SELECT state,COUNT(*) FROM chat_reply_outbox GROUP BY state'))
-            require(set(replies) <= {'pending','sending','delivered','cancelled','failed'}, 'reply_state_unknown')
+            replies = buckets('chat_reply_outbox', 'state',
+                              {'pending','sending','delivered','cancelled','failed'})
         else:
             require(not (release / 'robie_job_engine/chat_reply_outbox.py').exists(), 'reply_schema_missing')
             replies = None  # Explicitly absent in a pre-outbox release, never zero.
         result = {'jobs_by_status': counts, 'jobs_with_active_status_or_lease': leases,
                   'nonterminal_jobs': pending, 'queue_by_state': queue, 'queue_leases': queue_leases,
-                  'active_conversation_links': links, 'reply_outbox_by_state': replies}
+                  'active_conversation_links': links, 'reply_outbox_by_state': replies,
+                  'cancelled_semantics': 'UNVERIFIED' if counts.get('CANCELLED') else 'NOT_OBSERVED',
+                  'blocking_codes': [code for value, code in (
+                      (counts.get('UNKNOWN'), 'job_status_unknown'),
+                      (counts.get('CANCELLED'), 'cancelled_semantics_unverified'),
+                      (queue.get('UNKNOWN'), 'queue_state_unknown'),
+                      ((replies or {}).get('UNKNOWN'), 'reply_state_unknown')) if value]}
         result['clear'] = not (leases or pending or queue_leases or links
+                              or result['blocking_codes']
                               or any(queue.get(s, 0) for s in ('QUEUED','INFLIGHT','AWAITING_HUMAN_INPUT'))
                               or any((replies or {}).get(s, 0) for s in ('pending','sending')))
         return result
@@ -212,6 +232,110 @@ def policy(root):
     return {name: {'resolved_path': str(resolved(base / name, root, stable=True)),
                    'sha256': digest(read_file(base / name, root, stable=True))}
             for name in POLICY_FILES}
+
+
+def open_directory(path):
+    """Pin every directory component; never follow even an intermediate symlink."""
+    require(path.is_absolute() and '..' not in path.parts, 'archive_search_path')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def archive_bytes(directory_fd, name, limit):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= limit, 'archive_file_type_or_size')
+        data = stream.read(limit + 1)
+        require(len(data) <= limit, 'archive_file_type_or_size')
+        return data
+
+
+def find_rollback_archive(root, staging, commit, sha, output):
+    """Search release-storage layouts only, never source/runtime/home trees.
+
+    Directory names are an explicit layout allowlist. A negative result is
+    bounded-scope evidence, not a claim that the archive exists nowhere.
+    """
+    roots = (staging, root / 'deployments', root / 'releases')
+    name = f'robie-hermes-{commit[:12]}.tgz'
+    layout = re.compile(r'(?:[0-9a-f]{12,40}|robie-hermes-[0-9a-f]{12}|archives|packages|retained|releases|deployments)')
+    search = {'roots': [str(p) for p in roots], 'entries': 0, 'candidates': 0,
+              'bytes_read': 0, 'complete': False, 'scope': 'release_storage_layouts_only'}
+    output['archive_search'] = search
+    deadline = time.monotonic() + SEARCH_SECONDS
+    incomplete = False
+    candidate_error = None
+
+    def walk(fd, path, depth):
+        nonlocal incomplete, candidate_error
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                search['entries'] += 1
+                require(search['entries'] <= SEARCH_ENTRIES and time.monotonic() <= deadline,
+                        'archive_search_limit')
+                if entry.name == name:
+                    search['candidates'] += 1
+                    require(search['candidates'] <= SEARCH_CANDIDATES, 'archive_search_limit')
+                    try:
+                        remaining = MAX_EXPANDED - search['bytes_read']
+                        require(remaining > 0, 'archive_search_limit')
+                        data = archive_bytes(fd, name, min(MAX_ARCHIVE, remaining))
+                        search['bytes_read'] += len(data)
+                        require(search['bytes_read'] <= MAX_EXPANDED and time.monotonic() <= deadline,
+                                'archive_search_limit')
+                        checksum = archive_bytes(fd, name + '.sha256', 256).decode().split()
+                        require(checksum == [sha, name] and digest(data) == sha,
+                                'rollback_archive_digest')
+                        return path / name, data
+                    except Refused as exc:
+                        if str(exc) == 'archive_search_limit':
+                            raise
+                        candidate_error = str(exc)
+                    except (OSError, UnicodeError):
+                        candidate_error = 'archive_candidate_unreadable'
+                elif layout.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
+                    if depth >= SEARCH_DEPTH:
+                        incomplete = True
+                        continue
+                    try:
+                        child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        try:
+                            found = walk(child, path / entry.name, depth + 1)
+                        finally:
+                            os.close(child)
+                        if found:
+                            return found
+                    except OSError:
+                        incomplete = True
+        return None
+
+    for directory in roots:
+        try:
+            fd = open_directory(directory)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            incomplete = True
+            continue
+        try:
+            found = walk(fd, directory, 0)
+        finally:
+            os.close(fd)
+        if found:
+            search['matched'] = True
+            return found
+    search['complete'] = not incomplete
+    require(not incomplete, 'archive_search_incomplete')
+    raise Refused(candidate_error or 'rollback_archive_not_found')
 
 
 def release_evidence(root, staging, live_gateway, output):
@@ -237,12 +361,7 @@ def release_evidence(root, staging, live_gateway, output):
     require(flip['sha'] == short and flip['release_root'] == str(release), 'flip_identity')
     require(timestamp(live_gateway['active_enter']) > timestamp(flip['flip_at']), 'gateway_predates_flip')
     output['stored_proof_live'] = True
-    # The known installer retains its transfer at this exact commit-scoped path.
-    archive = staging / commit / f'robie-hermes-{short}.tgz'
-    data = read_file(archive, staging, MAX_ARCHIVE, stable=True)
-    actual = digest(data)
-    checksum = read_file(Path(str(archive) + '.sha256'), staging, 256).decode().split()
-    require(checksum == [sha, archive.name] and actual == sha, 'rollback_archive_digest')
+    archive, data = find_rollback_archive(root, staging, commit, sha, output)
     output['rollback_archive'] = str(archive)
     import io
     wanted = {f'robie-hermes-{short}/{source}': source for source, _, _ in OVERLAYS}
@@ -319,6 +438,7 @@ def collect(root=ROOT, staging=STAGING):
     skill = check('policy_skill', lambda: policy(root))
     jobs = check('durable_work', lambda: database(root, Path(release['path']))) if release else None
     if jobs and not jobs['clear']:
+        report['errors'].extend(jobs['blocking_codes'])
         report['errors'].append('durable_work_not_quiescent')
     if lease and not lease['clear']:
         report['errors'].append('driver_conflict_or_expired')

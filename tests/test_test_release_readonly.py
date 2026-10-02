@@ -212,7 +212,7 @@ class TestReadonlyRelease(unittest.TestCase):
         class SnapshotConnection(sqlite3.Connection):
             def execute(conn, sql, *args):
                 cursor = super().execute(sql, *args)
-                if sql.startswith('SELECT status,COUNT(*)'):
+                if sql.startswith('SELECT CASE WHEN status IN'):
                     writer.execute("INSERT INTO jobs VALUES ('RUNNING',NULL,'SECRET_SENTINEL')")
                     writer.commit()
                 return cursor
@@ -260,11 +260,156 @@ class TestReadonlyRelease(unittest.TestCase):
 
     def test_missing_archive_fails(self):
         self.archive.unlink()
-        self.refused('path_missing')
+        self.refused('rollback_archive_not_found')
         report = self.collect()
         self.assertEqual(report['checks']['release']['commit'], self.commit)
         self.assertIn('policy_skill', report['checks'])
         self.assertIn('durable_work', report['checks'])
+
+    def test_unknown_and_null_states_preserve_all_inventory_without_echo(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.executescript("""
+                INSERT INTO jobs VALUES ('SECRET_SENTINEL',NULL,'unused');
+                INSERT INTO jobs VALUES (NULL,NULL,'unused');
+                INSERT INTO jobs VALUES ('RUNNING','SECRET_SENTINEL','unused');
+                INSERT INTO chat_event_queue VALUES ('SECRET_SENTINEL',NULL,'unused');
+                INSERT INTO conversation_job_links VALUES (1,'unused');
+                CREATE TABLE chat_reply_outbox(state TEXT,bodies_json TEXT);
+                INSERT INTO chat_reply_outbox VALUES (NULL,'SECRET_SENTINEL');
+            """)
+        self.archive.unlink()
+        report = self.collect()
+        work = report['checks']['durable_work']
+        self.assertEqual(work['jobs_by_status'], {'COMPLETE': 1, 'RUNNING': 1, 'UNKNOWN': 2})
+        self.assertEqual(work['jobs_with_active_status_or_lease'], 1)
+        self.assertEqual(work['active_conversation_links'], 1)
+        self.assertEqual(work['queue_by_state'], {'UNKNOWN': 1})
+        self.assertEqual(work['reply_outbox_by_state'], {'UNKNOWN': 1})
+        self.assertTrue({'job_status_unknown', 'queue_state_unknown', 'reply_state_unknown',
+                         'rollback_archive_not_found'} <= set(report['errors']))
+        self.assertIn('policy_skill', report['checks'])
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(report))
+        self.assertFalse(report['snapshot_verified'])
+
+    def test_cancelled_is_reported_but_not_certified_terminal(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE jobs SET status='CANCELLED'")
+        report = self.collect()
+        work = report['checks']['durable_work']
+        self.assertEqual(work['jobs_by_status'], {'CANCELLED': 1})
+        self.assertEqual(work['cancelled_semantics'], 'UNVERIFIED')
+        self.assertEqual(work['nonterminal_jobs'], 1)
+        self.assertIn('cancelled_semantics_unverified', report['errors'])
+        self.assertFalse(work['clear'])
+
+    def move_archive(self, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / self.archive.name
+        self.archive.rename(destination)
+        Path(str(self.archive) + '.sha256').rename(Path(str(destination) + '.sha256'))
+        self.archive = destination
+
+    def test_alternate_archive_in_each_approved_root_verifies_exact_bytes(self):
+        for directory in (self.staging / 'retained', self.root / 'deployments' / self.short,
+                          self.root / 'releases' / self.short / 'archives'):
+            with self.subTest(directory=directory):
+                self.move_archive(directory)
+                report = self.collect()
+                self.assertTrue(report['snapshot_verified'], report)
+                self.assertEqual(report['checks']['release']['rollback_archive'], str(self.archive))
+
+    def test_archive_and_checksum_symlinks_and_fifo_are_never_read(self):
+        original = self.archive.read_bytes()
+        checksum = Path(str(self.archive) + '.sha256')
+        for target in (self.archive, checksum):
+            data = target.read_bytes()
+            external = Path(self.tmp.name) / 'outside'
+            external.write_bytes(data)
+            for kind in ('symlink', 'fifo'):
+                with self.subTest(target=target.name, kind=kind):
+                    target.unlink()
+                    if kind == 'symlink':
+                        target.symlink_to(external)
+                    else:
+                        os.mkfifo(target)
+                    report = self.collect()
+                    self.assertFalse(report['snapshot_verified'])
+                    self.assertFalse(report['checks']['release'].get('rollback_archive_verified', False))
+                    self.assertIn('durable_work', report['checks'])
+                    target.unlink()
+                    target.write_bytes(data)
+        self.assertEqual(self.archive.read_bytes(), original)
+
+    def test_search_never_enters_symlink_or_source_runtime_home_directories(self):
+        self.move_archive(Path(self.tmp.name) / 'outside')
+        (self.staging / 'retained').symlink_to(self.archive.parent, target_is_directory=True)
+        for name in ('.hermes', 'home', 'robie-job-engine', 'data', 'secrets', 'src'):
+            (self.staging / name).mkdir()
+            (self.staging / name / self.archive.name).write_bytes(b'SECRET_SENTINEL')
+        opened = []
+        real_open = audit.os.open
+        def guarded_open(path, *args, **kwargs):
+            opened.append(str(path))
+            self.assertNotIn(str(path), {'.hermes', 'home', 'robie-job-engine', 'data', 'secrets', 'src', 'retained'})
+            return real_open(path, *args, **kwargs)
+        # Observe only archive search; policy inspection intentionally reads its own fixed files.
+        with patch.object(audit.os, 'open', side_effect=guarded_open):
+            with self.assertRaisesRegex(audit.Refused, 'rollback_archive_not_found'):
+                audit.find_rollback_archive(self.root, self.staging, self.commit, '0' * 64, {})
+
+    def test_search_root_symlink_is_not_followed(self):
+        self.move_archive(Path(self.tmp.name) / 'outside')
+        import shutil
+        shutil.rmtree(self.staging)
+        self.staging.symlink_to(self.archive.parent, target_is_directory=True)
+        self.refused('archive_search_incomplete')
+
+    def test_checksum_mismatch_is_not_rollback_proof(self):
+        Path(str(self.archive) + '.sha256').write_text('0' * 64 + '  ' + self.archive.name)
+        self.refused('rollback_archive_digest')
+
+    def test_checksum_must_name_the_exact_archive(self):
+        sha = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        Path(str(self.archive) + '.sha256').write_text(sha + '  different.tgz')
+        self.refused('rollback_archive_digest')
+
+    def test_oversized_archive_is_rejected_before_read(self):
+        with patch.object(audit, 'MAX_ARCHIVE', 1):
+            self.refused('archive_file_type_or_size')
+
+    def test_intermediate_root_symlink_refused(self):
+        alias = Path(self.tmp.name) / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(OSError):
+            audit.open_directory(alias / 'deployments')
+
+    def test_directory_replaced_by_symlink_between_scan_and_open_is_refused(self):
+        import shutil
+        moved = Path(self.tmp.name) / 'outside'
+        moved.mkdir()
+        original_open = audit.os.open
+        swapped = False
+        def swap_before_open(path, *args, **kwargs):
+            nonlocal swapped
+            if str(path) == self.commit and not swapped:
+                swapped = True
+                directory = self.staging / self.commit
+                shutil.move(str(directory), str(moved / self.commit))
+                directory.symlink_to(moved / self.commit, target_is_directory=True)
+            return original_open(path, *args, **kwargs)
+        with patch.object(audit.os, 'open', side_effect=swap_before_open):
+            self.refused('archive_search_incomplete')
+        self.assertTrue(swapped)
+
+    def test_search_limits_fail_closed_and_preserve_independent_checks(self):
+        for setting, value in (('SEARCH_ENTRIES', 0), ('SEARCH_CANDIDATES', 0),
+                               ('SEARCH_SECONDS', -1), ('SEARCH_DEPTH', 0)):
+            with self.subTest(setting=setting), patch.object(audit, setting, value):
+                report = self.collect()
+                self.assertFalse(report['snapshot_verified'])
+                self.assertTrue({'archive_search_limit', 'archive_search_incomplete'} & set(report['errors']))
+                self.assertIn('durable_work', report['checks'])
+                self.assertIn('policy_skill', report['checks'])
 
     def test_driver_conflict_still_collects_other_evidence(self):
         self.driver.update(state='IN', holder='PRODUCTION', clear=False)
