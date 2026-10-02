@@ -437,7 +437,84 @@ def decide(
     )
 
 
+def _is_clarification_request(end_state: str) -> bool:
+    """True when Robie finished by asking the requester for more info.
+
+    This is not a failure -- it is Robie doing its job correctly by
+    refusing to guess. The requester just needs a warm nudge, not a QA report.
+    """
+    blob = str(end_state or "").lower()
+    return any(
+        marker in blob
+        for marker in (
+            "need clarification",
+            "need the following",
+            "missing items",
+            "before creating the ascend",
+            "could you provide",
+            "please provide",
+            "i need the following",
+        )
+    )
+
+
+def _warm_clarification_email(ask: str, end_state: str) -> str:
+    """Rewrite a clarification end-state as a warm human email.
+
+    Keeps every fact from the original (what Robie has, what is missing)
+    but sounds like a helpful colleague, not a QA report. No Jev scores,
+    no "end state" language, no internal jargon.
+    """
+    original = str(end_state or "").strip()
+
+    # Pull out the "what I have" lead (e.g. "I received the quote for X from Y")
+    have_match = re.search(
+        r"(I received the quote for .+?)(?:, but I need clarification.*)",
+        original,
+        re.IGNORECASE | re.DOTALL,
+    )
+    have_line = have_match.group(1).strip() + "." if have_match else ""
+
+    # Pull out the numbered missing items (lines starting with digits/bullets)
+    missing_lines = []
+    for line in original.split("\n"):
+        stripped = line.strip()
+        # Match "11. Insured Address: ..." or "- Insured Address: ..." etc.
+        if re.match(r"^(\d+[.\)]|[-\u2022])\s*\S", stripped):
+            # Clean up "11. Insured Address:" -> "Insured Address:"
+            cleaned = re.sub(r"^\d+[.\)]\s*", "", stripped)
+            missing_lines.append(cleaned)
+
+    parts = ["Hi there,", ""]
+    parts.append(
+        "Thanks for sending that over -- I'm on it."
+    )
+    if have_line:
+        parts += ["", have_line]
+    if missing_lines:
+        parts += ["", "Before I can build the financing agreement, I just need a couple of things from you:", ""]
+        for item in missing_lines:
+            parts.append("- " + item)
+        parts += [
+            "",
+            "Just hit reply with those details and I'll pick it right back up -- "
+            "no need to resend anything.",
+        ]
+    else:
+        # Fallback: keep the original ask, just wrapped warmly
+        parts += ["", original, "", "Just hit reply and I'll pick it right back up."]
+    parts += ["", "Thanks!", "Robie"]
+    return "\n".join(parts)
+
+
 def compose_report(job_id: str, context: dict[str, Any], decision: EndStateDecision) -> str:
+    raw_end_state = str(context.get("end_state") or "")
+    # Carlo 2026-10-02: when Robie is asking the requester for more info,
+    # send a warm human email -- not the internal QA report format.
+    if _is_clarification_request(raw_end_state):
+        return _warm_clarification_email(
+            str(context.get("ask") or ""), raw_end_state
+        )
     summary = summary_sentence(context.get("ask") or "", context.get("end_state") or "", decision.verdict)
     end_state = plain_customer_text(context.get("end_state") or "Robie stopped without a clear ending.")
     jev_line = (

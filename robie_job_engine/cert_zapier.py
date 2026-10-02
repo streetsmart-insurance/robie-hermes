@@ -86,7 +86,10 @@ class CertZapierClient:
     def create_task(self, *, applicant_id: int, title: str,
                     email_subject: str, note_text: str,
                     due_date: str = "") -> ZapResult:
-        """Fire the EZLynx follow-up-task Zap for a new certificate request.
+        """Create EZLynx follow-up task via direct API, falling back to Zap.
+
+        Tries the direct Discussion API TaskCreationNote first (no Zapier).
+        Falls back to the Zapier catch hook if direct API fails.
 
         Mints a ``filing_id`` nonce and includes it in the payload: the
         Zap's callback step must echo it back (see
@@ -96,17 +99,45 @@ class CertZapierClient:
         from .cert_callback import new_filing_id
 
         filing_id = new_filing_id()
-        payload = {
-            "applicant_id": str(applicant_id),
-            "task_title": title,
-            "assignee": self.assignee,
-            "source": "certificates-intake",
-            "email_subject": email_subject,
-            "due_date": due_date or certificate_due_date(),
-            "note_text": note_text,
-            "filing_id": filing_id,
-        }
-        result = self._fire(payload, applicant_verified=True)
+        
+        # Try direct API first
+        try:
+            from .ezlynx_task_api import create_task as direct_create_task
+            direct_result = direct_create_task(
+                applicant_id=str(applicant_id),
+                title=title,
+                description=note_text,
+                assigned_user_name=self.assignee,
+                due_date=due_date or certificate_due_date(),
+                due_time="22:00",  # 10 PM default per Carlo 2026-10-02
+                priority="High",
+            )
+            # Direct API succeeded - build ZapResult
+            result = ZapResult(
+                fired=True,
+                reason="direct_api",
+                stdout=str(direct_result.get("api_result", "")),
+            )
+            result.filing_id = filing_id
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Direct task API failed ({e}), falling back to Zapier"
+            )
+            # Fall back to Zapier
+            payload = {
+                "applicant_id": str(applicant_id),
+                "task_title": title,
+                "assignee": self.assignee,
+                "source": "certificates-intake",
+                "email_subject": email_subject,
+                "due_date": due_date or certificate_due_date(),
+                "note_text": note_text,
+                "filing_id": filing_id,
+            }
+            result = self._fire(payload, applicant_verified=True)
+        
+        result.filing_id = filing_id
         result.filing_id = filing_id
         # Delayed verification (2026-09-27): when the Zap actually fires, queue
         # the expected task for the verifier. Creation is NOT delayed — only
