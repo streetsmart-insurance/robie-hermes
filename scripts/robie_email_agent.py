@@ -587,6 +587,7 @@ def process_inbox():
     if not messages:
         return
 
+    batch = []
     for msg_meta in messages:
         msg_id = msg_meta["id"]
         if msg_id in processed_ids:
@@ -642,21 +643,46 @@ def process_inbox():
         body = extract_body_text(payload) or msg.get("snippet", "")
         attachments = download_attachments(service, msg_id, payload)
 
-        logger.info("📩 Processing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
+        logger.info("📩 Queuing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
+        batch.append({
+            "msg_id": msg_id,
+            "sender": sender,
+            "subject": subject,
+            "body": body,
+            "attachments": attachments,
+            "thread_id": thread_id,
+            "headers": headers,
+            "text": f"Subject: {subject}\n\n{body}",
+        })
 
+    def _run_one(item):
         try:
-            response_text = run_guarded_email_task(
-                db_path=JOB_DB, gmail_message_id=msg_id,
-                prompt=f"Subject: {subject}\n\n{body}", run_agent=run_agent_task,
-                attachment_names=tuple(name for name, _ in attachments),
-                thread_id=thread_id,
-                run_agent_with_context=lambda prompt, job_id, db_path: run_email_job(
-                    prompt, job_id, db_path, sender=sender, subject=subject, body=body,
-                    attachments=attachments, thread_id=thread_id),
+            return run_guarded_email_task(
+                db_path=JOB_DB, gmail_message_id=item["msg_id"],
+                prompt=item["text"], run_agent=run_agent_task,
+                attachment_names=tuple(name for name, _ in item["attachments"]),
+                thread_id=item["thread_id"],
+                sender=item["sender"],
+                run_agent_with_context=lambda prompt, job_id, db_path, item=item: run_email_job(
+                    prompt, job_id, db_path, sender=item["sender"], subject=item["subject"],
+                    body=item["body"], attachments=item["attachments"], thread_id=item["thread_id"]),
             )
         except EmailTaskPending:
             logger.info("Durable email job is pending; leaving message unread")
+            return None
+
+    from robie_job_engine.email_dispatch import run_email_batch
+
+    # Each email is its own job. The scan does not wait for one before
+    # starting the next. EZLynx writers still share the session lock.
+    for item, response_text in run_email_batch(batch, _run_one):
+        if response_text is None:
             continue
+        sender = item["sender"]
+        subject = item["subject"]
+        thread_id = item["thread_id"]
+        msg_id = item["msg_id"]
+        headers = item["headers"]
 
         # 2026-09-14: never reply to our own mailbox. is_allowed_sender()
         # already rejects self-senders above; this is defense-in-depth so a

@@ -136,7 +136,11 @@ def test_find_program_by_policy_hits_billable_search():
     program_id = SAMPLE_UUID
     routes = {
         ("GET", "/billables"): {
-            "data": [{"id": SAMPLE_BILLABLE_ID, "program_id": program_id}]
+            "data": [{
+                "id": SAMPLE_BILLABLE_ID,
+                "program_id": program_id,
+                "policy_number": "MXL0446256",
+            }]
         },
         ("GET", f"/programs/{program_id}"): {"data": {"id": program_id, "status": "active"}},
     }

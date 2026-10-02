@@ -63,6 +63,7 @@ EXEMPT_SENDS = {
     ("robie_job_engine/overdue_policy_change_reports.py", "default_mailer"): "overdue report, not a job reply",
     ("scripts/robie_health_check.py", "send_chat_alert"): "health channel keeps the checklist",
     ("scripts/robie_health_check.py", "send_daily_digest"): "health channel keeps the checklist",
+    ("robie_job_engine/ezlynx_login_page_alert.py", "post_webhook"): "operator webhook, not a job reply",
 }
 
 
