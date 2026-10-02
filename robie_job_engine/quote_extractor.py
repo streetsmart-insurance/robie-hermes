@@ -724,6 +724,18 @@ class QuoteExtractor:
         # named insureds, writing carrier.
         self._extract_edge_case_fields(quote, combined_text)
 
+        # 12b. Insured address/contact from user instruction (if provided upfront).
+        # This allows the initial request to include them, avoiding a HITL round-trip.
+        if clean_user_instruction:
+            if not quote.mailing_address:
+                address = _parse_address_answer(clean_user_instruction)
+                if address:
+                    quote.mailing_address = address
+            if not quote.primary_contact:
+                contact = _parse_contact_answer(clean_user_instruction)
+                if contact:
+                    quote.primary_contact = contact
+
         # 13. Evaluate Clarity & HITL Questions
         self._evaluate_hitl_requirements(quote, combined_text)
         return quote
@@ -1032,6 +1044,14 @@ class QuoteExtractor:
         if reasons and "agency_fee_unspecified" not in reasons and "agency_fee_confirm" not in reasons:
             reasons.append("agency_fee_confirm")
 
+        # Question 11: Insured address/contact missing — Ascend requires
+        # mailing address and primary contact to create the insured.
+        # Fail closed: ask for it rather than proceeding with placeholders.
+        if not quote.mailing_address:
+            reasons.append("insured_address_missing")
+        if not quote.primary_contact:
+            reasons.append("insured_contact_missing")
+
         quote.hitl_reasons = reasons
         self._sync_hitl_questions(quote)
 
@@ -1087,6 +1107,18 @@ class QuoteExtractor:
                 questions.append(
                     f"10. Dates: The expiration date ({quote.expiration_date}) is not after the effective date "
                     f"({quote.effective_date}). What are the correct dates?"
+                )
+            elif reason == "insured_address_missing":
+                insured_display = quote.named_insureds[0] if quote.named_insureds else "the insured"
+                questions.append(
+                    f"11. Insured Address: I don't have a mailing address for {insured_display}. "
+                    "What is the street address, city, state, and ZIP? (Required to create the Ascend agreement)"
+                )
+            elif reason == "insured_contact_missing":
+                insured_display = quote.named_insureds[0] if quote.named_insureds else "the insured"
+                questions.append(
+                    f"12. Insured Contact: I don't have a contact for {insured_display}. "
+                    "What is the contact name, email, and phone? (Required to create the Ascend agreement)"
                 )
         quote.hitl_questions = questions
         quote.requires_hitl = len(questions) > 0
@@ -1208,10 +1240,14 @@ class QuoteExtractor:
             address = _parse_address_answer(text)
             if address:
                 quote.mailing_address = address
+                if "insured_address_missing" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("insured_address_missing")
         if not quote.primary_contact:
             contact = _parse_contact_answer(text)
             if contact:
                 quote.primary_contact = contact
+                if "insured_contact_missing" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("insured_contact_missing")
         if not quote.applicant_id_hint:
             hint = _parse_applicant_id_hint(text)
             if hint:

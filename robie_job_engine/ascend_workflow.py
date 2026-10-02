@@ -492,6 +492,21 @@ class AscendWorkflowManager:
             for pn in policy_numbers_to_check:
                 existing = client.find_program_by_policy(pn)
                 if existing:
+                    # Verify the insured name matches before treating as duplicate.
+                    # A policy number collision (quote ref vs actual policy) with a
+                    # different insured is NOT a duplicate.
+                    existing_program = existing.get("program", {})
+                    existing_insured = existing_program.get("insured", {})
+                    existing_name = (
+                        existing_insured.get("legal_name")
+                        or existing_insured.get("business_name")
+                        or existing_insured.get("name")
+                        or ""
+                    ).strip().lower()
+                    quote_name = (quote.insured_name or "").strip().lower()
+                    if existing_name and quote_name and existing_name != quote_name:
+                        # Different insured — not a true duplicate, continue checking
+                        continue
                     existing_id = existing.get("id") or existing.get("program_id")
                     subject = f"Agreement already exists for policy {pn}"
                     body_lines = [

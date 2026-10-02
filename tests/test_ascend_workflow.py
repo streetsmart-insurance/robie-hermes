@@ -24,7 +24,7 @@ CARRIER: Nautilus Insurance Group
 WHOLESALER: Tapco Underwriters
 COVERAGE: Commercial Auto
 QUOTE NUMBER: APX-8831
-POLICY PERIOD: 10/01/2026 to 10/01/2027
+POLICY PERIOD: 11/01/2026 to 11/01/2027
 PURE PREMIUM: $15,000.00
 AGENCY FEE: $350.00
 COMMISSION: 12.5%
@@ -46,14 +46,21 @@ class TestQuoteExtractor(unittest.TestCase):
         self.assertIn("commission_rate_unspecified", quote.hitl_reasons)
         self.assertIn("surplus_lines_tax_verification", quote.hitl_reasons)
         self.assertIn("dual_terrorism_options_present", quote.hitl_reasons)
-        self.assertEqual(len(quote.hitl_questions), 4)
+        self.assertIn("insured_address_missing", quote.hitl_reasons)
+        self.assertIn("insured_contact_missing", quote.hitl_reasons)
+        # 7 questions: 4 original + agency_fee_confirm + address + contact
+        self.assertEqual(len(quote.hitl_questions), 7)
 
     def test_clear_quote_with_instruction_skips_hitl(self):
+        # With terrorism instruction, only address/contact remain (new requirement)
         quote = self.extractor.extract_from_text(
             SAMPLE_CLEAR_QUOTE,
             user_instruction="Please bind with terrorism coverage included",
         )
-        self.assertFalse(quote.requires_hitl)
+        # Terrorism resolved by instruction; address/contact still required
+        self.assertNotIn("dual_terrorism_options_present", quote.hitl_reasons)
+        self.assertIn("insured_address_missing", quote.hitl_reasons)
+        self.assertIn("insured_contact_missing", quote.hitl_reasons)
         self.assertEqual(quote.insured_name, "Apex Transport Inc")
         self.assertEqual(quote.carrier_name, "Nautilus Insurance Group")
         self.assertEqual(quote.wholesaler_name, "Tapco Underwriters")
@@ -67,7 +74,7 @@ class TestQuoteExtractor(unittest.TestCase):
         quote = self.extractor.extract_from_text(SAMPLE_AMBIGUOUS_QUOTE)
         self.assertTrue(quote.requires_hitl)
 
-        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism"
+        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism. Address: 123 Main St, Newark, NJ 07101. Contact: John Doe, john@acme.com, 555-0100"
         resolved = self.extractor.apply_user_clarifications(quote, reply)
         self.assertFalse(resolved.requires_hitl)
         self.assertEqual(resolved.agency_fees_cents, 35000)
@@ -229,7 +236,7 @@ class TestAscendWorkflowManager(unittest.TestCase):
         )
         self.assertEqual(res_initial.status, "NEEDS_CLARIFICATION")
 
-        reply = "1. Yes $350 fee 2. 10% commission 3. $500 surplus tax 4. Option 1 with terrorism"
+        reply = "1. Yes $350 fee 2. 10% commission 3. $500 surplus tax 4. Option 1 with terrorism. Address: 1 Test Way, Freehold, NJ 07728. Contact: Test Contact, t@example.com, 555-111-2222"
         from unittest.mock import patch
 
         with patch(
@@ -497,6 +504,21 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
         self.assertIn("already", res.reply_email_body.lower())
         self.assertIn("APX-8831", res.reply_email_body)
         self.mock_client.create_program.assert_not_called()
+
+    def test_duplicate_policy_different_insured_is_not_duplicate(self):
+        # Policy number matches but insured name differs: not a true duplicate,
+        # proceed with creation (quote ref vs actual policy collision).
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1",
+            "program_id": "existing-prog-1",
+            "program": {
+                "insured": {"business_name": "Different Company LLC"},
+            },
+        }
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        # Should NOT ask about duplicate since insured names differ
+        self.assertNotIn("already an Ascend agreement", res.reply_email_body or "")
 
     def test_confirm_duplicate_bypasses_duplicate_guard(self):
         # Sender confirms: the second agreement proceeds.
