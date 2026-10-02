@@ -62,10 +62,6 @@ _FORBIDDEN_PATH = re.compile(
 _PERSON = re.compile(
     r"\b(?:for|about|named)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b"
 )
-_PERSON_LOOSE = re.compile(
-    r"\b(?:for|about|named)\s+([a-z][a-z']+(?:\s+[a-z][a-z']+)+)\b",
-    re.IGNORECASE,
-)
 _NOT_A_NAME = frozenset(
     {
         "the",
@@ -325,7 +321,8 @@ def person_name_in_text(text: str) -> str | None:
     raw = " ".join(str(text or "").split())
     if not raw:
         return None
-    match = _PERSON.search(raw) or _PERSON_LOOSE.search(raw)
+    # Lowercase words ("named discussion test") are not a person's name.
+    match = _PERSON.search(raw)
     if not match:
         return None
     name = " ".join(match.group(1).split())
@@ -533,6 +530,27 @@ def bind_card_click_resume(
         except Exception:
             pass
     if store is not None and ident:
+        from .chat_turn_control import clear_agent_stop, job_was_explicitly_stopped
+
+        # The clarify card sets a stop so that turn ends. A card click is
+        # the answer, same as a text reply: clear that flag and run again.
+        # A real /stop (cancelled job or cancel checkpoint) stays stopped.
+        if not job_was_explicitly_stopped(store, ident):
+            clear_agent_stop(ident)
+            try:
+                current = str((store.get_job(ident) or {}).get("status") or "")
+            except Exception:
+                current = ""
+            if current == JobStatus.NEEDS_CLARIFICATION.value:
+                try:
+                    store.transition(
+                        ident,
+                        JobStatus.RUNNING,
+                        expected={JobStatus.NEEDS_CLARIFICATION},
+                        release_lease=True,
+                    )
+                except Exception:
+                    pass
         note_clarify_pending(store, ident, question, session_key=key)
     return ident
 

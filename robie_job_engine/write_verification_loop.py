@@ -150,8 +150,24 @@ def plan_prompt_for_job(job: dict[str, Any]) -> str:
         "target.discussion is the existing title, and values.note_text is the exact note. "
         "target must name the account, policy, or discussion. "
         "values must list each field that will change.\n"
-        "Request:\n"
+        + _named_note_plan_line(job)
+        + "Request:\n"
         + _job_text(job)
+    )
+
+
+def _named_note_plan_line(job: dict[str, Any]) -> str:
+    """Tell the planner the note is only the text after the colon."""
+    from .request_routing import parse_named_discussion_note
+
+    parsed = parse_named_discussion_note(_job_text(job)) or {}
+    body = str(parsed.get("body") or "").strip()
+    if not body:
+        return ""
+    return (
+        "The note text is only the words after the colon. "
+        "Do not repeat the request in the note.\n"
+        f"note_text: {body}\n"
     )
 
 
@@ -364,18 +380,28 @@ def _coerce_write(write: Any) -> str:
     return " ".join(str(write).split()).strip()
 
 
+def _exact_note_text(text: str) -> str:
+    """Drop a repeated 'Add a note ...:' prompt. Keep the text after the colon."""
+    from .request_routing import discussion_note_body
+
+    cleaned = discussion_note_body(text)
+    return cleaned or " ".join(str(text or "").split()).strip()
+
+
 def _coerce_values_field(values_raw: Any, args: Mapping[str, Any]) -> Any:
     """values is an object. A string is the note the model already stated."""
     if isinstance(values_raw, str):
-        text = " ".join(values_raw.split()).strip()
+        text = _exact_note_text(values_raw)
         if text:
             return {"note_text": text}
         values_raw = {}
     if isinstance(values_raw, Mapping):
         cleaned = _clean_values(values_raw)
         if cleaned:
+            if "note_text" in cleaned:
+                cleaned["note_text"] = _exact_note_text(str(cleaned.get("note_text") or ""))
             return cleaned
-    note = " ".join(str(args.get("note_text") or "").split()).strip()
+    note = _exact_note_text(str(args.get("note_text") or ""))
     if note and (values_raw is None or isinstance(values_raw, (str, Mapping))):
         return {"note_text": note}
     return values_raw

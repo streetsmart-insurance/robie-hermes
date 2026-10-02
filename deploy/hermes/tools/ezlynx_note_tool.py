@@ -118,7 +118,9 @@ def _file_note(args: dict) -> dict:
     from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
 
     applicant_id = str(args.get("applicant_id") or "").strip()
-    note_text = str(args.get("note_text") or "").strip()
+    from robie_job_engine.request_routing import discussion_note_body
+
+    note_text = discussion_note_body(str(args.get("note_text") or "").strip())
     title_hint = str(args.get("title_hint") or "").strip() or None
     if not applicant_id:
         raise ValueError("applicant_id is required")
