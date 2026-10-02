@@ -450,9 +450,28 @@ class AscendApiClient:
         return str(record.get("id"))
 
     def list_users(self) -> list[dict[str, Any]]:
-        response = self.transport.request("GET", "/users")
-        data = response.get("data")
-        return data if isinstance(data, list) else []
+        """Return every Ascend user, following pagination.
+
+        The /users endpoint pages (25 per page); a single-page fetch silently
+        misses users on later pages (e.g. Jake Ferrara was on page 2 of 39).
+        """
+        users: list[dict[str, Any]] = []
+        page: int | None = None
+        while True:
+            query = {"page": page} if page else None
+            response = self.transport.request("GET", "/users", query=query)
+            data = response.get("data")
+            if isinstance(data, list):
+                users.extend(data)
+            meta = response.get("meta") or {}
+            nxt = meta.get("next")
+            if not nxt:
+                break
+            try:
+                page = int(nxt)
+            except (TypeError, ValueError):
+                break
+        return users
 
     def resolve_user(self, name_or_email: str) -> str | None:
         """Resolve an Ascend user id by email or name.
@@ -460,8 +479,8 @@ class AscendApiClient:
         Returns None when no user matches. Callers must fail closed on
         None: a previous version silently substituted a hardcoded user id
         (Robie AI's own), which misattributed producer/account-manager on
-        agreements requested by senders who are not Ascend users
-        (e.g. jake@streetsmart.insurance). Never guess a user id.
+        agreements requested by senders who are not Ascend users. Never
+        guess a user id.
         """
         users = self.list_users()
         target = name_or_email.strip().lower()

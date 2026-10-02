@@ -333,6 +333,31 @@ class TestResolveUser(unittest.TestCase):
         self.assertEqual(client.resolve_user("Matthew Mancina"), "user-matthew")
         self.assertEqual(client.resolve_user("matthew@streetsmart.insurance"), "user-matthew")
 
+    def test_list_users_follows_pagination(self):
+        # Jake Ferrara sat on page 2 of 39 in production; a single-page
+        # fetch missed him and fail-closed incorrectly.
+        pages = {
+            None: {"data": [{"id": "u1", "first_name": "A", "last_name": "One",
+                             "email": "a@example.com"}],
+                   "meta": {"count": 2, "prev": None, "next": 2}},
+            2: {"data": [{"id": "user-jake", "first_name": "Jake",
+                          "last_name": "Ferrara",
+                          "email": "jake@streetsmart.insurance"}],
+                "meta": {"count": 2, "prev": 1, "next": None}},
+        }
+
+        class PagedTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                assert (method, path) == ("GET", "/users")
+                page = (query or {}).get("page")
+                return pages[page]
+
+        client = AscendApiClient(PagedTransport())
+        self.assertEqual(len(client.list_users()), 2)
+        self.assertEqual(client.resolve_user("jake@streetsmart.insurance"),
+                         "user-jake")
+        self.assertEqual(client.resolve_user("Jake Ferrara"), "user-jake")
+
 
 if __name__ == "__main__":
     unittest.main()
