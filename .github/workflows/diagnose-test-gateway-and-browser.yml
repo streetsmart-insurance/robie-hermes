@@ -46,6 +46,22 @@ jobs:
           test "${TEST_VM}" = hermes-test-01
           test "${PROJECT_ID}" = streetsmart-hermes-poc
           test "${ZONE}" = us-east1-b
+      - name: Require effective OS Login before publishing any key
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance_oslogin=$(gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(metadata.items.filter("key=enable-oslogin").map().extract(key).flatten(),metadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          effective_oslogin="${instance_oslogin}"
+          if [[ -z "${instance_oslogin}" || "${instance_oslogin}" == $'\t' ]]; then
+            effective_oslogin=$(gcloud compute project-info describe --project="${PROJECT_ID}" \
+              --format='value(commonInstanceMetadata.items.filter("key=enable-oslogin").map().extract(key).flatten(),commonInstanceMetadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          fi
+          [[ "${effective_oslogin^^}" == $'ENABLE-OSLOGIN\tTRUE' ]] || {
+            echo 'Effective OS Login is not verified enabled; refusing key registration and SSH' >&2
+            exit 2
+          }
       - name: Prepare approved expiring OS Login key
         run: bash scripts/ensure-gcloud-ssh-key.sh
       - name: Collect bounded Test snapshot without remote installation
@@ -57,6 +73,7 @@ jobs:
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --ssh-key-file="${HOME}/.ssh/google_compute_engine" \
+            --ssh-key-expire-after="${OSLOGIN_SSH_KEY_TTL}" \
             --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 \
             --command='test "$(hostname -s)" = hermes-test-01 && sudo -n env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 python3 -I -B -' \
             < scripts/diagnose_test_release_readonly.py \

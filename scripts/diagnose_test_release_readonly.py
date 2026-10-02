@@ -161,12 +161,19 @@ def driver():
 def database(root, release):
     path = resolved(root / 'robie-job-engine/data/jobs.db', root)
     require(path.is_file(), 'database_missing')
-    # Do not let a read-only SQLite connection create a missing WAL sidecar.
-    require(not Path(str(path) + '-wal').exists() or Path(str(path) + '-shm').is_file(),
-            'wal_shared_memory_missing')
+    # Even mode=ro can create WAL sidecars or update existing shared-memory
+    # read marks. This strictly read-only collector must not open a WAL DB.
+    # Never use immutable=1: it would silently omit committed WAL work.
+    with path.open('rb') as stream:
+        header = stream.read(100)
+    require(len(header) == 100 and header[:16] == b'SQLite format 3\x00', 'database_header')
+    require(header[18:20] == b'\x01\x01'
+            and not Path(str(path) + '-wal').exists() and not Path(str(path) + '-shm').exists(),
+            'wal_inspection_requires_shared_memory_writes')
     conn = sqlite3.connect('file:' + quote(str(path)) + '?mode=ro', uri=True, timeout=2)
     try:
         conn.execute('PRAGMA query_only=ON')
+        conn.execute('PRAGMA temp_store=MEMORY')
         conn.set_progress_handler(lambda: 1 if datetime.now(timezone.utc).timestamp() > deadline else 0, 10000)
         deadline = datetime.now(timezone.utc).timestamp() + 5
         conn.execute('BEGIN')

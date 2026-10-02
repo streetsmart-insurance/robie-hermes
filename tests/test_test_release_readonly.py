@@ -150,12 +150,24 @@ class TestReadonlyRelease(unittest.TestCase):
             conn.execute("UPDATE jobs SET status='SECRET_SENTINEL'")
         self.refused('job_status_unknown')
 
-    def test_wal_committed_work_is_seen(self):
-        with sqlite3.connect(self.db) as writer:
-            writer.execute('PRAGMA journal_mode=WAL')
-            writer.execute("INSERT INTO jobs VALUES ('RUNNING',NULL,'SECRET_SENTINEL')")
-            writer.commit()
-            self.refused('durable_work_not_quiescent')
+    def test_wal_is_refused_without_changing_or_creating_sidecars(self):
+        for keep_writer_open in (True, False):
+            with self.subTest(keep_writer_open=keep_writer_open):
+                writer = sqlite3.connect(self.db)
+                try:
+                    writer.execute('PRAGMA journal_mode=WAL')
+                    writer.execute("INSERT INTO jobs VALUES ('RUNNING',NULL,'SECRET_SENTINEL')")
+                    writer.commit()
+                    if not keep_writer_open:
+                        writer.close()
+                    before = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+                    with patch.object(audit.sqlite3, 'connect') as connect:
+                        self.refused('wal_inspection_requires_shared_memory_writes')
+                        connect.assert_not_called()
+                    after = {p.name: p.read_bytes() for p in self.db.parent.iterdir()}
+                    self.assertEqual(before, after)
+                finally:
+                    writer.close()
 
     def test_missing_archive_fails(self):
         self.archive.unlink()
@@ -252,6 +264,34 @@ class TestReadonlyRelease(unittest.TestCase):
 
 
 class TestTransportContracts(unittest.TestCase):
+    def test_oslogin_instance_override_and_access_failure_stop_before_key(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / '.github/workflows/diagnose-test-gateway-and-browser.yml').read_text())
+        steps = workflow['jobs']['diagnose']['steps']
+        guard = next(s for s in steps if s.get('name') == 'Require effective OS Login before publishing any key')
+        key_step = next(s for s in steps if s.get('name') == 'Prepare approved expiring OS Login key')
+        self.assertLess(steps.index(guard), steps.index(key_step))
+        for instance, project, access_code, expected in (
+                ('enable-oslogin\tTRUE','enable-oslogin\tFALSE',0,0),
+                ('enable-oslogin\tFALSE','enable-oslogin\tTRUE',0,2),
+                ('','enable-oslogin\ttrue',0,0),
+                ('\t','enable-oslogin\tTRUE',0,0),
+                ('enable-oslogin\t','enable-oslogin\tTRUE',0,2),
+                ('enable-oslogin','enable-oslogin\tTRUE',0,2),
+                ('','',0,2), ('','SECRET_SENTINEL',0,2),
+                ('enable-oslogin\tTRUE','enable-oslogin\tTRUE',41,41)):
+            with self.subTest(instance=instance, project=project, access_code=access_code), tempfile.TemporaryDirectory() as directory:
+                fake = Path(directory) / 'gcloud'
+                fake.write_text('#!/bin/bash\n[ "$ACCESS_CODE" -eq 0 ] || exit "$ACCESS_CODE"\nif [[ "$*" == *"instances describe"* ]]; then printf "%s" "$INSTANCE_OSLOGIN"; else printf "%s" "$PROJECT_OSLOGIN"; fi\n')
+                fake.chmod(0o755)
+                result = subprocess.run(['bash','-c',guard['run']], capture_output=True, text=True,
+                    env={'PATH':f'{directory}:/usr/bin:/bin','TEST_VM':audit.HOST,
+                         'PROJECT_ID':'streetsmart-hermes-poc','ZONE':'us-east1-b',
+                         'INSTANCE_OSLOGIN':instance,'PROJECT_OSLOGIN':project,'ACCESS_CODE':str(access_code)})
+                self.assertEqual(result.returncode, expected)
+                self.assertNotIn('SECRET_SENTINEL', result.stdout + result.stderr)
+
     def test_workflow_ssh_and_json_failures_cannot_turn_green(self):
         import yaml
         root = Path(__file__).resolve().parents[1]
@@ -270,7 +310,8 @@ class TestTransportContracts(unittest.TestCase):
                 result = subprocess.run(['bash','-c',command], cwd=root, capture_output=True, text=True,
                     env={'PATH':f'{base}:/usr/bin:/bin','HOME':directory,'RUNNER_TEMP':directory,
                          'GITHUB_SHA':'a'*40,'TEST_VM':audit.HOST,'PROJECT_ID':'streetsmart-hermes-poc',
-                         'ZONE':'us-east1-b','FIXTURE_PAYLOAD':payload,'FIXTURE_EXIT':str(ssh_exit)})
+                         'ZONE':'us-east1-b','OSLOGIN_SSH_KEY_TTL':'1h',
+                         'FIXTURE_PAYLOAD':payload,'FIXTURE_EXIT':str(ssh_exit)})
                 self.assertNotEqual(result.returncode, 0)
                 if ssh_exit:
                     self.assertEqual(result.returncode, ssh_exit)
@@ -317,6 +358,7 @@ class TestTransportContracts(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", job['if'])
         self.assertIn('inputs.temporary_ssh_key_approved == true', job['if'])
         self.assertEqual(job['env']['OSLOGIN_SSH_KEY_TTL'], '1h')
+        self.assertIn('--ssh-key-expire-after="${OSLOGIN_SSH_KEY_TTL}"', text)
         auth = next(s for s in job['steps'] if s.get('uses','').startswith('google-github-actions/auth@'))
         self.assertEqual(auth['with']['service_account'], 'robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com')
         for forbidden in ('systemctl cat','pgrep -fa','exit 0','compute scp','systemctl restart','secrets:'):
