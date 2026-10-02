@@ -17,6 +17,8 @@ The producer confirms and closes. The original assigner receives the result. Thi
 
 Do not open a new Change Request form. Do not use this job in place of the weekly overdue policy-change checker.
 
+The original request is not always a written Client Center form. If the only source is a call recording, or there is no clear written request with a requested effective date, mark the case `request source unclear (e.g. call recording)` and hold it for a person. Do not guess the date. Do not transcribe a recording.
+
 Progressive is the provisional carrier. Do not treat a memo retrieval as an issued endorsement. Production stays closed until Test evidence exists.
 
 An endorsement already filed on the EZLynx documents can be read when the live Directory download route cannot be walked. Label that source as an EZLynx-filed endorsement. It does not prove the Directory route and it does not confirm Progressive.

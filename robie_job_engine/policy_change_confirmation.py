@@ -35,6 +35,7 @@ CHECKPOINT = "policy_change_confirmation_packet"
 PROVISIONAL_CARRIER = "Progressive"
 NOTE_SIGNATURE = "ROBIE was here"
 WRITES_ENABLED = False
+REQUEST_SOURCE_UNCLEAR = "request source unclear (e.g. call recording)"
 EZLYNX_FILED_SOURCE = "ezlynx_filed_carrier_document"
 FILED_SOURCE_STATEMENT = (
     "This endorsement was already filed in EZLynx. The live carrier download "
@@ -148,6 +149,18 @@ _CORE_FIELDS = (
 
 _NOT_ISSUED = frozenset({"quote", "acknowledgement", "acknowledgment", "carrier_processed"})
 
+# A call recording is not a written request. Do not transcribe one to invent a date.
+_UNWRITTEN_REQUEST_SOURCES = frozenset({
+    "call_recording",
+    "call recording",
+    "recording",
+    "phone_call",
+    "phone call",
+    "voicemail",
+    "transcript",
+    "audio",
+})
+
 _EXCLUSIONS = {
     "quote_only": "waiting_for_carrier",
     "unsubmitted": "waiting_for_carrier",
@@ -185,7 +198,7 @@ _BASIS_ALIASES = {
 
 _PLAIN_RESULT = {
     "ready_for_human_review": "Ready for the producer to confirm and close.",
-    "request_unclear": "The request is not clear enough to check.",
+    "request_unclear": "The request is not clear enough to check. A person needs to review it.",
     "waiting_for_carrier": "Waiting on the carrier's issued endorsement.",
     "evidence_invalid": "The documents are not complete or readable enough to check.",
     "carrier_correction_required": "The carrier's endorsement does not match the request.",
@@ -731,6 +744,30 @@ def _reread_problem(packet: Mapping[str, Any], event: Mapping[str, Any]) -> str 
     return None
 
 
+def unclear_written_request(packet: Mapping[str, Any]) -> str | None:
+    """Hold when no written request states an effective date.
+
+    A call recording is not a written request. This does not read a recording,
+    and it does not copy a date from the carrier or from EZLynx.
+    """
+    request = packet.get("request") if isinstance(packet.get("request"), Mapping) else None
+    if not request:
+        return REQUEST_SOURCE_UNCLEAR
+    label = str(request.get("source") or request.get("kind") or "").strip().casefold()
+    if request.get("recording") is True or label in _UNWRITTEN_REQUEST_SOURCES:
+        return REQUEST_SOURCE_UNCLEAR
+    if request.get("written") is False:
+        return REQUEST_SOURCE_UNCLEAR
+    cell = _cell(request, "effective_date")
+    raw = None if cell is None else cell.get("raw")
+    if _blank(raw):
+        return REQUEST_SOURCE_UNCLEAR
+    normalized, rule = _normalize("date", raw)
+    if rule == "unparsed" or _blank(normalized):
+        return REQUEST_SOURCE_UNCLEAR
+    return None
+
+
 def _document_problem(packet: Mapping[str, Any]) -> str | None:
     document = packet.get("carrier_document")
     if not isinstance(document, Mapping) or not document:
@@ -819,6 +856,8 @@ def _next_action(outcome: str, assigner_name: str) -> str:
         return "Retrieve the issued endorsement on Test as SSRobie. Use the existing Gemini rescue if a screen is stuck."
     if outcome == "writeback_unverified":
         return "Read the actual saved item before any retry. Do not treat this as finished."
+    if outcome == "request_unclear":
+        return "A person needs to review the request. Do not guess the effective date."
     return "Obtain a clearer request or the missing support."
 
 
@@ -831,8 +870,15 @@ def draft_note(packet: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     insured = _present_raw(_cell(request, "named_insured")) or "The named insured"
     number = case.get("policy_number") or _present_raw(_cell(request, "policy_number")) or "an unnamed policy"
     term = case.get("term") or ""
-    effective = case.get("requested_effective_date") or ""
-    requested = str(request.get("summary") or "").strip() or "The requested change was not spelled out."
+    if result.get("request_source") == REQUEST_SOURCE_UNCLEAR:
+        effective = "not stated"
+        requested = (
+            f"{REQUEST_SOURCE_UNCLEAR}. A person needs to review this. "
+            "No date was guessed."
+        )
+    else:
+        effective = case.get("requested_effective_date") or ""
+        requested = str(request.get("summary") or "").strip() or "The requested change was not spelled out."
     issued = str(carrier.get("summary") or "").strip()
     if not issued:
         issued = "An issued endorsement was not available for this check." if not result.get("comparison_complete") else "The endorsement was read with the request."
@@ -1103,6 +1149,8 @@ def _finish(
         "result_sentence": result_sentence,
         "next_action": _next_action(headline, assigner_name),
         "reason": reason,
+        "request_source": REQUEST_SOURCE_UNCLEAR if reason == REQUEST_SOURCE_UNCLEAR else None,
+        "hold_for_human": reason == REQUEST_SOURCE_UNCLEAR,
         "blocked_target": blocked_target,
         "case_key": case_key(packet),
         "source_hash": source_hash(packet),
@@ -1222,6 +1270,20 @@ def _evaluate(packet: Mapping[str, Any], writes: DisabledWrites) -> dict[str, An
             assigner_id=assigner_id,
             assigner_name=assigner_name,
             reason="This change is outside the read-only pilot.",
+            writes=writes,
+            output_id=None,
+            replayed=False,
+        )
+    unclear = unclear_written_request(packet)
+    if unclear:
+        return _finish(
+            packet,
+            outcomes=["request_unclear"],
+            comparison=[],
+            comparison_complete=False,
+            assigner_id=assigner_id,
+            assigner_name=assigner_name,
+            reason=unclear,
             writes=writes,
             output_id=None,
             replayed=False,

@@ -20,6 +20,7 @@ from robie_job_engine.policy_change_confirmation import (
     EZLYNX_FILED_SOURCE,
     JOB_TYPE,
     NOTE_SIGNATURE,
+    REQUEST_SOURCE_UNCLEAR,
     ROLE_DECISION,
     ConfirmationLedger,
     DisabledWrites,
@@ -657,6 +658,74 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["comparison"], [])
         self.assertFalse(result["carrier_pilot"]["confirmed"])
         self.assertIsNone(result["carrier_source"])
+
+    def test_unclear_request_source_holds_for_a_person_without_guessing(self):
+        recording = copy.deepcopy(clean_packet())
+        recording["request"]["source"] = "call_recording"
+        recording["request"]["summary"] = "Caller asked to delete a van effective June 1."
+        recording["request"]["fields"]["effective_date"] = {
+            "raw": "06/01/2026",
+            "reference": "recording",
+        }
+        recording["case"]["requested_effective_date"] = "2026-06-01"
+        writes = DisabledWrites()
+        result = run_confirmation(recording, writes=writes)
+        self.assertEqual(result["outcome"], "request_unclear")
+        self.assertEqual(result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertTrue(result["hold_for_human"])
+        self.assertFalse(result["review_ready"])
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["comparison"], [])
+        self.assertFalse(result["comparison_complete"])
+        self.assertEqual(result["external_writes"], 0)
+        self.assertEqual(writes.performed, 0)
+        self.assertFalse(result["writes_enabled"])
+        self.assertFalse(result["carrier_pilot"]["confirmed"])
+        self.assertIn(REQUEST_SOURCE_UNCLEAR, result["note"])
+        self.assertIn("No date was guessed.", result["note"])
+        self.assertIn("not stated", result["note"])
+        self.assertNotIn("06/01/2026", result["note"])
+        self.assertNotIn("2026-06-01", result["note"])
+        self.assertNotIn("June 1", result["note"])
+        self.assertTrue(result["note"].strip().endswith(NOTE_SIGNATURE))
+        self.assertIn("A person needs to review", result["note"])
+        held = PolicyChangeConfirmationWorker().perform(
+            {"action_type": JOB_TYPE, "payload": recording},
+            idempotency_key="recording-hold",
+        )
+        self.assertFalse(held.succeeded)
+        self.assertEqual(held.hold_status, JobStatus.NEEDS_CLARIFICATION)
+        self.assertTrue(held.detail["hold_for_human"])
+        self.assertEqual(held.detail["external_writes"], 0)
+
+        missing = copy.deepcopy(clean_packet())
+        missing["request"] = {}
+        missing["case"]["requested_effective_date"] = "2026-03-01"
+        missing_result = run_confirmation(missing)
+        self.assertEqual(missing_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertTrue(missing_result["hold_for_human"])
+        self.assertEqual(missing_result["comparison"], [])
+        self.assertNotIn("2026-03-01", missing_result["note"])
+        self.assertFalse(missing_result["carrier_pilot"]["confirmed"])
+
+        undated = copy.deepcopy(clean_packet())
+        del undated["request"]["fields"]["effective_date"]
+        undated["case"]["requested_effective_date"] = ""
+        undated["carrier_document"]["fields"]["effective_date"]["raw"] = "2026-04-01"
+        undated_result = run_confirmation(undated)
+        self.assertEqual(undated_result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        self.assertTrue(undated_result["hold_for_human"])
+        self.assertEqual(undated_result["comparison"], [])
+        self.assertNotIn("2026-04-01", undated_result["note"])
+        self.assertNotIn("March 1, 2026", undated_result["note"])
+        self.assertFalse(undated_result["carrier_pilot"]["confirmed"])
+
+        written = copy.deepcopy(clean_packet())
+        written["request"]["source"] = "client_center"
+        written_result = run_confirmation(written)
+        self.assertIsNone(written_result["request_source"])
+        self.assertFalse(written_result["hold_for_human"])
+        self.assertEqual(written_result["outcome"], "ready_for_human_review")
 
     def test_filed_endorsement_does_not_verify_the_directory_route(self):
         proof = progressive_access_proof(
