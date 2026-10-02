@@ -1,12 +1,15 @@
 """Test-only NatGen Pending Cancellation NOC list and download.
 
-The playbook walks natgenagency.com: Agent Dashboard, Your Notifications,
-Policy To Dos, Pending Cancellations, then the policy, Policy History, and
+The playbook opens an already signed-in natgenagency.com tab, follows the
+dashboard link to Pending Cancellations, then the policy, Policy History, and
 the most recent Pending Cancellation / NOC Forms View PDF. When the tab is
-already the Pending Cancellations report — that URL, or an Agency Activity
-report page that shows the heading and the table — Agent Dashboard is not
-required. A missing Agent Dashboard does not hold by itself. The pull still
-holds when the report is not reached.
+already that report — ``AgencyActivityReports.aspx?r=5``, a
+pending-cancellations URL, or an Agency Activity page that shows the heading
+and the table — the dashboard link is not required. The live dashboard link
+reads ``N Pending Cancellations`` (the count changes) and its href is
+``/Reports/AgencyActivityReports.aspx?r=5``. Agent Dashboard and Your
+Notifications are headings, and Policy To Dos is not a link; those steps are
+optional. The pull follows the verified link and does not type the report URL.
 
 The Pending Cancellations list is not day-filtered. Rows are scrubbed by
 process date. A Monday in the requested window also keeps the preceding
@@ -14,9 +17,9 @@ Saturday and Sunday. Each saved PDF's cancel effective date must match the
 list. A mismatch is noted in the README and the pack is HELD. The wrong
 document is not filed under the official name.
 
-Accessible names below are that path, not a certified live DOM. A missing or
-non-unique control raises IntakeHold. This module does not log in, does not
-upload, note, task, or label in EZLynx, and does not register a timer.
+A missing or non-unique control raises IntakeHold. This module does not log
+in, does not upload, note, task, or label in EZLynx, and does not register a
+timer.
 """
 from __future__ import annotations
 
@@ -33,6 +36,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Callable
 
 from .intake_core import IntakeHold, SourceArchive, SourceItem
@@ -98,12 +102,34 @@ _HISTORY_FIELDS = (
     ("on", frozenset({"date", "transaction date", "processed date", "date processed"})),
     ("label", frozenset({"type", "transaction", "description", "activity"})),
 )
-_NAV_STEPS = (
+# Headings on the live dashboard. A missing control is skipped. An ambiguous
+# link/button/tab still holds. The report itself is the counted link below.
+_OPTIONAL_NAV_STEPS = (
     ("Agent Dashboard", ("link", "button")),
     ("Your Notifications", ("link", "button", "tab")),
     ("Policy To Dos", ("link", "button", "tab")),
-    ("Pending Cancellations", ("link", "button", "tab")),
 )
+# Live accessible name, verified on Test: "3 Pending Cancellations" (count changes).
+_PENDING_LINK_NAME = re.compile(
+    r"^\s*(\d+\s+)?Pending Cancellations\s*$",
+    re.IGNORECASE,
+)
+_FAILED_PENDING_LOAD = re.compile(
+    r"Failed to Load Pending Cancellations",
+    re.IGNORECASE,
+)
+_PENDING_LINK_WAIT_MS = 15000
+_PENDING_LINK_POLL_MS = 250
+_MAX_WIDGET_REFRESHES = 2
+PENDING_LINK_NOT_FOUND = "NatGen Pending Cancellations link not found on dashboard"
+PENDING_WIDGET_FAILED = (
+    "NatGen Pending Cancellations widget failed to load after 2 refreshes"
+)
+PENDING_LINK_MATCHED_MORE_THAN_ONCE = (
+    "NatGen Pending Cancellations link matched more than once"
+)
+PENDING_LINK_NOT_R5 = "NatGen Pending Cancellations link is not the r=5 report"
+PENDING_TABLE_DID_NOT_APPEAR = "NatGen Pending Cancellations table did not appear"
 _CANCEL_LABEL = re.compile(
     r"(?:"
     r"(?:cancellation|cancel)\s+effective(?:\s+date)?"
@@ -662,18 +688,38 @@ def _already_on_pending_report(page: Any) -> bool:
     return _named_state(page, "Agent Dashboard", ("link", "button")) == "missing"
 
 
-def open_pending_cancellations(page: Any) -> None:
-    """Open the Pending Cancellations list. There is no process-date filter to fill.
+def _now(page: Any) -> float:
+    clock = getattr(page, "clock", None)
+    if callable(clock):
+        return float(clock())
+    return monotonic()
 
-    Already sitting on that report skips Agent Dashboard. A missing Agent
-    Dashboard is skipped. Ambiguous controls still hold. If the report is
-    never reached, the pull holds before scrape.
-    """
-    assert_authenticated(page)
-    if _already_on_pending_report(page):
+
+def _pause(page: Any, milliseconds: int) -> None:
+    waiter = getattr(page, "wait_for_timeout", None)
+    if callable(waiter):
+        waiter(int(milliseconds))
         return
-    clicked_pending = False
-    for name, roles in _NAV_STEPS:
+    sleep(milliseconds / 1000.0)
+
+
+def _locator_href(locator: Any) -> str:
+    getter = getattr(locator, "get_attribute", None)
+    if not callable(getter):
+        return ""
+    try:
+        return str(getter("href") or "")
+    except Exception:
+        return ""
+
+
+def _click_optional_dashboard_steps(page: Any) -> None:
+    """Steps 1–3 are headings or plain text on the live dashboard.
+
+    Click them only when exactly one link, button, or tab has that name.
+    Missing is not a hold. Ambiguous still holds.
+    """
+    for name, roles in _OPTIONAL_NAV_STEPS:
         if _already_on_pending_report(page):
             return
         state = _named_state(page, name, roles)
@@ -682,12 +728,85 @@ def open_pending_cancellations(page: Any) -> None:
         if state != "one":
             continue
         click_named(page, name, roles=roles)
-        if name == "Pending Cancellations":
-            clicked_pending = True
-    if clicked_pending or _already_on_pending_report(page):
-        assert_authenticated(page)
+
+
+def _failed_widget_with_one_refresh(page: Any) -> bool:
+    if _FAILED_PENDING_LOAD.search(_safe_body(page)) is None:
+        return False
+    return _named_state(page, "Refresh", ("button", "link")) == "one"
+
+
+def _poll_and_click_pending_link(page: Any) -> bool:
+    """Wait for the one counted Pending Cancellations link and click it.
+
+    Returns False when the wait ends with zero matches. More than one match,
+    or a single match whose href is not the r=5 report, holds immediately.
+    ``Failed to Load Pending Cancellations`` does not match the link name.
+    """
+    deadline = _now(page) + (_PENDING_LINK_WAIT_MS / 1000.0)
+    while True:
+        locator = page.get_by_role("link", name=_PENDING_LINK_NAME)
+        count = int(locator.count())
+        if count > 1:
+            raise IntakeHold(PENDING_LINK_MATCHED_MORE_THAN_ONCE)
+        if count == 1:
+            href = _locator_href(locator)
+            absolute = urllib.parse.urljoin(str(getattr(page, "url", "") or ""), href)
+            if not _is_pending_activity_report_url(absolute):
+                raise IntakeHold(PENDING_LINK_NOT_R5)
+            locator.click()
+            return True
+        if _now(page) >= deadline:
+            return False
+        _pause(page, _PENDING_LINK_POLL_MS)
+
+
+def _wait_for_pending_table(page: Any) -> None:
+    deadline = _now(page) + (_PENDING_LINK_WAIT_MS / 1000.0)
+    while True:
+        try:
+            count = int(page.locator(PENDING_TABLE_CSS).count())
+        except Exception:
+            count = 0
+        if count >= 1:
+            return
+        if _now(page) >= deadline:
+            raise IntakeHold(PENDING_TABLE_DID_NOT_APPEAR)
+        _pause(page, _PENDING_LINK_POLL_MS)
+
+
+def _follow_pending_cancellations_link(page: Any) -> None:
+    """Click the verified r=5 link. Refresh a failed widget at most twice."""
+    refreshes = 0
+    while True:
+        if _poll_and_click_pending_link(page):
+            _wait_for_pending_table(page)
+            return
+        if _failed_widget_with_one_refresh(page) and refreshes < _MAX_WIDGET_REFRESHES:
+            click_named(page, "Refresh", roles=("button", "link"))
+            refreshes += 1
+            continue
+        if refreshes >= _MAX_WIDGET_REFRESHES:
+            raise IntakeHold(PENDING_WIDGET_FAILED)
+        raise IntakeHold(PENDING_LINK_NOT_FOUND)
+
+
+def open_pending_cancellations(page: Any) -> None:
+    """Open the Pending Cancellations list. There is no process-date filter to fill.
+
+    Already sitting on that report skips the dashboard. Optional earlier steps
+    are skipped when they are not a single link, button, or tab. The report
+    link is followed only when its href is the r=5 activity report. The pull
+    holds before scrape when that link or the pending table is not reached.
+    """
+    assert_authenticated(page)
+    if _already_on_pending_report(page):
         return
-    raise IntakeHold("Pending Cancellations report was not found")
+    _click_optional_dashboard_steps(page)
+    if _already_on_pending_report(page):
+        return
+    _follow_pending_cancellations_link(page)
+    assert_authenticated(page)
 
 
 def click_forms_view(page: Any) -> None:

@@ -8,19 +8,26 @@ stub: the scope name is recognized and refuses before any click.
 This slice does not upload to EZLynx, file notes, create tasks, apply labels,
 mark carrier rows processed, deploy, or enable a timer.
 
-Playbook path (live DOM is **UNVERIFIED** until a hermes-test-01 run):
+Playbook path:
 
 1. natgenagency.com, already signed in. This pull does not type the password.
-2. Agent Dashboard → Your Notifications → Policy To Dos → Pending Cancellations.
-   If the tab is already that report, those steps are skipped. The 2026-09-28
-   prove was already on
+2. From the dashboard, follow the one link whose accessible name is
+   `Pending Cancellations` or `N Pending Cancellations` (the count changes;
+   verified on Test 2026-10-01) and whose href is
+   `/Reports/AgencyActivityReports.aspx?r=5`. Do not type that URL.
+   `Agent Dashboard` and `Your Notifications` are headings, and `Policy To Dos`
+   is not a link. Those three steps are optional: a missing one does not hold,
+   and an ambiguous link, button, or tab still holds. If the link never appears
+   and the widget shows `Failed to Load Pending Cancellations` with exactly one
+   Refresh control, click Refresh and retry, at most twice. If the tab is
+   already that report, the dashboard link is skipped. The 2026-09-28 prove was
+   already on
    `https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5` with two
    rows and no Agent Dashboard control. That `r=5` URL is the Pending
    Cancellations list. A different `r` is not. A pending-cancellations URL
-   also skips nav. A dashboard that still shows Agent Dashboard keeps the
-   playbook clicks. A missing Agent Dashboard does not hold by itself.
-   Ambiguous controls hold. If the report is never reached, the pull holds
-   before scrape.
+   also skips nav. A dashboard that still shows Agent Dashboard as a link or
+   button does not take that shortcut. If the link, the r=5 href, or the
+   pending table is not reached, the pull holds before scrape.
 3. Open the policy number → Policy History → the most recent Pending
    Cancellation or NOC → Forms View PDF.
 
@@ -184,9 +191,13 @@ on `hermes-test-01`.
 
 ## UNVERIFIED until that Test run
 
-- Live accessible names: `Agent Dashboard`, `Your Notifications`,
-  `Policy To Dos`, `Pending Cancellations`, `Policy History`, `Forms View`,
-  and a policy-number link on each row. A mismatch holds; do not widen these
+- Dashboard Pending Cancellations link, verified on Test 2026-10-01:
+  accessible name `Pending Cancellations` or `N Pending Cancellations`
+  (the count changes). Href `/Reports/AgencyActivityReports.aspx?r=5`.
+  `Failed to Load Pending Cancellations` is not that link. `Agent Dashboard`
+  and `Your Notifications` are headings. `Policy To Dos` is not a link.
+- Live accessible names still open: `Policy History`, `Forms View`, and a
+  policy-number link on each row. A mismatch holds; do not widen these
   from Production. The shorter label `Notifications` is not accepted until a
   Test run shows that exact name.
 - Whether the grid uses a Type column, and whether a disabled `Next` control

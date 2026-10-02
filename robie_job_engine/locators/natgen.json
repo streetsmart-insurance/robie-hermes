@@ -40,8 +40,8 @@
       "fallback_strategy": "role",
       "fallback_selector": "button:Pending Cancellations",
       "exact": true,
-      "description": "Pending Cancellations list. The list is not day-filtered. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
-      "last_updated": "2026-09-26"
+      "description": "Verified on Test 2026-10-01. The live link accessible name is an optional count plus Pending Cancellations, for example 3 Pending Cancellations or 0 Pending Cancellations. Failed to Load Pending Cancellations is not this link. Href is /Reports/AgencyActivityReports.aspx?r=5. Exactly one match is required. The list is not day-filtered.",
+      "last_updated": "2026-10-01"
     },
     "policy_history": {
       "name": "policy_history",

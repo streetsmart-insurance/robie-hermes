@@ -19,12 +19,19 @@ from robie_job_engine.natgen_pending_cancellation import (
     DEFAULT_QA_ROOT,
     DRIVE_QA_PARENT_ID,
     DRIVE_UPLOAD_UNAVAILABLE,
+    PENDING_LINK_MATCHED_MORE_THAN_ONCE,
+    PENDING_LINK_NOT_FOUND,
+    PENDING_LINK_NOT_R5,
+    PENDING_TABLE_CSS,
+    PENDING_TABLE_DID_NOT_APPEAR,
+    PENDING_WIDGET_FAILED,
     HistoryEntry,
     LocalDeliveryLedger,
     NatGenPendingCancellationPortal,
     NocGrid,
     NocOpenObservation,
     PagePdfView,
+    _PENDING_LINK_NAME,
     build_parser,
     cancel_effective_date_in_pdf,
     choose_most_recent_noc,
@@ -645,7 +652,9 @@ class LocatorContractTests(unittest.TestCase):
             ("link", "Your Notifications"): 1,
             ("link", "Policy To Dos"): 1,
             ("link", "Pending Cancellations"): 1,
-        }, url="https://www.natgenagency.com/dashboard")
+        }, url="https://www.natgenagency.com/dashboard", hrefs={
+            "Pending Cancellations": "/Reports/AgencyActivityReports.aspx?r=5",
+        })
         open_pending_cancellations(page)
         self.assertEqual(page.clicks, [
             "Agent Dashboard",
@@ -654,6 +663,7 @@ class LocatorContractTests(unittest.TestCase):
             "Pending Cancellations",
         ])
         self.assertEqual(page.label_calls, [])
+        self.assertEqual(page.gotos, [])
 
         locked = RolePage({}, password_count=1)
         with self.assertRaisesRegex(IntakeHold, "not authenticated"):
@@ -704,7 +714,9 @@ class LocatorContractTests(unittest.TestCase):
             ("link", "Your Notifications"): 1,
             ("link", "Policy To Dos"): 1,
             ("link", "Pending Cancellations"): 1,
-        }, url="https://www.natgenagency.com/dashboard")
+        }, url="https://www.natgenagency.com/dashboard", hrefs={
+            "Pending Cancellations": "/Reports/AgencyActivityReports.aspx?r=5",
+        })
         open_pending_cancellations(page)
         self.assertEqual(page.clicks, [
             "Your Notifications",
@@ -728,8 +740,9 @@ class LocatorContractTests(unittest.TestCase):
             {},
             url="https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=9",
         )
-        with self.assertRaisesRegex(IntakeHold, "report was not found"):
+        with self.assertRaises(IntakeHold) as caught:
             open_pending_cancellations(page)
+        self.assertEqual(str(caught.exception), PENDING_LINK_NOT_FOUND)
         self.assertEqual(page.clicks, [])
 
     def test_encoded_pending_url_skips_agent_dashboard(self):
@@ -757,14 +770,18 @@ class LocatorContractTests(unittest.TestCase):
             ("link", "Your Notifications"): 1,
             ("link", "Policy To Dos"): 1,
             ("link", "Pending Cancellations"): 1,
-        }, url="https://www.natgenagency.com/dashboard", table_count=1, row_count=2, body="Pending Cancellations")
+        }, url="https://www.natgenagency.com/dashboard", table_count=1, row_count=2, body="Pending Cancellations", hrefs={
+            "Pending Cancellations": "/Reports/AgencyActivityReports.aspx?r=5",
+        })
         open_pending_cancellations(page)
         self.assertEqual(page.clicks[0], "Agent Dashboard")
+        self.assertIn("Pending Cancellations", page.clicks)
 
     def test_report_not_found_holds_when_dashboard_is_absent(self):
         page = RolePage({}, url="https://www.natgenagency.com/dashboard")
-        with self.assertRaisesRegex(IntakeHold, "report was not found"):
+        with self.assertRaises(IntakeHold) as caught:
             open_pending_cancellations(page)
+        self.assertEqual(str(caught.exception), PENDING_LINK_NOT_FOUND)
         self.assertEqual(page.clicks, [])
 
         forms = RolePage({
@@ -776,34 +793,104 @@ class LocatorContractTests(unittest.TestCase):
 
 
 class RolePage:
-    def __init__(self, roles, *, password_count=0, url=LIST_URL, table_count=0, row_count=0, body=""):
+    def __init__(
+        self,
+        roles,
+        *,
+        password_count=0,
+        url=LIST_URL,
+        table_count=0,
+        row_count=0,
+        body="",
+        hrefs=None,
+        on_refresh=None,
+        pending_table=True,
+        table_after_waits=0,
+    ):
         self.roles = roles
         self.password_count = password_count
         self.url = url
         self.table_count = table_count
         self.row_count = row_count
         self.body = body
+        self.hrefs = dict(hrefs or {})
+        self.on_refresh = on_refresh
+        self.pending_table = pending_table
+        self.table_after_waits = table_after_waits
         self.clicks = []
         self.label_calls = []
+        self.gotos = []
+        self.wait_calls = []
+        self.pending_clicked = False
+        self.waits_after_click = 0
+        self._now = 0.0
 
-    def get_by_role(self, role, name, exact=True):
-        del exact
-        if isinstance(name, re.Pattern):
-            count = sum(
-                item_count
-                for (item_role, item_name), item_count in self.roles.items()
-                if item_role == role and name.search(str(item_name))
-            )
-        else:
-            count = self.roles.get((role, name), 0)
+    def clock(self):
+        return self._now
+
+    def wait_for_timeout(self, ms):
+        self.wait_calls.append(int(ms))
+        self._now += int(ms) / 1000.0
+        if self.pending_clicked:
+            self.waits_after_click += 1
+
+    def goto(self, url):
+        self.gotos.append(url)
+        raise AssertionError(f"typed URL navigation is refused: {url}")
+
+    def _matching_names(self, role, name, exact):
+        found = []
+        for (item_role, item_name), item_count in self.roles.items():
+            if item_role != role or not item_count:
+                continue
+            label = str(item_name)
+            if isinstance(name, re.Pattern):
+                matched = name.search(label) is not None
+            elif exact:
+                matched = label == str(name)
+            else:
+                matched = str(name).casefold() in label.casefold()
+            if matched:
+                found.extend([label] * int(item_count))
+        return found
+
+    def get_by_role(self, role, name=None, exact=True):
         page = self
 
         class Locator:
             def count(self):
-                return count
+                return len(page._matching_names(role, name, exact))
+
+            def get_attribute(self, attr):
+                if attr != "href":
+                    return None
+                names = page._matching_names(role, name, exact)
+                if len(names) != 1:
+                    return None
+                return page.hrefs.get(names[0])
 
             def click(self):
-                page.clicks.append(name)
+                names = page._matching_names(role, name, exact)
+                chosen = names[0] if names else (name if isinstance(name, str) else "")
+                page.clicks.append(chosen)
+                if isinstance(name, re.Pattern):
+                    page.pending_clicked = True
+                if chosen == "Refresh" and callable(page.on_refresh):
+                    page.on_refresh(page)
+
+            def nth(self, index):
+                names = page._matching_names(role, name, exact)
+
+                class One:
+                    def count(self):
+                        return 1 if 0 <= index < len(names) else 0
+
+                    def get_attribute(self, attr):
+                        if attr == "href" and 0 <= index < len(names):
+                            return page.hrefs.get(names[index])
+                        return None
+
+                return One()
 
         return Locator()
 
@@ -813,21 +900,30 @@ class RolePage:
         raise AssertionError("Pending Cancellations list is not day-filtered")
 
     def locator(self, selector):
-        if selector == "input[type='password']":
-            count = self.password_count
-        elif selector == "table":
-            count = self.table_count
-        elif selector == "tbody tr":
-            count = self.row_count if self.table_count == 1 else 0
-        elif selector == "body":
-            count = 1
-        else:
-            count = 0
         page = self
+
+        def current_count():
+            if selector == "input[type='password']":
+                return page.password_count
+            if selector == "table":
+                return page.table_count
+            if selector == "tbody tr":
+                return page.row_count if page.table_count == 1 else 0
+            if selector == "body":
+                return 1
+            if selector == PENDING_TABLE_CSS:
+                if (
+                    page.pending_table
+                    and page.pending_clicked
+                    and page.waits_after_click >= page.table_after_waits
+                ):
+                    return 1
+                return 0
+            return 0
 
         class Locator:
             def count(self):
-                return count
+                return current_count()
 
             def inner_text(self):
                 return page.body if selector == "body" else ""
@@ -836,6 +932,138 @@ class RolePage:
                 return page.locator(child)
 
         return Locator()
+
+
+DASHBOARD_URL = "https://www.natgenagency.com/dashboard"
+R5_HREF = "/Reports/AgencyActivityReports.aspx?r=5"
+
+
+class DashboardPendingLinkTests(unittest.TestCase):
+    def _hold(self, page):
+        with self.assertRaises(IntakeHold) as caught:
+            open_pending_cancellations(page)
+        return str(caught.exception)
+
+    def test_counted_names_match_and_exact_string_does_not(self):
+        for label in ("3 Pending Cancellations", "0 Pending Cancellations"):
+            page = RolePage(
+                {("link", label): 1},
+                url=DASHBOARD_URL,
+                hrefs={label: R5_HREF},
+            )
+            self.assertEqual(
+                page.get_by_role("link", name="Pending Cancellations", exact=True).count(),
+                0,
+            )
+            self.assertEqual(page.get_by_role("link", name=_PENDING_LINK_NAME).count(), 1)
+            open_pending_cancellations(page)
+            self.assertEqual(page.clicks, [label])
+            self.assertEqual(page.gotos, [])
+
+    def test_two_matching_links_hold(self):
+        page = RolePage({
+            ("link", "3 Pending Cancellations"): 1,
+            ("link", "0 Pending Cancellations"): 1,
+        }, url=DASHBOARD_URL, hrefs={
+            "3 Pending Cancellations": R5_HREF,
+            "0 Pending Cancellations": R5_HREF,
+        })
+        self.assertEqual(self._hold(page), PENDING_LINK_MATCHED_MORE_THAN_ONCE)
+        self.assertEqual(page.clicks, [])
+
+    def test_href_other_than_r5_holds(self):
+        page = RolePage(
+            {("link", "3 Pending Cancellations"): 1},
+            url=DASHBOARD_URL,
+            hrefs={"3 Pending Cancellations": "/Reports/AgencyActivityReports.aspx?r=9"},
+        )
+        self.assertEqual(self._hold(page), PENDING_LINK_NOT_R5)
+        self.assertEqual(page.clicks, [])
+        self.assertEqual(page.gotos, [])
+
+    def test_failed_to_load_text_is_not_the_pending_link(self):
+        page = RolePage(
+            {("link", "Failed to Load Pending Cancellations"): 1},
+            url=DASHBOARD_URL,
+            body="Failed to Load Pending Cancellations. - Refresh",
+        )
+        self.assertEqual(page.get_by_role("link", name=_PENDING_LINK_NAME).count(), 0)
+        self.assertEqual(self._hold(page), PENDING_LINK_NOT_FOUND)
+        self.assertEqual(page.clicks, [])
+
+    def test_headings_and_plain_elements_still_reach_the_counted_link(self):
+        page = RolePage({
+            ("heading", "Agent Dashboard"): 1,
+            ("heading", "Your Notifications"): 1,
+            ("link", "3 Pending Cancellations"): 1,
+        }, url=DASHBOARD_URL, body="Policy To Dos", hrefs={
+            "3 Pending Cancellations": R5_HREF,
+        })
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, ["3 Pending Cancellations"])
+        self.assertEqual(page.gotos, [])
+
+    def test_refresh_then_the_counted_link_opens_the_report(self):
+        def reveal(page):
+            page.roles[("link", "3 Pending Cancellations")] = 1
+            page.hrefs["3 Pending Cancellations"] = R5_HREF
+            page.body = ""
+
+        page = RolePage(
+            {("button", "Refresh"): 1},
+            url=DASHBOARD_URL,
+            body="Failed to Load Pending Cancellations. - Refresh",
+            on_refresh=reveal,
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, ["Refresh", "3 Pending Cancellations"])
+        self.assertEqual(page.gotos, [])
+
+    def test_two_failed_refreshes_hold_after_exactly_two_clicks(self):
+        page = RolePage(
+            {("button", "Refresh"): 1},
+            url=DASHBOARD_URL,
+            body="Failed to Load Pending Cancellations. - Refresh",
+        )
+        self.assertEqual(self._hold(page), PENDING_WIDGET_FAILED)
+        self.assertEqual(page.clicks, ["Refresh", "Refresh"])
+
+    def test_pending_table_is_required_after_the_click(self):
+        missing = RolePage(
+            {("link", "3 Pending Cancellations"): 1},
+            url=DASHBOARD_URL,
+            hrefs={"3 Pending Cancellations": R5_HREF},
+            pending_table=False,
+        )
+        self.assertEqual(self._hold(missing), PENDING_TABLE_DID_NOT_APPEAR)
+        self.assertEqual(missing.clicks, ["3 Pending Cancellations"])
+        self.assertTrue(missing.wait_calls)
+
+        waited = RolePage(
+            {("link", "0 Pending Cancellations"): 1},
+            url=DASHBOARD_URL,
+            hrefs={"0 Pending Cancellations": R5_HREF},
+            table_after_waits=1,
+        )
+        open_pending_cancellations(waited)
+        self.assertEqual(waited.clicks, ["0 Pending Cancellations"])
+        self.assertGreaterEqual(waited.waits_after_click, 1)
+
+    def test_r5_shortcut_skips_the_dashboard_link(self):
+        page = RolePage(
+            {
+                ("link", "Agent Dashboard"): 1,
+                ("link", "3 Pending Cancellations"): 1,
+            },
+            url="https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5",
+            hrefs={"3 Pending Cancellations": R5_HREF},
+            table_count=1,
+            row_count=2,
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+        self.assertEqual(page.wait_calls, [])
+        self.assertEqual(page.gotos, [])
 
 
 def tempfile_dir():
