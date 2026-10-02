@@ -565,6 +565,30 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
         self.assertNotIn("Agreement Ready", res.reply_email_subject)
         self.mock_ezlynx_poster.post_agreement_note.assert_not_called()
 
+    def test_no_applicant_id_skips_ezlynx_filing(self):
+        # No applicant_id provided: EZLynx filing is skipped (not attempted with "0"),
+        # and the confirmation email reports NOT filed.
+        from robie_job_engine.models import WorkerResult
+        self.mock_client.find_program_by_policy.return_value = None
+        success = WorkerResult(
+            True,
+            "create_program",
+            {"program_id": "prog-123", "program_url": "https://example.com/prog-123",
+             "destination": {"program_id": "prog-123"}},
+        )
+        with patch(
+            "robie_job_engine.ascend_workflow.AscendCreateProgramWorker"
+        ) as worker_cls:
+            worker_cls.return_value.perform.return_value = success
+            res = self.manager.create_agreement_and_file_ezlynx(
+                self._clear_quote(),
+                sender_email="carlo@streetsmart.insurance",
+                sender_name="Carlo",
+                applicant_id=None,
+            )
+        self.mock_ezlynx_poster.post_agreement_note.assert_not_called()
+        self.assertIn("NOT filed", res.reply_email_body)
+
     def test_resolve_insured_from_ezlynx_maps_applicant_fields(self):
         import sys
         import types

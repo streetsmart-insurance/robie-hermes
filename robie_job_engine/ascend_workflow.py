@@ -673,15 +673,23 @@ class AscendWorkflowManager:
 
         # 7. File Agreement into EZLynx
         ezlynx_result = None
-        target_applicant_id = applicant_id or "0"
-        try:
-            ezlynx_result = self.ezlynx_poster.post_agreement_note(
-                applicant_id=target_applicant_id,
-                quote=quote,
-                program_url=program_url,
+        # Only attempt EZLynx filing with a valid applicant ID.
+        # "0" is not valid — skip filing and report NOT filed instead of failing silently.
+        target_applicant_id = applicant_id
+        if target_applicant_id and target_applicant_id != "0":
+            try:
+                ezlynx_result = self.ezlynx_poster.post_agreement_note(
+                    applicant_id=target_applicant_id,
+                    quote=quote,
+                    program_url=program_url,
+                )
+            except Exception as e:
+                logger.warning("EZLynx agreement note posting failed: %s", e)
+        else:
+            logger.warning(
+                "Skipping EZLynx filing: no valid applicant_id provided for %s",
+                quote.insured_name,
             )
-        except Exception as e:
-            logger.warning("EZLynx agreement note posting failed: %s", e)
 
         # 8. Compose Confirmation Email to User
         greeting_name = sender_name or "Team"
