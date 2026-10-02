@@ -830,5 +830,118 @@ class PolicyChangeConfirmationAcceptanceTests(unittest.TestCase):
         self.assertIn("directory_route_verified", proof["missing"])
 
 
+class PolicyChangeTaskActionTests(unittest.TestCase):
+    """The task goes back to the person who assigned it. No new task, ever."""
+
+    def test_completed_check_reassigns_back_to_original_assigner(self):
+        result = run_confirmation(clean_packet(), writes=DisabledWrites())
+        action = result["task_action"]
+        self.assertEqual(action["action"], "reassign_back")
+        self.assertEqual(action["to_assigner_id"], "csr-maria")
+        self.assertEqual(action["to_assigner_name"], "Maria Bara")
+        self.assertEqual(action["task_id"], "task-100")
+        self.assertIs(action["create_task"], False)
+        _assert_plain_note(self, action["note"])
+
+    def test_unsure_check_still_reassigns_back(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["request"]["source"] = "call_recording"
+        result = run_confirmation(packet, writes=DisabledWrites())
+        self.assertEqual(result["request_source"], REQUEST_SOURCE_UNCLEAR)
+        action = result["task_action"]
+        self.assertEqual(action["action"], "reassign_back")
+        self.assertEqual(action["to_assigner_id"], "csr-maria")
+        self.assertIs(action["create_task"], False)
+        _assert_plain_note(self, action["note"])
+
+    def test_hold_when_assigner_not_exact(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["assignment_events"] = []
+        packet["case"]["original_assigner_id"] = ""
+        result = run_confirmation(packet, writes=DisabledWrites())
+        action = result["task_action"]
+        self.assertEqual(action["action"], "hold")
+        self.assertIs(action["create_task"], False)
+        self.assertNotIn("to_assigner_id", action)
+
+    def test_hold_when_assigner_is_robie(self):
+        packet = copy.deepcopy(clean_packet())
+        packet["assignment_events"][0]["previous_owner_id"] = "SSRobie"
+        packet["assignment_events"][0]["previous_owner_name"] = "SSRobie"
+        result = run_confirmation(packet, writes=DisabledWrites())
+        action = result["task_action"]
+        self.assertEqual(action["action"], "hold")
+        self.assertIs(action["create_task"], False)
+
+    def test_create_task_is_always_false(self):
+        for packet in (clean_packet(), three_jr_packet()):
+            result = run_confirmation(packet, writes=DisabledWrites())
+            action = result["task_action"]
+            self.assertIs(action["create_task"], False)
+            self.assertNotIn(action["action"], {"create_task", "create", "new_task"})
+
+    def test_note_always_ends_with_signature(self):
+        for packet in (clean_packet(), three_jr_packet()):
+            result = run_confirmation(packet, writes=DisabledWrites())
+            action = result["task_action"]
+            if action["action"] == "reassign_back":
+                self.assertTrue(action["note"].strip().endswith(NOTE_SIGNATURE))
+
+    def test_executor_dry_run_touches_nothing(self):
+        from robie_job_engine.policy_change_task_executor import execute
+
+        result = run_confirmation(clean_packet(), writes=DisabledWrites())
+        outcome = execute(result["task_action"], mode="dry_run")
+        self.assertFalse(outcome["executed"])
+        self.assertIs(outcome["create_task"], False)
+        self.assertTrue(any("csr-maria" in line for line in outcome["plan"]))
+
+    def test_executor_live_refused_until_selectors_confirmed(self):
+        from robie_job_engine.policy_change_task_executor import execute
+
+        result = run_confirmation(clean_packet(), writes=DisabledWrites())
+        outcome = execute(result["task_action"], mode="live")
+        self.assertFalse(outcome["executed"])
+        self.assertIn("UNCONFIRMED", outcome["refused"])
+
+    def test_file_result_note_requires_readback(self):
+        from robie_job_engine.policy_change_task_action import file_result_note
+
+        class NoIdClient:
+            def append_note(self, discussion_id, body):
+                return {"ok": True}
+
+        with self.assertRaises(RuntimeError):
+            file_result_note(NoIdClient(), "discussion-100", "Plain result.\n" + NOTE_SIGNATURE)
+
+        class IdClient:
+            def append_note(self, discussion_id, body):
+                self.seen = (discussion_id, body)
+                return {"note_id": "note-999"}
+
+        client = IdClient()
+        note_id = file_result_note(client, "discussion-100", "Plain result.\n" + NOTE_SIGNATURE)
+        self.assertEqual(note_id, "note-999")
+        self.assertEqual(client.seen[0], "discussion-100")
+        self.assertTrue(client.seen[1].endswith(NOTE_SIGNATURE))
+
+        with self.assertRaises(ValueError):
+            file_result_note(IdClient(), "", "Plain result.\n" + NOTE_SIGNATURE)
+        with self.assertRaises(ValueError):
+            file_result_note(IdClient(), "discussion-100", "No signature here.")
+
+    def test_verifier_rejects_task_creation(self):
+        from robie_job_engine.policy_change_confirmation import (
+            PolicyChangeConfirmationVerifier,
+        )
+
+        verifier = PolicyChangeConfirmationVerifier()
+        bad = run_confirmation(clean_packet(), writes=DisabledWrites())
+        bad["task_action"] = {"action": "reassign_back", "create_task": True}
+        outcome = verifier.verify({}, {"detail": bad})
+        self.assertFalse(outcome.verified)
+        self.assertIn("never create a task", outcome.error)
+
+
 if __name__ == "__main__":
     unittest.main()

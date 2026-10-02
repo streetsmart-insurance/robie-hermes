@@ -1,18 +1,23 @@
-"""Read-only policy-change confirmation pilot.
+"""Policy-change confirmation pilot.
 
 A CSR assigns an existing EZLynx policy-change task to ROBIE. This job
 resolves that exact case and the original assigner, compares the request,
-the carrier-issued endorsement, and the EZLynx record, and drafts a note.
+the carrier-issued endorsement, and the EZLynx record, and drafts a
+plain-English note ending with "ROBIE was here".
 
-It does not file the note, upload a document, change a label, reassign the
-task, send email, submit a portal, change the policy, confirm the change,
-or close the task. It does not open a new Change Request form.
+When the check finishes — or when ROBIE is not sure — the task goes back
+to the person who assigned it. A new task is never created. The note is
+filed to the applicant's existing discussion through the Discussion API;
+the reassignment runs in the box browser because EZLynx has no Task API.
 
 This is not the weekly 4359 overdue checker and not
 ``policy_change_verification``. Those paths stay as they are.
 
 Carlo, October 1 2026: the producer confirms and closes. The original
 assigner still receives the result. That role choice is resolved.
+Carlo, October 2 2026: the task is reassigned back to the person who
+assigned it to ROBIE once the check is done or when ROBIE is not sure.
+No new task is ever created.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Any, Mapping
 
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 from .policy_change_ezlynx_read import apply_ezlynx_read, read_task_request
+from .policy_change_task_action import build_task_action
 
 
 JOB_TYPE = "policy_change_confirmation"
@@ -1261,6 +1267,7 @@ def _finish(
     }
     draft["note"] = draft_note(packet, draft)
     draft["evidence_hash"] = hashlib.sha256(draft["note"].encode()).hexdigest()
+    draft["task_action"] = build_task_action(packet, draft)
     return draft
 
 
@@ -1590,17 +1597,38 @@ class PolicyChangeConfirmationWorker:
 
 
 class PolicyChangeConfirmationVerifier:
-    """Refuses COMPLETE. The producer still confirms and closes."""
+    """Refuses COMPLETE. The producer still confirms and closes.
+
+    Also checks the post-check task action: a new task is never created,
+    and a reassignment names the original assigner exactly.
+    """
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult:
         del job
         detail = dict(action.get("detail") or {})
         writes = int(detail.get("external_writes") or 0)
+        task_action = detail.get("task_action")
+        task_action = task_action if isinstance(task_action, dict) else {}
+        action_ok = True
+        action_error = ""
+        if task_action.get("create_task") is not False:
+            action_ok = False
+            action_error = "The task action must never create a task."
+        elif task_action.get("action") == "reassign_back":
+            target = str(task_action.get("to_assigner_id") or "").strip()
+            if not target or target.casefold() in {"ssrobie", "robie", "robie ai"}:
+                action_ok = False
+                action_error = "A reassignment must name the original assigner exactly."
+        elif task_action.get("action") not in {"hold"}:
+            action_ok = False
+            action_error = "The task action is not a known action."
         observed = {
             "task_open": True,
             "change_request_open": True,
             "external_writes": writes,
             "status": "waiting_for_producer",
+            "task_action": task_action.get("action"),
+            "create_task": task_action.get("create_task"),
         }
         evidence = VerificationEvidence(
             method="policy_change_confirmation_packet",
@@ -1617,6 +1645,14 @@ class PolicyChangeConfirmationVerifier:
                 evidence,
                 retryable=False,
                 error="A write was counted. This pilot cannot confirm it.",
+                hold_status=JobStatus.WAITING,
+            )
+        if not action_ok:
+            return VerificationResult(
+                False,
+                evidence,
+                retryable=False,
+                error=action_error,
                 hold_status=JobStatus.WAITING,
             )
         return VerificationResult(
