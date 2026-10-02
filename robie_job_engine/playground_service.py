@@ -33,6 +33,7 @@ from .playground_guardrails import (
     SIMPLE_EDIT,
     Decision,
     Proposal,
+    _is_reply_request,
     classify_playground_request,
     mentioned_client,
 )
@@ -377,6 +378,14 @@ def _start(
                 source=hit.citation,
                 job_id=job_id,
                 freshness=hit.freshness_note,
+            )
+        elif _is_reply_request(text.lower()):
+            # Simple reply request (2026-10-02): user just wants an
+            # acknowledgment, not a procedure lookup.
+            reply = sop_reply(
+                answer="Got it.",
+                source="",
+                job_id=job_id,
             )
         else:
             reply = sop_reply(answer="", source="", job_id=job_id)
