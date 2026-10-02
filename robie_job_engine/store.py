@@ -673,17 +673,18 @@ class JobStore:
         """A terminal job does not keep the Chat turn lock.
 
         Interrupt the running agent now. Job 598820fc stayed COMPLETE for
-        about a minute while its turn kept calling tools. The in-flight
-        reply is already past the send gate; this stops the next tool.
+        about a minute while its turn kept calling tools. Kill registered
+        tool processes. Do not set the /stop flag: a normal finish is not a
+        stop, and the confirmation send still has to post.
         """
         try:
             from .chat_turn_control import (
+                kill_agent_processes,
                 release_finished_job_session,
-                request_agent_stop,
             )
 
-            request_agent_stop(job_id)
             release_finished_job_session(self.path, job_id, stop_agent=False)
+            kill_agent_processes(job_id)
         except Exception:
             logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
 
