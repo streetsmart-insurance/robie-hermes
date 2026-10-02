@@ -551,10 +551,13 @@ class AscendWorkflowManager:
                 # Different LOBs can be written by different carriers.
                 sp_carrier_identifier = sp.get("carrier_identifier")
                 if not sp_carrier_identifier:
+                    # Per-sub-policy carrier: its own writing carrier or carrier
+                    # name. Do NOT fall back to quote.writing_carrier_name —
+                    # that field is document-global and would bleed one LOB's
+                    # writing carrier into every other LOB.
                     sp_carrier_name = (
                         sp.get("writing_carrier_name")
                         or sp.get("carrier_name")
-                        or quote.writing_carrier_name
                     )
                     if sp_carrier_name and sp_carrier_name != quote.carrier_name:
                         sp_carriers = client.search_carriers(sp_carrier_name)
