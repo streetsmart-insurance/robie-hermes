@@ -1149,11 +1149,32 @@ def sent_message_id(result: Any) -> str:
     return ""
 
 
-def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
-    """Block a tool call when this job was stopped or hit the ceiling."""
-    from .live_turn_guard import acting_job_id
+def sole_live_session_key(adapter: Any, chat_id: str = "") -> str:
+    """The one live session key for this space. Empty when it is not unique."""
+    found: list[str] = []
+    space = str(chat_id or "").strip()
+    for key in _iter_live_session_keys(adapter):
+        text = str(key or "").strip()
+        if not text:
+            continue
+        if space and space not in text:
+            continue
+        if text not in found:
+            found.append(text)
+    if len(found) == 1:
+        return found[0]
+    return ""
 
-    job_id = acting_job_id(kwargs)
+
+def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
+    """Block a tool call when this job was stopped or hit the ceiling.
+
+    The job id is the one bound to this turn. A card click binds the job
+    it resumes. ``ROBIE_JOB_ID`` left behind by a previous job is not used.
+    """
+    from .live_turn_guard import job_id_for_stop_check
+
+    job_id = job_id_for_stop_check(kwargs)
     db_path = str(
         (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()

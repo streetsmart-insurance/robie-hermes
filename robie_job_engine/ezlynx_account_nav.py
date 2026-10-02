@@ -206,10 +206,29 @@ def is_direct_account_url(url: str, account_id: str | None = None) -> bool:
     return page not in GUESS_PAGES
 
 
+def is_applicant_search_url(url: str) -> bool:
+    """Name-search routes. These are not Summary/Details/Index guesses.
+
+    A john smith lookup opens ``/web/applicant/search`` or
+    ``/applicantportal/Search/Index``. Those pages are the search. Refusing
+    them as unknown-account guesses parked the lookup.
+    """
+    segments = _path_segments(url)
+    if not segments:
+        return False
+    if "search" not in segments:
+        return False
+    if "web" in segments and "applicant" in segments:
+        return True
+    return "applicantportal" in segments
+
+
 def is_account_url_guess(url: str) -> bool:
     """True for Summary/Details/Index (and sibling) applicant URL guesses."""
     raw = str(url or "").strip()
     if not raw:
+        return False
+    if is_applicant_search_url(raw):
         return False
     segments = _path_segments(raw)
     if not segments:

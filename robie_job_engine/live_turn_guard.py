@@ -20,6 +20,9 @@ _TURN_JOB: contextvars.ContextVar[str] = contextvars.ContextVar(
     "robie_turn_job_id", default=""
 )
 _AGENT_JOBS: dict[int, str] = {}
+# Set when a card click resumes a turn. Not the process env, and not a
+# leftover job id from the previous turn.
+_BOUND_RESUME: dict[str, str] = {}
 
 CLARIFY_PENDING = "clarify_pending"
 CLARIFY_REPLY_INJECTED = "clarify_reply_injected"
@@ -106,7 +109,11 @@ def bind_turn_owner(agent: Any, job_id: str | None) -> None:
 
 def set_turn_job(job_id: str | None) -> contextvars.Token:
     """Bind the job for the tool calls on this thread. Returns the reset token."""
-    return _TURN_JOB.set(str(job_id or "").strip())
+    ident = str(job_id or "").strip()
+    bound = str(_BOUND_RESUME.get("job_id") or "").strip()
+    if bound and ident and ident != bound:
+        _BOUND_RESUME.clear()
+    return _TURN_JOB.set(ident)
 
 
 def reset_turn_job(token: contextvars.Token) -> None:
@@ -128,9 +135,24 @@ def turn_owner_job_id(agent: Any = None) -> str:
     return current
 
 
+def bound_resume_job_id() -> str:
+    """The job a card click just resumed. Empty when this turn was not one."""
+    return str(_BOUND_RESUME.get("job_id") or "").strip()
+
+
 def stamp_agent_once(agent: Any) -> str:
-    """First tool call captures the env job. A later job must not replace it."""
+    """First tool call captures the env job. A later job must not replace it.
+
+    A stamp or env id left over from a stopped job loses to the card-click
+    resume. A live env job still wins, so a new turn is not stolen.
+    """
+    from .chat_turn_control import agent_stop_requested
+
     existing = turn_owner_job_id(agent)
+    resumed = bound_resume_job_id()
+    if resumed and existing and existing != resumed and agent_stop_requested(existing):
+        bind_turn_owner(agent, resumed)
+        return resumed
     if existing:
         return existing
     ident = str(
@@ -139,6 +161,9 @@ def stamp_agent_once(agent: Any) -> str:
         or os.environ.get("JOB_ID")
         or ""
     ).strip()
+    if resumed and (not ident or agent_stop_requested(ident)):
+        bind_turn_owner(agent, resumed)
+        return resumed
     if ident:
         bind_turn_owner(agent, ident)
     return ident
@@ -150,12 +175,35 @@ def acting_job_id(kwargs: dict | None = None, agent: Any = None) -> str:
     if owner:
         return owner
     values = dict(kwargs or {})
+    explicit = str(values.get("job_id") or "").strip()
+    if explicit:
+        return explicit
+    resumed = bound_resume_job_id()
+    if resumed:
+        return resumed
     return str(
-        values.get("job_id")
-        or os.environ.get("ROBIE_JOB_ID")
+        os.environ.get("ROBIE_JOB_ID")
         or os.environ.get("JOB_ID")
         or ""
     ).strip()
+
+
+def job_id_for_stop_check(kwargs: dict | None = None, agent: Any = None) -> str:
+    """The job whose /stop flag this tool call must honor.
+
+    A card-click resume binds that job. A leftover ``ROBIE_JOB_ID`` from
+    the previous turn is not consulted.
+    """
+    owner = turn_owner_job_id(agent) if agent is not None else ""
+    if owner:
+        return owner
+    current = str(_TURN_JOB.get() or "").strip()
+    if current:
+        return current
+    explicit = str((kwargs or {}).get("job_id") or "").strip()
+    if explicit:
+        return explicit
+    return bound_resume_job_id()
 
 
 def acting_db_path(kwargs: dict | None = None) -> str:
@@ -433,15 +481,60 @@ def note_clarify_pending(
     ident = str(job_id or "").strip()
     if store is None or not ident:
         return
+    prior: dict[str, Any] = {}
+    try:
+        prior = dict(store.get_checkpoint(ident, CLARIFY_PENDING) or {})
+    except Exception:
+        prior = {}
+    key = str(session_key or prior.get("session_key") or "").strip()
     store.checkpoint(
         ident,
         CLARIFY_PENDING,
         {
             "open": True,
-            "question": str(question or "")[:500],
-            "session_key": str(session_key or ""),
+            "question": str(question or prior.get("question") or "")[:500],
+            "session_key": key,
         },
     )
+
+
+def bind_card_click_resume(
+    adapter: Any,
+    store: Any,
+    job_id: str | None,
+    session_key: str | None,
+    question: str = "",
+) -> str:
+    """Bind the job and session a card click is resuming.
+
+    The next tool call checks a stop on this job only. The pending-question
+    record keeps the session key. A blank key is filled from the one live
+    session in this space when there is exactly one.
+    """
+    ident = str(job_id or "").strip()
+    key = str(session_key or "").strip()
+    if not key and adapter is not None:
+        from .chat_turn_control import sole_live_session_key
+
+        key = sole_live_session_key(adapter, "")
+    if ident:
+        _BOUND_RESUME["job_id"] = ident
+        _BOUND_RESUME["session_key"] = key
+        set_turn_job(ident)
+    agent = None
+    if adapter is not None and key:
+        from .chat_turn_control import _running_agent_for_key
+
+        agent = _running_agent_for_key(adapter, key)
+    if agent is not None and ident:
+        bind_turn_owner(agent, ident)
+        try:
+            agent._robie_session_key = key
+        except Exception:
+            pass
+    if store is not None and ident:
+        note_clarify_pending(store, ident, question, session_key=key)
+    return ident
 
 
 def _thread_matches(store: Any, job: dict[str, Any], inbound_thread_id: str | None) -> bool:

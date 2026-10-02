@@ -1054,6 +1054,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # stop cannot put a card back. The next inbound message clears it.
         self._typing_drop: Dict[str, bool] = {}
         self._clarify_state: Dict[str, str] = {}
+        self._clarify_resume: Dict[str, Dict[str, str]] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
         # In-flight Chat turns, keyed by (chat_id, thread_id). /stop cancels
@@ -3080,6 +3081,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         answer = custom_text if choice == "__other__" else choice
                         resolved = bool(answer) and resolve_gateway_clarify(clarify_id, str(answer))
                         if resolved:
+                            self._resume_clarify_click(clarify_id)
                             self._clarify_state.pop(clarify_id, None)
                             response = f"Choice recorded: {answer}"
                         else:
@@ -5449,7 +5451,39 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 retryable=_is_retryable_error(exc),
             )
 
-    def _mark_clarify_waiting(self, chat_id: str, question: str) -> None:
+    def _resume_clarify_click(self, clarify_id: str) -> None:
+        """Bind the job and session key before the resumed turn calls a tool."""
+        record = dict((getattr(self, "_clarify_resume", {}) or {}).get(clarify_id) or {})
+        session_key = str(
+            record.get("session_key") or (self._clarify_state or {}).get(clarify_id) or ""
+        ).strip()
+        job_id = str(record.get("job_id") or "").strip()
+        if not job_id:
+            active = getattr(self, "_active_chat_job", None) or {}
+            if len(active) == 1:
+                job_id = str(next(iter(active.values())) or "").strip()
+        if not session_key:
+            from robie_job_engine.chat_turn_control import sole_live_session_key
+
+            session_key = sole_live_session_key(self, "")
+        try:
+            from robie_job_engine.live_turn_guard import bind_card_click_resume
+
+            bind_card_click_resume(
+                self,
+                JobStore(ROBIE_JOB_DB),
+                job_id,
+                session_key,
+                str(record.get("question") or ""),
+            )
+        except Exception:
+            logger.exception(
+                "[GoogleChat] could not bind clarify resume id=%s", clarify_id
+            )
+
+    def _mark_clarify_waiting(
+        self, chat_id: str, question: str, session_key: str = ""
+    ) -> None:
         """An outbound question parks the job so the answer is not the busy reply."""
         job_id = self._active_chat_job.get(chat_id)
         if not job_id:
@@ -5462,7 +5496,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             from robie_job_engine.live_turn_guard import note_clarify_pending
 
-            note_clarify_pending(JobStore(ROBIE_JOB_DB), job_id, question)
+            note_clarify_pending(
+                JobStore(ROBIE_JOB_DB), job_id, question, session_key=session_key
+            )
             if mark_job_waiting_for_user(JobStore(ROBIE_JOB_DB), job_id, question):
                 status = str(
                     JobStore(ROBIE_JOB_DB).get_job(job_id).get("status") or ""
@@ -5526,7 +5562,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
         from robie_job_engine.user_reply import format_user_reply
 
         question = format_user_reply(question)
-        self._mark_clarify_waiting(chat_id, question)
+        job_id = ""
+        if isinstance(metadata, dict):
+            job_id = str(metadata.get("robie_job_id") or "").strip()
+        if not job_id:
+            job_id = str((self._active_chat_job or {}).get(chat_id) or "").strip()
+        remembered_key = str(session_key or "").strip()
+        if not remembered_key:
+            from robie_job_engine.chat_turn_control import sole_live_session_key
+
+            remembered_key = sole_live_session_key(self, chat_id)
+        self._mark_clarify_waiting(chat_id, question, remembered_key)
         if not choices:
             return await super().send_clarify(
                 chat_id, question, choices, clarify_id, session_key, metadata
@@ -5624,7 +5670,16 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         result = await self.send_card(chat_id, card, metadata=metadata)
         if result.success:
-            self._clarify_state[clarify_id] = session_key
+            self._clarify_state[clarify_id] = remembered_key or session_key
+            resume = getattr(self, "_clarify_resume", None)
+            if not isinstance(resume, dict):
+                self._clarify_resume = {}
+                resume = self._clarify_resume
+            resume[clarify_id] = {
+                "job_id": job_id,
+                "session_key": remembered_key or str(session_key or ""),
+                "question": question,
+            }
             return result
         return await super().send_clarify(
             chat_id, question, choices, clarify_id, session_key, metadata
