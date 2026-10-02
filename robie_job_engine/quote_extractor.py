@@ -752,7 +752,8 @@ class QuoteExtractor:
         # Skip coverage limits ("Each Occurrence $1,000,000"), deductibles,
         # aggregates — those are limits, not premiums.
         limit_words = ("occurrence", "aggregate", "deductible", "limit", "each",
-                       "per occurrence", "general aggregate")
+                       "per occurrence", "general aggregate", "balance to minimum",
+                       "minimum term", "minimum retained")
         seen_items: set[tuple[str, int]] = set()
         for line in text.splitlines():
             li = re.search(
