@@ -98,18 +98,30 @@ def confidence_threshold() -> int:
 
 
 def jev_questions() -> dict[str, Any]:
-    """Typed questions: did the end state satisfy the ask, and which outcome."""
+    """Typed questions: did the end state satisfy the ask, and which outcome.
+    
+    2026-10-02: Updated to recognize legitimate clarification requests.
+    When the worker asks the user for missing/ambiguous info (e.g. which of
+    two carriers, missing expiration date), that is CORRECT behavior per
+    Carlo's rule: "Anytime something is going to fail, I want you to ask
+    the user for that information." Do NOT score clarification as "wrong".
+    """
     return {
         "satisfied": {
             "type": "noul",
             "instructions": (
                 "Did the observed end state satisfy the original ask? "
                 "Use the ask, the end state, the readback results, and the "
-                "worker claim in the state. The worker claim is not proof."
+                "worker claim in the state. The worker claim is not proof. "
+                "IMPORTANT: If the worker asked the user for clarification "
+                "because the input was ambiguous or missing required info "
+                "(e.g. two carriers with the same name, missing expiration "
+                "date), that is CORRECT behavior — score as true. Asking "
+                "is better than guessing wrong."
             ),
             "criteria": {
-                "true": "The end state shows the requested work is done.",
-                "false": "The end state does not show the requested work is done.",
+                "true": "The end state shows the requested work is done, OR the worker correctly asked for clarification on ambiguous/missing input.",
+                "false": "The end state does not show the requested work is done, and the worker did not ask for needed clarification.",
             },
         },
         "outcome": {
@@ -120,6 +132,7 @@ def jev_questions() -> dict[str, Any]:
                 "partially_completed": "Some of the requested work is done, but not all of it.",
                 "blocked": "The work stopped on something in the way, such as a login page or a missing approval.",
                 "failed": "The work did not succeed.",
+                "needs_clarification": "The worker correctly asked the user for missing or ambiguous information instead of guessing.",
             },
         },
     }
@@ -161,20 +174,14 @@ def render_answer_only(
     channel: str = "chat",
     client: Any = None,
 ) -> str:
-    """Plain reply: the answer only. Audit detail stays on the job checkpoint."""
+    """Plain reply: the answer, Details, and the job id. No EZLynx readback."""
     from .answer_only import strip_answer_verifier_noise
     from .email_guard import _strip_internal_reasoning
-    from .user_reply import format_user_reply
 
     job_id = str(job.get("id") or "")
     cached = store.get_checkpoint(job_id, "end_state_report") if job_id else None
-    if cached and cached.get("answer_only"):
-        shown = str(cached.get("user_text") or "").strip()
-        if shown:
-            return shown if shown.endswith("\n") else shown + "\n"
-        if str(cached.get("text") or "").strip():
-            cleaned = format_user_reply(str(cached["text"]))
-            return cleaned if cleaned.endswith("\n") else cleaned + "\n"
+    if cached and str(cached.get("text") or "").strip() and cached.get("answer_only"):
+        return str(cached["text"])
     payload = dict(job.get("payload") or {})
     ask = _ask_text(payload) or _fragment(str(worker_text or ""))
     answer = _strip_internal_reasoning(str(worker_text or ""))
@@ -206,37 +213,28 @@ def render_answer_only(
     else:
         decision = None
         jev_line = "Jev was not asked. The end-state report is off."
-    summary = answer or "Answered."
-    from .user_reply import format_user_reply
-
-    user_text = format_user_reply(summary if summary.lower().startswith("answered") else f"Answered. {summary}")
-    if not user_text.endswith("\n"):
-        user_text += "\n"
-    audit = "\n".join(
+    summary = answer or "Robie did not write an answer."
+    details = "\n".join(
         (
-            summary.strip(),
-            "",
-            "Details",
             jev_line,
             "No EZLynx destination check. This was a question.",
-            "",
-            status_format.short_job_ref(job_id),
         )
-    ).strip()
+    )
+    text = "\n".join(
+        (summary.strip(), "", "Details", details, "", status_format.short_job_ref(job_id))
+    ).strip() + "\n"
     if job_id:
         store.checkpoint(
             job_id,
             "end_state_report",
             {
-                "text": audit,
-                "user_text": user_text,
+                "text": text,
                 "answer_only": True,
                 "verdict": getattr(decision, "verdict", ""),
                 "channel": channel,
             },
         )
-        logger.info("answer-only audit kept in the ledger job=%s", job_id)
-    return user_text
+    return text
 
 
 def render_job_end_state(
@@ -452,7 +450,92 @@ def decide(
     )
 
 
+def _is_clarification_request(end_state: str) -> bool:
+    """True when Robie finished by asking the requester for more info.
+
+    This is not a failure -- it is Robie doing its job correctly by
+    refusing to guess. The requester just needs a warm nudge, not a QA report.
+    """
+    blob = str(end_state or "").lower()
+    return any(
+        marker in blob
+        for marker in (
+            "need clarification",
+            "need the following",
+            "missing items",
+            "before creating the ascend",
+            "could you provide",
+            "please provide",
+            "i need the following",
+            # 2026-10-02: Astra Gold case - carrier not found in Ascend
+            "couldn't match",
+            "could not match",
+            "no results",
+            "what is the exact",
+            "please reply directly",
+            "i haven't created",
+            "so i haven't",
+        )
+    )
+
+
+def _warm_clarification_email(ask: str, end_state: str) -> str:
+    """Rewrite a clarification end-state as a warm human email.
+
+    Keeps every fact from the original (what Robie has, what is missing)
+    but sounds like a helpful colleague, not a QA report. No Jev scores,
+    no "end state" language, no internal jargon.
+    """
+    original = str(end_state or "").strip()
+
+    # Pull out the "what I have" lead (e.g. "I received the quote for X from Y")
+    have_match = re.search(
+        r"(I received the quote for .+?)(?:, but I need clarification.*)",
+        original,
+        re.IGNORECASE | re.DOTALL,
+    )
+    have_line = have_match.group(1).strip() + "." if have_match else ""
+
+    # Pull out the numbered missing items (lines starting with digits/bullets)
+    missing_lines = []
+    for line in original.split("\n"):
+        stripped = line.strip()
+        # Match "11. Insured Address: ..." or "- Insured Address: ..." etc.
+        if re.match(r"^(\d+[.\)]|[-\u2022])\s*\S", stripped):
+            # Clean up "11. Insured Address:" -> "Insured Address:"
+            cleaned = re.sub(r"^\d+[.\)]\s*", "", stripped)
+            missing_lines.append(cleaned)
+
+    parts = ["Hi there,", ""]
+    parts.append(
+        "Thanks for sending that over -- I'm on it."
+    )
+    if have_line:
+        parts += ["", have_line]
+    if missing_lines:
+        parts += ["", "Before I can build the financing agreement, I just need a couple of things from you:", ""]
+        for item in missing_lines:
+            parts.append("- " + item)
+        parts += [
+            "",
+            "Just hit reply with those details and I'll pick it right back up -- "
+            "no need to resend anything.",
+        ]
+    else:
+        # Fallback: keep the original ask, just wrapped warmly
+        parts += ["", original, "", "Just hit reply and I'll pick it right back up."]
+    parts += ["", "Thanks!", "Robie"]
+    return "\n".join(parts)
+
+
 def compose_report(job_id: str, context: dict[str, Any], decision: EndStateDecision) -> str:
+    raw_end_state = str(context.get("end_state") or "")
+    # Carlo 2026-10-02: when Robie is asking the requester for more info,
+    # send a warm human email -- not the internal QA report format.
+    if _is_clarification_request(raw_end_state):
+        return _warm_clarification_email(
+            str(context.get("ask") or ""), raw_end_state
+        )
     summary = summary_sentence(context.get("ask") or "", context.get("end_state") or "", decision.verdict)
     end_state = plain_customer_text(context.get("end_state") or "Robie stopped without a clear ending.")
     jev_line = (

@@ -188,6 +188,13 @@ def find_recent_sent(
     return matches
 
 
+def _content_hash(text):
+    """Hash normalized content for duplicate detection (2026-10-02)."""
+    import hashlib
+    normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def should_skip_send(
     service,
     to_address: str,
@@ -195,8 +202,14 @@ def should_skip_send(
     window_hours: int = 24,
     *,
     expected_mailbox: str = "",
+    incoming_body: str = "",
+    thread_id: str = "",
 ) -> tuple[bool, str]:
-    """Return (skip, reason). True when the same send already exists in Sent."""
+    """Return (skip, reason). True when the same send already exists in Sent.
+    
+    2026-10-02: Content-aware — if incoming_body differs from thread history,
+    this is a correction/follow-up, not a duplicate. Do NOT skip.
+    """
     expected = (expected_mailbox or "").strip().casefold()
     actual = delegated_mailbox(service) if expected else ""
     if expected and actual and actual != expected:
@@ -210,6 +223,40 @@ def should_skip_send(
     )
     if matches:
         first = matches[0]
+        # Content-aware check: is this new content or a true duplicate?
+        if incoming_body and thread_id and service:
+            try:
+                thread = service.users().threads().get(
+                    userId="me", id=thread_id, format="full").execute()
+                prev_hashes = set()
+                for msg in thread.get("messages", []):
+                    if "SENT" in msg.get("labelIds", []):
+                        continue
+                    # Extract body text
+                    payload = msg.get("payload", {})
+                    body_txt = ""
+                    def _extract(part):
+                        nonlocal body_txt
+                        mime = part.get("mimeType", "")
+                        data = part.get("body", {}).get("data", "")
+                        if mime == "text/plain" and data:
+                            import base64
+                            try:
+                                body_txt = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+                            except:
+                                pass
+                        for sub in part.get("parts", []):
+                            if not body_txt:
+                                _extract(sub)
+                    _extract(payload)
+                    if body_txt:
+                        prev_hashes.add(_content_hash(body_txt))
+                curr_hash = _content_hash(incoming_body)
+                if curr_hash not in prev_hashes:
+                    logger.info("New content in thread (correction/follow-up), not skipping")
+                    return False, "new content in thread - processing as correction"
+            except Exception as exc:
+                logger.warning("Content check failed: %s", exc)
         return True, (
             f"already sent to {to_address} "
             f"(sent id {first['id']} at {first['date']}); skipping duplicate"
