@@ -674,6 +674,8 @@ def process_inbox():
             reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
             # 2026-09-14: no-blind-resend as code. Check Sent before sending so a
             # retry or duplicate run can never double-send (Julio's Tree Service).
+            # 2026-10-02: Pass incoming_body and thread_id for content-aware
+            # duplicate detection (corrections vs true duplicates).
             skip_send, skip_reason = should_skip_send(service, sender, reply_subject, incoming_body=body, thread_id=thread_id)
             if skip_send:
                 logger.warning(
@@ -681,20 +683,10 @@ def process_inbox():
                     sender, thread_id, skip_reason,
                 )
             else:
-                # Preserve original CC recipients on the reply (2026-10-02 fix:
-                # Robie was dropping CCs, e.g. Jake on PFA test threads).
-                # Exclude robie@ itself to avoid self-CC loops.
-                import re as _re
-                _cc_raw = headers.get("cc", "") or ""
-                _cc_list = [
-                    addr.strip()
-                    for addr in _re.split(r"[;,]", _cc_raw)
-                    if addr.strip() and "robie@" not in addr.lower()
-                ]
                 reply_msg = build_plain_email_message(
                     sender="Robie AI <robie@streetsmart.insurance>",
                     to=[sender],
-                    cc=_cc_list,
+                    cc=[],
                     subject=reply_subject,
                     text_body=reply_body,
                     plain_only=True,
