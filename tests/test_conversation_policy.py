@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from test_conversation_reply import chat, event, execute, ACTOR
+from test_conversation_reply import chat, no_network, event, execute, ACTOR
 from test_round10_reply_lifecycle import _adapter_module, SPACE, THREAD, OTHER
 from robie_job_engine.conversation_reply import advance, bind
 from robie_job_engine.conversation_policy import (
