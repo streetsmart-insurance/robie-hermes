@@ -159,9 +159,8 @@ def test_claim_paths_cannot_follow_symlinks(tmp_path):
 
 def test_renderer_serializes_data_never_interpolates_python():
     r=request();r['actor_login']="');raise Exception('injected')#"
-    program=claim['render'](r,'claim');compile(program,'rendered','exec')
+    program=claim['render'](r,{},b'');compile(program,'rendered','exec')
     assert r['actor_login'] not in program
-    with pytest.raises(ValueError):claim['render'](r,'install')
 
 
 def test_workflows_disabled_and_cloud_auth_after_independent_validation():
@@ -176,8 +175,10 @@ def test_workflows_disabled_and_cloud_auth_after_independent_validation():
     auth=next(i for i,s in enumerate(steps) if 'google-github-actions/auth' in s.get('uses',''))
     assert names.index('Independently authorize original cloud comment') < auth
     assert names.index('Revalidate cloud request and exact built bytes before cloud authentication') < auth
-    assert names.index('Consume durable Test request before staging') < names.index('Create bounded Test staging directory')
-    assert names.index('Recheck request, replay ownership and rollback target before installation') < names.index('Install and independently verify Test')
+    cloud = steps[names.index('Execute authorized Test deployment under retained host lock')]
+    assert cloud['run'].count('gcloud compute ssh') == 1
+    for name in ('Create bounded Test staging directory','Transfer exact artifact and installer','Install and independently verify Test'):
+        assert steps[names.index(name)]['if'] == "inputs.cloud_comment_id == ''"
     assert '!inputs.cloud_comment_id' in workflow['jobs']['certify-test']['if']
     assert workflow['concurrency']=={'group':'robie-hermes-test-deploy','cancel-in-progress':False}
     assert 'workflow_dispatch' in str(workflow.get(True,workflow.get('on')))
@@ -263,27 +264,7 @@ def test_receiver_main_fetches_human_provenance_even_for_bot_dispatch(tmp_path, 
 def test_claim_refuses_production_before_any_path_access(monkeypatch):
     monkeypatch.setattr(remote['os'],'geteuid',lambda:0)
     monkeypatch.setattr(remote['socket'],'gethostname',lambda:'hermes-poc-01')
-    with pytest.raises(ValueError):remote['run'](request(),'claim')
-
-
-def test_transfer_uses_only_bounded_registered_cloud_key(monkeypatch):
-    transfer=runpy.run_path(str(ROOT/'scripts/transfer-test-artifact.py'))
-    env=dict(GITHUB_REF='refs/heads/main',GITHUB_REPOSITORY=ctl.REPO,TEST_VM='hermes-test-01',
-        PROJECT_ID='streetsmart-hermes-poc',ZONE='us-east1-b',SSH_KEY=str(Path.home()/'.ssh/google_compute_engine'),
-        CLOUD_COMMENT_ID='123',CLOUD_DEPLOY_ENABLED='TEST_DEPLOY_V1',GITHUB_SHA=COMMIT,
-        ARCHIVE_SHA256='e'*64,INSTALLER_SHA256='f'*64,ARTIFACT_SHA256='a'*64)
-    fn=transfer['transfer'];monkeypatch.setitem(fn.__globals__,'artifact_url',lambda env:'https://example.blob.core.windows.net/synthetic')
-    calls=[]
-    def runner(command,**kwargs):
-        calls.append(command);return SimpleNamespace(returncode=0,stdout='TEST_ARTIFACT_TRANSFER_OK\n')
-    fn(env,runner)
-    assert '--ssh-key-expire-after=1h' in calls[0]
-    assert '--ssh-key-file='+env['SSH_KEY'] in calls[0]
-    for change in (dict(SSH_KEY='/tmp/substitute'),dict(CLOUD_DEPLOY_ENABLED=''),dict(CLOUD_COMMENT_ID='../escape')):
-        with pytest.raises(ValueError):fn(dict(env,**change),runner)
-    manual=dict(env,SSH_KEY='/tmp/hermes-test-deploy');manual.pop('CLOUD_COMMENT_ID')
-    fn(manual,runner)
-    assert '--ssh-key-file=/tmp/hermes-test-deploy' in calls[-1]
+    with pytest.raises(ValueError):remote['run'](request(),{},b'')
 
 
 def test_every_workflow_ssh_key_use_has_bounded_registration():
@@ -291,3 +272,138 @@ def test_every_workflow_ssh_key_use_has_bounded_registration():
     for line in text.splitlines():
         if '--ssh-key-file=' in line:
             assert '--ssh-key-expire-after=1h' in line
+
+
+def execution_fixture(tmp_path, monkeypatch):
+    """Test-only fake root; production owner checks remain unchanged."""
+    r=request();r.update(receiver_run_id=987,controller_commit=CONTROLLER)
+    state=tmp_path/'state';state.mkdir(mode=0o700)
+    root=tmp_path/'test';target=root/'releases'/PRIOR[:12]/('robie-hermes-'+PRIOR[:12]);target.mkdir(parents=True)
+    (target/'.release-sha256').write_text(r['prior_sha256'])
+    (root/'current').symlink_to(target);(root/'releases/current').symlink_to(target)
+    monkeypatch.setitem(remote,'safe',lambda *a,**k:None)
+    clock=[NOW]
+    original=remote['authorized']
+    monkeypatch.setitem(remote,'authorized',lambda req:original(req,clock[0]))
+    return r,state,root,clock
+
+
+def test_download_delay_past_expiry_prevents_staging_and_install(tmp_path,monkeypatch):
+    r,state,root,clock=execution_fixture(tmp_path,monkeypatch)
+    def download():
+        clock[0]=NOW+dt.timedelta(minutes=21)
+        return {'release.tgz':b'approved synthetic bytes'}
+    invoked=[]
+    with pytest.raises(ValueError):
+        remote['execute_locked'](r,state,123,download,root,lambda *a:invoked.append(a))
+    assert not invoked and not (state/'run-987').exists()
+    assert (state/'comment_id-123').exists()  # consumed even though staging never began
+
+
+def test_expiry_between_staging_files_refuses_next_write(tmp_path):
+    calls=[]
+    def authorize():
+        calls.append(1)
+        if len(calls)==4:raise ValueError('expired before next file')
+    with pytest.raises(ValueError):remote['stage_files']({'one':b'1','two':b'2'},tmp_path/'stage',authorize)
+    assert (tmp_path/'stage/one').read_bytes()==b'1'
+    assert not (tmp_path/'stage/two').exists()
+
+
+def test_expiry_after_staging_before_installer_exec_refuses(tmp_path,monkeypatch):
+    r,state,root,clock=execution_fixture(tmp_path,monkeypatch)
+    invoked=[]
+    def installer(req,directory,fd,authorize):
+        clock[0]=NOW+dt.timedelta(minutes=21)
+        return remote['invoke_installer'](req,directory,fd,authorize,lambda *a,**k:invoked.append(a))
+    with pytest.raises(ValueError):remote['execute_locked'](r,state,123,lambda:{'file':b'data'},root,installer)
+    assert not invoked and not (state/'run-987/installer.log').exists()
+    assert (state/'comment_id-123').exists()
+
+
+def test_begun_install_and_rollback_can_finish_after_authorization_expiry(tmp_path,monkeypatch):
+    r,state,root,clock=execution_fixture(tmp_path,monkeypatch)
+    seen=[]
+    def runner(command,**kwargs):
+        assert 'timeout' not in kwargs  # no abrupt kill of potentially active rollback
+        assert kwargs['pass_fds']==(123,) and kwargs['start_new_session'] is True
+        clock[0]=NOW+dt.timedelta(minutes=21)
+        seen.append('installer and existing rollback allowed to finish')
+        return SimpleNamespace(returncode=2)
+    def installer(req,directory,fd,authorize):
+        return remote['invoke_installer'](req,directory,fd,authorize,runner)
+    with pytest.raises(ValueError):remote['execute_locked'](r,state,123,lambda:{'file':b'data'},root,installer)
+    assert seen and json.loads((state/'run-987/install-result.json').read_text())['returncode']==2
+    assert (state/'run-987/install-launch-intent.json').exists()
+
+
+def test_lock_is_held_through_download_staging_and_installer(tmp_path,monkeypatch):
+    import fcntl
+    r,state,root,clock=execution_fixture(tmp_path,monkeypatch)
+    lock=open(state/'lock','w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    phases=[]
+    def assert_locked(phase):
+        with open(state/'lock','r') as contender:
+            with pytest.raises(BlockingIOError):fcntl.flock(contender,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        phases.append(phase)
+    def download():assert_locked('download');return {'file':b'data'}
+    def installer(req,directory,fd,authorize):
+        authorize();assert_locked('installer');assert (directory/'file').read_bytes()==b'data';return 'done'
+    try:assert remote['execute_locked'](r,state,lock.fileno(),download,root,installer)=='done'
+    finally:lock.close()
+    assert phases==['download','installer']
+    with open(state/'lock','r') as contender:fcntl.flock(contender,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    with pytest.raises(FileExistsError):remote['consume'](r,state)
+
+
+def test_concurrent_claims_allow_one_winner_and_preserve_receipts(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    def attempt():
+        try:remote['consume'](request(),tmp_path);return 'claimed'
+        except FileExistsError:return 'refused'
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(lambda _:attempt(),range(2)))
+    assert sorted(results)==['claimed','refused']
+    assert json.loads((tmp_path/'comment_id-123').read_text())==request()
+
+
+def test_installer_child_keeps_lock_if_wrapper_exits(tmp_path):
+    import fcntl,os,subprocess,sys,time
+    path=tmp_path/'lock';ready=tmp_path/'ready';finish=tmp_path/'finish'
+    fd=os.open(path,os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    code="import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); deadline=time.monotonic()+5\nwhile not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline: time.sleep(.01)"
+    child=subprocess.Popen([sys.executable,'-c',code,str(ready),str(finish)],pass_fds=(fd,),
+        start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    os.close(fd)  # Simulate loss of the wrapper; child still owns the inherited description.
+    try:
+        deadline=time.monotonic()+3
+        while not ready.exists() and time.monotonic()<deadline:time.sleep(.01)
+        assert ready.exists()
+        with open(path,'r') as contender:
+            with pytest.raises(BlockingIOError):fcntl.flock(contender,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finish.touch();assert child.wait(timeout=5)==0
+        with open(path,'r') as contender:fcntl.flock(contender,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    finally:
+        finish.touch()
+        if child.poll() is None:child.kill();child.wait()
+
+
+def test_expiry_during_partial_claim_preserves_consumed_comment(tmp_path):
+    count=[0]
+    def authorize():
+        count[0]+=1
+        if count[0]==2:raise ValueError('expired')
+    with pytest.raises(ValueError):remote['consume'](request(),tmp_path,authorize)
+    assert (tmp_path/'comment_id-123').exists()
+    assert not (tmp_path/('nonce-'+'0'*32)).exists()
+    with pytest.raises(FileExistsError):remote['consume'](dict(request(),nonce='1'*32),tmp_path)
+
+
+def test_renderer_refuses_transfer_installer_substitution_before_url_lookup(tmp_path):
+    import os,subprocess,sys
+    (tmp_path/'cloud-deploy-request.json').write_text(json.dumps(request()))
+    result=subprocess.run([sys.executable,'-I','-B',str(ROOT/'scripts/test_cloud_deploy_claim.py')],
+        env={**os.environ,'RUNNER_TEMP':str(tmp_path),'INSTALLER_SHA256':'0'*64},
+        text=True,capture_output=True)
+    assert result.returncode!=0 and 'PINNED_TEST_INSTALLER_MISMATCH' in result.stderr
+    assert result.stdout==''

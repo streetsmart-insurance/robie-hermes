@@ -52,7 +52,7 @@ ambiguous dispatch must be reconciled read-only.
 The receiving workflow independently fetches the comment, current permission and
 merged PR. It verifies protected main, first run attempt, pinned controller tree,
 actual checkout, executing workflow identity and relevant-file byte/type/mode
-agreement. It repeats fresh authorization after build and before installation.
+agreement. It repeats fresh authorization after build and before sending the single host execution.
 The workflow-bot actor is never substituted for the original human author.
 
 The requested release must equal the receiving run's GITHUB_SHA. Main moving
@@ -79,22 +79,49 @@ added. Existing Test workflow SSH/SCP registrations are also explicitly bounded 
 one hour; the manual transfer key path remains supported. Existing authority is broad; actions:write is repository-scoped, not an IAM
 restriction to just this workflow. The implementation bounds its use in code.
 
-Before staging, a fixed root Python program rendered from the pinned controller
-checks the actual Test hostname, both rollback pointers and the prior digest file.
-It writes only this new replay state:
+A single fixed root Python program rendered from the pinned controller checks the
+actual Test hostname and performs claim, download, staging and installer launch
+in the same host execution. The separate manual staging/transfer/install steps
+are skipped for cloud requests. It writes only this transaction state before
+invoking the existing installer:
 
 - `/var/lib/robie-test-cloud-deploy/`: root-owned0700;
-- `lock`, `comment_id-<ID>`, `nonce-<nonce>`: root-owned0600.
+- `lock`, `comment_id-<ID>`, `nonce-<nonce>`: root-owned0600;
+- `run-<receiver-run-ID>/`: root-owned0700; exact archive/checksum/installer,
+  `installer.log`, `install-launch-intent.json`, `install-result.json`: root-owned0600.
 
-Claims use exclusive no-follow creates, fsync and a host lock. The immutable JSON
+Claims use exclusive no-follow creates, fsync and a host lock. Immutable claim JSON
 binds the original request, controller and receiving run ID. Partial claims stay
 consumed. Another run, reused nonce/comment, symlink, changed prior digest/pointers,
-expired request or changed receipt refuses. A second check immediately precedes the
-existing installer. There is no automatic cleanup, receipt replacement or retry.
-Credential exchange/key registration happen before the claim: replay protection
-prevents duplicate staging/install through this route, not repeated authentication.
-The lock serializes claims; it does not fence outside operators or business workers.
-Deployment concurrency and real operator coordination remain necessary.
+expired request or changed receipt refuses. No automatic cleanup, receipt replacement
+or retry is allowed. Root-private staging refuses preexisting attempt directories.
+The temporary artifact download URL is data in runner stdin only and is not persisted
+in host receipts or uploaded artifacts. The pinned transfer validator checks the ZIP,
+archive/checksum and installer digest before any release bytes are staged.
+
+**Authorization timing:** expiry is a deadline for starting staging mutations and
+installation, not for killing work already admitted. On-host checks run before
+claim/staging creation, before each staged-file open/write, and immediately before
+installer invocation. Receipt ownership and the actual rollback pointers/digest are
+rechecked after download/staging. One flock remains held through download, staging,
+installer completion and the existing installer's rollback; the child inherits the
+lock FD so losing the wrapper alone does not release exclusion while that child lives.
+The lock does not fence outside operators or business workers: existing deployment
+concurrency and real operator coordination remain necessary.
+
+**Completion/observation limits:** pre-install HTTP connect/read waits use 30-second
+timeouts and download chunks have a 120-second monotonic budget (an in-progress read
+can add up to its socket timeout). The receiving job retains its 25-minute observation
+bound. After an authorized installer start, expiry never triggers TERM/KILL; installation
+and rollback may finish after expiry. The installer has no audited interruption-safe
+hard deadline, so this candidate does not claim guaranteed bounded host completion.
+SIGHUP is ignored and installer streams go to root-private files, reducing disconnect
+risk without claiming durable supervision. If SSH/runner observation ends without a
+terminal result, outcome is **UNKNOWN/UNVERIFIED**: preserve consumed claims, lock and
+logs, reconcile read-only, and never automatically retry or assume rollback succeeded.
+Terminal completion evidence may be written after expiry as part of the admitted
+transaction. Credential exchange/key registration precede the host claim, so replay
+protection prevents repeated staging/install, not repeated authentication.
 
 The existing deploy operation itself changes Test release/runtime configuration
 and restarts its gateway. Those effects need a per-release authorization; the
