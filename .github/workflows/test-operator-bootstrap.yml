@@ -1,0 +1,153 @@
+name: Test inspection-only bounded bootstrap
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_BOOTSTRAP_ENABLED }}
+  OPERATOR_PR_NUMBER: ${{ vars.ROBIE_TEST_OPERATOR_PR_NUMBER }}
+  OPERATOR_PR_ID: ${{ vars.ROBIE_TEST_OPERATOR_PR_ID }}
+  OPERATOR_CONTROLLER_TREE: ${{ vars.ROBIE_TEST_OPERATOR_CONTROLLER_TREE }}
+  OPERATOR_ACTOR_IDS: '320188404'
+  OPERATOR_SETUP_COMMIT: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+  OPERATOR_EVENT_PROOF_RUN_ID: ${{ vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_RUN_ID }}
+
+jobs:
+  authorize:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'streetsmart-insurance/robie-hermes' &&
+      vars.ROBIE_TEST_OPERATOR_BOOTSTRAP_ENABLED == 'BOOTSTRAP_INSPECT_V1' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/robie-test bootstrap-inspect ')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('OPERATOR_SETUP_COMMIT', '')
+              tree = os.environ.get('OPERATOR_CONTROLLER_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+          persist-credentials: false
+      - name: Validate fresh command and current actor permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+      - name: Require successful connector proof for the pinned controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_setup_proof.py
+
+  bootstrap:
+    needs: authorize
+    if: needs.authorize.result == 'success' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: robie-hermes-test-deploy
+      cancel-in-progress: false
+    environment: Test-Operator-Setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('OPERATOR_SETUP_COMMIT', '')
+              tree = os.environ.get('OPERATOR_CONTROLLER_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+          persist-credentials: false
+      - name: Revalidate authorization and expiry after queue or environment wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+      - name: Require successful connector proof for the pinned controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_setup_proof.py
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Require existing instance OS Login before temporary registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          value=$(gcloud compute instances describe hermes-test-01 \
+            --project=streetsmart-hermes-poc --zone=us-east1-b \
+            --format='value(metadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          test "${value^^}" = TRUE
+      - name: Register approved one-hour OS Login key
+        env:
+          OSLOGIN_SSH_KEY_TTL: 1h
+        run: bash scripts/ensure-gcloud-ssh-key.sh
+      - name: Render only the fixed reviewed inspection bootstrap
+        run: python3 -I -B scripts/test_operator_bootstrap.py > "${RUNNER_TEMP}/inspection-bootstrap.py"
+      - name: Install fixed inspection helper and config through existing root route
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh hermes-test-01 \
+            --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            --ssh-key-file="${HOME}/.ssh/google_compute_engine" --ssh-key-expire-after=1h \
+            --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 \
+            --command='sudo -n /usr/bin/python3 -I -B -' \
+            < "${RUNNER_TEMP}/inspection-bootstrap.py" > "${RUNNER_TEMP}/inspection-bootstrap-result.json"
+          python3 -c 'import hashlib,json,pathlib,os; d=json.loads(pathlib.Path(os.environ["RUNNER_TEMP"],"inspection-bootstrap-result.json").read_text()); assert d["host"] == "hermes-test-01" and d["controller_commit"] == os.environ["OPERATOR_SETUP_COMMIT"]; assert d["helper_sha256"] == hashlib.sha256(pathlib.Path("scripts/test_operator_inspect.py").read_bytes()).hexdigest(); assert d["stopped_operations_enabled_by_bootstrap"] is False and d["runtime_changed"] is False'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-inspection-bootstrap-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/operator-request.json
+            ${{ runner.temp }}/controller-evidence.json
+            ${{ runner.temp }}/bootstrap-proof.json
+            ${{ runner.temp }}/inspection-bootstrap-result.json
+          if-no-files-found: error

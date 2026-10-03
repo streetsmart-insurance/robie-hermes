@@ -1549,7 +1549,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._allow_next_thinking_card(
                 getattr(getattr(event, "source", None), "chat_id", None)
             )
-            await self.handle_message(event)
+            await self._handle_conversation_only(event)
             return
         try:
             from robie_job_engine.playwright_observability import bind_current_playwright_job
@@ -1842,6 +1842,82 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         current["watchdog"] = watchdog
 
+    def set_message_handler(self, handler) -> None:
+        # Only the completed gateway callback, never model metadata/progress,
+        # may seal the exact final text for a no-job conversational turn.
+        async def finished(event):
+            from robie_job_engine.conversation_reply import current_reply
+            scope = current_reply()
+            try:
+                response = await handler(event)
+            except BaseException:
+                if scope is not None and scope.adapter is self:
+                    scope.revoked = True
+                raise
+            if scope is not None and scope.adapter is self:
+                from robie_job_engine.conversation_policy import informational_answer
+                if isinstance(response, str) and response.strip():
+                    response = informational_answer(response)
+                scope.seal(event, response)
+            return response
+        super().set_message_handler(finished)
+
+    async def _handle_conversation_only(self, event: MessageEvent) -> None:
+        from robie_job_engine.conversation_policy import (
+            classify, OPERATIONAL, INFORMATIONAL, STATUS, CLARIFY_REPLY, status_answer,
+        )
+        from robie_job_engine.chat_turn_control import sender_is_allowed
+        from robie_job_engine.conversation_reply import bind
+        from robie_job_engine.turn_finalization import (
+            install_tool_call_text_guard, _agent_class,
+        )
+        source = getattr(event, "source", None)
+        raw = getattr(event, "raw_message", None) or {}
+        sender = raw.get("sender") or {}
+        actor = str(getattr(source, "user_id", "") or "")
+        space = str(getattr(source, "chat_id", "") or "")
+        message = str(getattr(event, "message_id", "") or "")
+        attachments = self._chat_job_attachment_kwargs(event)
+        # Trusted identity comes from the normalized transport, not display
+        # names or user-supplied parameters. Missing context stays fail closed.
+        if (not actor or actor != str(sender.get("email") or sender.get("name") or "")
+            or sender.get("type") != "HUMAN"
+            or not sender_is_allowed(actor)
+            or not re.fullmatch(r"spaces/[^/]+/messages/[^/]+", message)
+            or not message.startswith(space + "/messages/")
+            or raw.get("name") != message
+            or (getattr(source, "thread_id", None) and (
+                not re.fullmatch(r"spaces/[^/]+/threads/[^/]+", str(source.thread_id))
+                or not str(source.thread_id).startswith(space + "/threads/")
+                or (raw.get("thread") or {}).get("name") != source.thread_id))
+            or (not getattr(source, "thread_id", None)
+                and getattr(source, "chat_type", None) != "dm")
+            or not getattr(event, "_robie_conversation_generation", None)
+            or str(event.text or "").startswith("/")
+            or classify(event.text, attachments=attachments["expected_attachment_count"]) == OPERATIONAL):
+            return
+        lane = classify(event.text, attachments=attachments["expected_attachment_count"])
+        from robie_job_engine.chat_turn_control import session_is_busy
+        busy = lane == INFORMATIONAL and session_is_busy(self, event)
+        if lane != INFORMATIONAL or busy:
+            from robie_job_engine.runtime_env import chat_routing_env
+            text = (await asyncio.to_thread(status_answer, ROBIE_JOB_DB, event,
+                    environment=chat_routing_env())) if lane == STATUS else (
+                        "This thread already has an active turn. Please ask the explanation question after it finishes. "
+                        "No new actions were taken for this reply." if busy else CLARIFY_REPLY)
+            with bind(self, event) as scope:
+                scope.seal(event, text)
+                await self.send(space, text, reply_to=message,
+                    metadata={"thread_id": getattr(source, "thread_id", None)})
+            return
+        install_tool_call_text_guard()
+        cls = _agent_class()
+        if not cls or not getattr(getattr(cls, "_execute_tool_calls", None),
+                                   "_robie_conversation_tool_guard", False):
+            return
+        with bind(self, event):
+            await self.handle_message(event)
+
     async def _begin_fresh_chat_turn(self, event: MessageEvent) -> None:
         """Drop prior Q&A so this message is answered on its own."""
         from robie_job_engine.chat_turn_control import fresh_turn_history
@@ -1866,6 +1942,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         This posts on the current call stack, into this job's thread, and
         does not attach the stopped job to the space.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return None
         from robie_job_engine.chat_turn_control import (
             record_chat_delivery,
             request_agent_stop,
@@ -3283,6 +3362,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 _log_inbound_drop("message could not be read")
                 return
 
+            from robie_job_engine.conversation_reply import advance
+            advance(self, event)
+
             # A live clarify reply wakes its exact owner before any busy/defer
             # or generic resume path can start a second agent session.
             text = (event.text or "").strip()
@@ -3307,13 +3389,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
             queue = None
             context = None
             interaction = {}
-            source_space = envelope.get("space") or msg.get("space") or {}
-            source_space_type = str(
-                source_space.get("type") or source_space.get("spaceType") or ""
-            ).upper()
             if (
                 event.source is not None
-                and source_space_type in {"DIRECT_MESSAGE", "DM"}
                 and not text.casefold().startswith(("/approve", "/deny"))
             ):
                 queue = await asyncio.to_thread(self._durable_chat_queue)
@@ -3321,12 +3398,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     queue.active_conversation_job, event.source.chat_id
                 )
                 interaction = dict((context or {}).get("interaction_state") or {})
+                if interaction.get("awaiting") == "human_input":
+                    from robie_job_engine.conversation_policy import pending_input_owned, pending_reply_is_conversation
+                    if not await asyncio.to_thread(pending_input_owned, ROBIE_JOB_DB, event,
+                            context, environment=route):
+                        _log_inbound_drop("pending human input owner mismatch")
+                        return
+                    if pending_reply_is_conversation(text):
+                        # A status/explanation request does not answer the saved
+                        # field or detach its still-pending Job correlation.
+                        await self._handle_conversation_only(event)
+                        return
                 if (
                     interaction.get("awaiting") == "human_input"
                     and classify_human_reply(text, interaction) == "NEW_INTENT"
                 ):
                     # Preserve the old Job and queue row as diagnostic history,
-                    # but remove the active DM correlation before routing the
+                    # but remove the active owned correlation before routing the
                     # new request. It can no longer consume this message as a
                     # missing-field reply.
                     await asyncio.to_thread(
@@ -3334,6 +3422,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     )
                     context = None
                     interaction = {}
+            # Owned pending values must reach the durable resume handler. They
+            # are not ordinary conversational turns (e.g. a requested year).
+            from robie_job_engine.conversation_policy import classify, OPERATIONAL
+            if (interaction.get("awaiting") != "human_input"
+                and classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL):
+                await self._handle_conversation_only(event)
+                return
             admin_response = await asyncio.to_thread(
                 handle_admin_command,
                 ROBIE_JOB_DB,
@@ -3508,6 +3603,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             text,
                         )
                         return
+
+            if classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL:
+                await self._handle_conversation_only(event)
+                return
 
             if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
                 queue = await asyncio.to_thread(self._durable_chat_queue)
@@ -3694,6 +3793,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return
         message_id = event.message_id or f"unidentified:{id(event)}"
         text = redact_text(text)
+        from robie_job_engine.conversation_policy import classify, OPERATIONAL
+        if classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL:
+            await self._handle_conversation_only(event)
+            return
         await self._announce_expired_questions(event)
         attachment_kwargs = self._chat_job_attachment_kwargs(event)
         attachment_count = attachment_kwargs["expected_attachment_count"]
@@ -3803,7 +3906,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 self._allow_next_thinking_card(
                     getattr(getattr(event, "source", None), "chat_id", None)
                 )
-                await self.handle_message(event)
+                if job_id:
+                    await self.handle_message(event)
+                else:
+                    await self._handle_conversation_only(event)
                 return
         # Test AND Production: operational bounded work goes through
         # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
@@ -4888,6 +4994,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         job_id: str | None,
     ) -> bool:
         """Post the gateway's one line. Does not run the model's send path."""
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return False
         api = getattr(self, "_chat_api", None)
         if api is None or not space or not text:
             return False
@@ -5125,6 +5234,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
         If ``content`` exceeds MAX_MESSAGE_LENGTH, the first chunk patches
         the typing card (if any), subsequent chunks are new messages.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        conversation = current_reply()
+        if conversation is not None:
+            if not conversation.permits(self, chat_id, content, reply_to, metadata):
+                return SendResult(success=False, error="conversation reply ownership refused")
+            body = {"text": content}
+            if conversation.lane[1]:
+                body["thread"] = {"name": conversation.lane[1]}
+            def still_owned():
+                if not conversation.current() or conversation.consumed:
+                    raise RuntimeError("conversation reply was superseded")
+            try:
+                result = await self._create_message(chat_id, body,
+                    request_id=conversation.request_id, before_request=still_owned)
+                if not result.success or not str(result.message_id or "").startswith(chat_id + "/messages/"):
+                    return SendResult(success=False, error="conversation reply receipt missing")
+                conversation.consumed = True
+                return result
+            except asyncio.CancelledError:
+                conversation.revoked = True
+                raise
+            except Exception:
+                return SendResult(success=False, error="conversation reply delivery failed")
         delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
         job_id = str((metadata or {}).get("robie_job_id") or "").strip() or None
         if delivery_kind == "idle_stop":
@@ -5562,6 +5694,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         card: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         body: Dict[str, Any] = {"cardsV2": [card]}
         meta = metadata if isinstance(metadata, dict) else {}
         job_id = str(meta.get("robie_job_id") or "").strip() or None
@@ -5714,6 +5849,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         session_key: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         from robie_job_engine.user_reply import format_user_reply
 
         question = format_user_reply(question)
@@ -5873,6 +6011,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         non-success; the gateway falls back to ``send()`` for the next
         edit cycle.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         if not message_id:
             return SendResult(success=False, error="missing message_id")
         from robie_job_engine.chat_turn_control import (
@@ -5952,6 +6093,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         partial preview) work correctly when explicit deletion is the
         right call.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return False
         if not message_id:
             return False
 
@@ -5983,6 +6127,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self, message_name: str, body: Dict[str, Any]
     ) -> SendResult:
         """Update a message's text (and optionally cards) in-place."""
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         from robie_job_engine.user_reply import format_user_reply
 
         if isinstance(body.get("text"), str):
@@ -6406,7 +6553,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _create_message(
         self, chat_id: str, body: Dict[str, Any], job_id: str | None = None,
-        *, request_id: str | None = None,
+        *, request_id: str | None = None, before_request=None,
     ) -> SendResult:
         """POST spaces/{space}/messages via REST, returning SendResult.
 
@@ -6421,6 +6568,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
         See https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create
         """
         from robie_job_engine.user_reply import format_user_reply
+        from robie_job_engine.conversation_reply import current_reply
+        conversation = current_reply()
+        if conversation is not None:
+            expected = {"text": conversation.final_text}
+            if conversation.lane[1]:
+                expected["thread"] = {"name": conversation.lane[1]}
+            if (not conversation.current() or conversation.consumed
+                or not conversation.final_text or chat_id != conversation.lane[0]
+                or body != expected or request_id != conversation.request_id
+                or before_request is None or job_id):
+                return SendResult(success=False, error="conversation POST ownership refused")
 
         if not request_id and isinstance(body.get("text"), str):
             body = dict(body)
@@ -6443,6 +6601,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 kwargs["messageReplyOption"] = "REPLY_MESSAGE_OR_FAIL"
 
         def _do_create() -> Dict[str, Any]:
+            if before_request is not None:
+                before_request()
             return (
                 self._chat_api.spaces()
                 .messages()
@@ -6450,6 +6610,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 .execute(http=self._new_authed_http())
             )
 
+        receipt_read = False
         try:
             resp = await self._call_with_retry(_do_create, op_name="messages.create")
         except Exception as exc:
@@ -6463,11 +6624,34 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 ).execute(http=self._new_authed_http())
 
             resp = await self._call_with_retry(_read_existing, op_name="messages.get")
+            receipt_read = True
             observed_thread = resp.get("thread") or {}
             if resp.get("text") != body.get("text") or any(
                 observed_thread.get(key) != value for key, value in thread_meta.items()
             ):
                 raise ValueError("Chat delivery ID collision did not match original reply") from exc
+        if conversation is not None:
+            # A normal requestId replay can echo the requested body, while
+            # name is system-assigned (client messageId is only an alias).
+            # Read the stable alias on success too; only stored content proves
+            # delivery. Keep both sides of the identity binding explicit.
+            create_name = str(resp.get("name") or "")
+            if not receipt_read:
+                def _read_conversation_reply():
+                    return self._chat_api.spaces().messages().get(
+                        name=f"{chat_id}/messages/client-{request_id}"
+                    ).execute(http=self._new_authed_http())
+                resp = await self._call_with_retry(
+                    _read_conversation_reply, op_name="messages.get")
+            observed_name = str(resp.get("name") or "")
+            if (not re.fullmatch(re.escape(chat_id) + r"/messages/[^/]+", observed_name)
+                or create_name != observed_name
+                or resp.get("clientAssignedMessageId", f"client-{request_id}") != f"client-{request_id}"
+                or resp.get("text") != body.get("text")
+                or resp.get("deleteTime")
+                or any((resp.get("thread") or {}).get(k) != v
+                       for k, v in thread_meta.items())):
+                return SendResult(success=False, error="conversation readback did not match exact reply")
         # Track outbound destination thread in the persistent count store
         # so a future user "Reply in thread" on the bot's message resolves
         # to a known thread (prev_count >= 1 → side thread). Without
@@ -6492,7 +6676,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     "[GoogleChat] could not store created job thread",
                     exc_info=True,
                 )
-        return SendResult(success=True, message_id=resp.get("name"))
+        return SendResult(success=True, message_id=resp.get("name"), raw_response=resp)
 
     def _retire_typing_card_now(self, chat_id: str) -> None:
         """Patch a leftover thinking card from the synchronous outcome path.
@@ -6502,6 +6686,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         rewrite it. A dot is the retire marker. Deleting the card leaves a
         tombstone.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return None
         if not chat_id:
             return
         messages = getattr(self, "_typing_messages", None)
@@ -6528,6 +6715,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _retire_suppressed_typing_card(self, chat_id: str) -> None:
         """Patch a leftover thinking card so it cannot become "(no reply)"."""
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return None
         current = self._typing_messages.get(chat_id)
         if not current or current == _TYPING_CONSUMED_SENTINEL:
             return
@@ -6618,6 +6808,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the task runs to completion and the msg_id lands in the slot
         regardless.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return None
         # A stop cleared this space. A typing tick still running for that
         # stop must not create a card the next message would inherit.
         dropped = getattr(self, "_typing_drop", None)
@@ -6758,6 +6951,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         never runs) are reaped by ``on_processing_complete`` — see that
         hook for the patch-to-final-state cleanup.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return None
         current = self._typing_messages.get(chat_id)
         if not current:
             return
@@ -6843,6 +7039,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         creating a fresh "Hermes is thinking…" card during any subsequent
         attachment send (which would later be reaped as "(no reply)").
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         current = self._typing_messages.get(chat_id)
         if not current or current == _TYPING_CONSUMED_SENTINEL:
             return None
@@ -6873,6 +7072,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the image (caption + URL) — same anti-tombstone pattern used by
         ``send()``. Otherwise create a new message.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         job_id, thread_spec = self._media_thread_spec(chat_id, metadata, reply_to)
         text_parts: List[str] = []
         if caption:
@@ -6899,6 +7101,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         _job_id, thread_spec = self._media_thread_spec(
             chat_id, kwargs.get("metadata"), reply_to
         )
@@ -6919,6 +7124,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         _job_id, thread_spec = self._media_thread_spec(
             chat_id, kwargs.get("metadata"), reply_to
         )
@@ -6939,6 +7147,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         _job_id, thread_spec = self._media_thread_spec(
             chat_id, kwargs.get("metadata"), reply_to
         )
@@ -6958,6 +7169,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs: Any,
     ) -> SendResult:
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         _job_id, thread_spec = self._media_thread_spec(
             chat_id, kwargs.get("metadata"), reply_to
         )
@@ -6978,6 +7192,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Google Chat has no native animation type; fall back to send_image."""
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         return await self.send_image(
             chat_id, animation_url, caption=caption,
             reply_to=reply_to, metadata=metadata,
@@ -7161,6 +7378,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         caption (or a single space when none) so it retires without a
         tombstone, then create the attachment message.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         if not os.path.exists(path):
             return SendResult(success=False, error=f"file not found: {path}")
 
@@ -7313,6 +7533,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         file isn't lost. Returns ``success=False`` so callers know the
         attachment did not land.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        if current_reply() is not None:
+            return SendResult(success=False, error="conversation supports only its owned final text")
         lines = []
         if caption:
             lines.append(caption)
