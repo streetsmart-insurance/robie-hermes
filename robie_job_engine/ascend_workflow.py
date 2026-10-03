@@ -24,6 +24,14 @@ from robie_job_engine.ascend_api import (
     configured_client,
 )
 from robie_job_engine.ezlynx_note_poster import EZLynxAgreementPoster
+from robie_job_engine.pfa_completion import (
+    PfaNotificationOutbox,
+    build_expected_from_quote,
+    default_outbox_path,
+    drain_outbox,
+    enqueue_completion_notification,
+    verify_program_against_request,
+)
 from robie_job_engine.quote_extractor import ExtractedQuote, QuoteExtractor
 
 logger = logging.getLogger(__name__)
@@ -119,10 +127,17 @@ class AscendWorkflowManager:
         client_factory: Callable[[], AscendApiClient] = configured_client,
         ezlynx_poster: Optional[EZLynxAgreementPoster] = None,
         quote_extractor: Optional[QuoteExtractor] = None,
+        notification_sender: Optional[Any] = None,
+        outbox_path: Optional[str] = None,
     ):
         self.client_factory = client_factory
         self.ezlynx_poster = ezlynx_poster or EZLynxAgreementPoster()
         self.quote_extractor = quote_extractor or QuoteExtractor()
+        # PFA completion guarantee: optional Gmail sender for the durable
+        # notification outbox. When None, notifications are enqueued and the
+        # daily reconciler (or a later drain) sends them; nothing is lost.
+        self.notification_sender = notification_sender
+        self.outbox_path = outbox_path or default_outbox_path()
 
     def process_quote_request(
         self,
@@ -684,6 +699,41 @@ class AscendWorkflowManager:
         program_id = destination.get("program_id")
         program_url = destination.get("program_url") or f"https://checkout.useascend.com/streetsmart_insurance_agency/overview?program_id={program_id}"
 
+        # 6b. Verify-before-complete (PFA completion guarantee). Read the
+        # program and its billables back from Ascend and diff every request
+        # field. ANY mismatch -- or an unreadable read-back -- fails closed
+        # HERE: no checkout link is ever composed or sent for an unverified
+        # program. (Astra Gold, 2026-10-02: the agreement was created but
+        # never verified and the requester was never notified.)
+        _expected = build_expected_from_quote(
+            quote,
+            payload.get("billables") or [],
+            requester_email=sender_email,
+            requester_name=sender_name,
+        )
+        try:
+            _verification = verify_program_against_request(client, program_id, _expected)
+        except Exception as exc:
+            logger.warning("Ascend verification read-back failed: %s", exc)
+            return WorkflowResult(
+                status="ERROR",
+                quote=quote,
+                error=(
+                    f"Ascend verification read-back failed for program {program_id}: "
+                    f"{exc}. The agreement is NOT verified; no checkout link was sent."
+                ),
+            )
+        if not _verification.ok:
+            return WorkflowResult(
+                status="ERROR",
+                quote=quote,
+                error=(
+                    f"Ascend verification failed for program {program_id}: "
+                    + "; ".join(_verification.diffs)
+                    + ". The agreement is NOT verified; no checkout link was sent."
+                ),
+            )
+
         # 7. File Agreement into EZLynx
         ezlynx_result = None
         # Only attempt EZLynx filing with a valid applicant ID.
@@ -744,6 +794,37 @@ class AscendWorkflowManager:
             "",
             "Robie was here",
         ])
+        if _verification.summary and _verification.summary not in "\n".join(body_lines):
+            body_lines.extend(["", _verification.summary])
+
+        # 8b. Completion guarantee: enqueue the durable notification and send
+        # it now (best effort). The outbox retries until Gmail confirms the
+        # send; the daily reconciler catches anything missed. When the send
+        # is confirmed here, the reply fields are cleared so the caller does
+        # not send a duplicate email. When no sender is wired (or the send
+        # fails), the reply email is kept as today and the outbox record
+        # stays pending for retry.
+        _email_subject = subject
+        _email_body = "\n".join(body_lines)
+        try:
+            _outbox = PfaNotificationOutbox(self.outbox_path)
+            enqueue_completion_notification(
+                _outbox,
+                program_id=program_id,
+                program_url=program_url,
+                requester_email=sender_email,
+                requester_name=greeting_name,
+                subject=subject,
+                body=_email_body,
+                verification_summary=_verification.summary,
+            )
+            if self.notification_sender is not None:
+                _drain_stats = drain_outbox(_outbox, self.notification_sender)
+                if _drain_stats.get("sent", 0) > 0:
+                    _email_subject = ""
+                    _email_body = ""
+        except Exception as exc:
+            logger.warning("PFA completion notification failed: %s", exc)
 
         return WorkflowResult(
             status="COMPLETED",

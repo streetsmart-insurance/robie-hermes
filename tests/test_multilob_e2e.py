@@ -31,11 +31,31 @@ Expiration: 01/01/2028
 """
 
 
+class FakeTransport:
+    """Minimal fake transport serving the verifier's read-back."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def request(self, method, path, query=None):
+        if method == "GET" and path == "/billables":
+            return {"data": self._client._billable_records()}
+        raise AssertionError(f"unexpected {method} {path}")
+
+
 class FakeAscendClient:
-    """Minimal fake matching the methods the workflow calls."""
+    """Minimal fake matching the methods the workflow calls.
+
+    Persists what was created so get_program / transport.request can serve
+    the verify-before-complete read-back, mirroring Ascend's record shape.
+    """
 
     def __init__(self):
         self.created_billables = []
+        self.transport = FakeTransport(self)
+        self._insured_name = ""
+        self._insured_address = {}
+        self._insured_contact = {}
 
     def find_program_by_policy(self, policy_number):
         return None  # no duplicates
@@ -57,6 +77,9 @@ class FakeAscendClient:
         return "12345678-1234-5678-1234-567812345678"
 
     def find_or_create_insured(self, **kwargs):
+        self._insured_name = kwargs.get("business_name") or ""
+        self._insured_address = dict(kwargs.get("address") or {})
+        self._insured_contact = dict(kwargs.get("contact") or {})
         return ("12345678-1234-5678-1234-567812345678", False)
 
     def create_program(self, payload):
@@ -64,8 +87,50 @@ class FakeAscendClient:
                 {"program_url": "https://example.com/p/prog-123"})
 
     def create_billable(self, payload):
-        self.created_billables.append(payload)
+        self.created_billables.append(dict(payload))
         return (f"b-{len(self.created_billables)}", {})
+
+    def get_program(self, program_id):
+        addr = self._insured_address
+        contact = self._insured_contact
+        return {
+            "id": program_id,
+            "status": "ready_for_checkout",
+            "insured": {
+                "business_name": self._insured_name,
+                "mailing_address_street_one": addr.get("mailing_address_street_one") or "",
+                "mailing_address_city": addr.get("mailing_address_city") or "",
+                "mailing_address_state": addr.get("mailing_address_state") or "",
+                "mailing_address_zip_code": addr.get("mailing_address_zip_code") or "",
+                "insured_contacts": [{
+                    "first_name": contact.get("first_name") or "",
+                    "last_name": contact.get("last_name") or "",
+                    "email": contact.get("email") or "",
+                    "phone": contact.get("phone") or "",
+                }],
+            },
+        }
+
+    def _billable_records(self):
+        records = []
+        for b in self.created_billables:
+            rate = b.get("organization_commission_rate") or 0
+            rec = {
+                "billable_identifier": b.get("billable_identifier"),
+                "carrier": {"identifier": b.get("carrier_identifier")},
+                "premium_cents": b.get("premium_cents"),
+                "taxes_and_fees_cents": b.get("taxes_and_fees_cents", 0),
+                "policy_fee_cents": b.get("policy_fee_cents", 0),
+                "agency_fees_cents": b.get("agency_fees_cents", 0),
+                "seller_commission_rate": rate,
+                "seller_commission_amount_cents": round((b.get("premium_cents") or 0) * rate),
+                "effective_date": b.get("effective_date"),
+                "expiration_date": b.get("expiration_date"),
+            }
+            if b.get("wholesaler_identifier"):
+                rec["wholesaler"] = {"identifier": b["wholesaler_identifier"]}
+            records.append(rec)
+        return records
 
 
 class TestMultiLobEndToEnd(unittest.TestCase):
@@ -76,12 +141,14 @@ class TestMultiLobEndToEnd(unittest.TestCase):
         quote.carrier_identifier = "carr-national-indemnity"
         quote.commission_rate = 0.10
         quote.mailing_address = {
-            "street": "123 Main St", "city": "Newark",
-            "state": "NJ", "zip": "07101",
+            "mailing_address_street_one": "123 Main St",
+            "mailing_address_city": "Newark",
+            "mailing_address_state": "NJ",
+            "mailing_address_zip_code": "07101",
         }
         quote.primary_contact = {
-            "name": "Test Person", "email": "test@example.com",
-            "phone": "555-0100",
+            "first_name": "Test", "last_name": "Person",
+            "email": "test@example.com", "phone": "555-0100",
         }
 
         fake_client = FakeAscendClient()
