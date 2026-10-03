@@ -43,7 +43,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_stopped_operations_require_separate_enablement_and_exact_grammar(self):
         original = self.fresh['body']
-        for operation in ('hold', 'install', 'verify'):
+        for operation in ('prepare-hold', 'hold', 'install', 'verify'):
             self.fresh['body'] = self.event['comment']['body'] = original.replace('inspect', operation)
             self.config['enabled'] = 'INSPECT_ONLY_V1'
             with self.assertRaises(ValueError):

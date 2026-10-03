@@ -4,8 +4,15 @@
   "host": "hermes-test-01",
   "commit": "42e872f4c86fc4b4e37f859fc390f0b7c832f373",
   "sha256": "876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064",
-  "operations": ["hold", "install", "verify"],
-  "actor_ids": [320188404],
+  "operations": [
+    "prepare-hold",
+    "hold",
+    "install",
+    "verify"
+  ],
+  "actor_ids": [
+    320188404
+  ],
   "issue": null,
   "helper_sha256": null,
   "not_before": null,
@@ -21,5 +28,10 @@
   "gateway_already_inactive": false,
   "cron_outage_included": false,
   "no_resume": true,
-  "expected_prior_target": null
+  "expected_prior_target": null,
+  "prepare_hold_authorized": false,
+  "auxiliary_units": [],
+  "worker_lock": null,
+  "safe_stop": {},
+  "drain_timeout_seconds": 600
 }

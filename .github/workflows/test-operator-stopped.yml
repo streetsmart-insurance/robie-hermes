@@ -18,7 +18,8 @@ jobs:
       github.repository == 'streetsmart-insurance/robie-hermes' &&
       vars.ROBIE_TEST_STOPPED_OPERATOR_ENABLED == 'STOPPED_OPERATOR_V1' &&
       !github.event.issue.pull_request &&
-      (startsWith(github.event.comment.body, '/robie-test hold ') ||
+      (startsWith(github.event.comment.body, '/robie-test prepare-hold ') ||
+       startsWith(github.event.comment.body, '/robie-test hold ') ||
        startsWith(github.event.comment.body, '/robie-test install ') ||
        startsWith(github.event.comment.body, '/robie-test verify '))
     runs-on: ubuntu-latest

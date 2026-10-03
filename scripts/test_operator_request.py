@@ -10,7 +10,7 @@ REPO = 'streetsmart-insurance/robie-hermes'
 REPO_ID = 1343750842
 RELEASE = '42e872f4c86fc4b4e37f859fc390f0b7c832f373'
 DIGEST = '876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064'
-COMMAND = re.compile(r'/robie-test (inspect|hold|install|verify) commit=([0-9a-f]{40}) sha256=([0-9a-f]{64}) nonce=([0-9a-f]{32}) expires=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)')
+COMMAND = re.compile(r'/robie-test (inspect|prepare-hold|hold|install|verify) commit=([0-9a-f]{40}) sha256=([0-9a-f]{64}) nonce=([0-9a-f]{32}) expires=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)')
 
 
 def require(ok):
@@ -37,7 +37,7 @@ def validate(event, fresh, permission, config, now):
     require(match is not None)
     operation, commit, digest, nonce, expires = match.groups()
     require(operation == 'inspect' if config['enabled'] == 'INSPECT_ONLY_V1'
-            else operation in {'hold', 'install', 'verify'})
+            else operation in {'prepare-hold', 'hold', 'install', 'verify'})
     require(commit == RELEASE and digest == DIGEST)
     expiry = dt.datetime.strptime(expires, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
     created = dt.datetime.fromisoformat(fresh['created_at'].replace('Z', '+00:00'))

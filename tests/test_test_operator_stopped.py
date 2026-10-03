@@ -343,3 +343,191 @@ def test_stopped_workflow_has_no_freeform_shell_or_pre_auth_concurrency():
     assert '${{ github.event.comment.body }}' not in text
     assert '/usr/local/libexec/robie-test-stopped-operator.py operate' in text
     assert 'bash scripts/build-release.sh' not in text
+
+
+def prep_plan(host, monkeypatch):
+    host.plan.update(prepare_hold_authorized=True, workers_drained=False,
+        operations=['prepare-hold', 'install', 'verify'], auxiliary_units=[f'fixture-{i}.service' for i in range(6)],
+        worker_lock=dict(type='flock', initial_host_pid_namespace=True, path=str(op.ROOT / 'worker.lock'),
+                         contract_reference='fixture-reviewed-contract', device=1, inode=2),
+        drain_timeout_seconds=2, safe_stop={})
+    for unit in host.plan['auxiliary_units']:
+        host.states[unit] = dict(LoadState='not-found', ActiveState='inactive', SubState='dead',
+                                MainPID='0', ControlPID='0', UnitFileState='', ControlGroup='')
+    monkeypatch.setattr(op, 'process_inventory', lambda: {})
+    monkeypatch.setattr(op, 'worker_lock_observation', lambda plan: {'owners': [], 'device': 1, 'inode': 2})
+    monkeypatch.setattr(op, 'safe_stop_contract', lambda *args, **kwargs: {})
+    base = op.command
+    def command(args, **kwargs):
+        if args[1] == 'stop' and not args[2].endswith('.timer'):
+            host.calls.append(args)
+            host.states[args[2]].update(ActiveState='inactive', SubState='dead', MainPID='0', ControlPID='0')
+            return ''
+        return base(args, **kwargs)
+    monkeypatch.setattr(op, 'command', command)
+    return host.plan
+
+
+def test_prepare_failed_gateway_records_original_then_normalizes_empty_service(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    host.states['robie-gateway.service'].update(ActiveState='failed', SubState='failed')
+    op.validate_approval(plan, request('prepare-hold'), NOW)
+    db = op.DB.read_bytes()
+    result = op.hold(plan, 'approval-hash', host.guard, preparing=True)
+    assert result['status'] == 'HOLD ESTABLISHED'
+    before = op.read_private(op.ATTEMPT / 'prepare-before.json')
+    assert before['receipt']['prior_units']['robie-gateway.service']['active'] == 'failed'
+    assert op.DB.read_bytes() == db
+    assert ['stop', 'robie-gateway.service'] in [call[1:] for call in host.calls]
+    assert all(call[1] not in {'start', 'restart', 'unmask', 'reset-failed', 'kill'} for call in host.calls)
+
+
+@pytest.mark.parametrize('field,value', [('auxiliary_units', []), ('worker_lock', {}),
+                                        ('drain_timeout_seconds', 0)])
+def test_prepare_missing_contract_refused_before_journal(host, monkeypatch, field, value):
+    plan = prep_plan(host, monkeypatch)
+    plan[field] = value
+    with pytest.raises((ValueError, KeyError)):
+        op.hold(plan, 'hash', host.guard, preparing=True)
+    assert not op.ATTEMPT.exists()
+
+
+def test_prepare_running_gateway_refused_before_fencing(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    host.states['robie-gateway.service'].update(ActiveState='active', MainPID='42')
+    with pytest.raises(ValueError, match='RUNNING_GATEWAY_REFUSED'):
+        op.hold(plan, 'hash', host.guard, preparing=True)
+    assert not op.ATTEMPT.exists()
+
+
+def test_prepare_waits_business_work_naturally_and_never_stops_it(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    host.states['robie-scheduler.service'].update(ActiveState='active', MainPID='42')
+    waited = []
+    def natural_exit(seconds):
+        waited.append(seconds)
+        host.states['robie-scheduler.service'].update(ActiveState='inactive', MainPID='0')
+    monkeypatch.setattr(op.time, 'sleep', natural_exit)
+    op.hold(plan, 'hash', host.guard, preparing=True)
+    assert waited
+    assert ['/usr/bin/systemctl', 'stop', 'robie-scheduler.service'] not in host.calls
+
+
+def test_prepare_expired_active_run_times_out_without_reconciling_or_receipt(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    with sqlite3.connect(op.DB) as con:
+        con.execute("INSERT INTO isolated_runs(status) VALUES ('ACTIVE')")
+    db = op.DB.read_bytes()
+    clock = iter([0, 0, 10])
+    monkeypatch.setattr(op.time, 'monotonic', lambda: next(clock))
+    with pytest.raises(ValueError, match='DRAIN_TIMEOUT'):
+        op.hold(plan, 'hash', host.guard, preparing=True)
+    assert (op.ATTEMPT / 'prepare-before.json').is_file()
+    assert not op.RECEIPT.exists()
+    assert op.DB.read_bytes() == db
+
+
+def test_prepare_unknown_schema_refused_before_masks(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    with sqlite3.connect(op.DB) as con:
+        con.execute('DROP TABLE isolated_runs')
+    with pytest.raises(ValueError, match='DATABASE_GUARD_REFUSED'):
+        op.hold(plan, 'hash', host.guard, preparing=True)
+    assert not op.ATTEMPT.exists()
+
+
+def test_timer_stop_contract_uses_only_unit_properties(monkeypatch):
+    fields = op.stop_fields('fixture.timer')
+    assert 'KillMode' not in fields and 'ExecStop' not in fields
+    values = {field: 'none' if field.endswith('Action') else '' for field in fields}
+    monkeypatch.setattr(op, 'command', lambda args: '\n'.join(f'{k}={v}' for k,v in values.items()))
+    plan = {'safe_stop': {'fixture.timer': dict(reviewed_handler_never_signals_children=True,
+        children_cannot_escape_cgroup=True, source_review_reference='fixture',
+        properties_sha256=hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest())}}
+    assert op.safe_stop_contract('fixture.timer', plan, {'MainPID':'0', 'ControlPID':'0', 'ActiveState':'active'}) == values
+
+
+def test_worker_lock_observer_reports_real_owner_without_acquiring(tmp_path, monkeypatch):
+    import fcntl
+    path = tmp_path / 'worker.lock'
+    path.touch(mode=0o600)
+    monkeypatch.setattr(op, 'protected', lambda *a, **kw: None)
+    info = path.stat()
+    real_readlink = os.readlink
+    monkeypatch.setattr(op.os, 'readlink', lambda p: 'fixture-host-pid-namespace'
+                        if str(p) in ('/proc/self/ns/pid', '/proc/1/ns/pid') else real_readlink(p))
+    plan = {'worker_lock': dict(path=str(path), device=info.st_dev, inode=info.st_ino)}
+    with path.open('rb') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        assert str(os.getpid()) in op.worker_lock_observation(plan)['owners']
+        assert path.stat().st_ino == info.st_ino and path.read_bytes() == b''
+    assert op.worker_lock_observation(plan)['owners'] == []
+
+
+def test_prepare_checks_auxiliary_units_again_on_install(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    op.hold(plan, 'hash', host.guard, preparing=True)
+    host.states[plan['auxiliary_units'][0]].update(ActiveState='active', MainPID='45')
+    with pytest.raises(ValueError, match='AUXILIARY_NOT_STOPPED'):
+        op.install(host.guard, {}, 'hash')
+    assert not (op.ATTEMPT / 'install-started.json').exists()
+
+
+def test_cron_waits_reparented_cgroup_child_before_stopping(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    host.states['cron.service'].update(ActiveState='active', MainPID='42', ControlGroup='/system.slice/cron.service')
+    main = {'parent':'1', 'start':'10', 'executable':'/usr/sbin/cron', 'cgroup':'0::/system.slice/cron.service'}
+    monkeypatch.setattr(op, 'process_inventory', lambda: {'42': main})
+    members = {'42', '99'}  # no direct PPID child in process inventory
+    monkeypatch.setattr(op, 'cgroup_members', lambda state: set(members) if state['MainPID']=='42' else set())
+    waits = []
+    def natural_exit(seconds):
+        assert ['/usr/bin/systemctl', 'stop', 'cron.service'] not in host.calls
+        assert (op.ATTEMPT / 'original-unit-files/cron.service').exists()
+        waits.append(seconds)
+        members.remove('99')
+    monkeypatch.setattr(op.time, 'sleep', natural_exit)
+    op.hold(plan, 'hash', host.guard, preparing=True)
+    assert waits and ['/usr/bin/systemctl', 'stop', 'cron.service'] in host.calls
+    assert all(call[1] != 'kill' for call in host.calls)
+
+
+def test_all_stop_contracts_validated_before_first_mutation(host, monkeypatch):
+    plan = prep_plan(host, monkeypatch)
+    host.states['cron.service'].update(ActiveState='active', MainPID='42')
+    def refuse_cron(unit, *args, **kwargs):
+        if unit == 'cron.service':
+            raise ValueError('UNKNOWN_STOP_SEMANTICS')
+    monkeypatch.setattr(op, 'safe_stop_contract', refuse_cron)
+    with pytest.raises(ValueError, match='UNKNOWN_STOP_SEMANTICS'):
+        op.hold(plan, 'hash', host.guard, preparing=True)
+    assert not op.ATTEMPT.exists()
+    assert not any(call[1] == 'stop' for call in host.calls)
+
+
+@pytest.mark.parametrize('field,value', [('KillMode','control-group'), ('SendSIGKILL','yes'),
+    ('SendSIGHUP','yes'), ('ExecStop','/unsafe'), ('Restart','always'),
+    ('RequiredBy','other.service'), ('UpheldBy','other.service'), ('TriggeredBy','other.timer')])
+def test_active_cron_unsafe_semantics_refused_before_signal(monkeypatch, field, value):
+    values = {name: 'none' if name.endswith('Action') else '' for name in op.stop_fields('cron.service')}
+    values.update(KillMode='process', KillSignal='15', SendSIGKILL='no', SendSIGHUP='no', Restart='no')
+    values[field] = value
+    plan = {'safe_stop': {'cron.service': dict(reviewed_handler_never_signals_children=True,
+        children_cannot_escape_cgroup=True, source_review_reference='fixture-source-review',
+        properties_sha256=hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest())}}
+    monkeypatch.setattr(op, 'stop_properties', lambda unit: values)
+    with pytest.raises(ValueError, match='UNSAFE_STOP_SEMANTICS'):
+        op.safe_stop_contract('cron.service', plan, {'ActiveState':'active','MainPID':'42','ControlPID':'0'})
+
+
+def test_empty_failed_normalization_allows_mixed_but_refuses_hooks(monkeypatch):
+    values = {name: 'none' if name.endswith('Action') else '' for name in op.stop_fields('robie-gateway.service')}
+    values.update(KillMode='mixed', KillSignal='15', SendSIGKILL='yes', SendSIGHUP='no', Restart='always')
+    plan = {'safe_stop': {'robie-gateway.service': dict(reviewed_handler_never_signals_children=True,
+        children_cannot_escape_cgroup=True, source_review_reference='fixture-source-review', properties_sha256='pre-mask')}}
+    monkeypatch.setattr(op, 'stop_properties', lambda unit: values)
+    state = {'ActiveState':'failed','MainPID':'0','ControlPID':'0','ControlGroup':''}
+    op.safe_stop_contract('robie-gateway.service', plan, state, normalize=True)
+    values['ExecStopPost'] = '/unsafe'
+    with pytest.raises(ValueError, match='UNSAFE_STOP_SEMANTICS'):
+        op.safe_stop_contract('robie-gateway.service', plan, state, normalize=True)

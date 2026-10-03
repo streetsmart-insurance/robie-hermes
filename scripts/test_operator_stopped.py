@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import types
+import time
 
 COMMIT = '42e872f4c86fc4b4e37f859fc390f0b7c832f373'
 DIGEST = '876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064'
@@ -97,8 +98,8 @@ def validate_approval(approval, request, now):
     need(approval['host'] == 'hermes-test-01')
     need(approval['commit'] == request['commit'] == COMMIT)
     need(approval['sha256'] == request['sha256'] == DIGEST)
-    need(request['operation'] in {'hold', 'install', 'verify'})
-    need(set(approval['operations']) <= {'hold', 'install', 'verify'})
+    need(request['operation'] in {'prepare-hold', 'hold', 'install', 'verify'})
+    need(set(approval['operations']) <= {'prepare-hold', 'hold', 'install', 'verify'})
     need(request['operation'] in approval['operations'])
     need(type(request['actor_id']) is int and request['actor_id'] in approval['actor_ids'])
     need(type(request['issue']) is int and request['issue'] == approval['issue'])
@@ -114,7 +115,13 @@ def validate_approval(approval, request, now):
         need(isinstance(approval[key], str) and 1 <= len(approval[key]) <= 512)
         need(approval[key].strip() == approval[key] and '\n' not in approval[key])
     need(approval['external_producers_fenced'] is True)
-    need(approval['manual_runners_fenced'] is True and approval['workers_drained'] is True)
+    need(approval['manual_runners_fenced'] is True)
+    if request['operation'] == 'prepare-hold':
+        need(approval['prepare_hold_authorized'] is True)
+        preparation_contract(approval)
+    else:
+        need(approval['workers_drained'] is True or (request['operation'] in {'install', 'verify'}
+             and approval.get('prepare_hold_authorized') is True))
     need(approval['exclusive_operator_handoff'] is True)
     need(approval['gateway_already_inactive'] is True)
     need(approval['cron_outage_included'] is True)
@@ -179,23 +186,241 @@ def unit_state(unit):
 
 def no_workers(state):
     need(all(state.get(key, '') in ('', '0') for key in ('MainPID', 'ControlPID')))
+    need(not cgroup_members(state), 'WORKERS_REMAIN')
+
+
+def cgroup_members(state):
     group = state.get('ControlGroup', '')
     if not group:
-        return
+        return set()
     need(group.startswith('/') and '..' not in Path(group).parts)
     root = Path('/sys/fs/cgroup') / group.lstrip('/')
     need(root.resolve().is_relative_to(Path('/sys/fs/cgroup')))
     need(root.is_dir(), 'CGROUP_UNAVAILABLE')
     count = 0
+    members = set()
     for directory, children, names in os.walk(root, followlinks=False):
         count += 1
         need(count <= 512)
         need(all(not (Path(directory) / name).is_symlink() for name in children))
         need('cgroup.procs' in names, 'CGROUP_UNAVAILABLE')
-        need(not (Path(directory) / 'cgroup.procs').read_text().strip(), 'WORKERS_REMAIN')
+        values = (Path(directory) / 'cgroup.procs').read_text().split()
+        need(all(value.isdecimal() for value in values), 'CGROUP_UNAVAILABLE')
+        members.update(values)
+    return members
 
 
-def prior_units(states):
+# Local source fragment; installed only by a separately approved bootstrap.
+STOP_FIELDS = ('ExecStop', 'ExecStopPost', 'KillMode', 'KillSignal', 'SendSIGKILL',
+               'Restart', 'OnFailure', 'OnSuccess', 'FailureAction', 'SuccessAction',
+               'PropagatesStopTo', 'ConsistsOf', 'BoundBy', 'JobTimeoutAction', 'TriggeredBy', 'SendSIGHUP', 'UpheldBy', 'RequiredBy')
+
+
+def preparation_contract(approval):
+    units = approval['auxiliary_units']
+    need(isinstance(units, list) and len(set(units)) == len(units) == 6, 'AUXILIARY_CONTRACT_REQUIRED')
+    need(all(isinstance(u, str) and re.fullmatch(r'[A-Za-z0-9_-]+\.(service|timer)', u)
+             and u not in UNITS and 'browser' not in u for u in units), 'AUXILIARY_CONTRACT_REQUIRED')
+    lock = approval['worker_lock']
+    need(lock['type'] == 'flock' and lock['initial_host_pid_namespace'] is True,
+         'WORKER_LOCK_CONTRACT_REQUIRED')
+    path = Path(lock['path'])
+    need(path.is_absolute() and path.is_relative_to(ROOT) and '..' not in path.parts,
+         'WORKER_LOCK_CONTRACT_REQUIRED')
+    need(isinstance(lock['contract_reference'], str) and bool(lock['contract_reference'].strip()))
+    need(type(lock['device']) is int and type(lock['inode']) is int and lock['inode'] > 0)
+    need(type(approval['drain_timeout_seconds']) is int and 1 <= approval['drain_timeout_seconds'] <= 600)
+    need(isinstance(approval['safe_stop'], dict))
+
+
+def process_inventory():
+    # No command lines, environments, browser state or client data. Root-private only.
+    need(os.readlink('/proc/self/ns/pid') == os.readlink('/proc/1/ns/pid'), 'PID_NAMESPACE_MISMATCH')
+    result = {}
+    for path in Path('/proc').iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
+            try:
+                executable = os.readlink(path / 'exe')
+            except FileNotFoundError:
+                executable = None
+            result[path.name] = dict(parent=fields[1], start=fields[19], executable=executable,
+                                     cgroup=(path / 'cgroup').read_text())
+        except FileNotFoundError:
+            continue  # process ended naturally; other failures are not hidden
+    return result
+
+
+def worker_lock_observation(approval):
+    contract = approval['worker_lock']
+    path = Path(contract['path'])
+    protected(path, private=False)
+    before = path.stat()
+    need((before.st_dev, before.st_ino) == (contract['device'], contract['inode']), 'WORKER_LOCK_CHANGED')
+    need(os.readlink('/proc/self/ns/pid') == os.readlink('/proc/1/ns/pid'), 'PID_NAMESPACE_MISMATCH')
+    key = (os.major(before.st_dev), os.minor(before.st_dev), before.st_ino)
+    owners = []
+    for line in Path('/proc/locks').read_text().splitlines():
+        fields = line.split()
+        if '->' in fields:
+            fields.remove('->')
+        need(len(fields) >= 8, 'LOCK_INVENTORY_UNKNOWN')
+        device = fields[5].split(':')
+        need(len(device) == 3, 'LOCK_INVENTORY_UNKNOWN')
+        current = (int(device[0], 16), int(device[1], 16), int(device[2]))
+        if current == key:
+            need(fields[1] == 'FLOCK', 'LOCK_TYPE_CHANGED')
+            owners.append(fields[4])
+    after = path.stat()
+    need((after.st_dev, after.st_ino) == key_identity(before), 'WORKER_LOCK_CHANGED')
+    return {'device': before.st_dev, 'inode': before.st_ino, 'owners': owners}
+
+
+def key_identity(info):
+    return info.st_dev, info.st_ino
+
+
+def auxiliary_snapshot(approval):
+    result = {unit: unit_state(unit) for unit in approval['auxiliary_units']}
+    for state in result.values():
+        need(state['ActiveState'] in {'inactive', 'failed'}, 'AUXILIARY_NOT_STOPPED')
+        no_workers(state)
+    return result
+
+
+def stop_fields(unit):
+    service_only = {'ExecStop', 'ExecStopPost', 'KillMode', 'KillSignal', 'SendSIGKILL', 'SendSIGHUP', 'Restart'}
+    return tuple(field for field in STOP_FIELDS if unit.endswith('.service') or field not in service_only)
+
+
+def stop_properties(unit):
+    fields = stop_fields(unit)
+    raw = command(['/usr/bin/systemctl', 'show', unit, '--all', '--no-pager',
+                   '--property=' + ','.join(fields)])
+    values = dict(line.split('=', 1) for line in raw.splitlines())
+    need(set(values) == set(fields), 'UNKNOWN_STOP_SEMANTICS')
+    return values
+
+
+def safe_stop_contract(unit, approval, state, normalize=False):
+    contract = approval['safe_stop'][unit]
+    need(contract['reviewed_handler_never_signals_children'] is True and
+         contract['children_cannot_escape_cgroup'] is True, 'UNKNOWN_STOP_SEMANTICS')
+    need(isinstance(contract['source_review_reference'], str) and contract['source_review_reference'].strip(),
+         'UNKNOWN_STOP_SEMANTICS')
+    values = stop_properties(unit)
+    if normalize:
+        need(state['ActiveState'] == 'failed', 'NORMALIZATION_STATE_CHANGED')
+        no_workers(state)
+    else:
+        need(hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest() ==
+             contract['properties_sha256'], 'STOP_PROPERTIES_CHANGED')
+    for field in ('ExecStop', 'ExecStopPost', 'OnFailure', 'OnSuccess',
+                  'PropagatesStopTo', 'ConsistsOf', 'BoundBy', 'TriggeredBy', 'UpheldBy', 'RequiredBy'):
+        if field in values:
+            need(values[field] == '', 'UNSAFE_STOP_SEMANTICS')
+    for field in ('FailureAction', 'SuccessAction', 'JobTimeoutAction'):
+        need(values[field] == 'none', 'UNSAFE_STOP_SEMANTICS')
+    if unit.endswith('.service') and state['ActiveState'] == 'active':
+        need(values['SendSIGHUP'] == 'no', 'UNSAFE_STOP_SEMANTICS')
+        need(values['KillMode'] == 'process' and values['KillSignal'] in {'15', 'SIGTERM'}
+             and values['SendSIGKILL'] == 'no' and values['Restart'] == 'no', 'UNSAFE_STOP_SEMANTICS')
+    pid = state.get('MainPID', '0')
+    need(state.get('ControlPID', '0') == '0', 'CONTROL_PROCESS_REMAINS')
+    if pid != '0':
+        need(unit in ('cron.service', 'crond.service'), 'BUSINESS_PROCESS_STOP_REFUSED')
+        executable = Path('/proc') / pid / 'exe'
+        need(str(executable.resolve(strict=True)) == contract['executable'], 'CRON_EXECUTABLE_CHANGED')
+        need(hashlib.sha256(executable.read_bytes()).hexdigest() == contract['executable_sha256'],
+             'CRON_EXECUTABLE_CHANGED')
+    return values
+
+
+def idle_database(guard):
+    try:
+        return guard.database_snapshot(DB, KEY, reject_existing_proof=True)
+    except ValueError as error:
+        # Wait only for known activity; unknown schema/state must fail immediately.
+        need(str(error) in {'Nonidle or unresolved lease: jobs',
+             'Nonidle or unresolved lease: chat_event_queue',
+             'Nonidle or unresolved lease: isolated_runs', 'Nonidle reply outbox'},
+             'DATABASE_GUARD_REFUSED')
+        return None
+
+
+def prepare_launchers(approval):
+    deadline = time.monotonic() + approval['drain_timeout_seconds']
+    # Journal exists; retain effective original settings until launcher stops.
+    for unit in UNITS:
+        state = unit_state(unit)
+        if unit.endswith('.timer') and state['ActiveState'] == 'active':
+            safe_stop_contract(unit, approval, state)
+            command(['/usr/bin/systemctl', 'stop', unit])
+    for unit in ('cron.service', 'crond.service'):
+        while unit_state(unit)['ActiveState'] == 'active':
+            state = unit_state(unit)
+            safe_stop_contract(unit, approval, state)
+            inventory = process_inventory()
+            # Cron may fork between this observation and stop. Its reviewed handler,
+            # process-only kill policy and disabled escalation must preserve that child.
+            group = state.get('ControlGroup', '')
+            need(group.startswith('/') and '..' not in Path(group).parts, 'CGROUP_UNAVAILABLE')
+            children = [pid for pid, item in inventory.items()
+                        if item['parent'] == state['MainPID'] or
+                        (pid != state['MainPID'] and any(
+                            (cg := line.split(':', 2)[-1]) == group or cg.startswith(group + '/')
+                            for line in item['cgroup'].splitlines()))]
+            children.extend(cgroup_members(state) - {state['MainPID']})
+            if not children:
+                need(unit_state(unit) == state, 'CRON_PROCESS_CHANGED')
+                refreshed = process_inventory()
+                need(state['MainPID'] in inventory and refreshed.get(state['MainPID']) ==
+                     inventory[state['MainPID']], 'CRON_PROCESS_CHANGED')
+                need(cgroup_members(state) == {state['MainPID']}, 'CRON_PROCESS_CHANGED')
+                command(['/usr/bin/systemctl', 'stop', unit])
+                break
+            need(time.monotonic() < deadline, 'DRAIN_TIMEOUT_REQUIRES_REVIEW')
+            time.sleep(1)
+
+
+def prepare_drain(approval, guard, states):
+    deadline = time.monotonic() + approval['drain_timeout_seconds']
+    while True:
+        busy = False
+        for unit in UNITS:
+            state = unit_state(unit)
+            need(state['ActiveState'] in {'active', 'inactive', 'failed'}, 'UNKNOWN_DRAIN_STATE')
+            if state['ActiveState'] == 'active':
+                need(unit not in ('robie-gateway.service', 'hermes-gateway.service', 'cron.service', 'crond.service')
+                     and not unit.endswith('.timer'), 'LAUNCHER_REACTIVATED')
+                busy = True
+            else:
+                # A nonempty cgroup is not safe to normalize, even if systemd says failed.
+                try:
+                    no_workers(state)
+                except ValueError as error:
+                    if str(error) != 'WORKERS_REMAIN':
+                        raise
+                    busy = True
+        auxiliary_snapshot(approval)
+        lock = worker_lock_observation(approval)
+        database = idle_database(guard)
+        if not busy and not lock['owners'] and database is not None:
+            break
+        need(time.monotonic() < deadline, 'DRAIN_TIMEOUT_REQUIRES_REVIEW')
+        time.sleep(1)
+    for unit in UNITS:
+        state = unit_state(unit)
+        if state['ActiveState'] == 'failed':
+            no_workers(state)
+            safe_stop_contract(unit, approval, state, normalize=True)
+            command(['/usr/bin/systemctl', 'stop', unit])
+    return database
+
+
+def prior_units(states, preparing=False):
     prior = {}
     for unit, state in states.items():
         missing = state['LoadState'] == 'not-found'
@@ -204,6 +429,11 @@ def prior_units(states):
             no_workers(state)
         elif unit.endswith('.timer'):
             need(state['ActiveState'] in {'active', 'inactive'})
+        elif preparing:
+            need(state['ActiveState'] in {'inactive', 'failed', 'active'})
+            if unit in ('robie-gateway.service', 'hermes-gateway.service'):
+                need(state['ActiveState'] in {'inactive', 'failed'}, 'RUNNING_GATEWAY_REFUSED')
+                no_workers(state)
         else:
             need(state['ActiveState'] == 'inactive' and state['SubState'] == 'dead', 'DRAIN_REQUIRED')
             no_workers(state)
@@ -309,13 +539,19 @@ def existing_hold(guard, approval_hash):
     for unit, prior in receipt['prior_units'].items():
         if prior['unit_backup']:
             need(unit_file(Path(prior['unit_backup'])) == saved['unit_files'][unit], 'UNIT_BACKUP_CHANGED')
+    if saved['approval'].get('prepare_hold_authorized'):
+        preparation_contract(saved['approval'])
+        auxiliary_snapshot(saved['approval'])
+        need(not worker_lock_observation(saved['approval'])['owners'], 'WORKER_LOCK_HELD')
     units = guard.unit_snapshot()
     for unit in UNITS:
         no_workers(unit_state(unit))
     return saved, units
 
 
-def hold(approval, approval_hash, guard):
+def hold(approval, approval_hash, guard, preparing=False):
+    if preparing:
+        preparation_contract(approval)
     # Never replace another operator's receipt, interrupted attempt, or release.
     need(not RECEIPT.exists() and not RECEIPT.is_symlink(), 'EXISTING_HOLD_REQUIRES_REVIEW')
     need(not SNAPSHOT.exists() and not RELEASE.parent.exists(), 'EXISTING_RELEASE_REQUIRES_REVIEW')
@@ -324,37 +560,57 @@ def hold(approval, approval_hash, guard):
     protected(RECEIPT.parent, directory=True, private=False)
     pointers(approval['expected_prior_target'])
     states = {unit: unit_state(unit) for unit in UNITS}
-    prior = prior_units(states)
+    prior = prior_units(states, preparing=preparing)
     unit_files = {unit: unit_file(UNIT_DIR / unit) for unit in UNITS}
     need(not prior['robie-gateway.service']['mask_preexisting'], 'ORIGINAL_INTERPRETER_REQUIRED')
     invocation = command(['/usr/bin/systemctl', 'show', 'robie-gateway.service', '--no-pager', '-p', 'ExecStart', '--value'])
     matches = re.findall(r'path=([^ ;}]+)', invocation)
     need(len(matches) == 1, 'ORIGINAL_INTERPRETER_REQUIRED')
     identity = guard.interpreter_identity(matches[0])
-    database = guard.database_snapshot(DB, KEY, reject_existing_proof=True)
+    database = idle_database(guard) if preparing else guard.database_snapshot(DB, KEY, reject_existing_proof=True)
+    preparation = {}
+    if preparing:
+        preparation = dict(processes=process_inventory(), auxiliary=auxiliary_snapshot(approval),
+                           worker_lock=worker_lock_observation(approval))
+        for unit, state in states.items():
+            if state['ActiveState'] == 'failed' or (state['ActiveState'] == 'active' and
+                    (unit.endswith('.timer') or unit in ('cron.service', 'crond.service'))):
+                safe_stop_contract(unit, approval, state)
     preserved = preserved_state(approval['expected_prior_target'])
     receipt = dict(version=1, host='hermes-test-01', release_sha256=DIGEST,
                    gateway_interpreter=identity, external_producers_fenced=True,
                    approved_outage_reference=approval['approved_outage_reference'], prior_units=prior)
     ATTEMPT.mkdir(mode=0o700)
     fsync_dir(ATTEMPT.parent)
-    save(ATTEMPT / 'before.json', dict(approval_sha256=approval_hash, approval=approval,
-                                     receipt=receipt, unit_states=states, database=database,
-                                     unit_files=unit_files, preserved=preserved))
+    journal = dict(approval_sha256=approval_hash, approval=approval,
+                   receipt=receipt, unit_states=states, database=database,
+                   unit_files=unit_files, preserved=preserved, preparation=preparation)
+    save(ATTEMPT / ('prepare-before.json' if preparing else 'before.json'), journal)
     BACKUP_DIR.mkdir(mode=0o700)
     fsync_dir(BACKUP_DIR.parent)
-    # Only timer stops are allowed. Active services/cron/gateway require the
-    # separate verified drain/outage procedure; never kill them to pass a guard.
+    if preparing:
+        originals = ATTEMPT / 'original-unit-files'
+        originals.mkdir(mode=0o700)
+        fsync_dir(ATTEMPT)
+        for unit, metadata in unit_files.items():
+            if metadata is not None:
+                path = UNIT_DIR / unit
+                content = metadata['target'].encode() if metadata['target'] is not None else path.read_bytes()
+                exclusive(originals / unit, content)
+                need(unit_file(path) == metadata, 'UNIT_FILE_CHANGED')
+        prepare_launchers(approval)
+    # Legacy hold stops only timers; prepare-hold has stopped verified launchers.
     for unit in UNITS:
-        if unit.endswith('.timer') and states[unit]['ActiveState'] == 'active':
+        if not preparing and unit.endswith('.timer') and states[unit]['ActiveState'] == 'active':
             command(['/usr/bin/systemctl', 'stop', unit])
     for unit in UNITS:
         item = prior[unit]
         if item['active'] == 'not-found' or item['mask_preexisting']:
             continue
         live = unit_state(unit)
-        need(live['ActiveState'] == 'inactive' and live['SubState'] == 'dead', 'DRAIN_REQUIRED')
-        no_workers(live)
+        if not preparing:
+            need(live['ActiveState'] == 'inactive' and live['SubState'] == 'dead', 'DRAIN_REQUIRED')
+            no_workers(live)
         path = UNIT_DIR / unit
         need(unit_file(path) == unit_files[unit], 'UNIT_FILE_CHANGED')
         if item['unit_backup']:
@@ -367,6 +623,12 @@ def hold(approval, approval_hash, guard):
         os.symlink('/dev/null', path)
         fsync_dir(UNIT_DIR)
     command(['/usr/bin/systemctl', 'daemon-reload'])
+    if preparing:
+        database = prepare_drain(approval, guard, states)
+        journal['database'] = database
+        journal['drained_processes'] = process_inventory()
+        need(preserved_state(approval['expected_prior_target']) == preserved, 'PRESERVED_STATE_CHANGED')
+        save(ATTEMPT / 'before.json', journal)
     guard.unit_snapshot()
     need(guard.database_snapshot(DB, KEY, reject_existing_proof=True) == database, 'DURABLE_STATE_CHANGED')
     guard.verify_interpreter(identity)
@@ -478,8 +740,8 @@ def main():
         files = members(archive_bytes())
         guard = candidate_module(files, 'scripts/test_stopped_install.py', 'approved_stopped_guard')
         need(tuple(guard.UNITS) == UNITS)
-        if request['operation'] == 'hold':
-            result = hold(approval, approval_hash, guard)
+        if request['operation'] in {'prepare-hold', 'hold'}:
+            result = hold(approval, approval_hash, guard, preparing=request['operation'] == 'prepare-hold')
         elif request['operation'] == 'install':
             result = install(guard, files, approval_hash)
         else:

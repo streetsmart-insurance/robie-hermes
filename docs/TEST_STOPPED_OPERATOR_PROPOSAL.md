@@ -10,7 +10,7 @@ added. Controller changes are not a replacement runtime package.
 
 ## Implemented command path
 
-The strict existing issue grammar accepts `hold`, `install`, or `verify` only
+The strict existing issue grammar accepts `prepare-hold`, `hold`, `install`, or `verify` only
 when `ROBIE_TEST_STOPPED_OPERATOR_ENABLED=STOPPED_OPERATOR_V1`. Inspection retains
 its separate enable variable. Every request binds the original commit/digest,
 actor, designated issue, fresh nonce and 30-minute expiry. Fresh GitHub permission
@@ -34,13 +34,57 @@ producers, worker drain, exclusive handoff, and no resume. The supplied disabled
 JSON intentionally contains null evidence and false attestations. It cannot run.
 Never change these to true just to satisfy the helper.
 
-`hold` requires the gateway AND every existing service, including cron, already
-inactive/dead with no worker PID/cgroup processes. Active timers may be stopped
-after original state capture. This deliberately does not implement a safe drain
-for a running gateway or cron: that requires the existing verified reservation,
-actual intake fence and approved outage procedure. An idle DB snapshot alone
-never substitutes. Unknown/missing schemas, active or expired unresolved runs,
-leases and reply sends fail closed through the exact approved package guard.
+`prepare-hold` is the already-stopped-gateway path. It requires explicit shared
+cron outage authorization, exclusive operator handoff and real external/manual
+producer fencing. It does not require timers or cron to be manually stopped.
+A running gateway is refused. No reservation-store API, expired-run reconciliation,
+message-runtime configurator, driver lock acquisition or browser login is used.
+
+Its root approval must additionally supply exactly six reviewed auxiliary unit
+names, the actual Test worker flock path/device/inode and source contract, evidence
+that the observer is in the host PID namespace, a bounded drain timeout, and
+reviewed stop contracts for every planned stop. Those inventory facts are not
+available in the checkout and are deliberately absent from the disabled template.
+The auxiliary units must already have no workers and be inactive/failed; the
+helper only observes them. Browser and global driver are compared unchanged;
+it does not require Production or the global driver to be empty.
+
+Before mutation, capture original unit states/files, interpreter, pointers,
+process/cgroup inventory, worker-lock owners, auxiliary states and the read-only
+approved database guard result. A known busy database permits natural drain;
+unknown schema/state does not. Save a private fsynced preparation journal and
+copies of original local unit bytes/link targets. Validate every planned stop
+before the first stop; revalidate immediately before each execution.
+
+Stop approved timers and the cron launcher using their original effective unit
+settings. Timer property schemas exclude service-only fields. Active cron must
+have process-only SIGTERM, no SIGHUP/escalation/restart/stop hooks or activation/
+propagation relationships, and an identified executable whose reviewed handler
+never signals children. Inspect RequiredBy, UpheldBy and TriggeredBy as well as
+stop propagation; missing properties fail closed. A properties digest alone is
+not evidence about daemon behavior. Wait while recursive cgroup members other
+than the verified main PID exist, including reparented children. Recheck PID
+start time, executable identity and cgroup immediately before stopping. A child
+forked in the remaining race must survive under the reviewed handler semantics;
+unknown semantics refuse the operation, without altering cron configuration.
+
+Immediately apply persistent masks and reload. Do not stop business services;
+let them complete naturally. Observe the existing worker lock through /proc/locks
+without opening it for write, acquiring it, unlinking it or changing its inode.
+Recheck all ten guarded units and six auxiliary units, complete jobs/claims/ACTIVE
+isolated runs (including expired unresolved records), and reply-outbox send state.
+Pending/retry rows are retained. An empty failed service may be normalized using
+`systemctl stop` only after checking its effective post-mask settings have no
+stop hooks, callbacks or propagation and proving no PIDs/cgroup work; this does
+not require the active-cron KillMode policy. No reset-failed or start is used.
+
+Save the post-drain database baseline separately from the original preparation
+journal. Only then finish the genuine receipt. Unknown facts, timeout, unexpected
+reactivation or partial preparation leave evidence and any completed fences in
+place, with no receipt, retry or resume. A crash between launcher stop and masking
+is a partial preparation, not a durable hold across reboot. The original `hold`
+operation remains available only for already inactive/dead services. Running
+gateway drain remains outside this proposal.
 
 Before masks: capture the gateway's real ExecStart Python/venv identity; original
 unit states and local unit file identity; exact release pointers; durable-row
@@ -113,7 +157,8 @@ a moving main. The proposed actions, once those identifiers are recorded:
    reviewer after initial access proof. Create `Test-Operator-Stopped` main-only
    with an explicitly selected independent reviewer and self-review prevented.
    Reviewer identity and supported environment protection options remain unresolved.
-3. Through the already authorized Mac/IAP route, install reviewed helper files
+3. Through a separately reviewed, exact-commit bounded bootstrap workflow using
+   the existing protected-main WIF/IAP/sudo route, install reviewed helper files
    root-owned and non-writable by the login user, preserving any prior files:
    `/usr/local/libexec/robie-test-operator.py` (inspect) and
    `/usr/local/libexec/robie-test-stopped-operator.py` (stopped operations).
@@ -133,12 +178,13 @@ a moving main. The proposed actions, once those identifiers are recorded:
    has TTL 1h; no durable private key is placed in this cloud workspace.
 7. Enable the stopped workflow only after separate explicit approval for that
    persistent trigger. Before mutation, an authorized operator must supply the
-   actual completed fence/drain/handoff evidence, shared-cron outage authorization,
+   actual external/manual fence and handoff evidence, shared-cron outage authorization,
+   the reviewed preparation contracts (or completed drain evidence for legacy hold),
    observed old pointer, helper hash and validity window in the root approval.
    Stop if Carlo has not approved cron or other operators have not relinquished
    direct activity. Issue commands alone cannot supply or amend that approval.
 8. Prove inspect from a fresh cloud session with Mac offline, then separately
-   run approved hold/install/verify on the same TGZ and record run IDs/evidence.
+   run approved prepare-hold/install/verify on the same TGZ and record run IDs/evidence.
    Retain the root approved package and before/after evidence; never delete queues.
 
 ## Explicit limits and unresolved decisions
@@ -148,7 +194,7 @@ a moving main. The proposed actions, once those identifiers are recorded:
   or issues have been created. Test that route after approval; do not weaken actor
   checks if the connector emits bot comments or an event is suppressed.
 - Shared cron outage and actual external/manual fencing approval remain missing.
-  This helper cannot stop an active cron/gateway/service to guess safe drain.
+  Active cron needs its actual reviewed stop contract; a running gateway is refused.
 - A single actual operator must own Test before mutation. Shared host lock covers
   these new helpers and inherited installer only; existing Mac/manual and ordinary
   deployment entrypoints do not honor it. Existing Actions deployments share the
@@ -161,10 +207,28 @@ a moving main. The proposed actions, once those identifiers are recorded:
   obtain a separately reviewed evidence-preserving recovery procedure; never
   rewrite evidence/replay records or unmask merely to pass checks.
 - This is not a general-purpose deployment platform or a running-gateway drain
-  controller. Hold/install support is deliberately this approved release only.
+  controller. Prepare-hold/install support is deliberately this approved release only.
   Other releases need a separately reviewed immutable approval mechanism.
 
 Rollback of access setup disables enable variables first and restores only newly
 changed infrastructure from recorded backups. It never removes runtime masks,
 starts services, or releases backlog. Partial runtime recovery follows the exact
 approved stopped-install runbook with preserved evidence and separate authority.
+
+## Minimal Mac-independent bootstrap option (not implemented or authorized)
+
+The observed existing protected-main Actions WIF/IAP/root route can install the
+reviewed helpers without a Mac terminal or new IAM. This is a separate, bounded
+setup change: first prove the connector's actual comment actor and issue event
+with a credentialless workflow, then review an immutable bootstrap commit with
+an owner-approved protected execution gate. A fixed bootstrap installs only the
+exact approved helper/config bytes into the destinations above, preserves prior
+files/metadata, verifies returned hashes, and provisions the retained original
+TGZ after checksum verification. It must not take arbitrary shell text or paths
+from comments, start/stop runtime units, or manufacture outage attestations.
+The original runtime release/digest stays unchanged. Temporary one-hour OS Login
+registration and execution need explicit setup approval; no registration or
+bootstrap execution has occurred. Actual trigger delivery, reviewer identity,
+setup publication and host read-back remain unproven. No native workflow-dispatch
+tool is available in this cloud session. Do not call the route operational until
+that end-to-end proof succeeds from a fresh cloud session with the Mac offline.
