@@ -1297,7 +1297,6 @@ def file_note_to_existing_discussion(
         find_recent_same_text,
         note_still_blocks_repost,
         note_was_unconfirmed,
-        undo_unconfirmed_note,
     )
 
     doc_id = str(document_id or "").strip()
@@ -1402,7 +1401,7 @@ def file_note_to_existing_discussion(
             title=title,
         )
     try:
-        prior_row = begin_unconfirmed_note(
+        begin_unconfirmed_note(
             applicant,
             discussion_id,
             note_text=text,
@@ -1431,23 +1430,9 @@ def file_note_to_existing_discussion(
             "note_id": None,
             "matches": list(getattr(exc, "matches", []) or []),
         }
-    except DiscussionApiError:
-        finish_chat_note_post()
-        try:
-            undo_unconfirmed_note(
-                applicant,
-                discussion_id,
-                note_text=text,
-                document_id=doc_id,
-                previous=prior_row,
-                ledger_path=ledger_path,
-            )
-        except DiscussionNoteLedgerError:
-            pass
-        raise
     except Exception:
         finish_chat_note_post()
-        # A timeout does not prove the server rejected the POST.
+        # Typed API/transport failures also do not prove POST rejection.
         # Keep the unconfirmed row so a retry cannot post it twice.
         raise
     else:

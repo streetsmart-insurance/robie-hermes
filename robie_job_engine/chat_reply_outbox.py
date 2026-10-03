@@ -93,18 +93,19 @@ class ChatReplyOutbox:
     def recover_orphaned_sending(self) -> list[dict[str, str]]:
         """Startup recovery for rows left in ``sending`` by a dead process.
 
-        A gateway restart orphans every in-flight lease, even one that has
-        not expired yet. A row that already has ``message_name`` reached
-        Chat and is marked delivered. A row with no ``message_name`` is
-        put back to ``pending`` once, and the same request id is used so a
-        send that actually landed is not posted twice.
+        Startup does not establish that another sender has died. Preserve
+        unexpired leases, and recover only after their expiry. A row that
+        already has ``message_name`` is marked delivered; an unacknowledged
+        row returns to ``pending`` with the same request id so an accepted
+        send is not posted twice.
         """
         now = time.time()
         outcomes: list[dict[str, str]] = []
         with self.store.transaction() as conn:
             rows = conn.execute(
                 """SELECT id, message_name, lease_until FROM chat_reply_outbox
-                   WHERE state='sending' ORDER BY created_at, id"""
+                   WHERE state='sending' AND lease_until<=? ORDER BY created_at, id""",
+                (now,),
             ).fetchall()
             for row in rows:
                 reply_id = str(row["id"])
@@ -113,8 +114,8 @@ class ChatReplyOutbox:
                     conn.execute(
                         """UPDATE chat_reply_outbox
                            SET state='delivered', lease_token=NULL, lease_until=0
-                           WHERE id=? AND state='sending'""",
-                        (reply_id,),
+                           WHERE id=? AND state='sending' AND lease_until<=?""",
+                        (reply_id, now),
                     )
                     action = "marked_delivered"
                     logger.info(
@@ -127,8 +128,9 @@ class ChatReplyOutbox:
                     conn.execute(
                         """UPDATE chat_reply_outbox
                            SET state='pending', next_at=?, lease_token=NULL, lease_until=0
-                           WHERE id=? AND state='sending' AND message_name IS NULL""",
-                        (now, reply_id),
+                           WHERE id=? AND state='sending' AND message_name IS NULL
+                             AND lease_until<=?""",
+                        (now, reply_id, now),
                     )
                     action = "requeued"
                     logger.info(

@@ -1604,8 +1604,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
             JobStore(ROBIE_JOB_DB).fail_gateway_restart_orphans(exclude=active)
             from robie_job_engine.chat_reply_outbox import ChatReplyOutbox
 
-            # A restart leaves in-flight sends in 'sending'. Requeue the ones
-            # Chat has not acknowledged. Do not post a row twice.
+            # Recover expired sends only; another sender may still own a live lease.
+            # Unacknowledged sends retain their stable request IDs.
             ChatReplyOutbox(ROBIE_JOB_DB).recover_orphaned_sending()
 
         try:

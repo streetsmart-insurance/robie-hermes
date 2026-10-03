@@ -244,9 +244,26 @@ class ReplyRecoveryTests(unittest.TestCase):
                 )
         return reply_id
 
+    def test_startup_preserves_another_owners_unexpired_sending_lease(self):
+        reply_ids = [
+            self._stick_sending("unacknowledged"),
+            self._stick_sending("acknowledged", f"{SPACE}/messages/already-there"),
+        ]
+        before = {reply_id: self.outbox.get(reply_id) for reply_id in reply_ids}
+        second_owner = ChatReplyOutbox(self.db)
+        for reply_id in reply_ids:
+            self.assertIsNone(second_owner.claim(reply_id))
+        for now in (self.clock, before[reply_ids[0]]["lease_until"] - 0.001):
+            self.clock = now
+            self.assertEqual(second_owner.recover_orphaned_sending(), [])
+            for reply_id in reply_ids:
+                self.assertEqual(second_owner.get(reply_id), before[reply_id])
+                self.assertIsNone(second_owner.claim(reply_id))
+
     def test_stuck_sending_without_message_name_is_resent_once(self):
         text = "I couldn't look that up; a CSR should take a look."
         reply_id = self._stick_sending(text)
+        self.clock = self.outbox.get(reply_id)["lease_until"]
         with self.assertLogs("robie.chat_reply_outbox", level="INFO") as logs:
             recovered = self.outbox.recover_orphaned_sending()
         self.assertEqual(recovered, [{"id": reply_id, "action": "requeued"}])
@@ -264,6 +281,7 @@ class ReplyRecoveryTests(unittest.TestCase):
         name = f"{SPACE}/messages/already-there"
         reply_id = self._stick_sending(text, message_name=name)
         before = len(self.messages.calls)
+        self.clock = self.outbox.get(reply_id)["lease_until"]
         with self.assertLogs("robie.chat_reply_outbox", level="INFO") as logs:
             recovered = self.outbox.recover_orphaned_sending()
         self.assertEqual(recovered, [{"id": reply_id, "action": "marked_delivered"}])
@@ -277,7 +295,11 @@ class ReplyRecoveryTests(unittest.TestCase):
     def test_two_startups_still_post_once(self):
         text = "I couldn't look that up; a CSR should take a look."
         reply_id = self._stick_sending(text)
+        before = self.outbox.get(reply_id)
+        self.clock = before["lease_until"]
         self.outbox.recover_orphaned_sending()
+        self.assertEqual(self.outbox.get(reply_id)["id"], before["id"])
+        self.assertEqual(self.outbox.get(reply_id)["attempts"], before["attempts"])
         self.run_async(self.chat()._recover_pending_replies())
         self.assertEqual(len(self.messages.accepted), 1)
         # The process dies after Chat accepted and before the receipt is stored.
@@ -288,9 +310,12 @@ class ReplyRecoveryTests(unittest.TestCase):
                    WHERE id=?""",
                 (self.clock + 500, reply_id),
             )
+        self.clock += 500
         self.outbox.recover_orphaned_sending()
         self.run_async(self.chat()._recover_pending_replies())
         self.assertEqual(len(self.messages.accepted), 1)
+        self.assertEqual(self.messages.calls[0]["requestId"], self.messages.calls[-1]["requestId"])
+        self.assertEqual(self.messages.calls[0]["messageId"], self.messages.calls[-1]["messageId"])
         self.assertEqual(self.outbox.get(reply_id)["state"], "delivered")
 
     def test_live_lease_excludes_another_drainer(self):

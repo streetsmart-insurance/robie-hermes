@@ -232,16 +232,22 @@ def test_ledger_write_failure_does_not_post(tmp_path):
     assert client.posts == 0
 
 
-def test_a_post_that_raises_does_not_keep_the_unconfirmed_row(tmp_path):
+@pytest.mark.parametrize("status", [500, None])
+def test_api_error_after_possible_acceptance_keeps_marker_and_blocks_retry(tmp_path, status):
     class Boom(LiveShapeClient):
         def append_note(self, discussion_id, text, note_type="Note"):
-            raise disc.DiscussionApiError(500, "rejected")
+            self.posts += 1
+            self.posted = True
+            raise disc.DiscussionApiError(status, "response failed after possible acceptance")
 
     ledger = tmp_path / "ledger.json"
+    client = Boom()
     with pytest.raises(disc.DiscussionApiError):
-        _file(Boom(), ledger_path=ledger)
+        _file(client, ledger_path=ledger)
     saved = json.loads(ledger.read_text(encoding="utf-8"))
-    assert saved["notes"] == []
+    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
+    assert _file(client, ledger_path=ledger)["status"] == "already_posted"
+    assert client.posts == 1
 
 
 def test_accepted_post_followed_by_timeout_keeps_marker_and_blocks_retry(tmp_path):
