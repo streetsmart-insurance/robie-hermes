@@ -1,98 +1,167 @@
 #!/usr/bin/env python3
-"""Tests for EZLynx task report parser and assignment worker."""
+"""Tests for the EZLynx task report parser and assignment worker.
 
-import unittest
-from unittest.mock import MagicMock
+Uses the REAL Looker CSV schema (verified 2026-10-03 from the live
+"Robie AI - Task Check-In" test delivery).
+"""
 
-import sys
-sys.path.insert(0, '/tmp')
+import pytest
 
 from robie_job_engine.ezlynx_task_report import (
-    parse_task_report,
+    AssignedTask,
     TaskReportParseError,
-    EXPECTED_HEADERS,
+    parse_task_report,
 )
 from robie_job_engine.task_assignment_worker import TaskAssignmentWorker
 
 
-SAMPLE_CSV = """Task ID,Task Title,Task Description,Applicant ID,Applicant Name,Assigned To,Due Date,Priority,Created Date,Status
-TASK-001,Call back client,Please call about renewal,25486692,Jake Ferrara,Robie AI,2026-10-05,High,2026-10-03,Open
-TASK-002,Upload documents,Need loss runs PDF,25486692,Jake Ferrara,Robie AI,2026-10-06,Medium,2026-10-03,Open
-TASK-003,Review quote,Check premium calculation,12345,Other Client,Carlo Ferrara,2026-10-07,Low,2026-10-03,Open
+# Real CSV fixture — matches the live Looker export format.
+# Headers are WITHOUT Looker view prefixes (Looker strips them in CSV).
+REAL_CSV = """Applicant ID,Account Name,Task Assigned To,Branch,Activity Type,Note Created by,Task Status,Assigned Producer,CSR,Task Created By,Created Date,Task Due Date,Task Last Modified Date,Task Last Modified By,Note,Comment,Task Closed By,Policy Master ID,Task Priority,Sticky,Task Created By ID,Task Created Date,Task ID,Task Closed Date,Policy Number,Producer Code,Producer Code Override,Activity Labels,Lead Source,Discussion ID,Department,Service Team
+25486692,Jake N Ferrara,Robie AI,Streetsmart Insurance,Task Note,Carlo Ferrara,Open,Carlo Ferrara,,Carlo Ferrara,2026-10-03T09:24:00,2026-10-05,2026-10-03,Carlo Ferrara,Test task for Roby - please ignore,,0,0,Normal,0,123,2026-10-03,63429523,,,,,,Google,849945654,,
+220250093,ROBIE Test LLC,Robie AI,Streetsmart Insurance,Task Note,Carlo Ferrara,Open,Carlo Ferrara,,Carlo Ferrara,2026-10-03T08:00:00,2026-10-03,2026-10-03,Carlo Ferrara,Please call the client about renewal,,0,0,High,0,123,2026-10-03,63425064,,,,,,Google,849932997,,
+48006672,Joseph & Emily Calhoun,Ashley Huntley,Streetsmart Insurance,Task Note,Ashley Huntley,Open,Ashley Huntley,Daniela Aguilar,Ashley Huntley,2026-10-03T09:58:07,2026-10-06,2026-10-03,Ashley Huntley,Fire claim loss run attached,,0,0,Normal,0,456,2026-09-23,63129743,,,,,,Google,847305170,,
 """
 
+REAL_HEADERS = [
+    "Applicant ID", "Account Name", "Task Assigned To", "Branch",
+    "Activity Type", "Note Created by", "Task Status", "Assigned Producer",
+    "CSR", "Task Created By", "Created Date", "Task Due Date",
+    "Task Last Modified Date", "Task Last Modified By", "Note", "Comment",
+    "Task Closed By", "Policy Master ID", "Task Priority", "Sticky",
+    "Task Created By ID", "Task Created Date", "Task ID", "Task Closed Date",
+    "Policy Number", "Producer Code", "Producer Code Override",
+    "Activity Labels", "Lead Source", "Discussion ID", "Department",
+    "Service Team",
+]
 
-class TestParseTaskReport(unittest.TestCase):
-    def test_parses_roby_tasks(self):
-        tasks = parse_task_report(SAMPLE_CSV)
-        # Only Roby's tasks (TASK-001, TASK-002), not Carlo's (TASK-003)
-        self.assertEqual(len(tasks), 2)
-        self.assertEqual(tasks[0].task_id, "TASK-001")
-        self.assertEqual(tasks[0].assigned_to, "Robie AI")
-        self.assertEqual(tasks[1].task_id, "TASK-002")
+
+class TestParseRealCsv:
+    def test_parses_real_looker_csv(self):
+        tasks = parse_task_report(REAL_CSV)
+        # Only the 2 Robie AI rows (Ashley Huntley's row is filtered out)
+        assert len(tasks) == 2
+        assert all(t.assigned_to == "Robie AI" for t in tasks)
+
+    def test_real_field_mapping(self):
+        tasks = parse_task_report(REAL_CSV)
+        task = next(t for t in tasks if t.task_id == "63429523")
+        assert task.applicant_id == "25486692"
+        assert task.applicant_name == "Jake N Ferrara"
+        assert task.description == "Test task for Roby - please ignore"
+        assert task.discussion_id == "849945654"
+        assert task.status == "Open"
+        assert task.priority == "Normal"
+        assert task.due_date == "2026-10-05"
+        assert task.last_modified == "2026-10-03"
+
+    def test_filters_non_robie_tasks(self):
+        tasks = parse_task_report(REAL_CSV)
+        task_ids = {t.task_id for t in tasks}
+        assert "63129743" not in task_ids  # Ashley Huntley's task
+
+    def test_zero_robie_tasks_is_quiet_not_error(self):
+        no_robie = REAL_CSV.replace("Robie AI", "Someone Else")
+        tasks = parse_task_report(no_robie)
+        assert tasks == []
 
     def test_empty_csv_raises(self):
-        with self.assertRaises(TaskReportParseError):
+        with pytest.raises(TaskReportParseError):
             parse_task_report("")
 
     def test_missing_headers_raises(self):
-        bad_csv = "Wrong,Headers\nval1,val2\n"
-        with self.assertRaises(TaskReportParseError):
-            parse_task_report(bad_csv)
+        with pytest.raises(TaskReportParseError, match="Missing expected headers"):
+            parse_task_report("Foo,Bar\n1,2\n")
 
-    def test_blank_task_id_raises(self):
-        bad_csv = (
-            "Task ID,Task Title,Task Description,Applicant ID,Applicant Name,"
-            "Assigned To,Due Date,Priority,Created Date,Status\n"
-            ",No ID task,desc,123,Name,Robie AI,2026-10-05,High,2026-10-03,Open\n"
-        )
-        with self.assertRaises(TaskReportParseError):
-            parse_task_report(bad_csv)
-
-    def test_zero_roby_tasks_raises(self):
-        no_roby = (
-            "Task ID,Task Title,Task Description,Applicant ID,Applicant Name,"
-            "Assigned To,Due Date,Priority,Created Date,Status\n"
-            "TASK-999,Other task,desc,123,Name,Carlo Ferrara,2026-10-05,High,2026-10-03,Open\n"
-        )
-        with self.assertRaises(TaskReportParseError):
-            parse_task_report(no_roby)
+    def test_missing_task_id_raises(self):
+        bad = REAL_CSV.replace("63429523", "", 1)
+        with pytest.raises(TaskReportParseError, match="no Task ID"):
+            parse_task_report(bad)
 
 
-class TestTaskAssignmentWorker(unittest.TestCase):
-    def test_categorize_callback(self):
-        worker = TaskAssignmentWorker(discussion_client=None)
-        from robie_job_engine.ezlynx_task_report import AssignedTask
-        task = AssignedTask(
-            task_id="T1", title="Call back client",
-            description="Please phone the client",
-            applicant_id="123", applicant_name="Test",
-            assigned_to="Robie AI", due_date="2026-10-05",
-            priority="High", created_date="2026-10-03", status="Open",
-        )
-        self.assertEqual(worker._categorize_task(task), "callback")
+class FakeDiscussionClient:
+    def __init__(self):
+        self.notes: list[tuple[str, str]] = []
 
-    def test_categorize_unknown(self):
-        worker = TaskAssignmentWorker(discussion_client=None)
-        from robie_job_engine.ezlynx_task_report import AssignedTask
-        task = AssignedTask(
-            task_id="T2", title="Do something vague",
-            description="Handle this somehow",
-            applicant_id="123", applicant_name="Test",
-            assigned_to="Robie AI", due_date="2026-10-05",
-            priority="High", created_date="2026-10-03", status="Open",
-        )
-        self.assertEqual(worker._categorize_task(task), "unknown")
+    def append_note(self, discussion_id: str, body: str):
+        self.notes.append((discussion_id, body))
 
-    def test_process_tasks_dry_run(self):
-        worker = TaskAssignmentWorker(discussion_client=None)  # Dry-run, no client
-        tasks = parse_task_report(SAMPLE_CSV)
+
+class TestWorker:
+    def test_acknowledges_and_categorizes(self):
+        tasks = parse_task_report(REAL_CSV)
+        client = FakeDiscussionClient()
+        worker = TaskAssignmentWorker(discussion_client=client)
         results = worker.process_tasks(tasks)
-        self.assertEqual(len(results), 2)
-        # First task is callback (clear), second is document (clear)
-        actions = [r.action for r in results]
-        self.assertIn("worked", actions)
 
+        assert len(results) == 2
+        # Callback task (call the client) gets categorized
+        cb = next(r for r in results if r.task_id == "63425064")
+        assert cb.action == "categorized"
+        assert "callback" in cb.detail
 
-if __name__ == '__main__':
-    unittest.main()
+        # Notes went to the RIGHT discussions (from CSV, not guessed)
+        discussion_ids = {d for d, _ in client.notes}
+        assert "849945654" in discussion_ids
+        assert "849932997" in discussion_ids
+        # Never posted to Ashley Huntley's task discussion
+        assert "847305170" not in discussion_ids
+
+    def test_idempotent_on_repeat_report(self):
+        tasks = parse_task_report(REAL_CSV)
+        client = FakeDiscussionClient()
+        worker = TaskAssignmentWorker(discussion_client=client)
+
+        first = worker.process_tasks(tasks)
+        assert all(r.action in ("categorized", "flagged_for_human") for r in first)
+
+        # Same report again — all skipped, no duplicate notes
+        notes_before = len(client.notes)
+        second = worker.process_tasks(tasks)
+        assert all(r.action == "skipped_seen" for r in second)
+        assert len(client.notes) == notes_before
+
+    def test_modified_task_reprocessed(self):
+        tasks = parse_task_report(REAL_CSV)
+        client = FakeDiscussionClient()
+        worker = TaskAssignmentWorker(discussion_client=client)
+        worker.process_tasks(tasks)
+
+        # Task modified (new last_modified) → processed again
+        modified_csv = REAL_CSV.replace(
+            "63429523,,,,,,Google,849945654,,",
+            "63429523,,,,,,Google,849945654,,",
+        ).replace(
+            "2026-10-03,Carlo Ferrara,Test task for Roby",
+            "2026-10-04,Carlo Ferrara,Test task for Roby",
+            1,
+        )
+        tasks2 = parse_task_report(modified_csv)
+        results2 = worker.process_tasks(tasks2)
+        reprocessed = [r for r in results2 if r.action != "skipped_seen"]
+        assert len(reprocessed) == 1
+        assert reprocessed[0].task_id == "63429523"
+
+    def test_empty_task_list_is_quiet(self):
+        worker = TaskAssignmentWorker(discussion_client=FakeDiscussionClient())
+        assert worker.process_tasks([]) == []
+
+    def test_unknown_task_flagged_for_human(self):
+        csv_unknown = REAL_CSV.replace(
+            "Test task for Roby - please ignore",
+            "Xyzzy plugh frobnicate the wobble",
+            1,
+        )
+        tasks = parse_task_report(csv_unknown)
+        client = FakeDiscussionClient()
+        worker = TaskAssignmentWorker(discussion_client=client)
+        results = worker.process_tasks(tasks)
+
+        flagged = next(r for r in results if r.task_id == "63429523")
+        assert flagged.action == "flagged_for_human"
+
+    def test_dry_run_posts_nothing(self):
+        tasks = parse_task_report(REAL_CSV)
+        worker = TaskAssignmentWorker(discussion_client=None)
+        results = worker.process_tasks(tasks)
+        assert len(results) == 2  # still processes, just logs

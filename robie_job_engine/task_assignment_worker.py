@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Task assignment worker — processes EZLynx tasks assigned to Roby.
 
-Polls the task report (via email CSV) and for each task assigned to
-"Robie AI":
-1. Acknowledges the task by posting a note to the applicant's discussion
-2. Attempts to work the task based on its description
+For each task assigned to "Robie AI" in the report CSV:
+1. Acknowledges the task by posting a note to the task's discussion
+   (using the Discussion ID from the report — no guessing)
+2. Attempts to categorize the task
 3. If the task can't be handled automatically, flags it for human review
 
 Safety invariants:
@@ -12,14 +12,16 @@ Safety invariants:
 - Never emails clients directly about tasks
 - All actions are logged and auditable
 - Fail-closed: unclear tasks are flagged, not guessed at
+- Idempotent: (task_id, last_modified) pairs already seen are skipped
+
+Notes are concise, plain English, non-technical (per agency standard).
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from .ezlynx_task_report import AssignedTask
 
@@ -31,7 +33,8 @@ class TaskResult:
     """Result of processing a single assigned task."""
     task_id: str
     applicant_id: str
-    action: str  # "acknowledged", "worked", "flagged_for_human", "failed"
+    # "acknowledged", "categorized", "flagged_for_human", "skipped_seen", "failed"
+    action: str
     detail: str
     timestamp: str
 
@@ -39,95 +42,98 @@ class TaskResult:
 class TaskAssignmentWorker:
     """Processes tasks assigned to Roby from EZLynx."""
 
-    def __init__(self, discussion_client=None):
-        """Initialize with a DiscussionApiClient (or None for dry-run)."""
+    def __init__(self, discussion_client=None, seen: set[tuple[str, str]] | None = None):
+        """Initialize.
+
+        discussion_client: object with append_note(discussion_id, body).
+            None = dry-run (log only).
+        seen: set of (task_id, last_modified) already processed.
+            Used for idempotency across report runs.
+        """
         self.client = discussion_client
+        self.seen: set[tuple[str, str]] = seen if seen is not None else set()
         self.results: list[TaskResult] = []
 
     def process_tasks(self, tasks: list[AssignedTask]) -> list[TaskResult]:
-        """Process a list of assigned tasks.
+        """Process a list of assigned tasks. Empty list is fine (quiet).
 
-        For each task:
-        1. Acknowledge by posting a note
-        2. Try to categorize and work it
-        3. Flag for human if unclear
+        Returns only this batch's results (not accumulated history).
         """
+        batch: list[TaskResult] = []
         for task in tasks:
             try:
                 result = self._process_single(task)
-                self.results.append(result)
+                batch.append(result)
             except Exception as e:
                 logger.error(f"Failed to process task {task.task_id}: {e}")
-                self.results.append(TaskResult(
+                batch.append(TaskResult(
                     task_id=task.task_id,
                     applicant_id=task.applicant_id,
                     action="failed",
                     detail=f"Error: {str(e)[:200]}",
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 ))
-        return self.results
+        self.results.extend(batch)
+        return batch
 
     def _process_single(self, task: AssignedTask) -> TaskResult:
-        """Process a single task: acknowledge and attempt to work it."""
+        """Process a single task: dedupe, acknowledge, categorize."""
         timestamp = datetime.now(timezone.utc).isoformat()
+        identity = (task.task_id, task.last_modified)
 
-        # Step 1: Acknowledge the task
-        ack_note = (
-            f"Roby acknowledged task: {task.title}\n"
-            f"Task ID: {task.task_id}\n"
-            f"Received: {timestamp}\n"
-            f"Status: Reviewing..."
+        # Idempotency: skip if we've seen this exact task version
+        if identity in self.seen:
+            return TaskResult(
+                task_id=task.task_id,
+                applicant_id=task.applicant_id,
+                action="skipped_seen",
+                detail=f"Already processed (last modified {task.last_modified})",
+                timestamp=timestamp,
+            )
+
+        # Step 1: Acknowledge — one concise note on the task's discussion
+        self._post_note(
+            task.discussion_id,
+            "Roby picked up this task and is reviewing it.",
         )
-        self._post_note(task.applicant_id, ack_note)
 
-        # Step 2: Categorize the task based on description
+        # Step 2: Categorize
         category = self._categorize_task(task)
 
         if category == "unknown":
-            # Flag for human review
-            flag_note = (
-                f"Roby needs help with this task.\n"
-                f"Task: {task.title}\n"
-                f"Description: {task.description[:500]}\n"
-                f"Reason: Could not determine how to handle automatically.\n"
-                f"Please review and assign to appropriate team member."
+            self._post_note(
+                task.discussion_id,
+                "Roby could not determine how to handle this task automatically. "
+                "Flagged for team review — please reassign as needed.",
             )
-            self._post_note(task.applicant_id, flag_note)
+            self.seen.add(identity)
             return TaskResult(
                 task_id=task.task_id,
                 applicant_id=task.applicant_id,
                 action="flagged_for_human",
-                detail=f"Unclear task, flagged for review: {task.title[:80]}",
+                detail=f"Unclear task, flagged for review: {task.description[:80]}",
                 timestamp=timestamp,
             )
 
-        # Step 3: Attempt to work the task (placeholder for specific handlers)
-        # For v1, we acknowledge and categorize. Specific task handlers
-        # (follow-up calls, document requests, etc.) will be added incrementally.
-        work_note = (
-            f"Roby is working on: {task.title}\n"
-            f"Category: {category}\n"
-            f"Task ID: {task.task_id}"
+        # Step 3: Record categorization (v1: acknowledge + categorize;
+        # specific handlers for callback/document/quote land incrementally)
+        self._post_note(
+            task.discussion_id,
+            f"Roby categorized this as: {category}. Working on it.",
         )
-        self._post_note(task.applicant_id, work_note)
-
+        self.seen.add(identity)
         return TaskResult(
             task_id=task.task_id,
             applicant_id=task.applicant_id,
-            action="worked",
-            detail=f"Categorized as {category}: {task.title[:80]}",
+            action="categorized",
+            detail=f"Categorized as {category}: {task.description[:80]}",
             timestamp=timestamp,
         )
 
     def _categorize_task(self, task: AssignedTask) -> str:
-        """Categorize a task based on its title and description.
-
-        Returns a category string, or "unknown" if unclear.
-        """
+        """Categorize a task from its activity type and note text."""
         text = f"{task.title} {task.description}".lower()
 
-        # Simple keyword-based categorization for v1
-        # More sophisticated NLP can be added later
         if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
             return "callback"
         if any(kw in text for kw in ["document", "upload", "attach", "pdf"]):
@@ -141,25 +147,21 @@ class TaskAssignmentWorker:
 
         return "unknown"
 
-    def _post_note(self, applicant_id: str, note_body: str) -> None:
-        """Post a note to the applicant's discussion.
+    def _post_note(self, discussion_id: str, note_body: str) -> None:
+        """Post a note to the task's discussion.
 
-        If no client is configured (dry-run), logs instead of posting.
+        Uses the Discussion ID straight from the report — no guessing
+        which discussion is correct. Dry-run (no client) logs instead.
         """
+        if not discussion_id:
+            raise ValueError("No discussion ID — cannot post note")
+
         if self.client is None:
-            logger.info(f"[DRY-RUN] Would post to applicant {applicant_id}: {note_body[:100]}...")
+            logger.info(
+                f"[DRY-RUN] Would post to discussion {discussion_id}: "
+                f"{note_body[:100]}..."
+            )
             return
 
-        # Find or create a discussion for the applicant, then append the note
-        # For v1, we use the existing discussion pattern
-        try:
-            discussions = self.client.get_discussions(applicant_id)
-            if discussions:
-                discussion_id = discussions[0].get('id')
-                self.client.append_note(discussion_id, note_body)
-                logger.info(f"Posted note to applicant {applicant_id}")
-            else:
-                logger.warning(f"No discussions found for applicant {applicant_id}")
-        except Exception as e:
-            logger.error(f"Failed to post note for {applicant_id}: {e}")
-            raise
+        self.client.append_note(discussion_id, note_body)
+        logger.info(f"Posted note to discussion {discussion_id}")
