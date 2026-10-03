@@ -472,8 +472,10 @@ class DiscussionApiClient:
         # raises here, and the driver lease is read again.
         assert_write_checks_intact()
         from .chat_write_boundary import assert_chat_write_allowed
+        from .chat_write_go import permit_chat_http_write
 
         assert_chat_write_allowed()
+        permit_chat_http_write()
         driver_gate_for_write()
         _refuse_hard_blocked_job()
         return self._request_json(
@@ -692,8 +694,9 @@ def authorized_discussion_hint(title_hint: str | None) -> str:
         if agent_interpreter():
             return ""
         return hint
-    if hint.casefold() in " ".join(user.split()).casefold():
-        return hint
+    bare = _bare_title(hint)
+    if bare and bare in _normalize_selection_text(user):
+        return bare
     return ""
 
 
@@ -794,16 +797,56 @@ _SELECTION_GUARD = re.compile(
 )
 
 
+_QUOTE_FIX = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u00ab": '"',
+        "\u00bb": '"',
+        "\uff02": '"',
+        "\uff1a": ":",
+    }
+)
+_TEST_MARKER = re.compile(r"^\[\[robie-test\]\]\s*", re.IGNORECASE)
+
+
 def _strip_bot_mention(text: str) -> str:
     """Drop a leading @Robie or <users/...> mention. The title after it stays."""
     return _BOT_MENTION.sub("", str(text or "")).strip()
+
+
+def _normalize_selection_text(text: str) -> str:
+    """Straight quotes, no leading mention or test marker, one casefolded line.
+
+    Google Chat sends curly quotes and an @Robie or <users/...> prefix.
+    The test channel also prefixes [[robie-test]]. None of those are part
+    of the discussion title.
+    """
+    raw = str(text or "").translate(_QUOTE_FIX)
+    while True:
+        nxt = _TEST_MARKER.sub("", _strip_bot_mention(raw)).strip()
+        if nxt == raw:
+            break
+        raw = nxt
+    return " ".join(raw.casefold().split())
+
+
+def _bare_title(hint: str) -> str:
+    """The title without surrounding quotes. Smart quotes count as quotes."""
+    return _normalize_selection_text(hint).strip(" \"'`")
 
 
 def _exact_discussion_row(
     rows: list[dict[str, Any]], text: str
 ) -> dict[str, Any] | None:
     """The one discussion whose full title is this answer, or None."""
-    wanted = " ".join(_strip_bot_mention(text).casefold().split()).strip(" .!\"'")
+    wanted = _normalize_selection_text(text).strip(" .!\"'")
     if not wanted:
         return None
     matched = [
@@ -844,7 +887,7 @@ def select_discussion_for_note(
         )
     if len(rows) == 1:
         return rows[0]
-    hint_raw = str(title_hint or "").strip().lower()
+    hint_raw = _bare_title(str(title_hint or ""))
     from .turn_finalization import bound_model_context
 
     owner, generation, owner_db = bound_model_context()
@@ -867,7 +910,10 @@ def select_discussion_for_note(
         job = store.get_job(owner)
         payload = job.get("payload") or {}
         reply = store.get_checkpoint(owner, "clarification_reply") or {}
-        texts = [str(payload.get(key) or "") for key in ("request_text", "original_text")]
+        texts = [
+            str(payload.get(key) or "")
+            for key in ("request_text", "text", "prompt", "original_text")
+        ]
         reply_generation = reply.get("generation")
         clarification = ""
         if not reply_generation or reply_generation == generation:
@@ -896,7 +942,7 @@ def select_discussion_for_note(
             )[0].strip()
 
         def selected(text: str, *, answer: bool = False) -> bool:
-            normalized = " ".join(text.casefold().replace("’", "'").split())
+            normalized = _normalize_selection_text(text)
             if answer:
                 answered = " ".join(
                     _strip_bot_mention(normalized).split()
@@ -1179,9 +1225,12 @@ def file_note_to_existing_discussion(
     repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
-    again. A send that cannot be confirmed is stored as sent, unconfirmed
-    and keeps blocking a repost until a person says yes. If that ledger
-    write fails, nothing is posted.
+    again. A send that cannot be confirmed is stored as sent, unconfirmed.
+    A later ask says it could not be confirmed. It does not say the note
+    was added. If that ledger write fails, nothing is posted.
+
+    A Chat model turn does not post, and does not write that ledger row,
+    until this thread has said go. The token is checked again at HTTP.
 
     A job that is not RUNNING does not reach the API. The check is the
     status on the job row at this moment, not the status from when the
@@ -1233,6 +1282,12 @@ def file_note_to_existing_discussion(
             "discussion_title": title,
             "note_id": None,
         }
+    from .chat_write_go import (
+        authorize_chat_note_post,
+        awaiting_go_reason,
+        finish_chat_note_post,
+        unconfirmed_was_not_added,
+    )
     from .discussion_note_ledger import (
         DiscussionNoteLedgerError,
         SENT_UNCONFIRMED,
@@ -1275,7 +1330,7 @@ def file_note_to_existing_discussion(
             if not allow_repost and note_still_blocks_repost(already):
                 return _note_result(
                     "already_posted",
-                    reason=already_added_question(already.get("posted_at")),
+                    reason=unconfirmed_was_not_added(),
                     applicant=applicant,
                     discussion_id=discussion_id,
                     title=title,
@@ -1298,16 +1353,21 @@ def file_note_to_existing_discussion(
                 idempotent=True,
             )
     if recent is not None and not allow_repost:
+        unconfirmed = note_was_unconfirmed(recent)
         return _note_result(
             "already_posted",
-            reason=already_added_question(recent.get("posted_at")),
+            reason=(
+                unconfirmed_was_not_added()
+                if unconfirmed
+                else already_added_question(recent.get("posted_at"))
+            ),
             applicant=applicant,
             discussion_id=discussion_id,
             title=title,
             note_id=str(recent.get("note_id") or "").strip() or None,
             read_back=False,
             verified_by=None,
-            confirmation=SENT_UNCONFIRMED if note_was_unconfirmed(recent) else None,
+            confirmation=SENT_UNCONFIRMED if unconfirmed else None,
         )
     getter = getattr(client, "get_discussion", None)
     if not callable(getter):
@@ -1333,6 +1393,14 @@ def file_note_to_existing_discussion(
     # Re-read the job now. A cancel that landed during the discussion
     # lookup must not reach DiscussionApi.
     assert_live_write_allowed()
+    if not authorize_chat_note_post():
+        return _note_result(
+            "awaiting_go",
+            reason=awaiting_go_reason(title, text),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
     try:
         prior_row = begin_unconfirmed_note(
             applicant,
@@ -1342,6 +1410,7 @@ def file_note_to_existing_discussion(
             ledger_path=ledger_path,
         )
     except DiscussionNoteLedgerError as exc:
+        finish_chat_note_post()
         return _note_result(
             "held",
             reason=str(exc),
@@ -1352,6 +1421,7 @@ def file_note_to_existing_discussion(
     try:
         created = client.append_note(discussion_id, text, note_type=note_type)
     except DiscussionSelectionError as exc:
+        finish_chat_note_post()
         return {
             "status": "pending",
             "reason_code": exc.code,
@@ -1362,6 +1432,7 @@ def file_note_to_existing_discussion(
             "matches": list(getattr(exc, "matches", []) or []),
         }
     except DiscussionApiError:
+        finish_chat_note_post()
         try:
             undo_unconfirmed_note(
                 applicant,
@@ -1375,9 +1446,12 @@ def file_note_to_existing_discussion(
             pass
         raise
     except Exception:
+        finish_chat_note_post()
         # A timeout does not prove the server rejected the POST.
         # Keep the unconfirmed row so a retry cannot post it twice.
         raise
+    else:
+        finish_chat_note_post()
     try:
         after_record = getter(discussion_id)
     except Exception:

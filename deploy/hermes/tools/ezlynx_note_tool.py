@@ -213,6 +213,23 @@ def _file_note(args: dict) -> dict:
                 else "The note was not sent. Do not try a different screen."
             ),
         }
+    if status == "awaiting_go":
+        return {
+            "ok": False,
+            "status": "awaiting_go",
+            "note_id": None,
+            "discussion_id": filed.get("discussion_id"),
+            "discussion_title": filed.get("discussion_title"),
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "read_back": False,
+            "verified_by": None,
+            "reason": filed.get("reason"),
+            "confirmation": None,
+            "wrote": False,
+            "do_not_repost": True,
+            "instruction": "The user has not said go. Do not post.",
+        }
     if (
         status == "pending"
         and str(filed.get("reason_code") or "") == "AMBIGUOUS_DISCUSSIONS"

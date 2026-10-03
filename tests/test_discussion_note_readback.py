@@ -120,7 +120,9 @@ def test_textless_count_increase_does_not_identify_our_note(tmp_path):
 
     again = _file(client, ledger_path=ledger)
     assert again["status"] == "already_posted"
-    assert "Want me to add it again?" in again["reason"]
+    assert "couldn't confirm" in again["reason"].casefold()
+    assert "already added" not in again["reason"].casefold()
+    assert "Want me to add it again?" not in again["reason"]
     assert client.posts == 1
 
     allowed = _file(client, ledger_path=ledger, allow_repost=True)

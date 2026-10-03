@@ -633,6 +633,16 @@ def accept_clarify_thread_reply(
         "clarification_reply",
         {"message_id": message_id, "text": reply},
     )
+    from .chat_thread import read_job_chat_thread
+    from .chat_write_go import bind_chat_write_go
+
+    bind_chat_write_go(
+        store,
+        job_id,
+        reply,
+        thread_id=read_job_chat_thread(store, job_id) or "",
+        message_id=message_id,
+    )
     store.checkpoint(
         job_id,
         "keep_chat_context",

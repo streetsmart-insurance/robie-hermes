@@ -533,8 +533,10 @@ class EzlynxApiClient:
         try:
             if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
                 from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
 
                 assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -625,8 +627,10 @@ class EzlynxApiClient:
         try:
             if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
                 from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
 
                 assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             http_status = None
             status_source = None

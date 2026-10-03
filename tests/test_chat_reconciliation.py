@@ -770,6 +770,10 @@ def test_actual_note_handler_never_selects_from_payload(tmp_path, monkeypatch, i
     generation = begin_model_generation(owner, store=store)
     # A valid tool plan must never turn its model-generated hint into user authority.
     store.checkpoint(owner, PLAN_CHECKPOINT, {'locked': True})
+    if expected_posts:
+        from robie_job_engine.chat_write_go import bind_chat_write_go
+
+        assert bind_chat_write_go(store, owner, 'go', message_id='m-go')
     client = Client()
     actual_api = partial(writes.add_note_to_discussion, discussion_client=client, ledger_path=tmp_path / 'ledger.json')
     note, previous, created = _load_hermes_tool('quoted_payload_note_tool', 'ezlynx_note_tool.py')

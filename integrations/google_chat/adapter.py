@@ -4917,6 +4917,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
         self._mark_sole_reply_sent(job_id)
         self._remember_reply_job(space, job_id)
+        # The question is the reply. Leave the thinking card as a dot so
+        # the end of the turn cannot rewrite it to "(no reply)".
+        self._retire_typing_card_now(space)
         return True
 
     def _live_chat_job_id(self, chat_id: str | None) -> str | None:
@@ -6491,6 +6494,38 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
         return SendResult(success=True, message_id=resp.get("name"))
 
+    def _retire_typing_card_now(self, chat_id: str) -> None:
+        """Patch a leftover thinking card from the synchronous outcome path.
+
+        ``post_outcome_sync`` already sent the one line. The thinking card
+        is still in the slot, and ``on_processing_complete`` would otherwise
+        rewrite it. A dot is the retire marker. Deleting the card leaves a
+        tombstone.
+        """
+        if not chat_id:
+            return
+        messages = getattr(self, "_typing_messages", None)
+        if not isinstance(messages, dict):
+            return
+        current = messages.pop(chat_id, None)
+        if not current or current == _TYPING_CONSUMED_SENTINEL:
+            if current == _TYPING_CONSUMED_SENTINEL:
+                messages[chat_id] = current
+            return
+        try:
+            (
+                self._chat_api.spaces()
+                .messages()
+                .patch(name=current, updateMask="text", body={"text": "·"})
+                .execute(http=self._new_authed_http())
+            )
+        except Exception:
+            logger.debug(
+                "[GoogleChat] outcome typing-card retire failed",
+                exc_info=True,
+            )
+        self._mark_typing_card_consumed(chat_id)
+
     async def _retire_suppressed_typing_card(self, chat_id: str) -> None:
         """Patch a leftover thinking card so it cannot become "(no reply)"."""
         current = self._typing_messages.get(chat_id)
@@ -6762,7 +6797,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 # with a benign final state instead of deleting (no tombstone).
                 label = (
                     "(interrupted)" if outcome == ProcessingOutcome.CANCELLED
-                    else "(no reply)"
+                    else "·"
                 )
                 try:
                     await self._patch_message(current, {"text": label})

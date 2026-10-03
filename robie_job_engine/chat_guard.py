@@ -2974,6 +2974,13 @@ def publish_discussion_note_outcome(
             if not close_confirmed_note_job(store, job_id):
                 return None
             line = _discussion_note_user_reply(store, store.get_job(job_id))
+    elif status == "awaiting_go":
+        line = " ".join(str(note.get("reason") or "").split())
+        if not line:
+            return None
+        from .chat_job_controls import mark_job_waiting_for_user
+
+        mark_job_waiting_for_user(store, job_id, line)
     elif status == "needs_discussion":
         from .ezlynx_discussions import ambiguous_discussion_question
 

@@ -2502,7 +2502,9 @@ class Round6ConversationTests(unittest.TestCase):
             )
         self.assertEqual(second["status"], "already_posted")
         self.assertFalse(second.get("read_back"))
-        self.assertIn("Want me to add it again?", second["reason"])
+        self.assertIn("couldn't confirm", second["reason"].casefold())
+        self.assertNotIn("already added", second["reason"].casefold())
+        self.assertNotIn("Want me to add it again?", second["reason"])
         self.assertEqual(client.appended, 1)
 
     def test_holder_note_and_field_reply_say_what_was_and_was_not_done(self):
