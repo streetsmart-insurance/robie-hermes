@@ -48,9 +48,10 @@ def thread_ingress_refusal(message: dict[str, Any], *, space: str,
                            environment: str, db_path: str) -> str | None:
     """Admit top-level events or replies owned by this gateway's durable DB.
 
-    Google Chat's output-only threadReply=false proves a top-level message.
-    Missing threadReply on a threaded event is ambiguous, not false. Neither
-    a Production default nor an explicit routing attribute proves ownership.
+    Google omits threadReply on a top-level message. A real reply sets
+    threadReply true. An explicit false is also top-level. Only a true
+    reply must already belong to this gateway. Neither a Production
+    default nor an explicit routing attribute proves ownership.
     This reads existing state only, before attachments, commands or new jobs.
     """
     import json
@@ -69,7 +70,8 @@ def thread_ingress_refusal(message: dict[str, Any], *, space: str,
             or not re.fullmatch(r'spaces/[^/]+/threads/[^/]+', name)
             or not space or name.split('/threads/', 1)[0] != space):
         return 'CHAT_THREAD_METADATA_INVALID'
-    if message.get('threadReply') is False:
+    # Absent and false are top-level. Only true is a reply in an existing thread.
+    if message.get('threadReply') is not True:
         return None
     if environment not in {'prod', 'test'}:
         return 'CHAT_THREAD_ENVIRONMENT_INVALID'

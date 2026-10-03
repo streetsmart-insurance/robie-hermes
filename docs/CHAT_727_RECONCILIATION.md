@@ -98,9 +98,10 @@ identified seven source-level defects. This follow-up adds bounded corrections:
 - HTTP card processing now also requires a recognized runtime environment; local
   decision presence cannot bypass environment validation.
 
-**Compatibility:** unthreaded and Google `threadReply: false` top-level messages
-remain ordinary Production requests by default. A threaded message with true or
-missing `threadReply` must already be owned by this gateway's durable database;
+**Compatibility:** unthreaded messages, Google `threadReply: false`, and a
+missing `threadReply` are top-level Production requests by default. Google
+omits the field on a real top-level message. A threaded message with
+`threadReply: true` must already be owned by this gateway's durable database;
 a present owner environment stamp must match. This deliberately refuses legacy
 unmarked Production traffic that supplies an unknown thread but omits the flag.
 A `prod` attribute does not override unknown thread ownership. Known legacy local

@@ -4135,16 +4135,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
         #   already had messages (clicked "Reply in thread" on a prior
         #   message). Isolate session by chat_id+thread_id, AND keep
         #   the bot's reply inside that thread.
-        # An explicit threadReply of false is not a side thread.
+        # A missing threadReply is top-level. Google omits the field.
+        # Only threadReply true is a reply. An explicit false is top-level.
         #
         # For groups, threads ARE meaningful conversational containers
         # (Telegram forum / Discord thread parity); always isolate AND
         # always reply in-thread.
         if chat_type == "dm":
-            # threadReply, not prev_thread_count > 0, decides a side thread.
+            # threadReply true, not prev_thread_count > 0, decides a side thread.
             # A restart sees count 0 for a reply that already belonged to one.
+            # A missing threadReply is not a side thread.
             is_side_thread = (
-                bool(thread_name) and msg.get("threadReply") is not False
+                bool(thread_name) and msg.get("threadReply") is True
             )
             session_thread_id = thread_name if is_side_thread else None
             # Outbound thread cache: populated only when side-thread, so
@@ -4162,13 +4164,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # A reply inside a thread that already had messages is bound to
         # the job. A brand-new top-level (prev count 0) is not: the first
-        # outbound starts the job's own thread. An explicit threadReply
-        # of false is not bound.
+        # outbound starts the job's own thread. A missing threadReply,
+        # and an explicit false, are not bound. Only true is.
         inbound_name = str(msg.get("name") or "")
         if (
             thread_name
             and inbound_name
-            and msg.get("threadReply") is not False
+            and msg.get("threadReply") is True
         ):
             self._reply_in_existing_thread[inbound_name] = thread_name
 
