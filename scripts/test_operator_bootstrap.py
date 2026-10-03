@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 
 # Kept self-contained so the remote host needs no repository or auxiliary tools.
 REMOTE = r'''
@@ -106,7 +107,9 @@ def render(request, controller, approved, helper):
 def main():
     request = json.loads(Path(os.environ['RUNNER_TEMP'], 'operator-request.json').read_text())
     source = Path(__file__).with_name('test_operator_inspect.py').read_bytes()
-    print(render(request, os.environ['GITHUB_SHA'], os.environ['OPERATOR_SETUP_COMMIT'], source))
+    checkout = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+    print(render(request, checkout, os.environ['OPERATOR_SETUP_COMMIT'], source))
 
 
 if __name__ == '__main__':

@@ -210,7 +210,7 @@ class FixedMergedPRTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(ValueError):
                 trigger.validate(self.event, self.fresh, self.permission, self.config, self.now, candidate)
 
-    def test_all_modes_require_reviewed_tree_and_exact_event_commit(self):
+    def test_all_modes_require_reviewed_tree_and_exact_controller_commit(self):
         for mode, operation in [('EVENT_PROOF_V1','event-proof'), ('BOOTSTRAP_INSPECT_V1','bootstrap-inspect'),
                                 ('INSPECT_ONLY_V1','inspect'), ('STOPPED_OPERATOR_V1','prepare-hold')]:
             self.setUp()
@@ -231,11 +231,11 @@ class FixedMergedPRTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.request()
 
-    def test_all_workflows_pin_main_and_require_pr_conversation(self):
+    def test_all_workflows_pin_controller_and_require_main_pr_conversation(self):
         for name in ('inspect','stopped','event-proof','bootstrap'):
             text=(ROOT/f'.github/workflows/test-operator-{name}.yml').read_text()
             data=yaml.safe_load(text)
-            self.assertIn("github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT",text)
+            self.assertNotIn("github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT",text)
             self.assertIn("github.ref == 'refs/heads/main'",text)
             self.assertIn('github.event.issue.pull_request &&',text)
             self.assertNotIn('!github.event.issue.pull_request',text)
@@ -247,4 +247,4 @@ class FixedMergedPRTests(unittest.TestCase):
                 self.assertEqual(job['permissions']['pull-requests'],'read')
                 for step in job['steps']:
                     if step.get('uses','').startswith('actions/checkout@'):
-                        self.assertEqual(step['with']['ref'],'${{ github.sha }}')
+                        self.assertEqual(step['with']['ref'],'${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}')

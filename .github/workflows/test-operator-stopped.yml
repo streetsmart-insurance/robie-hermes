@@ -20,7 +20,6 @@ jobs:
     if: >-
       github.ref == 'refs/heads/main' &&
       github.repository == 'streetsmart-insurance/robie-hermes' &&
-      github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT &&
       vars.ROBIE_TEST_STOPPED_OPERATOR_ENABLED == 'STOPPED_OPERATOR_V1' &&
       github.event.issue.pull_request &&
       (startsWith(github.event.comment.body, '/robie-test prepare-hold ') ||
@@ -33,9 +32,29 @@ jobs:
       issues: read
       pull-requests: read
     steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('OPERATOR_SETUP_COMMIT', '')
+              tree = os.environ.get('OPERATOR_CONTROLLER_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
           persist-credentials: false
       - name: Validate fresh command and current actor permission
         env:
@@ -57,9 +76,29 @@ jobs:
       pull-requests: read
       id-token: write
     steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('OPERATOR_SETUP_COMMIT', '')
+              tree = os.environ.get('OPERATOR_CONTROLLER_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
           persist-credentials: false
       - name: Revalidate authorization and expiry after queue or environment wait
         env:
@@ -94,13 +133,14 @@ jobs:
             < "${RUNNER_TEMP}/operator-request.json" > "${RUNNER_TEMP}/operator-stopped-result.json"
           python3 -c 'import hashlib,json,pathlib,sys; d=json.load(open(sys.argv[1])); assert d["live"] is False and d["status"] in ("HOLD ESTABLISHED", "TEST INSTALLED STOPPED"); assert d["helper_sha256"] == hashlib.sha256(pathlib.Path("scripts/test_operator_stopped.py").read_bytes()).hexdigest()' "${RUNNER_TEMP}/operator-stopped-result.json"
           sha256sum scripts/test_operator_request.py scripts/test_operator_stopped.py > "${RUNNER_TEMP}/controller-files.sha256"
-          printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/controller-commit.txt"
+          printf '%s\n' "${OPERATOR_SETUP_COMMIT}" > "${RUNNER_TEMP}/controller-commit.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: test-operator-stopped-${{ github.run_id }}
           retention-days: 30
           path: |
             ${{ runner.temp }}/operator-request.json
+            ${{ runner.temp }}/controller-evidence.json
             ${{ runner.temp }}/operator-stopped-result.json
             ${{ runner.temp }}/controller-files.sha256
             ${{ runner.temp }}/controller-commit.txt

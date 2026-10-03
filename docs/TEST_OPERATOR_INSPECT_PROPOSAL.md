@@ -34,7 +34,7 @@ It GETs the comment and collaborator permission from GitHub twice: before and
 after execution queue/environment waits. Expiry must fall within 30 minutes of creation.
 Comment text never becomes shell code. Neither job writes comments or issues.
 
-The execution job uses the exact default-branch event controller SHA, WIF and
+The execution job uses the immutable approved controller SHA, WIF and
 IAP. It sends validated JSON through stdin to one fixed, preinstalled root-owned
 helper. The helper uses isolated Python, a fixed unit list and fixed pointer
 paths. No arbitrary path, program, shell, environment, operation or release
@@ -96,8 +96,8 @@ Follow TEST_OPERATOR_BOOTSTRAP.md: publish the exact reviewed tree through norma
 protected-main checks, bind its own merged PR number/ID and merge SHA, prove the
 actual documented PR-comment connector route without cloud credentials, and then
 approve the bounded inspection-only bootstrap through the setup environment.
-No new ordinary issue or sudo/IAM policy is required. Main advances disable the
-pinned route; any migration requires separate review. A fresh cloud inspection
+No new ordinary issue or sudo/IAM policy is required. Unrelated main advances are allowed only when the execution manifest is unchanged;
+relevant changes require separate reviewed migration. A fresh cloud inspection
 with the Mac offline must succeed before claiming usable access.
 
 ## Separate stopped-operation component
