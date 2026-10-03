@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from robie_job_engine.ascend_workflow import AscendWorkflowManager, WorkflowResult
 from robie_job_engine.ezlynx_note_poster import EZLynxAgreementPoster, format_ascend_agreement_note
@@ -24,7 +24,7 @@ CARRIER: Nautilus Insurance Group
 WHOLESALER: Tapco Underwriters
 COVERAGE: Commercial Auto
 QUOTE NUMBER: APX-8831
-POLICY PERIOD: 10/01/2026 to 10/01/2027
+POLICY PERIOD: 11/01/2026 to 11/01/2027
 PURE PREMIUM: $15,000.00
 AGENCY FEE: $350.00
 COMMISSION: 12.5%
@@ -46,14 +46,21 @@ class TestQuoteExtractor(unittest.TestCase):
         self.assertIn("commission_rate_unspecified", quote.hitl_reasons)
         self.assertIn("surplus_lines_tax_verification", quote.hitl_reasons)
         self.assertIn("dual_terrorism_options_present", quote.hitl_reasons)
-        self.assertEqual(len(quote.hitl_questions), 4)
+        self.assertIn("insured_address_missing", quote.hitl_reasons)
+        self.assertIn("insured_contact_missing", quote.hitl_reasons)
+        # 7 questions: 4 original + agency_fee_confirm + address + contact
+        self.assertEqual(len(quote.hitl_questions), 7)
 
     def test_clear_quote_with_instruction_skips_hitl(self):
+        # With terrorism instruction, only address/contact remain (new requirement)
         quote = self.extractor.extract_from_text(
             SAMPLE_CLEAR_QUOTE,
             user_instruction="Please bind with terrorism coverage included",
         )
-        self.assertFalse(quote.requires_hitl)
+        # Terrorism resolved by instruction; address/contact still required
+        self.assertNotIn("dual_terrorism_options_present", quote.hitl_reasons)
+        self.assertIn("insured_address_missing", quote.hitl_reasons)
+        self.assertIn("insured_contact_missing", quote.hitl_reasons)
         self.assertEqual(quote.insured_name, "Apex Transport Inc")
         self.assertEqual(quote.carrier_name, "Nautilus Insurance Group")
         self.assertEqual(quote.wholesaler_name, "Tapco Underwriters")
@@ -67,7 +74,7 @@ class TestQuoteExtractor(unittest.TestCase):
         quote = self.extractor.extract_from_text(SAMPLE_AMBIGUOUS_QUOTE)
         self.assertTrue(quote.requires_hitl)
 
-        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism"
+        reply = "1. Yes standard $350 fee. 2. 10% commission. 3. Surplus tax is $600. 4. Include terrorism. Address: 123 Main St, Newark, NJ 07101. Contact: John Doe, john@acme.com, 555-010-1234"
         resolved = self.extractor.apply_user_clarifications(quote, reply)
         self.assertFalse(resolved.requires_hitl)
         self.assertEqual(resolved.agency_fees_cents, 35000)
@@ -75,6 +82,74 @@ class TestQuoteExtractor(unittest.TestCase):
         self.assertEqual(resolved.surplus_lines_tax_cents, 60000)
         self.assertTrue(resolved.terrorism_included)
         self.assertEqual(resolved.pure_premium_cents, 1260000)
+
+    def test_clarification_parses_carrier_identifier(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC", carrier_name="Nautilus Insurance Group")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "The carrier identifier is nautilus_insurance_company_scottsdale_916e26"
+        )
+        self.assertEqual(resolved.carrier_identifier, "nautilus_insurance_company_scottsdale_916e26")
+
+    def test_clarification_parses_carrier_name(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(quote, "Carrier name: Nautilus Insurance Company")
+        self.assertEqual(resolved.carrier_name, "Nautilus Insurance Company")
+
+    def test_clarification_parses_address_and_contact(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        reply = (
+            "Address: 42 Riva Ave, North Brunswick, NJ 08902\n"
+            "Primary contact: Mike Fingerhut, mjfingerhut@gmail.com, 732-266-8111"
+        )
+        resolved = self.extractor.apply_user_clarifications(quote, reply)
+        self.assertEqual(resolved.mailing_address["mailing_address_street_one"], "42 Riva Ave")
+        self.assertEqual(resolved.mailing_address["mailing_address_city"], "North Brunswick")
+        self.assertEqual(resolved.mailing_address["mailing_address_state"], "NJ")
+        self.assertEqual(resolved.mailing_address["mailing_address_zip_code"], "08902")
+        self.assertEqual(resolved.primary_contact["first_name"], "Mike")
+        self.assertEqual(resolved.primary_contact["last_name"], "Fingerhut")
+        self.assertEqual(resolved.primary_contact["email"], "mjfingerhut@gmail.com")
+        self.assertEqual(resolved.primary_contact["phone"], "7322668111")
+
+    def test_clarification_parses_applicant_id_hint(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "Here is the applicant link, applicant id 223600203"
+        )
+        self.assertEqual(resolved.applicant_id_hint, "223600203")
+
+    def test_clarification_parses_producer_hint(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "Producer: Matthew Mancina"
+        )
+        self.assertEqual(resolved.producer_hint, "Matthew Mancina")
+        # "account manager" label works too
+        quote2 = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved2 = self.extractor.apply_user_clarifications(
+            quote2, "account manager: matthew@streetsmart.insurance"
+        )
+        self.assertEqual(resolved2.producer_hint, "matthew@streetsmart.insurance")
+
+    def test_clarification_parses_confirm_duplicate(self):
+        quote = ExtractedQuote(insured_name="Acme Hauling LLC")
+        resolved = self.extractor.apply_user_clarifications(
+            quote, "Yes, confirm duplicate - please create it"
+        )
+        self.assertTrue(resolved.duplicate_confirmed)
+
+    def test_clarification_does_not_overwrite_existing_values(self):
+        quote = ExtractedQuote(
+            insured_name="Acme Hauling LLC",
+            carrier_identifier="existing_carrier_id",
+            mailing_address={"mailing_address_street_one": "1 Old Rd"},
+        )
+        resolved = self.extractor.apply_user_clarifications(
+            quote,
+            "carrier identifier is new_carrier_id_here_1234\nAddress: 9 New St, Edison, NJ 08817",
+        )
+        self.assertEqual(resolved.carrier_identifier, "existing_carrier_id")
+        self.assertEqual(resolved.mailing_address["mailing_address_street_one"], "1 Old Rd")
 
 
 class TestEZLynxNotePoster(unittest.TestCase):
@@ -128,6 +203,7 @@ class TestAscendWorkflowManager(unittest.TestCase):
             "44444444-4444-4444-4444-444444444444",
             {"id": "44444444-4444-4444-4444-444444444444"},
         )
+        self.mock_client.find_program_by_policy.return_value = None
 
         self.mock_ezlynx_poster = MagicMock()
         self.mock_ezlynx_poster.post_agreement_note.return_value = {"status": "success", "note_id": 9999}
@@ -160,14 +236,28 @@ class TestAscendWorkflowManager(unittest.TestCase):
         )
         self.assertEqual(res_initial.status, "NEEDS_CLARIFICATION")
 
-        reply = "1. Yes $350 fee 2. 10% commission 3. $500 surplus tax 4. Option 1 with terrorism"
-        res_completed = self.manager.resume_with_clarifications(
-            res_initial.quote,
-            reply,
-            sender_name="Carlo",
-            sender_email="carlo@streetsmart.insurance",
-            applicant_id="123456",
-        )
+        reply = "1. Yes $350 fee 2. 10% commission 3. $500 surplus tax 4. Option 1 with terrorism. Address: 1 Test Way, Freehold, NJ 07728. Contact: Test Contact, t@example.com, 555-111-2222"
+        from unittest.mock import patch
+
+        with patch(
+            "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
+            return_value=(
+                {
+                    "mailing_address_street_one": "1 Test Way",
+                    "mailing_address_city": "Freehold",
+                    "mailing_address_state": "NJ",
+                    "mailing_address_zip_code": "07728",
+                },
+                {"first_name": "Test", "last_name": "Contact", "email": "t@example.com", "phone": "5551112222"},
+            ),
+        ):
+            res_completed = self.manager.resume_with_clarifications(
+                res_initial.quote,
+                reply,
+                sender_name="Carlo",
+                sender_email="carlo@streetsmart.insurance",
+                applicant_id="123456",
+            )
         self.assertEqual(res_completed.status, "COMPLETED")
         self.assertEqual(res_completed.program_id, "33333333-3333-3333-3333-333333333333")
         self.assertTrue(res_completed.program_url.startswith("https://checkout.useascend.com/"))
@@ -176,6 +266,371 @@ class TestAscendWorkflowManager(unittest.TestCase):
         self.mock_ezlynx_poster.post_agreement_note.assert_called_once()
         self.assertIn("Ascend Agreement Ready", res_completed.reply_email_subject)
         self.assertIn("Robie was here", res_completed.reply_email_body)
+
+    def _resumable_quote(self) -> ExtractedQuote:
+        return ExtractedQuote(
+            insured_name="Acme Hauling LLC",
+            carrier_name="Nautilus Insurance Group",
+            pure_premium_cents=1200000,
+            agency_fees_cents=35000,
+            effective_date="2026-10-01",
+            expiration_date="2027-10-01",
+            policy_number="Q-123",
+        )
+
+    def test_resume_consumes_sender_supplied_address_and_contact(self):
+        # EZLynx has no address/contact for this client; the sender's reply
+        # supplies both. Resume must use the reply's values, not ask again.
+        quote = self._resumable_quote()
+        reply = (
+            "Address: 42 Riva Ave, North Brunswick, NJ 08902. "
+            "Primary contact: Mike Fingerhut, mjfingerhut@gmail.com, 732-266-8111"
+        )
+        with patch(
+            "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
+            return_value=(None, None),
+        ):
+            res = self.manager.resume_with_clarifications(
+                quote, reply, sender_name="Jake", sender_email="jake@streetsmart.insurance",
+            )
+        self.assertEqual(res.status, "COMPLETED")
+        _, kwargs = self.mock_client.find_or_create_insured.call_args
+        self.assertEqual(kwargs["address"]["mailing_address_street_one"], "42 Riva Ave")
+        self.assertEqual(kwargs["address"]["mailing_address_zip_code"], "08902")
+        self.assertEqual(kwargs["contact"]["first_name"], "Mike")
+        self.assertEqual(kwargs["contact"]["last_name"], "Fingerhut")
+        self.assertEqual(kwargs["contact"]["email"], "mjfingerhut@gmail.com")
+
+    def test_resume_consumes_carrier_identifier_from_reply(self):
+        # Ascend has no carrier match; the sender's reply supplies the exact
+        # identifier. Resume must use it verbatim, never a guessed slug.
+        quote = self._resumable_quote()
+        self.mock_client.search_carriers.return_value = []
+        reply = "Use carrier identifier nautilus_insurance_company_scottsdale_916e26"
+        with patch(
+            "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
+            return_value=(
+                {
+                    "mailing_address_street_one": "1 Test Way",
+                    "mailing_address_city": "Freehold",
+                    "mailing_address_state": "NJ",
+                    "mailing_address_zip_code": "07728",
+                },
+                {"first_name": "Test", "last_name": "Contact", "email": "t@example.com", "phone": "5551112222"},
+            ),
+        ):
+            res = self.manager.resume_with_clarifications(
+                quote, reply, sender_name="Jake", sender_email="jake@streetsmart.insurance",
+            )
+        self.assertEqual(res.status, "COMPLETED")
+        billable_body = self.mock_client.create_billable.call_args[0][0]
+        self.assertEqual(
+            billable_body["carrier_identifier"],
+            "nautilus_insurance_company_scottsdale_916e26",
+        )
+
+
+class TestAscendWorkflowFailClosed(unittest.TestCase):
+    """Regression tests for the 2026-10-01 PFA sandbox findings:
+    (1) billable failure was reported as COMPLETED, (2) carrier identifiers
+    were invented by slugifying the carrier name, (3) new insureds were
+    created without the address/contact Ascend requires."""
+
+    def setUp(self):
+        self.mock_client = MagicMock()
+        self.mock_client.search_carriers.return_value = [
+            {"identifier": "nautilus_insurance_company_scottsdale_916e26", "title": "Nautilus Insurance Company"}
+        ]
+        self.mock_client.search_wholesalers.return_value = []
+        self.mock_client.find_or_create_insured.return_value = (
+            "11111111-1111-1111-1111-111111111111",
+            {"id": "11111111-1111-1111-1111-111111111111"},
+        )
+        self.mock_client.resolve_user.return_value = "22222222-2222-2222-2222-222222222222"
+        self.mock_client.create_program.return_value = (
+            "33333333-3333-3333-3333-333333333333",
+            {"id": "33333333-3333-3333-3333-333333333333", "program_url": "https://checkout.useascend.com/x"},
+        )
+        self.mock_client.create_billable.return_value = (
+            "44444444-4444-4444-4444-444444444444",
+            {"id": "44444444-4444-4444-4444-444444444444"},
+        )
+        self.mock_client.find_program_by_policy.return_value = None
+        self.mock_ezlynx_poster = MagicMock()
+        self.manager = AscendWorkflowManager(
+            client_factory=lambda: self.mock_client,
+            ezlynx_poster=self.mock_ezlynx_poster,
+        )
+        self.resolver_patcher = patch(
+            "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
+            return_value=(
+                {
+                    "mailing_address_street_one": "1 Test Way",
+                    "mailing_address_city": "Freehold",
+                    "mailing_address_state": "NJ",
+                    "mailing_address_zip_code": "07728",
+                },
+                {"first_name": "Test", "last_name": "Contact", "email": "t@example.com", "phone": "5551112222"},
+            ),
+        )
+        self.resolver_patcher.start()
+        self.addCleanup(self.resolver_patcher.stop)
+
+    def _clear_quote(self):
+        return ExtractedQuote(
+            insured_name="Apex Transport Inc",
+            carrier_name="Nautilus Insurance Company",
+            coverage_title="Commercial Auto",
+            coverage_identifier="commercial_auto",
+            policy_number="APX-8831",
+            effective_date="2026-10-01",
+            expiration_date="2027-10-01",
+            pure_premium_cents=150000,
+            agency_fees_cents=35000,
+            commission_rate=0.125,
+            surplus_lines_tax_cents=75000,
+        )
+
+    def test_carrier_identifier_is_never_invented(self):
+        # search_carriers returns nothing: the workflow must ask the sender,
+        # not slugify "Nautilus Insurance Group" into a fake identifier.
+        self.mock_client.search_carriers.return_value = []
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="jake@streetsmart.insurance", sender_name="Jake"
+        )
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("carrier", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
+
+    def test_no_carrier_name_at_all_also_asks(self):
+        quote = self._clear_quote()
+        quote.carrier_name = ""
+        quote.carrier_identifier = ""
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="jake@streetsmart.insurance", sender_name="Jake"
+        )
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.mock_client.create_program.assert_not_called()
+
+    def test_missing_ezlynx_address_asks_sender(self):
+        self.resolver_patcher.stop()
+        try:
+            with patch(
+                "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
+                return_value=(None, None),
+            ):
+                res = self.manager.create_agreement_and_file_ezlynx(
+                    self._clear_quote(), sender_email="jake@streetsmart.insurance", sender_name="Jake"
+                )
+        finally:
+            self.resolver_patcher.start()
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("mailing address", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
+
+    def test_unresolvable_sender_asks_for_producer(self):
+        # jake@streetsmart.insurance is not an Ascend user: the workflow must
+        # ask who should be producer/account-manager, not silently substitute
+        # Robie AI (the old hardcoded fallback). Nothing may be created.
+        self.mock_client.resolve_user.return_value = None
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="jake@streetsmart.insurance", sender_name="Jake Ferrara"
+        )
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("producer", res.reply_email_body.lower())
+        self.assertIn("jake@streetsmart.insurance", res.reply_email_body)
+        self.mock_client.find_or_create_insured.assert_not_called()
+        self.mock_client.create_program.assert_not_called()
+
+    def test_producer_hint_from_reply_resolves_on_resume(self):
+        # Sender still unresolvable, but the reply names a producer who is an
+        # Ascend user: the agreement proceeds with that producer.
+        def fake_resolve(name_or_email):
+            return "aaaaaaaa-1111-1111-1111-111111111111" if "matthew" in name_or_email.lower() else None
+
+        self.mock_client.resolve_user.side_effect = fake_resolve
+        quote = self._clear_quote()
+        quote.producer_hint = "Matthew Mancina"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="jake@streetsmart.insurance", sender_name="Jake Ferrara"
+        )
+        self.mock_client.create_program.assert_called_once()
+        payload = self.mock_client.create_program.call_args[0][0]
+        self.assertEqual(payload["producer_id"], "aaaaaaaa-1111-1111-1111-111111111111")
+        self.assertEqual(payload["account_manager_id"], "aaaaaaaa-1111-1111-1111-111111111111")
+
+    def test_system_job_with_no_sender_attributes_to_robie_ai(self):
+        # No sender at all (system-triggered): Robie AI may be resolved by
+        # name. Still fail closed if even that does not resolve.
+        self.mock_client.resolve_user.side_effect = lambda n: "bbbbbbbb-2222-2222-2222-222222222222" if n == "Robie AI" else None
+        res = self.manager.create_agreement_and_file_ezlynx(self._clear_quote())
+        self.mock_client.create_program.assert_called_once()
+        payload = self.mock_client.create_program.call_args[0][0]
+        self.assertEqual(payload["producer_id"], "bbbbbbbb-2222-2222-2222-222222222222")
+
+    def test_ambiguous_carrier_asks_with_options(self):
+        # Two carriers match: must ask with the options, not take the first.
+        self.mock_client.search_carriers.return_value = [
+            {"identifier": "carrier-a-123", "title": "Nautilus Insurance Company"},
+            {"identifier": "carrier-b-456", "title": "Nautilus Specialty Insurance"},
+        ]
+        quote = self._clear_quote()
+        quote.carrier_identifier = ""
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("2 carriers", res.reply_email_body)
+        self.assertIn("Nautilus Specialty Insurance", res.reply_email_body)
+        self.mock_client.create_program.assert_not_called()
+
+    def test_unmatched_wholesaler_asks(self):
+        # Named wholesaler with no Ascend match: ask, don't silently drop it.
+        self.mock_client.search_wholesalers.return_value = []
+        quote = self._clear_quote()
+        quote.wholesaler_name = "Nonexistent Wholesale Inc"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("wholesaler", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
+
+    def test_duplicate_policy_number_asks_before_creating(self):
+        # A program already exists for this policy: ask, don't double-create.
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1", "program_id": "existing-prog-1"}
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("already", res.reply_email_body.lower())
+        self.assertIn("APX-8831", res.reply_email_body)
+        self.mock_client.create_program.assert_not_called()
+
+    def test_duplicate_policy_different_insured_is_not_duplicate(self):
+        # Policy number matches but insured name differs: not a true duplicate,
+        # proceed with creation (quote ref vs actual policy collision).
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1",
+            "program_id": "existing-prog-1",
+            "program": {
+                "insured": {"business_name": "Different Company LLC"},
+            },
+        }
+        res = self.manager.create_agreement_and_file_ezlynx(
+            self._clear_quote(), sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        # Should NOT ask about duplicate since insured names differ
+        self.assertNotIn("already an Ascend agreement", res.reply_email_body or "")
+
+    def test_confirm_duplicate_bypasses_duplicate_guard(self):
+        # Sender confirms: the second agreement proceeds.
+        self.mock_client.find_program_by_policy.return_value = {
+            "id": "existing-prog-1", "program_id": "existing-prog-1"}
+        quote = self._clear_quote()
+        quote.duplicate_confirmed = True
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.mock_client.create_program.assert_called_once()
+
+    def test_scanned_pdf_asks_for_text(self):
+        # PDF with no selectable text: clear message, not a field-by-field ask.
+        quote = self._clear_quote()
+        quote.raw_text = "[PDF_NO_TEXT_EXTRACTED: the PDF appears to be a scanned image]"
+        res = self.manager.create_agreement_and_file_ezlynx(
+            quote, sender_email="carlo@streetsmart.insurance", sender_name="Carlo")
+        self.assertEqual(res.status, "NEEDS_CLARIFICATION")
+        self.assertIn("scanned", res.reply_email_body.lower())
+        self.mock_client.create_program.assert_not_called()
+
+    def test_partial_billables_are_an_error_not_completed(self):
+        # Defense in depth: even if a worker ever reports success with fewer
+        # billables than expected, the workflow must not compose "Agreement Ready".
+        from robie_job_engine.ascend_api import ACTION_TYPE
+        from robie_job_engine.models import WorkerResult
+
+        partial = WorkerResult(
+            True,
+            ACTION_TYPE,
+            {"program_id": "33333333-3333-3333-3333-333333333333", "program_url": "https://checkout.useascend.com/x"},
+            detail={"billable_ids": [], "expected_billable_count": 1, "partial_failure": "boom"},
+            retryable=False,
+        )
+        with patch(
+            "robie_job_engine.ascend_workflow.AscendCreateProgramWorker"
+        ) as worker_cls:
+            worker_cls.return_value.perform.return_value = partial
+            res = self.manager.create_agreement_and_file_ezlynx(
+                self._clear_quote(), sender_email="jake@streetsmart.insurance", sender_name="Jake"
+            )
+        self.assertEqual(res.status, "ERROR")
+        self.assertIn("NOT ready", res.error or "")
+        self.assertNotIn("Agreement Ready", res.reply_email_subject)
+        self.mock_ezlynx_poster.post_agreement_note.assert_not_called()
+
+    def test_no_applicant_id_skips_ezlynx_filing(self):
+        # No applicant_id provided: EZLynx filing is skipped (not attempted with "0"),
+        # and the confirmation email reports NOT filed.
+        from robie_job_engine.models import WorkerResult
+        self.mock_client.find_program_by_policy.return_value = None
+        success = WorkerResult(
+            True,
+            "create_program",
+            {"program_id": "prog-123", "program_url": "https://example.com/prog-123",
+             "destination": {"program_id": "prog-123"}},
+        )
+        with patch(
+            "robie_job_engine.ascend_workflow.AscendCreateProgramWorker"
+        ) as worker_cls:
+            worker_cls.return_value.perform.return_value = success
+            res = self.manager.create_agreement_and_file_ezlynx(
+                self._clear_quote(),
+                sender_email="carlo@streetsmart.insurance",
+                sender_name="Carlo",
+                applicant_id=None,
+            )
+        self.mock_ezlynx_poster.post_agreement_note.assert_not_called()
+        self.assertIn("NOT filed", res.reply_email_body)
+
+    def test_resolve_insured_from_ezlynx_maps_applicant_fields(self):
+        import sys
+        import types
+
+        # Stop the setUp resolver mock: this test exercises the real function.
+        self.resolver_patcher.stop()
+        self.addCleanup(self.resolver_patcher.start)
+        from robie_job_engine.ascend_workflow import _resolve_insured_from_ezlynx
+
+        fake_client = MagicMock()
+        fake_client.get_applicant.return_value = {
+            "status": "success",
+            "applicant": {
+                "BusinessName": "Earth Center Conservancy",
+                "FirstName": "Mike",
+                "LastName": "Fingerhut",
+                "BusinessEmail": "mjfingerhut@gmail.com",
+                "BusinessPhone": "7322668111",
+                "CurrentAddress": {
+                    "AddressLine1": "42 RIVA AVE",
+                    "City": "NORTH BRUNSWICK",
+                    "State": "NJ",
+                    "Zip": "08902",
+                },
+            },
+        }
+        fake_mod = types.ModuleType("src.ezlynx.api_client")
+        fake_mod.EZLynxApiClient = lambda: fake_client
+        fake_pkg = types.ModuleType("src.ezlynx")
+        fake_root = types.ModuleType("src")
+        with patch.dict(
+            sys.modules,
+            {"src": fake_root, "src.ezlynx": fake_pkg, "src.ezlynx.api_client": fake_mod},
+        ):
+            address, contact = _resolve_insured_from_ezlynx("223600203", "Earth Center Conservancy")
+        self.assertEqual(address["mailing_address_street_one"], "42 RIVA AVE")
+        self.assertEqual(address["mailing_address_city"], "NORTH BRUNSWICK")
+        self.assertEqual(address["mailing_address_state"], "NJ")
+        self.assertEqual(address["mailing_address_zip_code"], "08902")
+        self.assertEqual(contact["first_name"], "Mike")
+        self.assertEqual(contact["last_name"], "Fingerhut")
+        self.assertEqual(contact["email"], "mjfingerhut@gmail.com")
 
 
 class TestAscendGoogleChatIntegration(unittest.TestCase):

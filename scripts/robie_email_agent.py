@@ -705,6 +705,7 @@ def process_inbox():
             continue
         sender = item["sender"]
         subject = item["subject"]
+        body = item["body"]
         thread_id = item["thread_id"]
         msg_id = item["msg_id"]
         headers = item["headers"]
@@ -729,17 +730,45 @@ def process_inbox():
             reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
             # 2026-09-14: no-blind-resend as code. Check Sent before sending so a
             # retry or duplicate run can never double-send (Julio's Tree Service).
-            skip_send, skip_reason = should_skip_send(service, sender, reply_subject)
+            # Content-aware args are optional. Pass them only when this
+            # callable accepts them, so older guards and test doubles still work.
+            import inspect
+            skip_kwargs = {}
+            try:
+                skip_params = inspect.signature(should_skip_send).parameters
+            except (TypeError, ValueError):
+                skip_params = {}
+            accepts_var_kw = any(
+                getattr(param, "kind", None) == inspect.Parameter.VAR_KEYWORD
+                for param in skip_params.values()
+            )
+            if accepts_var_kw or "incoming_body" in skip_params:
+                skip_kwargs["incoming_body"] = body
+            if accepts_var_kw or "thread_id" in skip_params:
+                skip_kwargs["thread_id"] = thread_id
+            skip_send, skip_reason = should_skip_send(
+                service, sender, reply_subject, **skip_kwargs
+            )
             if skip_send:
                 logger.warning(
                     "Skipping duplicate reply to %s on thread %s: %s",
                     sender, thread_id, skip_reason,
                 )
             else:
+                # Preserve original CC recipients on the reply (2026-10-02:
+                # Robie was dropping CCs, e.g. Jake on PFA test threads).
+                # Exclude robie@ itself to avoid self-CC loops.
+                import re as _re
+                cc_raw = headers.get("cc", "") or ""
+                cc_list = [
+                    addr.strip()
+                    for addr in _re.split(r"[;,]", cc_raw)
+                    if addr.strip() and "robie@" not in addr.lower()
+                ]
                 reply_msg = build_plain_email_message(
                     sender="Robie AI <robie@streetsmart.insurance>",
                     to=[sender],
-                    cc=[],
+                    cc=cc_list,
                     subject=reply_subject,
                     text_body=reply_body,
                     plain_only=True,
