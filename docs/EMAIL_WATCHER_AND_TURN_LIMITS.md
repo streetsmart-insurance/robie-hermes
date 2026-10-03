@@ -49,7 +49,16 @@ message or start another tool call. The thread gets "I stopped after
 10 minutes." or one line, "Stopped. That job is cancelled. Ref: job …",
 and that post is stored as a `chat_delivery` checkpoint when Google
 returns a message id. `/stop` with nothing running does not touch a job
-record and replies only "Nothing is running right now."
+record and replies only "Nothing is running right now." `/stop` inside
+a finished job's thread replies "That job already finished." and does
+not change that job.
+
+In a group space, Google Chat delivers a message to this app only when
+it @mentions Robie. `/stop` in a job's thread has to be `@Robie /stop`.
+A thread reply with no mention never reaches the gateway, so it is not
+in the log and a restart cannot redeliver it. A direct message does not
+need the mention. The adapter does not drop a message Google already
+delivered because it lacks a mention.
 
 A new message in a busy session does not cancel the running job. Only
 `/stop` and the ceiling cancel. The new message gets "I'm finishing

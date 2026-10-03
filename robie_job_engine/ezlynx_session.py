@@ -48,6 +48,7 @@ AUTH_CODES = {
 }
 LOGIN_URL = "https://app.ezlynx.com/auth/account/login"
 APP_URL = "https://app.ezlynx.com/"
+APP_WEB_URL = "https://app.ezlynx.com/web/"
 
 
 def _now() -> str:
@@ -231,30 +232,97 @@ class PlaywrightEzlynxSession:
             self._page.goto(APP_URL, wait_until="domcontentloaded")
 
     def state(self) -> SessionState:
-        self._ensure_page()
+        """Judge the session on the app page, not on a blank login tab."""
+        try:
+            self._page.goto(APP_WEB_URL, wait_until="domcontentloaded")
+        except Exception:
+            return SessionState.UNVERIFIED
         url = self._page.url.casefold()
-        body = self._page.locator("body").inner_text(timeout=10_000).casefold()
+        try:
+            body = self._page.locator("body").inner_text(timeout=10_000).casefold()
+        except Exception:
+            body = ""
         if "captcha" in body or "verification code" in body or "multi-factor" in body:
             return SessionState.INTERACTIVE_AUTH_REQUIRED
-        if "/auth/account/login" in url or "/auth/account/logout" in url:
+        if "limited to 2 active sessions" in body and (
+            "log out the session" in body or "continue will log out" in body
+        ):
             return SessionState.LOGIN_REQUIRED
+        try:
+            internal_web_links = self._page.locator('a[href*="/web/"]').count()
+            login_controls = self._page.locator("#txtUserName,#txtPassword,#btnLogin").count()
+        except Exception:
+            return SessionState.UNVERIFIED
         if authenticated_app_evidence(
             url,
-            internal_web_links=self._page.locator('a[href*="/web/"]').count(),
-            login_controls=self._page.locator("#txtUserName,#txtPassword,#btnLogin").count(),
+            internal_web_links=internal_web_links,
+            login_controls=login_controls,
         ):
             return SessionState.SIGNED_IN
+        if "/auth/account/login" in url or "/auth/account/logout" in url:
+            return SessionState.LOGIN_REQUIRED
         return SessionState.UNVERIFIED
 
-    def login(self, username: str, password: str) -> SessionState:
-        self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    def _wait_for_login_form(self) -> None:
+        """A blank login page has no form until it reloads."""
+        field = self._page.locator("#txtUserName")
         try:
+            field.wait_for(state="visible", timeout=8_000)
+            return
+        except Exception:
+            self._page.reload(wait_until="domcontentloaded")
+        field.wait_for(state="visible", timeout=15_000)
+
+    def _continue_two_session(self, username: str, password: str) -> SessionState:
+        """The login helper's one-Continue path. Same fill, same proof, same rc."""
+        from ezlynx_login_bootstrap import (
+            SESSION_LIMIT_LOGIN_FAILED,
+            SESSION_LIMIT_REFUSED,
+            handle_two_session_prompt,
+        )
+        from robie_job_engine.ezlynx_driver_gate import (
+            EzlynxDriverGateRefused,
+            require_driver_in,
+        )
+
+        code = handle_two_session_prompt(
+            self._page,
+            gate=require_driver_in,
+            username=username,
+            password=password,
+        )
+        if code == 0:
+            return SessionState.SIGNED_IN
+        if code == SESSION_LIMIT_REFUSED:
+            raise EzlynxDriverGateRefused(
+                "This environment does not hold the EZLynx driver, so Continue was not pressed."
+            )
+        if code == SESSION_LIMIT_LOGIN_FAILED:
+            raise SessionVerificationFailed(
+                "EZLynx did not confirm login after one Continue. "
+                "The other session is still active."
+            )
+        raise SessionVerificationFailed(
+            "EZLynx two-session prompt did not reach the app page."
+        )
+
+    def login(self, username: str, password: str) -> SessionState:
+        from ezlynx_login_bootstrap import begin_login_run, session_limit_on
+
+        begin_login_run()
+        self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
+        try:
+            self._wait_for_login_form()
             self._page.locator("#txtUserName").fill(username)
             self._page.locator("#txtPassword").fill(password)
             self._page.locator("#btnLogin").click()
             self._page.wait_for_load_state("domcontentloaded", timeout=20_000)
         except Exception as exc:
             raise RuntimeError("EZLynx login interaction failed") from exc
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
         return wait_for_post_login_state(self.state)
 
 

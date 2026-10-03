@@ -72,7 +72,7 @@ from .playground_reply import (
     sop_reply,
 )
 from .playground_voice import render_turn_prompt
-from .playground_sop import retrieve_sop
+from .playground_sop import retrieve_sop, ambiguous_sop_hits
 from .playground_undo import record_write
 from .store import JobStore, utc_now
 
@@ -402,7 +402,23 @@ def _start(
         _note("needs_clarification")
         return reply
     if decision.intent == "sop":
-        hits = retrieve_sop(text, sop_docs)
+        hits = retrieve_sop(text, sop_docs, limit=2, include_ties=True)
+        if ambiguous_sop_hits(hits):
+            tied = [hit for hit in hits if hit.match_score == hits[0].match_score]
+            sources = "; ".join(hit.citation for hit in tied[:3])
+            remaining = f"; and {len(tied) - 3} more" if len(tied) > 3 else ""
+            question = (f"{len(tied)} procedure sources match this question with different text: "
+                        + sources + remaining
+                        + ". Which approved source should I use?")
+            reply = clarify_reply(question=question, job_id=job_id)
+            store.checkpoint(job_id, "sop_ambiguity", {"source_ids": [hit.doc_id for hit in tied],
+                                                      "needs_review": True})
+            store.transition(job_id, JobStatus.NEEDS_CLARIFICATION,
+                             expected={JobStatus.PENDING}, error="SOP source ambiguity",
+                             release_lease=True)
+            store.checkpoint(job_id, REPLY_KIND, {"text": reply})
+            _note("needs_clarification")
+            return reply
         if hits:
             hit = hits[0]
             reply = sop_reply(

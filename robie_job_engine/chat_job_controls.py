@@ -14,8 +14,8 @@ from typing import Any
 
 from .models import JobStatus
 
-# The Chat turn ceiling is 10 minutes. A clarify older than that is stale.
-WAITING_EXPIRE_SECONDS = 600
+# Carlo's HITL window is 30 minutes. A clarify stays open at least that long.
+WAITING_EXPIRE_SECONDS = 30 * 60
 # Fallback bind when the message has no thread: only a fresh waiting job.
 WAITING_BIND_MAX_SECONDS = 900
 # A RUNNING row with no lease and no heartbeat is dead after this long.
@@ -366,6 +366,48 @@ def close_declined_note_repost(store: Any, job_id: str, text: str) -> str | None
     return LEFT_AS_IS
 
 
+def active_jobs_for_requester(
+    db_path: str,
+    conversation_id: str,
+    requester: str | None = None,
+) -> list[str]:
+    """Jobs still in progress in this space for the person who said stop.
+
+    Includes a RUNNING job. ``waiting_jobs_for_requester`` does not, and a
+    top-level /stop used to leave that job going.
+    """
+    if not db_path or not conversation_id:
+        return []
+    from .store import JobStore
+
+    who = " ".join(str(requester or "").casefold().split())
+    store = JobStore(db_path)
+    found: list[str] = []
+    statuses = {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+        JobStatus.NEEDS_CLARIFICATION,
+        JobStatus.AWAITING_HUMAN_INPUT,
+    }
+    for job in store.list_jobs_by_status(statuses):
+        payload = dict(job.get("payload") or {})
+        space = str(payload.get("conversation_id") or "")
+        if space and space != conversation_id:
+            continue
+        owner = " ".join(
+            str(payload.get("requested_by") or payload.get("requester_user_id") or "")
+            .casefold()
+            .split()
+        )
+        if who and owner and who not in owner and owner not in who:
+            continue
+        job_id = str(job.get("id") or "")
+        if job_id:
+            found.append(job_id)
+    return found
+
+
 def waiting_jobs_for_requester(
     db_path: str,
     conversation_id: str,
@@ -407,7 +449,9 @@ def consume_note_repost_allowance(store: Any, job_id: str) -> bool:
     if not job_id or store is None:
         return False
     import json
+
     from .store import canonical_json, utc_now
+
     try:
         with store.transaction() as conn:
             saved = conn.execute(
@@ -523,6 +567,7 @@ def should_bind_waiting_reply(
     if hard_block_reply(text):
         return False
     from .hitl import classify_human_reply
+
     if text.strip() and classify_human_reply(text, {}) == "NEW_INTENT":
         return False
     from .chat_thread import read_job_chat_thread, thread_resource_name
@@ -560,13 +605,94 @@ def waiting_job_to_bind(
     return None
 
 
+def original_request_text(job: dict[str, Any] | None) -> str:
+    """The ask that opened the job, without a later clarification reply."""
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("original_text", "request_text", "text", "prompt"):
+        text = str(payload.get(key) or "").strip()
+        if not text:
+            continue
+        marker = "\n\nUser reply:"
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+        if text:
+            return " ".join(text.split())
+    return ""
+
+
+def expired_question_reply(store: Any, job: dict[str, Any] | None) -> str:
+    """The expiry line plus the original ask, on one line so Chat keeps both."""
+    ask = original_request_text(job)
+    question = ""
+    job_id = str((job or {}).get("id") or "")
+    if store is not None and job_id:
+        try:
+            note = store.get_checkpoint(job_id, "clarification") or {}
+        except Exception:
+            note = {}
+        question = " ".join(str(note.get("question") or "").split())
+    restated = ask or question
+    if question and ask and question.casefold() not in ask.casefold():
+        restated = f"{question} {ask}".strip()
+    if not restated:
+        return WAITING_EXPIRED_NOTE
+    return f"{WAITING_EXPIRED_NOTE} {restated}"
+
+
+def answer_is_new_request(text: str) -> bool:
+    """True when this message is a fresh task, not an answer to a question."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if _FRESH_TASK.search(raw):
+        return True
+    from .hitl import classify_human_reply
+
+    try:
+        return classify_human_reply(raw, {}) == "NEW_INTENT"
+    except Exception:
+        return False
+
+
+def expired_clarify_job_for_reply(
+    store: Any,
+    text: str,
+    inbound_thread_id: str | None,
+) -> dict[str, Any] | None:
+    """The expired clarify job this in-thread answer must not reopen as new work.
+
+    A fresh request in that thread still starts a job. A short answer does not.
+    """
+    if store is None or answer_is_new_request(text):
+        return None
+    from .chat_thread import read_job_chat_thread, thread_resource_name
+
+    inbound = thread_resource_name(inbound_thread_id)
+    if not inbound:
+        return None
+    for job in list_jobs_in_status(store, {JobStatus.FAILED.value}):
+        job_id = str(job.get("id") or "")
+        if not job_id:
+            continue
+        try:
+            note = store.get_checkpoint(job_id, "waiting_expired") or {}
+        except Exception:
+            note = {}
+        if not note:
+            continue
+        stored = read_job_chat_thread(store, job_id)
+        if stored and stored == inbound:
+            return job
+    return None
+
+
 def expire_stale_waiting_jobs(
     store: Any,
     *,
     older_than_seconds: int = WAITING_EXPIRE_SECONDS,
     now: datetime | None = None,
 ) -> list[dict[str, str]]:
-    """Fail clarify jobs older than the 10-minute ceiling. One line each."""
+    """Fail clarify jobs older than 30 minutes. Restate the original ask."""
     if older_than_seconds < 1:
         raise ValueError("waiting expire window must be positive")
     clock = now or datetime.now(timezone.utc)
@@ -577,6 +703,7 @@ def expire_stale_waiting_jobs(
         job_id = str(job.get("id") or "")
         if not job_id:
             continue
+        reply = expired_question_reply(store, job)
         try:
             store.transition(
                 job_id,
@@ -590,7 +717,7 @@ def expire_stale_waiting_jobs(
         store.checkpoint(
             job_id,
             "waiting_expired",
-            {"reply": WAITING_EXPIRED_NOTE},
+            {"reply": reply},
         )
         from .chat_thread import read_job_chat_thread
 
@@ -599,7 +726,7 @@ def expire_stale_waiting_jobs(
         expired.append(
             {
                 "id": job_id,
-                "reply": WAITING_EXPIRED_NOTE,
+                "reply": reply,
                 "thread_id": read_job_chat_thread(store, job_id) or "",
                 "conversation_id": conversation_id,
             }

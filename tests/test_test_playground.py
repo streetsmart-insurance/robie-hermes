@@ -166,7 +166,7 @@ class PlaygroundAnswerTests(unittest.TestCase):
                 )
             self.assertEqual(decision.reason, "answered question")
             self.assertEqual(decision.status, "COMPLETE")
-            self.assertTrue(reply.startswith("Answered."))
+            self.assertFalse(reply.lstrip().lower().startswith("answered"))
             self.assertIn(ANSWER, reply)
             self.assertNotIn("Not verified.", reply)
             self.assertNotIn("UNVERIFIED", reply)

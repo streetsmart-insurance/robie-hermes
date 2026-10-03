@@ -1,5 +1,12 @@
-"""Only correlated note receipts may produce a successful Chat outcome.
+"""A live EZLynx note still tells the user, and a matched note is not a write.
 
+POST returns no note id. The discussion read has no note text. The notes
+list is HTTP 405. A metadata-only count increase is held, one plain line,
+and UNVERIFIED. A returned note id that matches the latest note is filed.
+A job that only remembered an older note can be closed. A job that really
+posted cannot.
+
+Only correlated note receipts may produce a successful Chat outcome.
 An unidentified metadata-only change stays unconfirmed. Returned note IDs must
 match a fresh discussion read; replay of an old receipt is not a new write.
 """
@@ -49,6 +56,67 @@ def _stick_recording(db: str, job_id: str) -> str:
 
 
 class LiveNoteReplyTests(unittest.TestCase):
+    def test_stable_plus_one_posts_one_line_and_stays_unverified(self):
+        client = LiveShapeClient()
+        with durable_temporary_directory() as tmp:
+            ledger = Path(tmp) / "ledger.json"
+            filed = disc.file_note_to_existing_discussion(
+                client,
+                APPLICANT,
+                "Follow up. ROBIE was here",
+                ledger_path=ledger,
+            )
+            self.assertEqual(filed["status"], "held")
+            self.assertFalse(filed["read_back"])
+            self.assertIsNone(filed["note_id"])
+            self.assertEqual(filed["confirmation"], SENT_UNCONFIRMED)
+            self.assertIn("could not be told apart", filed["reason"])
+            self.assertEqual(client.posts, 1)
+            self.assertEqual(client.note_lists, 0)
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = _running(
+                store,
+                "ezlynx.discussion_note",
+                {
+                    "text": "add a note to Buster Brown on follw up 1 saying Follow up",
+                    "conversation_id": SPACE,
+                    "account_name": "Buster Brown",
+                },
+            )
+            store.checkpoint(
+                job_id,
+                "discussion_note",
+                {
+                    "status": filed["status"],
+                    "discussion_id": filed["discussion_id"],
+                    "discussion_title": TITLE,
+                    "note_id": filed["note_id"],
+                    "note_text": "Follow up. ROBIE was here",
+                    "applicant_id": APPLICANT,
+                    "read_back": False,
+                    "confirmation": SENT_UNCONFIRMED,
+                    "wrote": True,
+                    "reason": filed["reason"],
+                },
+            )
+            bind_job_chat_thread(store, job_id, THREAD)
+            recording = _stick_recording(db, job_id)
+            sent: list[str] = []
+            line = publish_discussion_note_outcome(
+                db,
+                job_id,
+                poster=lambda space, text, thread, posted_job: sent.append(text),
+            )
+            self.assertEqual(sent, [line])
+            self.assertIn("could not be told apart", line or "")
+            self.assertIn("not sent again", line or "")
+            self.assertNotIn("Added the note", line or "")
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.UNVERIFIED.value)
+            self.assertNotEqual(
+                RecordingStore(db).get(recording)["status"], "RECORDING"
+            )
+
     def test_returned_note_id_posts_one_line_after_readback(self):
         client = LiveShapeClient(post_body={"noteId": "701"})
         with durable_temporary_directory() as tmp:
@@ -303,6 +371,73 @@ class LiveShapeToolTests(unittest.TestCase):
             _restore_modules(previous)
             raise
         return module, previous
+
+    def test_handler_speaks_once_for_the_live_shape(self):
+        tool, previous = self._load()
+        client = LiveShapeClient()
+        try:
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                ledger = Path(tmp) / "ledger.json"
+                store = JobStore(db)
+                job = store.create_job(
+                    "hermes.plain_english",
+                    {
+                        "text": "add a note to Buster Brown on follw up 1 saying Follow up",
+                        "conversation_id": SPACE,
+                        "account_name": "Buster Brown",
+                    },
+                )
+                store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+                bind_job_chat_thread(store, job["id"], THREAD)
+
+                def _add(applicant_id, note_text, **kwargs):
+                    return disc.file_note_to_existing_discussion(
+                        client,
+                        applicant_id,
+                        note_text,
+                        title_hint=kwargs.get("title_hint"),
+                        ledger_path=ledger,
+                        allow_repost=bool(kwargs.get("allow_repost")),
+                    )
+
+                sent: list[str] = []
+                with patch(
+                    "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
+                    side_effect=_add,
+                ):
+                    result = tool.ezlynx_discussion_note_handler(
+                        {
+                            "applicant_id": APPLICANT,
+                            "note_text": "Follow up",
+                            "title_hint": TITLE,
+                        },
+                        job_id=job["id"],
+                        db_path=db,
+                        outcome_poster=lambda space, text, thread, posted_job: sent.append(
+                            text
+                        ),
+                    )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "held")
+                self.assertIsNone(result["verified_by"])
+                self.assertFalse(result["read_back"])
+                self.assertTrue(result["wrote"])
+                self.assertEqual(result["confirmation"], SENT_UNCONFIRMED)
+                self.assertEqual(client.posts, 1)
+                self.assertEqual(client.note_lists, 0)
+                self.assertEqual(len(sent), 1)
+                self.assertIn("could not be told apart", sent[0])
+                self.assertNotIn("Added the note", sent[0])
+                saved = JobStore(db).get_checkpoint(job["id"], "discussion_note")
+                self.assertTrue(saved["wrote"])
+                self.assertEqual(saved["status"], "held")
+                self.assertEqual(
+                    JobStore(db).get_job(job["id"])["status"],
+                    JobStatus.UNVERIFIED.value,
+                )
+        finally:
+            _restore_modules(previous)
 
     def test_handler_speaks_once_for_correlated_note_receipt(self):
         tool, previous = self._load()

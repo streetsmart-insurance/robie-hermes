@@ -225,6 +225,99 @@ class ReplyRecoveryTests(unittest.TestCase):
                 self.run_async(self.chat()._recover_pending_replies())
                 self.assertEqual(self.outbox.get(row["id"])["state"], "delivered" if status == 503 else "failed")
 
+    def _stick_sending(self, text: str, message_name: str | None = None) -> str:
+        """A crash after claim: state sending, lease still in the future."""
+        reply_id = self.outbox.prepare(
+            self.job,
+            SPACE,
+            "notice",
+            [{"text": text, "thread": {"name": THREAD}}],
+        )
+        claimed = self.outbox.claim(reply_id)
+        self.assertIsNotNone(claimed)
+        self.assertGreater(claimed["lease_until"], self.clock)
+        if message_name:
+            with self.store.connect() as conn:
+                conn.execute(
+                    "UPDATE chat_reply_outbox SET message_name=? WHERE id=?",
+                    (message_name, reply_id),
+                )
+        return reply_id
+
+    def test_startup_preserves_another_owners_unexpired_sending_lease(self):
+        reply_ids = [
+            self._stick_sending("unacknowledged"),
+            self._stick_sending("acknowledged", f"{SPACE}/messages/already-there"),
+        ]
+        before = {reply_id: self.outbox.get(reply_id) for reply_id in reply_ids}
+        second_owner = ChatReplyOutbox(self.db)
+        for reply_id in reply_ids:
+            self.assertIsNone(second_owner.claim(reply_id))
+        for now in (self.clock, before[reply_ids[0]]["lease_until"] - 0.001):
+            self.clock = now
+            self.assertEqual(second_owner.recover_orphaned_sending(), [])
+            for reply_id in reply_ids:
+                self.assertEqual(second_owner.get(reply_id), before[reply_id])
+                self.assertIsNone(second_owner.claim(reply_id))
+
+    def test_stuck_sending_without_message_name_is_resent_once(self):
+        text = "I couldn't look that up; a CSR should take a look."
+        reply_id = self._stick_sending(text)
+        self.clock = self.outbox.get(reply_id)["lease_until"]
+        with self.assertLogs("robie.chat_reply_outbox", level="INFO") as logs:
+            recovered = self.outbox.recover_orphaned_sending()
+        self.assertEqual(recovered, [{"id": reply_id, "action": "requeued"}])
+        self.assertIn("requeued", "\n".join(logs.output))
+        self.assertEqual(self.outbox.get(reply_id)["state"], "pending")
+        self.assertIsNone(self.outbox.get(reply_id)["message_name"])
+        self.run_async(self.chat()._recover_pending_replies())
+        self.assertEqual(len(self.messages.accepted), 1)
+        self.assertEqual(self.outbox.get(reply_id)["state"], "delivered")
+        self.run_async(self.chat()._recover_pending_replies())
+        self.assertEqual(len(self.messages.accepted), 1)
+
+    def test_sending_row_with_message_name_is_not_resent(self):
+        text = "I couldn't look that up; a CSR should take a look."
+        name = f"{SPACE}/messages/already-there"
+        reply_id = self._stick_sending(text, message_name=name)
+        before = len(self.messages.calls)
+        self.clock = self.outbox.get(reply_id)["lease_until"]
+        with self.assertLogs("robie.chat_reply_outbox", level="INFO") as logs:
+            recovered = self.outbox.recover_orphaned_sending()
+        self.assertEqual(recovered, [{"id": reply_id, "action": "marked_delivered"}])
+        self.assertIn("marked_delivered", "\n".join(logs.output))
+        self.assertEqual(self.outbox.get(reply_id)["state"], "delivered")
+        self.assertEqual(self.outbox.get(reply_id)["message_name"], name)
+        self.run_async(self.chat()._recover_pending_replies())
+        self.assertEqual(len(self.messages.calls), before)
+        self.assertEqual(len(self.messages.accepted), 0)
+
+    def test_two_startups_still_post_once(self):
+        text = "I couldn't look that up; a CSR should take a look."
+        reply_id = self._stick_sending(text)
+        before = self.outbox.get(reply_id)
+        self.clock = before["lease_until"]
+        self.outbox.recover_orphaned_sending()
+        self.assertEqual(self.outbox.get(reply_id)["id"], before["id"])
+        self.assertEqual(self.outbox.get(reply_id)["attempts"], before["attempts"])
+        self.run_async(self.chat()._recover_pending_replies())
+        self.assertEqual(len(self.messages.accepted), 1)
+        # The process dies after Chat accepted and before the receipt is stored.
+        with self.store.connect() as conn:
+            conn.execute(
+                """UPDATE chat_reply_outbox
+                   SET state='sending', message_name=NULL, next_chunk=0, lease_until=?
+                   WHERE id=?""",
+                (self.clock + 500, reply_id),
+            )
+        self.clock += 500
+        self.outbox.recover_orphaned_sending()
+        self.run_async(self.chat()._recover_pending_replies())
+        self.assertEqual(len(self.messages.accepted), 1)
+        self.assertEqual(self.messages.calls[0]["requestId"], self.messages.calls[-1]["requestId"])
+        self.assertEqual(self.messages.calls[0]["messageId"], self.messages.calls[-1]["messageId"])
+        self.assertEqual(self.outbox.get(reply_id)["state"], "delivered")
+
     def test_live_lease_excludes_another_drainer(self):
         row = self.failed()
         self.clock += 31

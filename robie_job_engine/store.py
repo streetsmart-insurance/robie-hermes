@@ -667,14 +667,53 @@ class JobStore:
         if status in TERMINAL_STATUSES:
             self._stop_capture([job_id])
             self._release_turn_lock(job_id)
+            if status == JobStatus.CANCELLED or (
+                status == JobStatus.FAILED and "cancel" in str(error or "").casefold()
+            ):
+                self._clear_cancelled_conversation_link(job_id)
         return job
 
-    def _release_turn_lock(self, job_id: str) -> None:
-        """A terminal job does not keep the Chat turn lock."""
-        try:
-            from .chat_turn_control import release_finished_job_session
+    def _clear_cancelled_conversation_link(self, job_id: str) -> None:
+        """A cancelled job must not stay the active conversation link.
 
-            release_finished_job_session(self.path, job_id, stop_agent=False)
+        Preflight treats an active link to a terminal job as a failure.
+        /stop used to leave that row active=1.
+        """
+        try:
+            from .chat_queue import DurableChatEventQueue
+
+            DurableChatEventQueue(str(self.path)).deactivate_job_links(job_id)
+        except Exception:
+            return
+
+    def _release_turn_lock(self, job_id: str) -> None:
+        """A terminal job does not keep the Chat turn lock.
+
+        Interrupt the running agent now. Job 598820fc stayed COMPLETE for
+        about a minute while its turn kept calling tools. Kill registered
+        tool processes. Do not set the /stop flag: a normal finish is not a
+        stop, and the confirmation send still has to post.
+        """
+        try:
+            from .chat_turn_control import (
+                kill_agent_processes,
+                release_finished_job_session,
+            )
+
+            status = ""
+            try:
+                status = str((self.get_job(job_id) or {}).get("status") or "")
+            except Exception:
+                status = ""
+            # CANCELLED sets the stop flag so a later tool call cannot write.
+            # COMPLETE and UNVERIFIED do not: the confirmation send still posts.
+            # Every terminal status still drops the session lease and the clarify.
+            release_finished_job_session(
+                self.path,
+                job_id,
+                stop_agent=status == "CANCELLED",
+            )
+            kill_agent_processes(job_id)
         except Exception:
             logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
 

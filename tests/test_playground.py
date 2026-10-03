@@ -588,6 +588,7 @@ class CarrierAndPracticeTests(unittest.TestCase):
             applicant_id="26356199",
             discussion_title="Policy Change Request",
             new_value="checked",
+            body="Exact requested note text",
             client="Buster Brown",
             field="note",
         )
@@ -608,8 +609,8 @@ class CarrierAndPracticeTests(unittest.TestCase):
             "robie_job_engine.playground_execute.with_ezlynx_lock",
             return_value=_Lock(),
         ), mock.patch(
-            "robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion",
-            return_value={"status": "filed", "note_id": "n1"},
+            "robie_job_engine.playground_ports.PlaygroundPorts.file_note",
+            return_value="n1",
         ):
             filed = default_apply(proposal)
         self.assertTrue(filed.applied)

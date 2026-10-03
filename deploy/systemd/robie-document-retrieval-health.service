@@ -1,0 +1,25 @@
+[Unit]
+Description=ROBIE document retrieval health check (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+# Same Production identity and job database as the retrieval run.
+EnvironmentFile=/etc/streetsmart-hermes/robie-message-runtime.env
+# Exit 0 = healthy. Exit 1 = not healthy. This command does not file.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.document_retrieval_health --alert
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,22 @@ AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
 SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
 INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
+# A real shell control. The tab URL, by itself, is not authentication.
+AUTHENTICATED_ELEMENT_SELECTOR = (
+    "#quickSearchInput, "
+    "a[href*='/web/account/'], "
+    'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
+)
+SESSION_LIMIT_CONTINUE = (
+    "button:has-text('Continue'), "
+    "input[type='submit'][value='Continue'], "
+    "a:has-text('Continue')"
+)
+SESSION_LIMIT_REFUSED = 29
+SESSION_LIMIT_NOT_CLEARED = 31
+# Continue was pressed once and the app page still did not prove a login.
+SESSION_LIMIT_LOGIN_FAILED = 32
+_CONTINUE_PRESSED = False
 
 
 def secret(name: str) -> str:
@@ -175,21 +191,236 @@ def visible_page(browser):
     )
 
 
+def page_text(page) -> str:
+    try:
+        return str(page.locator("body").inner_text(timeout=5_000) or "")
+    except Exception:
+        return ""
+
+
+def session_limit_detail(text: str) -> str | None:
+    """The two-session prompt, including which session Continue would end."""
+    raw = " ".join(str(text or "").split())
+    folded = raw.casefold()
+    if "limited to 2 active sessions" not in folded:
+        return None
+    if "log out the session" not in folded and "continue will log out" not in folded:
+        return None
+    start = folded.find("limited to 2 active sessions")
+    return raw[start:start + 300].strip()
+
+
+def session_limit_on(page) -> str | None:
+    return session_limit_detail(page_text(page))
+
+
 def authenticated(page) -> bool:
-    url = page.url.lower()
+    """True only after a real app element is present. The URL is not enough."""
+    text = page_text(page).casefold()
+    if "username is required" in text or "password is required" in text:
+        return False
+    if session_limit_on(page):
+        return False
+    url = str(getattr(page, "url", "") or "").lower()
     if not url.startswith(AUTHENTICATED_APP_PREFIX):
         return False
     try:
         login_controls = page.locator(LOGIN_CONTROL_SELECTOR).count()
         internal_links = page.locator(INTERNAL_WEB_LINK_SELECTOR).count()
+        # A shell control after reload. The URL and a stale link count are
+        # not enough; the two-session prompt is refused above.
+        shell = page.locator(AUTHENTICATED_ELEMENT_SELECTOR).count()
     except Exception:
         return False
-    return login_controls == 0 and internal_links > 0
+    return login_controls == 0 and internal_links > 0 and shell > 0
+
+
+def confirm_authenticated(page) -> bool:
+    """Reload, then require an app element. A stale /web/ URL is not proof."""
+    if session_limit_on(page):
+        return False
+    try:
+        page.reload(wait_until="domcontentloaded")
+    except Exception:
+        return False
+    return authenticated(page)
 
 
 def navigate_to_submission_route(page) -> None:
     page.goto(SUBMISSION_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(2_000)
+
+
+def session_is_logged_in_on_app_page(page) -> bool:
+    """Open the app, reload, and judge login from a page element."""
+    navigate_to_submission_route(page)
+    return confirm_authenticated(page)
+
+
+def begin_login_run() -> None:
+    """One login attempt may press the two-session Continue only once."""
+    global _CONTINUE_PRESSED
+    _CONTINUE_PRESSED = False
+
+
+def _field_present(field) -> bool:
+    try:
+        return field.count() > 0
+    except Exception:
+        return False
+
+
+def fill_session_limit_credentials(page, username: str, password: str) -> None:
+    """Fill username and password when those fields are on the prompt.
+
+    EZLynx shows the fields empty on the two-session page. Continue without
+    them comes back with "Username is required". Fill when a field is
+    present, including when its current value is empty. Values are not logged.
+    """
+    for selector, value in (("#txtUserName", username), ("#txtPassword", password)):
+        field = page.locator(selector)
+        if not _field_present(field):
+            continue
+        field.fill(value)
+
+
+def _login_credentials(
+    username: str | None,
+    password: str | None,
+) -> tuple[str, str]:
+    if username is not None and password is not None:
+        return username, password
+    return secret("ezlynx-username"), secret("ezlynx-password")
+
+
+def press_session_limit_continue(page) -> bool:
+    """Click Continue once per login run. False means it was already clicked."""
+    global _CONTINUE_PRESSED
+    if _CONTINUE_PRESSED:
+        return False
+    locator = page.locator(SESSION_LIMIT_CONTINUE)
+    if locator.count() == 0:
+        role = getattr(page, "get_by_role", None)
+        if not callable(role):
+            raise RuntimeError("SESSION_LIMIT_CONTINUE_NOT_FOUND")
+        role("button", name="Continue").click()
+    else:
+        first = getattr(locator, "first", locator)
+        first.click()
+    _CONTINUE_PRESSED = True
+    return True
+
+
+def _login_failure_reason(text: str) -> str:
+    """What the page showed after the one Continue. Never claims a session ended."""
+    folded = " ".join(str(text or "").split()).casefold()
+    if "username is required" in folded:
+        return (
+            "Username is required. The username and password were filled "
+            "and Continue was pressed once. The other session is still active."
+        )
+    if "password is required" in folded:
+        return (
+            "Password is required. The username and password were filled "
+            "and Continue was pressed once. The other session is still active."
+        )
+    if session_limit_detail(text):
+        return (
+            "The two-session prompt is still on the page. Continue was "
+            "pressed once. The other session is still active."
+        )
+    snippet = " ".join(str(text or "").split())[:180]
+    if snippet:
+        return (
+            f"Login was not confirmed. The page said: {snippet} "
+            "Continue was pressed once. The other session is still active."
+        )
+    return (
+        "Login was not confirmed by an EZLynx app page element. "
+        "Continue was pressed once. The other session is still active."
+    )
+
+
+def handle_two_session_prompt(
+    page,
+    *,
+    gate,
+    username: str | None = None,
+    password: str | None = None,
+) -> int:
+    """Fill the login fields, then press Continue once if this env holds the lease.
+
+    "Ended the other session" is logged only after a real app element proves
+    the login. A lease refusal does not click Continue and does not return
+    the username-login code.
+    """
+    detail = session_limit_on(page) or "the session that is currently active"
+    try:
+        gate()
+    except Exception as exc:
+        from robie_job_engine.ezlynx_driver_gate import EzlynxDriverGateRefused
+
+        if not isinstance(exc, EzlynxDriverGateRefused):
+            raise
+        print(f"SESSION_LIMIT_REFUSED: did not press Continue ({exc})", flush=True)
+        print(f"other session left active: {detail}", flush=True)
+        return SESSION_LIMIT_REFUSED
+    if _CONTINUE_PRESSED:
+        print(
+            "SESSION_LIMIT_LOGIN_FAILED: Continue was already pressed once "
+            "and was not pressed again. The other session is still active.",
+            flush=True,
+        )
+        return SESSION_LIMIT_LOGIN_FAILED
+    user_field = page.locator("#txtUserName")
+    password_field = page.locator("#txtPassword")
+    if _field_present(user_field) or _field_present(password_field):
+        filled_user, filled_password = _login_credentials(username, password)
+        fill_session_limit_credentials(page, filled_user, filled_password)
+    if not press_session_limit_continue(page):
+        print(
+            "SESSION_LIMIT_LOGIN_FAILED: Continue was already pressed once "
+            "and was not pressed again. The other session is still active.",
+            flush=True,
+        )
+        return SESSION_LIMIT_LOGIN_FAILED
+    try:
+        page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        pass
+    after = page_text(page)
+    if confirm_authenticated(page):
+        print(
+            f"SESSION_LIMIT_CONTINUED: ended the other active session: {detail}",
+            flush=True,
+        )
+        print("AUTHENTICATED", flush=True)
+        return 0
+    print(f"SESSION_LIMIT_LOGIN_FAILED: {_login_failure_reason(after)}", flush=True)
+    return SESSION_LIMIT_LOGIN_FAILED
+
+
+def resolve_login_barrier(page, *, gate) -> int | None:
+    """Handle a two-session prompt or a proved shell. None continues login."""
+    if session_limit_on(page):
+        return handle_two_session_prompt(page, gate=gate)
+    if confirm_authenticated(page):
+        print("AUTHENTICATED", flush=True)
+        return 0
+    if session_limit_on(page):
+        return handle_two_session_prompt(page, gate=gate)
+    return None
+
+
+def ensure_login_form(page) -> None:
+    """Reload a blank login page and wait until the username field is visible."""
+    field = page.locator("#txtUserName")
+    try:
+        field.wait_for(state="visible", timeout=8_000)
+        return
+    except Exception:
+        page.reload(wait_until="domcontentloaded")
+    field.wait_for(state="visible", timeout=15_000)
 
 
 def main() -> int:
@@ -205,6 +436,7 @@ def main() -> int:
         print(str(exc))
         return 28
 
+    begin_login_run()
     try:
         # Verify the OAuth identity before retrieving credentials or requesting
         # an MFA message. Carlo's mailbox must never be used as a fallback.
@@ -226,9 +458,9 @@ def main() -> int:
             raise
         page.set_default_timeout(20_000)
 
-        if authenticated(page):
-            print("AUTHENTICATED")
-            return 0
+        barrier = resolve_login_barrier(page, gate=require_driver_in)
+        if barrier is not None:
+            return barrier
 
         url = page.url.lower()
         recognized_auth_route = any(
@@ -241,20 +473,21 @@ def main() -> int:
         )
         if not recognized_auth_route:
             navigate_to_submission_route(page)
-            if authenticated(page):
-                print("AUTHENTICATED")
-                return 0
+            barrier = resolve_login_barrier(page, gate=require_driver_in)
+            if barrier is not None:
+                return barrier
             url = page.url.lower()
 
         if "/auth/account/login" in url:
+            ensure_login_form(page)
             page.locator("#txtUserName").fill(secret("ezlynx-username"))
             page.locator("#txtPassword").fill(secret("ezlynx-password"))
             page.locator("#btnLogin").click()
             page.wait_for_load_state("domcontentloaded")
             page.wait_for_timeout(2_000)
-            if authenticated(page):
-                print("AUTHENTICATED")
-                return 0
+            barrier = resolve_login_barrier(page, gate=require_driver_in)
+            if barrier is not None:
+                return barrier
             url = page.url.lower()
 
         previous = newest_ezlynx_code(datetime.now(timezone.utc) - timedelta(minutes=14))
@@ -303,9 +536,9 @@ def main() -> int:
         submit.first.click()
         page.wait_for_load_state("domcontentloaded")
         page.wait_for_timeout(2_000)
-        if authenticated(page):
-            print("AUTHENTICATED")
-            return 0
+        barrier = resolve_login_barrier(page, gate=require_driver_in)
+        if barrier is not None:
+            return barrier
         print("MFA_NOT_ACCEPTED")
         return 23
 

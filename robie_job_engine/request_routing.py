@@ -277,6 +277,11 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
             WORKER_FOR_ACTION["hermes.plain_english"],
             answer_only=True,
         )
+    if _is_explicit_discussion_note(text):
+        return RequestClassification(
+            "ezlynx.discussion_note",
+            WORKER_FOR_ACTION["ezlynx.discussion_note"],
+        )
     instruction = _routing_instruction(normalized)
     if _is_address_change(instruction):
         return RequestClassification(
@@ -366,6 +371,73 @@ def _is_policy_change_request(text: str) -> bool:
 
 def _is_certificate_request(text: str) -> bool:
     return _CERTIFICATE_RE.search(text) is not None
+
+
+def _is_explicit_discussion_note(text: str) -> bool:
+    """'add a note ... on the discussion \"X\"' is a note, not a policy change.
+
+    The title may say Policy Change or Mailing Address. Those words name
+    the discussion. They are not an instruction to change the policy.
+    """
+    raw = " ".join(str(text or "").split())
+    return _EXPLICIT_DISCUSSION_NOTE.search(raw) is not None
+
+
+_EXPLICIT_DISCUSSION_NOTE = re.compile(
+    r'\b(?:add|file|post|leave)\s+(?:a\s+)?note\b.{0,300}?\bon\s+the\s+discussion\s+["“]',
+    re.IGNORECASE,
+)
+
+
+def discussion_note_body(text: str) -> str:
+    """The note is the text after the instruction's colon.
+
+    A planned note that repeats the prompt ("...please ignore Add a note
+    to Buster Brown 26356199: ...") keeps only the text after that colon.
+    A colon inside the quoted discussion title is not the split.
+    A note that is already just the body is returned unchanged, including
+    its line breaks.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    match = re.search(r"\badd\s+a\s+note\b", raw, re.IGNORECASE)
+    if not match:
+        return raw
+    quote = 0
+    for index, char in enumerate(raw[match.end():], match.end()):
+        if char == '"':
+            quote = 0 if quote else 1
+        elif char == "“":
+            quote += 1
+        elif char == "”" and quote:
+            quote -= 1
+        elif char == ":" and quote == 0:
+            body = raw[index + 1:].strip()
+            return body or raw
+    return raw
+
+
+def parse_named_discussion_note(text: str) -> dict[str, str] | None:
+    """Applicant, discussion title, and note body from one named-discussion ask."""
+    raw = " ".join(str(text or "").split())
+    if not _is_explicit_discussion_note(raw):
+        return None
+    title_match = re.search(
+        r'\bon\s+the\s+discussion\s+["“]([^"”]+)["”]',
+        raw,
+        re.IGNORECASE,
+    )
+    if not title_match:
+        return None
+    instruction = raw[: title_match.end()]
+    ids = re.findall(r"(?<!\d)([1-9]\d{5,9})(?!\d)", instruction)
+    applicant = ids[0] if len(set(ids)) == 1 else ""
+    return {
+        "applicant_id": applicant,
+        "discussion": " ".join(title_match.group(1).split()),
+        "body": discussion_note_body(raw),
+    }
 
 
 def _is_discussion_note_request(text: str) -> bool:

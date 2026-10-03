@@ -130,6 +130,27 @@ def format_user_reply(text: str, *, collapse: bool = True) -> str:
     return _release_internal(text, chosen)
 
 
+def format_outbound_reply(text: str, job: dict | None = None) -> str:
+    """Chat delivery. A question keeps every paragraph. A status report does not.
+
+    ``format_user_reply`` with the default ``collapse=True`` keeps only
+    ``statements[0]`` and then caps that line at 400 characters. That is
+    the cut that left Chat with the first paragraph of a longer answer.
+    """
+    return format_user_reply(text, collapse=not _job_keeps_full_answer(job))
+
+
+def _job_keeps_full_answer(job: dict | None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    payload = dict(job.get("payload") or {})
+    if payload.get("answered") or payload.get("answer_only"):
+        return True
+    from .answer_only import is_answer_only_job
+
+    return is_answer_only_job(job)
+
+
 def plain_clarify_or_sign_in(text: str) -> str | None:
     """One plain question when a clarify or sign-in ask still carries codes.
 

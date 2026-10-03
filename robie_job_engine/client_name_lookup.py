@@ -1,16 +1,18 @@
 """Read-only client lookup by name.
 
-No live browser search is installed by this backport. An explicit applicant
-ID or an injected, authorized search result is required. One matching client is
+Typing into EZLynx global search is not a write. One matching client is
 bound onto the job. More than one match asks a plain question. The write
 allowlist is unchanged for every other control.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -101,6 +103,48 @@ def job_is_client_policy_lookup(job: dict[str, Any] | None) -> bool:
     for key in ("request_text", "text", "prompt", "original_text"):
         text = str(payload.get(key) or "")
         if _POLICY_FACT.search(text) and client_name_from_lookup(text):
+            return True
+    return False
+
+
+_LOOK_UP_NAME = re.compile(
+    r"\b(?:look\s*up|lookup|find|search(?:\s+for)?)\s+"
+    r"([A-Za-z][A-Za-z']+(?:\s+[A-Za-z][A-Za-z']+){1,3})\b",
+    re.IGNORECASE,
+)
+
+
+def person_to_look_up(text: str) -> str | None:
+    """A person named by 'look up john smith' or a policy-fact question.
+
+    A write ('add a note for') is not this lookup. The name is not an
+    applicant id, and the reply must not ask for one.
+    """
+    raw = " ".join(str(text or "").split())
+    if not raw or _WRITE.search(raw):
+        return None
+    named = client_name_from_lookup(raw)
+    if named:
+        return named
+    match = _LOOK_UP_NAME.search(raw)
+    if not match:
+        return None
+    name = " ".join(match.group(1).split()).strip(" .?")
+    tokens = [token for token in name.split() if token]
+    if len(tokens) < 2:
+        return None
+    if any(token.casefold() in {"the", "a", "an", "account", "policy", "client", "this", "that"} for token in tokens):
+        return None
+    return name or None
+
+
+def job_is_person_lookup(job: dict[str, Any] | None) -> bool:
+    """True for 'look up john smith' as well as a policy-number question."""
+    if job_is_client_policy_lookup(job):
+        return True
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("request_text", "text", "prompt", "original_text"):
+        if person_to_look_up(str(payload.get(key) or "")):
             return True
     return False
 
@@ -301,7 +345,11 @@ def _search_note(store: Any, job_id: str) -> dict[str, Any]:
 
 
 def trusted_applicant_ids(store: Any, job: dict[str, Any] | None) -> list[str]:
-    """Ids this job may open: the user's message, or this job's search."""
+    """Ids a named lookup may open: this job's search, or an id the user typed.
+
+    A digit already stored on the payload is not trusted here. Named lookups
+    drop a docs or fixture id. Write jobs decide that case separately.
+    """
     if not job:
         return []
     found: list[str] = []
@@ -309,7 +357,7 @@ def trusted_applicant_ids(store: Any, job: dict[str, Any] | None) -> list[str]:
     if named:
         found.append(named)
     note = _search_note(store, str(job.get("id") or ""))
-    if str(note.get("source") or "") == "search":
+    if str(note.get("source") or "") in {"search", "user_message"}:
         for item in note.get("applicant_ids") or []:
             token = str(item or "").strip()
             if token and token not in found:
@@ -320,6 +368,261 @@ def trusted_applicant_ids(store: Any, job: dict[str, Any] | None) -> list[str]:
 def _is_auth_url(url: object) -> bool:
     path = urlparse(str(url or "").strip()).path.casefold()
     return any(marker in path for marker in _AUTH_MARKERS)
+
+
+_PROBE_OVERRIDE: Callable[[], str] | None = None
+_LAST_PROBE_URL = ""
+AUTHENTICATED_PROBE_URL = "https://app.ezlynx.com/web/"
+_SIGN_OUT_CLAIM = re.compile(
+    r"signed\s+out|sign[\s-]?out|sign[\s-]?in|log[\s-]?in|/auth/account/login",
+    re.IGNORECASE,
+)
+
+
+def set_session_probe(probe: Callable[[], str] | None) -> None:
+    """Tests pin the fresh-page probe. None uses the last live probe."""
+    global _PROBE_OVERRIDE
+    _PROBE_OVERRIDE = probe
+
+
+def note_session_probe(url: str) -> None:
+    global _LAST_PROBE_URL
+    _LAST_PROBE_URL = str(url or "").strip()
+
+
+def session_probe_url() -> str:
+    if _PROBE_OVERRIDE is not None:
+        try:
+            return str(_PROBE_OVERRIDE() or "").strip()
+        except Exception:
+            return ""
+    return _LAST_PROBE_URL
+
+
+def text_claims_sign_out(text: str) -> bool:
+    return _SIGN_OUT_CLAIM.search(str(text or "")) is not None
+
+
+def sign_out_posture(text: str) -> str:
+    """How to treat a sign-out claim after a fresh-page probe.
+
+    ``ignore`` — no probe yet; the existing sign-in path decides.
+    ``suppress`` — the fresh page is still authenticated. Do not ask
+    the user to sign in. The lookup continues.
+    ``post`` — the fresh probe also landed on login. One plain line.
+    """
+    if not text_claims_sign_out(text):
+        return "ignore"
+    probe = session_probe_url()
+    if not probe:
+        return "ignore"
+    if _is_auth_url(probe):
+        return "post"
+    return "suppress"
+
+
+def _body_text(page: Any) -> str:
+    locator = getattr(page, "locator", None)
+    if not callable(locator):
+        return str(getattr(page, "body_text", "") or "")
+    try:
+        body = locator("body")
+    except Exception:
+        return ""
+    inner = getattr(body, "inner_text", None)
+    if not callable(inner):
+        return ""
+    try:
+        return str(inner() or "")
+    except TypeError:
+        try:
+            return str(inner(timeout=1000) or "")
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _page_html(page: Any) -> str:
+    content = getattr(page, "content", None)
+    if callable(content):
+        try:
+            return str(content() or "")
+        except Exception:
+            return ""
+    return str(getattr(page, "html", "") or "")
+
+
+def angular_shell_is_blank(page: Any) -> bool:
+    """True for an empty ``<app-root></app-root>`` with no body text."""
+    if _body_text(page).strip():
+        return False
+    folded = _page_html(page).casefold()
+    return "<app-root" in folded and "</app-root>" in folded
+
+
+def wait_for_angular_content(page: Any, *, seconds: float = 8.0) -> bool:
+    """Wait until the Angular shell has real text. A fake page is one shot."""
+    waiter = getattr(page, "wait_for_function", None)
+    if callable(waiter):
+        try:
+            waiter(
+                """() => {
+                  const text = (document.body && document.body.innerText || '').trim();
+                  return text.length > 0;
+                }""",
+                timeout=max(1, int(seconds * 1000)),
+            )
+        except Exception:
+            pass
+    return bool(_body_text(page).strip()) and not angular_shell_is_blank(page)
+
+
+def close_extra_ezlynx_pages(context: Any, keep: Any) -> None:
+    """Leave one EZLynx tab. Other EZLynx pages opened for the probe are closed."""
+    pages = list(getattr(context, "pages", []) or [])
+    for item in pages:
+        if item is keep:
+            continue
+        url = _page_url(item).casefold()
+        if url and "ezlynx.com" not in url:
+            continue
+        closer = getattr(item, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                continue
+
+
+def account_activity_url(applicant_id: str) -> str:
+    ident = str(applicant_id or "").strip()
+    return f"https://app.ezlynx.com/web/account/{ident}/activity"
+
+
+def open_bound_account_in_fresh_page(context: Any, applicant_id: str) -> dict[str, Any]:
+    """Open the bound account on a new tab and wait for Angular content.
+
+    A blank ``<app-root>`` is not a sign-out. A root redirect to login is
+    not a sign-out either, unless a fresh page of a known authenticated
+    route also lands on login. Extra pages are closed.
+    """
+    if context is None or not str(applicant_id or "").strip():
+        return {"opened": False, "signed_out": False, "probe_url": ""}
+    url = account_activity_url(applicant_id)
+    fresh = context.new_page()
+    goto = getattr(fresh, "goto", None)
+    if callable(goto):
+        goto(url)
+    if not wait_for_angular_content(fresh):
+        another = context.new_page()
+        again = getattr(another, "goto", None)
+        if callable(again):
+            again(url)
+        wait_for_angular_content(another)
+        closer = getattr(fresh, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+        fresh = another
+    probe = context.new_page()
+    probe_goto = getattr(probe, "goto", None)
+    if callable(probe_goto):
+        probe_goto(AUTHENTICATED_PROBE_URL)
+    probe_url = _page_url(probe)
+    note_session_probe(probe_url)
+    signed_out = _is_auth_url(probe_url)
+    probe_close = getattr(probe, "close", None)
+    if callable(probe_close):
+        try:
+            probe_close()
+        except Exception:
+            pass
+    close_extra_ezlynx_pages(context, fresh)
+    return {
+        "opened": True,
+        "signed_out": signed_out,
+        "probe_url": probe_url,
+        "url": _page_url(fresh),
+        "page": fresh,
+    }
+
+
+def assess_session_after_stuck_tab(
+    page: Any,
+    context: Any,
+    *,
+    account_url: str = "",
+) -> dict[str, Any]:
+    """A blank shell or a login landing is checked on a fresh page.
+
+    The fresh page is a known authenticated route: the bound account when
+    we have one, otherwise ``/web/``. Sign-out is reported only when that
+    page is also the login page. The extra page is closed. One EZLynx tab
+    stays.
+    """
+    if context is None:
+        url = _page_url(page)
+        return {
+            "signed_out": _is_auth_url(url),
+            "probe_url": url,
+            "page": page,
+        }
+    target = str(account_url or "").strip() or AUTHENTICATED_PROBE_URL
+    fresh = context.new_page()
+    goto = getattr(fresh, "goto", None)
+    if callable(goto):
+        goto(target)
+    wait_for_angular_content(fresh)
+    probe_url = _page_url(fresh)
+    note_session_probe(probe_url)
+    signed_out = _is_auth_url(probe_url)
+    if signed_out:
+        closer = getattr(fresh, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+        return {"signed_out": True, "probe_url": probe_url, "page": page}
+    close_extra_ezlynx_pages(context, fresh)
+    return {"signed_out": False, "probe_url": probe_url, "page": fresh}
+
+
+def install_stuck_tab_recovery(scope: dict[str, Any]) -> None:
+    """Wrap ``page.goto`` so a stuck account tab is replaced from the same context."""
+    page = scope.get("page")
+    context = scope.get("context")
+    if page is None or context is None:
+        return
+    original = getattr(page, "goto", None)
+    if not callable(original) or getattr(original, "_robie_stuck_tab", False):
+        return
+
+    def goto(url: str, *args: Any, **kwargs: Any) -> Any:
+        response = original(url, *args, **kwargs)
+        current = scope.get("page") or page
+        blank = angular_shell_is_blank(current)
+        login = _is_auth_url(_page_url(current))
+        if not blank and not login:
+            return response
+        account = ""
+        raw = str(url or "")
+        match = re.search(r"/web/account/(\d{6,})", raw, re.IGNORECASE)
+        if match:
+            account = account_activity_url(match.group(1))
+        result = assess_session_after_stuck_tab(
+            current, context, account_url=account
+        )
+        replacement = result.get("page")
+        if replacement is not None and not result.get("signed_out"):
+            scope["page"] = replacement
+        return response
+
+    goto._robie_stuck_tab = True  # type: ignore[attr-defined]
+    page.goto = goto
 
 
 def _page_url(page: Any) -> str:
@@ -663,6 +966,82 @@ def read_applicant_search(page: Any, name: str) -> dict[str, Any]:
     return {"status": "ok", "matches": matches}
 
 
+def _connect_current_page() -> tuple[Any, Any] | None:
+    """The dashboard, or another page that is not an unsaved form.
+
+    This never navigates to a guessed EZLynx URL.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return None
+    cdp_url = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
+    playwright = None
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.connect_over_cdp(cdp_url, timeout=2000)
+    except Exception:
+        if playwright is not None:
+            try:
+                playwright.stop()
+            except Exception:
+                pass
+        return None
+    pages = [page for context in browser.contexts for page in context.pages]
+    page = choose_client_search_page(pages)
+    if page is None:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+        return None
+    return page, playwright
+
+
+def _search_open_page(name: str) -> dict[str, Any]:
+    opened = _connect_current_page()
+    if opened is None:
+        logger.info(
+            "named client search unreadable url=none name=%s hint=no safe EZLynx page why=no page",
+            " ".join(str(name or "").split()),
+        )
+        return {"status": "error", "matches": []}
+    page, playwright = opened
+    try:
+        outcome = read_applicant_search(page, name)
+        matches = [row for row in (outcome.get("matches") or []) if isinstance(row, dict)]
+        if str(outcome.get("status") or "") == "ok" and len(matches) == 1:
+            context = getattr(page, "context", None)
+            applicant = str(matches[0].get("applicant_id") or "").strip()
+            if context is not None and applicant:
+                outcome["account_tab"] = open_bound_account_in_fresh_page(
+                    context, applicant
+                )
+        return outcome
+    except Exception:
+        _log_unreadable(page, name, "search failed")
+        return {"status": "error", "matches": []}
+    finally:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+
+
+def default_searcher(name: str) -> dict[str, Any]:
+    """Sync Playwright cannot run on the gateway loop.
+
+    The EZLynx re-read already leaves the loop for the same reason. When this
+    function is called from the loop, the sync search runs on a worker thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _search_open_page(name)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_search_open_page, name).result()
+
+
 def _drop_untrusted_binding(store: Any, job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
     trusted = set(trusted_applicant_ids(store, job))
@@ -723,6 +1102,142 @@ def _remember_search(
     )
 
 
+def _running_under_test() -> bool:
+    """The suite must not open a live EZLynx page to resolve a name."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    import sys
+
+    command = " ".join(sys.argv).casefold()
+    return "pytest" in command or "unittest" in command
+
+
+def write_client_name(job: dict[str, Any]) -> str | None:
+    text = _original_ask(job)
+    match = re.search(
+        r"\b(?:for|about|named)\s+([a-z][a-z']+\s+[a-z][a-z']+)", text, re.I
+    )
+    if not match or match.group(1).split()[0].casefold() in {"the", "this", "that", "a", "an", "my", "our"}:
+        return None
+    return match.group(1)
+
+
+def prepare_named_write_client(
+    store: Any,
+    job_id: str,
+    *,
+    searcher: Callable[[str], dict[str, Any]] | None = None,
+) -> str | None:
+    """Name-search before a write when the request names a person and no id.
+
+    One match is bound onto the job. Several matches ask which account.
+    A missing browser in tests does not ask the user for an applicant id.
+    """
+    from .live_turn_guard import person_named_in_job
+
+    job = store.get_job(job_id)
+    name = person_named_in_job(job) or write_client_name(job) or ""
+    if not name:
+        return None
+    note = _search_note(store, job_id)
+    if list(note.get("applicant_ids") or []) and str(note.get("source") or "") in {
+        "search",
+        "user_message",
+    }:
+        return None
+    if str(note.get("source") or "") in {"several", "linked"}:
+        return _consume_client_choice(store, job_id)
+    explicit = user_message_applicant(job)
+    if explicit:
+        payload = dict(job.get("payload") or {})
+        payload["applicant_id"] = explicit
+        payload["client_name"] = name
+        store.update_payload(job_id, payload)
+        _remember_search(
+            store,
+            job_id,
+            source="user_message",
+            applicant_ids=[explicit],
+            name=name,
+        )
+        return None
+    # A name with no account number must not keep a fixture id that was
+    # copied onto the payload from the open tab or a file.
+    _drop_untrusted_binding(store, job)
+    runner = searcher or _SEARCHER_OVERRIDE
+    if runner is None and _running_under_test():
+        return "I could not resolve that client from an authorized EZLynx search."
+    if runner is None:
+        runner = default_searcher
+    try:
+        outcome = dict(runner(name) or {})
+    except Exception:
+        outcome = {"status": "error", "matches": []}
+    status = str(outcome.get("status") or "error").casefold()
+    matches = [row for row in (outcome.get("matches") or []) if isinstance(row, dict)]
+    if status == "sign_in":
+        from .user_reply import SIGN_IN_QUESTION
+
+        _remember_search(
+            store,
+            job_id,
+            source="sign_in",
+            applicant_ids=[],
+            user_line=SIGN_IN_QUESTION,
+            name=name,
+        )
+        return SIGN_IN_QUESTION
+    if status != "ok":
+        return None
+    named, linked = _split_name_matches(name, matches)
+    if len(named) == 1:
+        applicant = str(named[0].get("applicant_id") or "").strip()
+        payload = dict(store.get_job(job_id).get("payload") or {})
+        payload["applicant_id"] = applicant
+        payload["client_name"] = name
+        store.update_payload(job_id, payload)
+        _remember_search(
+            store,
+            job_id,
+            source="search",
+            applicant_ids=[applicant],
+            name=name,
+            matches=[_stored_match(named[0])],
+        )
+        return None
+    if len(named) > 1:
+        shown = [_stored_match(row) for row in named[:5]]
+        line = which_client_question(name, shown)
+        _remember_search(
+            store,
+            job_id,
+            source="several",
+            applicant_ids=[],
+            user_line=line,
+            name=name,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
+            matches=shown,
+            list_kind="named",
+        )
+        return line
+    if linked:
+        shown = [_stored_match(row) for row in linked[:5]]
+        line = linked_accounts_question(name, shown)
+        _remember_search(
+            store,
+            job_id,
+            source="linked",
+            applicant_ids=[],
+            user_line=line,
+            name=name,
+            candidates=[str(row.get("applicant_id") or "") for row in shown],
+            matches=shown,
+            list_kind="linked",
+        )
+        return line
+    return None
+
+
 def prepare_named_client_lookup(
     store: Any,
     job_id: str,
@@ -735,7 +1250,7 @@ def prepare_named_client_lookup(
     None says so. An id from docs, a runbook, or an earlier chat is dropped.
     """
     job = store.get_job(job_id)
-    if not job_is_client_policy_lookup(job):
+    if not job_is_person_lookup(job):
         return None
     note = _search_note(store, job_id)
     if note.get("resolved") and note.get("source") != "needs_id":
@@ -745,7 +1260,8 @@ def prepare_named_client_lookup(
     name = ""
     payload = dict(job.get("payload") or {})
     for key in ("request_text", "text", "prompt", "original_text"):
-        name = client_name_from_lookup(str(payload.get(key) or "")) or ""
+        text = str(payload.get(key) or "")
+        name = client_name_from_lookup(text) or person_to_look_up(text) or ""
         if name:
             break
     user_id = user_message_applicant(job)
@@ -768,14 +1284,7 @@ def prepare_named_client_lookup(
     _drop_untrusted_binding(store, job)
     if not name:
         return None
-    runner = searcher or _SEARCHER_OVERRIDE
-    if runner is None:
-        # This Chat backport does not own the shared browser. Never attach CDP
-        # or type into another driver's session to resolve a name.
-        line = "Which EZLynx applicant ID should I use?"
-        _remember_search(store, job_id, source="needs_id", applicant_ids=[],
-                         user_line=line, name=name)
-        return line
+    runner = searcher or _SEARCHER_OVERRIDE or default_searcher
     try:
         outcome = dict(runner(name) or {})
     except Exception:
@@ -1219,42 +1728,10 @@ def named_lookup_read_state(store: Any, job: dict[str, Any] | None) -> str:
             if applicant and applicant in trusted:
                 return "read"
     if saw_sign_in:
+        probe = session_probe_url()
+        # A login URL on the stuck tab is not a sign-out when a fresh page
+        # in the same context is still authenticated.
+        if probe and not _is_auth_url(probe):
+            return "probe_ok"
         return "sign_in"
     return "none"
-
-
-def write_client_name(job: dict[str, Any]) -> str | None:
-    text = _original_ask(job)
-    match = re.search(
-        r"\b(?:for|about|named)\s+([a-z][a-z']+\s+[a-z][a-z']+)", text, re.I
-    )
-    if not match or match.group(1).split()[0].casefold() in {"the", "this", "that", "a", "an", "my", "our"}:
-        return None
-    return match.group(1)
-
-
-def prepare_named_write_client(store: Any, job_id: str) -> str | None:
-    """Discard fixture bindings; use only an explicitly injected name search.
-
-    No browser attachment is introduced by this Chat reconciliation.
-    """
-    job = store.get_job(job_id)
-    name = write_client_name(job)
-    if not name:
-        return None
-    _drop_untrusted_binding(store, job)
-    if trusted_applicant_ids(store, job):
-        return None
-    if _SEARCHER_OVERRIDE is None:
-        return "I could not resolve that client from an authorized EZLynx search."
-    outcome = dict(_SEARCHER_OVERRIDE(name) or {})
-    matches = [row for row in outcome.get("matches", [])
-               if isinstance(row, dict) and account_name_matches(name, str(row.get("name") or ""))]
-    if outcome.get("status") != "ok" or len(matches) != 1:
-        return "Which client should I use?"
-    bind_named_client(store, job_id, name=name, matches=matches)
-    applicant = str((store.get_job(job_id).get("payload") or {}).get("applicant_id") or "")
-    if not applicant:
-        return "Which client should I use?"
-    _remember_search(store, job_id, source="search", applicant_ids=[applicant], name=name, matches=matches)
-    return None

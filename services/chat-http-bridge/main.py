@@ -531,6 +531,39 @@ def _event_space_name(event: dict[str, Any]) -> str:
     return _canonical_space_name(str(thread.get("name") or ""))
 
 
+# First token of a Chat message. Prod's subscription is
+# ``attributes.robie_env = "prod" OR NOT attributes:robie_env``, so a
+# message published with ``robie_env=test`` is ignored by Prod and taken
+# by the Test subscription (``attributes.robie_env = "test"``,
+# ``hermes-chat-sub-test-env``). Ordinary text stays untagged and goes
+# to Prod.
+TEST_MESSAGE_MARKER = "[[robie-test]]"
+
+
+def _message_body(event: dict[str, Any]) -> str:
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    return str(message.get("text") or message.get("argumentText") or "")
+
+
+def _message_requests_test_env(event: dict[str, Any]) -> bool:
+    """True when the sender marked this message for the Test gateway.
+
+    A leading @mention is not part of the marker. Message parameters
+    cannot select Test.
+    """
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    for key in ("argumentText", "text"):
+        text = re.sub(
+            r"^(?:(?:<users/[^>]+>|@robie)\s*)+",
+            "",
+            str(message.get(key) or "").lstrip(),
+            flags=re.I,
+        )
+        if re.match(r"^(?:\[\[robie-test\]\]|robie-test:)(?=\s|$)", text, flags=re.I):
+            return True
+    return False
+
+
 def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str]:
     """Pub/Sub attributes for one forwarded event.
 
@@ -538,10 +571,15 @@ def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str
     exactly ``test`` or ``prod``. Clicks without that parameter stay
     untagged.
 
-    Ordinary messages stay untagged unless their first non-mention token
-    is ``[[robie-test]]`` / ``robie-test:`` or the Chat space is listed in
-    ``ROBIE_TEST_CHAT_SPACES``. Message parameters cannot select Test. The default empty list matches a Prod filter of
-    ``attributes.robie_env = "prod" OR NOT attributes:robie_env``.
+    An ordinary message is tagged ``test`` when its text starts with
+    ``[[robie-test]]`` (or ``robie-test:``). Prod ignores that attribute.
+    Test's subscription accepts only that attribute.
+
+    A message without the marker stays untagged unless the Chat space is
+    listed in ``ROBIE_TEST_CHAT_SPACES``. A space that is not listed is
+    never tagged ``test`` just because the message carries a
+    ``robie_env`` parameter. The default empty list matches a Prod filter
+    of ``attributes.robie_env = "prod" OR NOT attributes:robie_env``.
     """
     attrs = {"ce-type": event_type}
     if _is_card_click(event, event_type):
@@ -549,12 +587,9 @@ def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str
         if env in _ROUTING_ENVS:
             attrs["robie_env"] = env
         return attrs
-    message = event.get("message") or {}
-    for key in ("argumentText", "text"):
-        text = re.sub(r"^(?:(?:<users/[^>]+>|@robie)\s*)+", "", str(message.get(key) or "").lstrip(), flags=re.I)
-        if re.match(r"^(?:\[\[robie-test\]\]|robie-test:)(?=\s|$)", text, flags=re.I):
-            attrs["robie_env"] = "test"
-            return attrs
+    if _message_requests_test_env(event):
+        attrs["robie_env"] = "test"
+        return attrs
     space = _event_space_name(event)
     if space and space in _configured_test_chat_spaces():
         attrs["robie_env"] = "test"

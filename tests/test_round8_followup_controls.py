@@ -276,7 +276,18 @@ class WaitingJobTests(unittest.TestCase):
             )
             _backdate(db, waiting, 16 * 60)
             aged = store.get_job(waiting)
-            self.assertFalse(should_bind_waiting_reply(store, aged, "3"))
+            self.assertTrue(
+                should_bind_waiting_reply(
+                    store, aged, "3", inbound_thread_id=THREAD
+                )
+            )
+            _backdate(db, waiting, 31 * 60)
+            aged = store.get_job(waiting)
+            self.assertFalse(
+                should_bind_waiting_reply(
+                    store, aged, "3", inbound_thread_id=THREAD
+                )
+            )
             expired = open_chat_job(
                 db,
                 "m-after-expire",
@@ -285,10 +296,52 @@ class WaitingJobTests(unittest.TestCase):
             )
             self.assertNotEqual(expired, waiting)
             self.assertEqual(store.get_job(waiting)["status"], JobStatus.FAILED.value)
-            self.assertEqual(
-                store.get_checkpoint(waiting, "waiting_expired")["reply"],
-                WAITING_EXPIRED_NOTE,
+            reply = store.get_checkpoint(waiting, "waiting_expired")["reply"]
+            self.assertIn(WAITING_EXPIRED_NOTE, reply)
+            self.assertIn("can you do a book for me", reply)
+
+    def test_expired_thread_answer_restates_the_ask_and_is_not_a_new_job(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            waiting = open_chat_job(
+                db,
+                "m-expire-thread",
+                "can you do a book for me",
+                conversation_id="spaces/only",
             )
+            bind_job_chat_thread(store, waiting, THREAD)
+            _backdate(db, waiting, 12 * 60)
+            self.assertTrue(
+                should_bind_waiting_reply(
+                    store,
+                    store.get_job(waiting),
+                    "follw up 1",
+                    inbound_thread_id=THREAD,
+                )
+            )
+            _backdate(db, waiting, 31 * 60)
+            answered = open_chat_job(
+                db,
+                "m-expire-answer",
+                "follw up 1",
+                conversation_id="spaces/only",
+                inbound_thread_id=THREAD,
+            )
+            self.assertEqual(answered, waiting)
+            self.assertEqual(store.get_job(waiting)["status"], JobStatus.FAILED.value)
+            reply = store.get_checkpoint(waiting, "expired_answer")["reply"]
+            self.assertIn(WAITING_EXPIRED_NOTE, reply)
+            self.assertIn("can you do a book for me", reply)
+            self.assertEqual(len(store.list_jobs_by_status(set(JobStatus))), 1)
+            fresh = open_chat_job(
+                db,
+                "m-expire-new",
+                "please write an essay about roofs",
+                conversation_id="spaces/only",
+                inbound_thread_id=THREAD,
+            )
+            self.assertNotEqual(fresh, waiting)
 
     def test_stop_cancels_a_waiting_job_and_not_a_finished_one(self):
         with durable_temporary_directory() as tmp:

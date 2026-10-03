@@ -27,7 +27,11 @@ DISCUSSION_NOTE_SCHEMA = {
         "properties": {
             "applicant_id": {
                 "type": "string",
-                "description": "EZLynx applicant/account id (e.g. 220250093).",
+                "description": (
+                    "EZLynx applicant id from the user's message or this job's "
+                    "client lookup. Never use an id from the open browser tab, "
+                    "a tool example, or a fixture account."
+                ),
             },
             "note_text": {
                 "type": "string",
@@ -114,7 +118,9 @@ def _file_note(args: dict) -> dict:
     from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
 
     applicant_id = str(args.get("applicant_id") or "").strip()
-    note_text = str(args.get("note_text") or "").strip()
+    from robie_job_engine.request_routing import discussion_note_body
+
+    note_text = discussion_note_body(str(args.get("note_text") or "").strip())
     title_hint = str(args.get("title_hint") or "").strip() or None
     if not applicant_id:
         raise ValueError("applicant_id is required")
@@ -207,6 +213,23 @@ def _file_note(args: dict) -> dict:
                 else "The note was not sent. Do not try a different screen."
             ),
         }
+    if status == "awaiting_go":
+        return {
+            "ok": False,
+            "status": "awaiting_go",
+            "note_id": None,
+            "discussion_id": filed.get("discussion_id"),
+            "discussion_title": filed.get("discussion_title"),
+            "applicant_id": applicant_id,
+            "note_text": note_text,
+            "read_back": False,
+            "verified_by": None,
+            "reason": filed.get("reason"),
+            "confirmation": None,
+            "wrote": False,
+            "do_not_repost": True,
+            "instruction": "The user has not said go. Do not post.",
+        }
     if (
         status == "pending"
         and str(filed.get("reason_code") or "") == "AMBIGUOUS_DISCUSSIONS"
@@ -265,12 +288,9 @@ def _file_note(args: dict) -> dict:
 def _note_job(kwargs: dict) -> tuple[str, str]:
     import os
 
-    job_id = str(
-        (kwargs or {}).get("job_id")
-        or os.environ.get("ROBIE_JOB_ID")
-        or os.environ.get("JOB_ID")
-        or ""
-    ).strip()
+    from robie_job_engine.live_turn_guard import acting_job_id
+
+    job_id = acting_job_id(kwargs)
     db_path = str(
         (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()
@@ -317,6 +337,7 @@ def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
 
 def _remember_discussion_note(kwargs: dict, report: dict) -> None:
     import os
+
     from robie_job_engine.turn_finalization import current_model_job_id
 
     job_id = str(
@@ -386,6 +407,7 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
 
 def ezlynx_discussion_note_handler(args: dict, **kwargs):
     from robie_job_engine.turn_finalization import bound_model_context
+
     owner, _generation, owner_db = bound_model_context()
     if owner:
         # The write and its receipt belong to the same immutable turn, even

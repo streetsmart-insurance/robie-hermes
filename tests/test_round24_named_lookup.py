@@ -488,8 +488,114 @@ class SearchBoxTests(unittest.TestCase):
         clean = _Clean()
         self.assertIs(choose_client_search_page([clean]), clean)
 
+    def test_prepare_from_the_event_loop_does_not_call_sync_playwright_there(self):
+        """The real searcher, not a fake, started from a running loop."""
+        loop_thread = threading.current_thread()
+        started: list[threading.Thread] = []
+
+        class _BoxLoop(_Box):
+            pass
+
+        box = _BoxLoop()
+
+        class _LinkLoop:
+            def get_attribute(self, name: str) -> str:
+                if name == "href":
+                    return f"https://app.ezlynx.com/web/account/{FOUND_ID}/overview"
+                return ""
+
+            def inner_text(self) -> str:
+                return "Buster Brown"
+
+        class _LinksLoop:
+            def count(self) -> int:
+                return 1
+
+            def nth(self, _index: int) -> _LinkLoop:
+                return _LinkLoop()
+
+        class _PageLoop:
+            url = "https://app.ezlynx.com/web/"
+
+            def locator(self, selector: str):
+                if selector == QUICK_SEARCH_SELECTOR:
+                    return box
+                if (
+                    "/web/account/" in selector
+                    or "/applicantportal/" in selector
+                    or "listbox" in selector
+                    or "option" in selector
+                ):
+                    return _LinksLoop()
+                if selector == "input":
+                    return _Missing()
+                if selector == "body":
+                    return _Body("")
+                return _Missing()
+
+        class _Context:
+            pages = [_PageLoop()]
+
+        class _Browser:
+            contexts = [_Context()]
+
+        class _Playwright:
+            def start(self):
+                started.append(threading.current_thread())
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    return self
+                raise RuntimeError(
+                    "It looks like you are using Playwright Sync API inside the asyncio loop"
+                )
+
+            def stop(self) -> None:
+                return None
+
+            def connect_over_cdp(self, _url: str, timeout: int = 0):
+                del timeout
+                return _Browser()
+
+            @property
+            def chromium(self):
+                return self
+
+        def _sync_playwright():
+            return _Playwright()
+
+        # The regression runner does not install Playwright. Seed the module
+        # the real searcher imports, and refuse a sync start on the loop.
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = _sync_playwright
+        playwright_mod = types.ModuleType("playwright")
+        playwright_mod.sync_api = sync_api
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = _job(store, applicant_id=DOCS_ID)
+
+            async def _from_the_loop():
+                asyncio.get_running_loop()
+                return prepare_named_client_lookup(store, job_id)
+
+            with patch.dict(
+                sys.modules,
+                {"playwright": playwright_mod, "playwright.sync_api": sync_api},
+            ):
+                line = asyncio.run(_from_the_loop())
+            payload = store.get_job(job_id)["payload"]
+            self.assertIsNone(line)
+            self.assertEqual(payload.get("applicant_id"), FOUND_ID)
+            self.assertNotIn(DOCS_ID, payload.values())
+            self.assertEqual(box.fills, ["buster brown"])
+            self.assertEqual(len(started), 1)
+            self.assertIsNot(started[0], loop_thread)
+
     def test_default_named_lookup_never_attaches_shared_browser(self):
-        # A name does not authorize this backport to acquire or use CDP.
+        # A name does not authorize this path to acquire or use CDP.
+        # A failed lookup does not ask for an applicant id.
         sync_api = types.ModuleType("playwright.sync_api")
         def forbidden():
             raise AssertionError("shared browser must not be touched")
@@ -501,6 +607,6 @@ class SearchBoxTests(unittest.TestCase):
                 return prepare_named_client_lookup(store, job_id)
             with patch.dict(sys.modules, {"playwright.sync_api": sync_api}):
                 line = asyncio.run(prepare())
-            self.assertEqual(line, "Which EZLynx applicant ID should I use?")
+            self.assertEqual(line, "I couldn't look that up; a CSR should take a look.")
             self.assertNotIn(DOCS_ID, store.get_job(job_id)["payload"].values())
-            self.assertEqual(store.get_checkpoint(job_id, "client_name_search")["source"], "needs_id")
+            self.assertEqual(store.get_checkpoint(job_id, "client_name_search")["source"], "error")

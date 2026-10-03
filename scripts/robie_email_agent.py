@@ -722,7 +722,11 @@ def process_inbox():
             from robie_job_engine.hitl_copy import worker_report_human_text
             from robie_job_engine.verification_mailer import build_plain_email_message
 
-            reply_body = worker_report_human_text(response_text, channel="email")
+            from robie_job_engine.user_reply import format_user_reply
+
+            reply_body = format_user_reply(
+                worker_report_human_text(response_text, channel="email")
+            )
             reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
             # 2026-09-14: no-blind-resend as code. Check Sent before sending so a
             # retry or duplicate run can never double-send (Julio's Tree Service).

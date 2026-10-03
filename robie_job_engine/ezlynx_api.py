@@ -533,8 +533,10 @@ class EzlynxApiClient:
         try:
             if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
                 from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
 
                 assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -568,7 +570,12 @@ class EzlynxApiClient:
         Added for the verified writers (discussion notes). ``path`` is
         relative to the API origin, e.g. ``"/DiscussionApi/discussions/v1/notes"``.
         Fail-closed: transport and HTTP errors raise EzlynxApiError.
+        The driver lease is checked here so a patched caller cannot skip it.
         """
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        assert_write_checks_intact()
+        driver_gate_for_write()
         url = self._origin() + "/" + str(path or "").lstrip("/")
         data = json.dumps(payload).encode("utf-8")
         headers = {
@@ -620,8 +627,10 @@ class EzlynxApiClient:
         try:
             if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
                 from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
 
                 assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             http_status = None
             status_source = None
@@ -949,7 +958,10 @@ class EzlynxApiClient:
         200 body is a numeric document id. Never uploads to a live applicant.
         """
         from .chat_write_boundary import assert_chat_applicant
+        from .live_turn_guard import assert_live_write_allowed
+
         assert_chat_applicant(applicant_id)
+        assert_live_write_allowed()
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
         if not name:

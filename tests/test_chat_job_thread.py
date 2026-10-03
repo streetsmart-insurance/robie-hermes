@@ -201,5 +201,7 @@ class ChatJobThreadTests(unittest.TestCase):
         self.assertIn('thread_meta.get("threadKey")', create)
         self.assertIn("REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD", create)
         self.assertIn("remember_created_thread", create)
-        self.assertIn('msg.get("threadReply") is not False', source)
+        self.assertIn("prev_thread_count > 0", source)
+        self.assertIn('msg.get("threadReply") is True', source)
+        self.assertNotIn('msg.get("threadReply") is not False', source)
         self.assertIn("_reply_in_existing_thread", source)

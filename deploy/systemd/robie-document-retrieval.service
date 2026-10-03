@@ -1,0 +1,30 @@
+[Unit]
+Description=ROBIE document retrieval: pull and file FAO, NatGen, and Geico
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+# ROBIE_ENV=PRODUCTION and ROBIE_JOB_DB are set here on hermes-poc-01.
+EnvironmentFile=/etc/streetsmart-hermes/robie-message-runtime.env
+# Filing is off. The drop-in below keeps the same off value.
+# Only the single character 1 turns filing on, and only after Carlo's GO.
+# Unset, 0, and false file nothing.
+Environment=ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.document_retrieval_service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target

@@ -453,7 +453,7 @@ def test_invalid_or_foreign_card_environment_is_refused(stamp, monkeypatch):
         assert not _adapter_module()._click_routed_to_this_gateway({'robie_env': stamp})
 
 
-@pytest.mark.parametrize('flag', [True, None])
+@pytest.mark.parametrize('flag', [True])
 @pytest.mark.parametrize('attrs', [{}, {'robie_env': 'prod'}])
 def test_foreign_thread_stop_refused_before_build(tmp_path, monkeypatch, flag, attrs):
     store = JobStore(str(tmp_path / 'prod.db'))
@@ -472,6 +472,26 @@ def test_foreign_thread_stop_refused_before_build(tmp_path, monkeypatch, flag, a
     assert store.get_job(owner)['status'] == 'RUNNING'
 
 
+def test_omitted_thread_reply_reaches_the_builder(tmp_path, monkeypatch):
+    """A real top-level message has a thread and no threadReply field."""
+    store = JobStore(str(tmp_path / 'prod.db'))
+    chat = _chat(str(store.path))
+    monkeypatch.setattr(_adapter_module(), 'ROBIE_JOB_DB', str(store.path))
+    monkeypatch.setenv('ROBIE_ENV', 'PRODUCTION')
+    from unittest.mock import AsyncMock
+    chat._build_message_event = AsyncMock(return_value=None)
+    space = 'spaces/AAQAZbLJO78'
+    msg = {
+        'name': space + '/messages/HjADXxDpgPk.HjADXxDpgPk',
+        'text': 'hello',
+        'space': {'name': space},
+        'thread': {'name': space + '/threads/HjADXxDpgPk'},
+    }
+    assert 'threadReply' not in msg
+    asyncio.run(chat._dispatch_message(msg, {}))
+    chat._build_message_event.assert_called_once()
+
+
 def test_thread_contract_and_read_failure(tmp_path):
     from robie_job_engine.chat_environment import thread_ingress_refusal, ThreadOwnershipUnavailable
     store = JobStore(str(tmp_path / 'prod.db'))
@@ -483,6 +503,23 @@ def test_thread_contract_and_read_failure(tmp_path):
     assert thread_ingress_refusal(message, **kwargs) == 'CHAT_THREAD_ENVIRONMENT_MISMATCH'
     assert thread_ingress_refusal({**message, 'threadReply': False}, **kwargs) is None
     assert thread_ingress_refusal({**message, 'threadReply': 'false'}, **kwargs) == 'CHAT_THREAD_METADATA_INVALID'
+    # Live top-level shape: Google omits threadReply. The message id is <tid>.<tid>.
+    top_level = {
+        'name': 'spaces/AAQAZbLJO78/messages/HjADXxDpgPk.HjADXxDpgPk',
+        'thread': {'name': 'spaces/AAQAZbLJO78/threads/HjADXxDpgPk'},
+    }
+    assert 'threadReply' not in top_level
+    assert thread_ingress_refusal(
+        top_level, space='spaces/AAQAZbLJO78', environment='test', db_path=str(store.path),
+    ) is None
+    owned_reply = {**top_level, 'threadReply': True}
+    assert thread_ingress_refusal(
+        owned_reply, space='spaces/AAQAZbLJO78', environment='test', db_path=str(store.path),
+    ) == 'CHAT_THREAD_NOT_OWNED'
+    assert thread_ingress_refusal(
+        {**top_level, 'threadReply': False},
+        space='spaces/AAQAZbLJO78', environment='test', db_path=str(store.path),
+    ) is None
     missing = tmp_path / 'missing.db'
     with pytest.raises(ThreadOwnershipUnavailable):
         thread_ingress_refusal(message, **{**kwargs, 'db_path': str(missing)})
@@ -628,8 +665,8 @@ def test_real_builder_retains_owned_reply_after_restart(tmp_path, monkeypatch, f
     if flag is not None:
         msg['threadReply'] = flag
     event = asyncio.run(chat._build_message_event(msg, {}))
-    assert event.source.thread_id == (None if flag is False else THREAD)
-    assert chat._reply_in_existing_thread.get(msg['name']) == (None if flag is False else THREAD)
+    assert event.source.thread_id == (THREAD if flag is True else None)
+    assert chat._reply_in_existing_thread.get(msg['name']) == (THREAD if flag is True else None)
 
 
 def test_verified_target_remains_authorized_at_transport(tmp_path):
@@ -733,6 +770,10 @@ def test_actual_note_handler_never_selects_from_payload(tmp_path, monkeypatch, i
     generation = begin_model_generation(owner, store=store)
     # A valid tool plan must never turn its model-generated hint into user authority.
     store.checkpoint(owner, PLAN_CHECKPOINT, {'locked': True})
+    if expected_posts:
+        from robie_job_engine.chat_write_go import bind_chat_write_go
+
+        assert bind_chat_write_go(store, owner, 'go', message_id='m-go')
     client = Client()
     actual_api = partial(writes.add_note_to_discussion, discussion_client=client, ledger_path=tmp_path / 'ledger.json')
     note, previous, created = _load_hermes_tool('quoted_payload_note_tool', 'ezlynx_note_tool.py')

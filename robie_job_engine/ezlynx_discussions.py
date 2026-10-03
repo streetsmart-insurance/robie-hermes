@@ -42,12 +42,14 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib import error, parse, request
 from urllib.parse import urlparse
 
+from .discussion_note_ledger import with_serialized_ledger
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 GRANT_TYPE = "vendor_data_access"
@@ -70,6 +72,119 @@ class DiscussionApiError(RuntimeError):
     def __init__(self, status: int | None, message: str) -> None:
         self.status = status
         super().__init__(message)
+
+
+# A 404 or 405 is a miss. Two misses, or a different guessed path after
+# one miss, stop the next call before HTTP. A later 2xx clears the count
+# so one miss does not stick for the life of the process.
+_DISCUSSION_MISS_LIMIT = 2
+_discussion_miss_lock = threading.Lock()
+_discussion_misses: list[tuple[str, int]] = []
+_KNOWN_DISCUSSION_COLLECTIONS = (
+    "/v8/discussions/ids-by-applicant",
+    "/v8/discussions/by-applicant",
+    "/v8/discussions/with-note",
+)
+_KNOWN_DISCUSSION_ID = re.compile(
+    r"/v8/discussions/(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?:/notes)?$",
+    re.IGNORECASE,
+)
+
+
+def reset_discussion_api_misses() -> None:
+    """Drop the 404/405 count. Tests call this so one case cannot poison the next."""
+    with _discussion_miss_lock:
+        _discussion_misses.clear()
+
+
+def discussion_api_path(url: str) -> str:
+    path = urlparse(str(url or "")).path or ""
+    return path.rstrip("/")
+
+
+def is_discussion_api_url(url: str) -> bool:
+    raw = str(url or "")
+    folded = raw.casefold()
+    if "discussionapi" in folded:
+        return True
+    path = discussion_api_path(raw).casefold()
+    return "/v8/discussions" in path or "/discussions/" in path
+
+
+def is_known_discussion_path(url: str) -> bool:
+    """A path this client actually calls. Anything else after a miss is a guess."""
+    path = discussion_api_path(url).casefold()
+    index = path.find("/v8/discussions")
+    if index < 0:
+        return False
+    suffix = path[index:]
+    if suffix in _KNOWN_DISCUSSION_COLLECTIONS:
+        return True
+    return _KNOWN_DISCUSSION_ID.fullmatch(suffix) is not None
+
+
+def _stop_guessing_message(url: str, status: int) -> str:
+    path = discussion_api_path(url) or str(url or "")
+    return (
+        f"DiscussionApi returned HTTP {int(status)} for {path}. "
+        "Stop. Do not guess another path. Report this error."
+    )
+
+
+def arm_discussion_api_call(url: str) -> None:
+    """Raise before HTTP when this call is still guessing after a 404 or 405.
+
+    Two misses stop the next call. One miss still allows the same path, or
+    another path this client already knows. A different path is a guess.
+    """
+    if not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        misses = list(_discussion_misses)
+    if not misses:
+        return
+    prior_url, status = misses[-1]
+    if len(misses) >= _DISCUSSION_MISS_LIMIT:
+        raise DiscussionApiError(status, _stop_guessing_message(prior_url, status))
+    prior = discussion_api_path(prior_url).casefold()
+    current = discussion_api_path(url).casefold()
+    if current != prior and not is_known_discussion_path(url):
+        raise DiscussionApiError(status, _stop_guessing_message(prior_url, status))
+
+
+def record_discussion_api_miss(url: str, status: int) -> None:
+    """Count one HTTP 404 or 405. Other statuses are not path guesses."""
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return
+    if code not in {404, 405} or not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        _discussion_misses.append((str(url or ""), code))
+
+
+def note_discussion_api_success(url: str) -> None:
+    """A real DiscussionApi response clears the miss count."""
+    if not is_discussion_api_url(url):
+        return
+    with _discussion_miss_lock:
+        _discussion_misses.clear()
+
+
+def response_status(result: Any) -> int | None:
+    """Status from a Playwright response, whether ``status`` is a value or a method."""
+    status = getattr(result, "status", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:
+            return None
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
 
 
 class DiscussionSelectionError(RuntimeError):
@@ -305,6 +420,7 @@ class DiscussionApiClient:
         authenticated: bool = True,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> Any:
+        arm_discussion_api_call(url)
         headers = dict(headers)
         try:
             extra = self._session_headers(url)
@@ -316,13 +432,11 @@ class DiscussionApiClient:
         if authenticated:
             headers["Authorization"] = f"Bearer {self.get_token()}"
         try:
-            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
-                from .chat_write_boundary import assert_chat_write_allowed
-
-                assert_chat_write_allowed()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
+            if exc.code in {404, 405}:
+                record_discussion_api_miss(url, exc.code)
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -337,6 +451,7 @@ class DiscussionApiClient:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise DiscussionApiError(None, "Discussion API returned non-JSON") from exc
+        note_discussion_api_success(url)
         return parsed
 
     def _base(self) -> str:
@@ -351,6 +466,18 @@ class DiscussionApiClient:
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        # Last step before HTTP. A patched allowlist or readback check
+        # raises here, and the driver lease is read again.
+        assert_write_checks_intact()
+        from .chat_write_boundary import assert_chat_write_allowed
+        from .chat_write_go import permit_chat_http_write
+
+        assert_chat_write_allowed()
+        permit_chat_http_write()
+        driver_gate_for_write()
+        _refuse_hard_blocked_job()
         return self._request_json(
             "POST",
             self._base() + path.lstrip("/"),
@@ -374,7 +501,9 @@ class DiscussionApiClient:
         if not applicant:
             raise DiscussionApiError(None, "applicant id is required")
         parsed = self._get("v8/discussions/by-applicant", {"applicantId": applicant})
-        return _normalize_record_list(parsed)
+        rows = _normalize_record_list(parsed)
+        _remember_discussions_for_choice(rows)
+        return rows
 
     def get_discussion(self, discussion_id: str) -> dict[str, Any]:
         """Single discussion by id (v8 discussions/:discussionId)."""
@@ -394,11 +523,13 @@ class DiscussionApiClient:
         """Append a note to an EXISTING discussion (v8 discussions/:id/notes).
 
         Never creates a discussion. The body is refused when it contains a
-        phone-number-like value.
+        phone-number-like value. Several discussions the user did not name
+        are refused here too, so agent code cannot pick one after listing them.
         """
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")
+        _refuse_unasked_discussion(discussion)
         text = reject_phone_numbers(body).strip()
         if not text:
             raise DiscussionApiError(None, "note body is required")
@@ -483,9 +614,13 @@ def _discussion_stamp(row: dict[str, Any]) -> str:
 
 
 def recent_discussion_titles(
-    rows: list[dict[str, Any]], *, limit: int = 5
+    rows: list[dict[str, Any]], *, limit: int = 5, preferred: str = ""
 ) -> list[str]:
-    """Up to ``limit`` titles, newest dated rows first."""
+    """Up to ``limit`` titles, newest dated rows first.
+
+    A title that exactly matches ``preferred`` is listed first even when
+    it is older than the recency window. The question can then name it.
+    """
     dated = [row for row in rows if _discussion_stamp(row)]
     undated = [row for row in rows if not _discussion_stamp(row)]
     dated.sort(key=_discussion_stamp, reverse=True)
@@ -495,23 +630,233 @@ def recent_discussion_titles(
         if not title or title in titles:
             continue
         titles.append(title)
-        if len(titles) >= limit:
-            break
-    return titles
+    wanted = " ".join(str(preferred or "").split()).casefold()
+    if wanted:
+        exact = [title for title in titles if title.casefold() == wanted]
+        if len(exact) == 1:
+            titles = [exact[0]] + [title for title in titles if title != exact[0]]
+    return titles[:limit]
 
 
 def ambiguous_discussion_question(titles: list[str], hint: str = "") -> str:
-    """One question. At most five titles, so the person can pick."""
-    label = " ".join(str(hint or "").split()).strip()
-    subject = f"{label} discussion" if label else "discussion"
+    """One question. At most five titles, so the person can pick.
+
+    The subject stays "discussion". The requested title is a choice, not
+    the thing the question is asking the person to name twice.
+    """
+    del hint
     shown = [title for title in titles if str(title).strip()][:5]
     if not shown:
-        return f"Which {subject} should I use?"
+        return "Which discussion should I use?"
     if len(shown) == 1:
         choices = shown[0]
     else:
         choices = ", ".join(shown[:-1]) + f", or {shown[-1]}"
-    return f"Which {subject} should I use: {choices}?"
+    return f"Which discussion should I use: {choices}?"
+
+
+def _job_request_text() -> str | None:
+    """The ask stored on this turn's job, or None when there is no job.
+
+    A model-supplied discussion title is not the user's choice. The hint
+    counts only when this text contains it. No job means a system caller
+    (the notice driver, a unit test) and the hint stands, unless this
+    process is the agent interpreter.
+    """
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return None
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return None
+    payload = dict(job.get("payload") or {})
+    parts = [
+        str(payload.get(key) or "")
+        for key in ("request_text", "text", "prompt", "original_text")
+    ]
+    return "\n".join(parts)
+
+
+def authorized_discussion_hint(title_hint: str | None) -> str:
+    """Hint the user actually wrote. An invented title does not choose."""
+    hint = " ".join(str(title_hint or "").split()).strip()
+    if not hint:
+        return ""
+    user = _job_request_text()
+    if user is None:
+        from .safety_seal import agent_interpreter
+
+        if agent_interpreter():
+            return ""
+        return hint
+    bare = _bare_title(hint)
+    if bare and bare in _normalize_selection_text(user):
+        return bare
+    return ""
+
+
+def _choice_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    chosen: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or is_untitled_discussion(row):
+            continue
+        title = discussion_title_of(row)
+        ident = discussion_id_of(row)
+        if not title or not ident or ident in seen:
+            continue
+        seen.add(ident)
+        chosen.append({"discussion_id": ident, "title": title})
+    return chosen
+
+
+def _remember_discussions_for_choice(rows: list[dict[str, Any]]) -> None:
+    """Remember a multi-discussion list so a later append cannot pick one."""
+    chosen = _choice_rows(rows)
+    if len(chosen) < 2:
+        return
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        JobStore(db_path).checkpoint(
+            job_id,
+            "discussion_choices",
+            {"matches": [row["title"] for row in chosen], "rows": chosen},
+        )
+    except Exception:
+        return
+
+
+def _refuse_hard_blocked_job() -> None:
+    """A hard block on the ask refuses the write even from agent code."""
+    user = _job_request_text()
+    if not user:
+        return
+    from .safety_seal import hard_block_for_write
+
+    blocked = hard_block_for_write(user)
+    if blocked:
+        raise DiscussionApiError(None, blocked)
+
+
+def _refuse_unasked_discussion(discussion_id: str) -> None:
+    """Several remembered discussions require the user to name one."""
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        note = JobStore(db_path).get_checkpoint(job_id, "discussion_choices") or {}
+    except Exception:
+        return
+    rows = [row for row in (note.get("rows") or []) if isinstance(row, dict)]
+    if len(rows) < 2:
+        return
+    target = str(discussion_id or "").strip()
+    user = _job_request_text() or ""
+    folded = " ".join(user.split()).casefold()
+    named = [
+        row
+        for row in rows
+        if str(row.get("title") or "").strip()
+        and str(row.get("title") or "").strip().casefold() in folded
+    ]
+    if len(named) == 1 and str(named[0].get("discussion_id") or "") == target:
+        return
+    titles = [str(row.get("title") or "").strip() for row in rows if str(row.get("title") or "").strip()]
+    raise DiscussionSelectionError(
+        AMBIGUOUS_DISCUSSIONS,
+        ambiguous_discussion_question(titles),
+        matches=titles,
+    )
+
+
+_BOT_MENTION = re.compile(
+    r"^(?:(?:<users/[^>]+>|@robie(?:-[\w]+)?)[\s,]*)+",
+    re.IGNORECASE,
+)
+_QUOTED_SPAN = re.compile(
+    r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)'
+)
+_SELECTION_GUARD = re.compile(
+    r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
+    r"|\bask me\b|\bwhich discussion\b"
+)
+
+
+_QUOTE_FIX = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u00ab": '"',
+        "\u00bb": '"',
+        "\uff02": '"',
+        "\uff1a": ":",
+    }
+)
+_TEST_MARKER = re.compile(r"^\[\[robie-test\]\]\s*", re.IGNORECASE)
+
+
+def _strip_bot_mention(text: str) -> str:
+    """Drop a leading @Robie or <users/...> mention. The title after it stays."""
+    return _BOT_MENTION.sub("", str(text or "")).strip()
+
+
+def _normalize_selection_text(text: str) -> str:
+    """Straight quotes, no leading mention or test marker, one casefolded line.
+
+    Google Chat sends curly quotes and an @Robie or <users/...> prefix.
+    The test channel also prefixes [[robie-test]]. None of those are part
+    of the discussion title.
+    """
+    raw = str(text or "").translate(_QUOTE_FIX)
+    while True:
+        nxt = _TEST_MARKER.sub("", _strip_bot_mention(raw)).strip()
+        if nxt == raw:
+            break
+        raw = nxt
+    return " ".join(raw.casefold().split())
+
+
+def _bare_title(hint: str) -> str:
+    """The title without surrounding quotes. Smart quotes count as quotes."""
+    return _normalize_selection_text(hint).strip(" \"'`")
+
+
+def _exact_discussion_row(
+    rows: list[dict[str, Any]], text: str
+) -> dict[str, Any] | None:
+    """The one discussion whose full title is this answer, or None."""
+    wanted = _normalize_selection_text(text).strip(" .!\"'")
+    if not wanted:
+        return None
+    matched = [
+        row
+        for row in rows
+        if discussion_title_of(row).strip().casefold() == wanted
+    ]
+    if len(matched) == 1:
+        return matched[0]
+    return None
 
 
 def select_discussion_for_note(
@@ -542,54 +887,131 @@ def select_discussion_for_note(
         )
     if len(rows) == 1:
         return rows[0]
-    hint = str(title_hint or "").strip().lower()
+    hint_raw = _bare_title(str(title_hint or ""))
     from .turn_finalization import bound_model_context
 
     owner, generation, owner_db = bound_model_context()
-    if owner and hint:
+    if owner:
         from .store import JobStore
+
+        store = JobStore(owner_db)
+        reply = store.get_checkpoint(owner, "clarification_reply") or {}
+        # A resume stores the answer without a generation. A different
+        # generation is an older answer and does not choose.
+        reply_generation = reply.get("generation")
+        if not reply_generation or reply_generation == generation:
+            chosen = _exact_discussion_row(rows, str(reply.get("text") or ""))
+            if chosen is not None:
+                return chosen
+    if owner and hint_raw:
+        from .store import JobStore
+
         store = JobStore(owner_db)
         job = store.get_job(owner)
         payload = job.get("payload") or {}
         reply = store.get_checkpoint(owner, "clarification_reply") or {}
-        texts = [str(payload.get(key) or "") for key in ("request_text", "original_text")]
-        clarification = str(reply.get("text") or "") if reply.get("generation") == generation else ""
-        # Bound Chat selection is deliberately narrow: exact title after an
-        # affirmative selector, or an exact clarification answer. Mentions,
-        # negations and substrings do not grant write authority.
-        import re
-        def selected(text, *, answer=False):
-            normalized = " ".join(text.casefold().replace("’", "'").split())
-            if answer and normalized.strip(" .!\"'") == hint:
-                return True
-            # Quoted note bodies are data, never selection instructions.
-            # Conservatively omit quoted titles too: an exact clarification
-            # or an unquoted outer instruction can supply the selection.
-            outer = re.sub(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)', ' ', normalized)
-            if any(token in outer for token in ('"', '“', '”', '`')):
-                return False  # incomplete quote: cannot establish outer text
-            if re.search(r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
-                         r"|\bask me\b|\bwhich discussion\b", outer):
+        texts = [
+            str(payload.get(key) or "")
+            for key in ("request_text", "text", "prompt", "original_text")
+        ]
+        reply_generation = reply.get("generation")
+        clarification = ""
+        if not reply_generation or reply_generation == generation:
+            clarification = str(reply.get("text") or "")
+
+        def _instruction(normalized: str) -> str:
+            """The choosing sentence. A note body after the colon is not it."""
+            raw = normalized
+            match = re.search(r"\badd\s+a\s+note\b", raw)
+            if match:
+                quote = 0
+                for index, char in enumerate(raw[match.end():], match.end()):
+                    if char == '"':
+                        quote = 0 if quote else 1
+                    elif char == "“":
+                        quote += 1
+                    elif char == "”" and quote:
+                        quote -= 1
+                    elif char == ":" and quote == 0:
+                        raw = raw[:index]
+                        break
+            return re.split(
+                r"\b(?:with text|note text|note body|saying|that says)\b",
+                raw,
+                maxsplit=1,
+            )[0].strip()
+
+        def selected(text: str, *, answer: bool = False) -> bool:
+            normalized = _normalize_selection_text(text)
+            if answer:
+                answered = " ".join(
+                    _strip_bot_mention(normalized).split()
+                ).strip(" .!\"'")
+                if answered == hint_raw:
+                    return True
+            instruction = _instruction(normalized)
+            bare = _QUOTED_SPAN.sub(" ", instruction)
+            if _SELECTION_GUARD.search(bare):
                 return False
-            # Unquoted payload introductions terminate the authority-bearing
-            # instruction too; wording inside the payload cannot select a row.
-            outer = re.split(r"\b(?:with text|note text|note body|saying|that says)\b", outer, maxsplit=1)[0].strip()
-            title = r"(?:the\s+)?(?:discussion\s+)?" + re.escape(hint) + r"(?:\s+discussion)?\s*(?:[.!;]|$)"
-            return bool(re.search(r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+" + title, outer)
-                        or re.search(r"(?:^|[.!;])\s*(?:please\s+)?(?:add|file|post|append|put|write|record)\b[^.!;?]*\b(?:in|to)\s+" + title, outer))
-        # The current clarification supersedes the original selection. Do not
-        # borrow an older affirmative instruction after a new uncertain reply.
-        authorized = selected(clarification, answer=True) if clarification else any(selected(text) for text in texts)
+            # A quoted title after on/in/to/into the discussion is the choice.
+            # The same title quoted only inside the note body was cut off above.
+            quoted = (
+                r'["“]'
+                + re.escape(hint_raw)
+                + r'["”](?:\s+discussion)?\s*(?:[.!;:,]|$)'
+            )
+            if re.search(
+                r"\b(?:on|in|to|into)\s+(?:the\s+)?discussion\s+" + quoted,
+                instruction,
+            ) or re.search(
+                r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+"
+                r"(?:the\s+)?(?:discussion\s+)?" + quoted,
+                instruction,
+            ):
+                return True
+            if any(token in bare for token in ('"', "“", "”", "`")):
+                return False
+            title = (
+                r"(?:the\s+)?(?:discussion\s+)?"
+                + re.escape(hint_raw)
+                + r"(?:\s+discussion)?\s*(?:[.!;:,]|$)"
+            )
+            return bool(
+                re.search(
+                    r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+" + title,
+                    bare,
+                )
+                or re.search(
+                    r"(?:^|[.!;])\s*(?:please\s+)?(?:add|file|post|append|put|write|record)\b"
+                    r"[^.!;?]*\b(?:on|in|to|into)\s+" + title,
+                    bare,
+                )
+            )
+
+        authorized = (
+            selected(clarification, answer=True)
+            if clarification
+            else any(selected(text) for text in texts)
+        )
         if not authorized:
-            raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
+            raise DiscussionSelectionError(
+                AMBIGUOUS_DISCUSSIONS,
                 "discussion title was not selected by the requester; refusing to guess",
-                matches=recent_discussion_titles(rows))
-        exact = [row for row in rows if discussion_title_of(row).strip().casefold() == hint]
+                matches=recent_discussion_titles(rows, preferred=hint_raw),
+            )
+        exact = [
+            row
+            for row in rows
+            if discussion_title_of(row).strip().casefold() == hint_raw
+        ]
         if len(exact) != 1:
-            raise DiscussionSelectionError(AMBIGUOUS_DISCUSSIONS,
+            raise DiscussionSelectionError(
+                AMBIGUOUS_DISCUSSIONS,
                 "requester selection must identify exactly one full discussion title",
-                matches=recent_discussion_titles(rows))
+                matches=recent_discussion_titles(rows, preferred=hint_raw),
+            )
         return exact[0]
+    hint = authorized_discussion_hint(title_hint).lower()
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
@@ -599,13 +1021,13 @@ def select_discussion_for_note(
             AMBIGUOUS_DISCUSSIONS,
             f"title hint {title_hint!r} matched {len(matched)} of {len(rows)} "
             "discussions; refusing to guess",
-            matches=recent_discussion_titles(pool),
+            matches=recent_discussion_titles(pool, preferred=hint),
         )
     raise DiscussionSelectionError(
         AMBIGUOUS_DISCUSSIONS,
         f"applicant has {len(rows)} discussions and no title hint was given; "
         "refusing to guess",
-        matches=recent_discussion_titles(rows),
+        matches=recent_discussion_titles(rows, preferred=hint_raw),
     )
 
 
@@ -773,9 +1195,6 @@ def _metadata_note_confirmation(
     )
 
 
-from .discussion_note_ledger import with_serialized_ledger
-
-
 @with_serialized_ledger
 def file_note_to_existing_discussion(
     client: DiscussionApiClient,
@@ -789,17 +1208,42 @@ def file_note_to_existing_discussion(
     ledger_path: Any = None,
     allow_repost: bool = False,
 ) -> dict[str, Any]:
-    """Append once to an existing discussion and independently identify the note.
+    """Append ``note_body`` to the applicant's existing discussion.
 
-    Confirmation requires matching note text or a returned note ID in a fresh
-    discussion read. Stable counts alone cannot identify this request's note.
-    Persist uncertainty before the POST and retain it across transport errors;
-    a later retry must not silently send again, even after the daily window.
-    Explicit, separately authorized repost approval remains a caller boundary.
+    Fail-closed: the write-scope allowlist is enforced first; when no single
+    existing discussion can be chosen the result is ``status="pending"`` and
+    nothing is written. A discussion is never created and nothing is deleted.
+
+    Confirmation reads the discussion before the post and once after it.
+    The note is filed only when a second signal says it is ours: matching
+    note text, or a returned note id that is the new latest id. A higher
+    count or a new latest id by itself is not a receipt, because another
+    writer can produce the same metadata. That post is held, the ledger
+    row stays sent and unconfirmed, and a repeat asks before it posts
+    again. A count that jumped, an unchanged latest id, a changed title,
+    or a later read that moved stays unconfirmed too. The post is never
+    repeated automatically.
+
+    A local ledger remembers accepted notes so a rerun does not post them
+    again. A send that cannot be confirmed is stored as sent, unconfirmed.
+    A later ask says it could not be confirmed. It does not say the note
+    was added. If that ledger write fails, nothing is posted.
+
+    A Chat model turn does not post, and does not write that ledger row,
+    until this thread has said go. The token is checked again at HTTP.
+
+    A job that is not RUNNING does not reach the API. The check is the
+    status on the job row at this moment, not the status from when the
+    turn started.
+
+    Returns a result dict with ``status`` one of ``filed`` / ``pending`` /
+    ``held`` / ``dry_run``, plus ``applicant_id``, ``discussion_id``,
+    ``note_id`` and a human-readable ``reason``.
     """
-    from .chat_write_boundary import assert_chat_applicant
-    assert_chat_applicant(applicant_id)
     applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+    from .chat_write_boundary import assert_chat_applicant
+
+    assert_chat_applicant(applicant)
     text = reject_phone_numbers(note_body).strip()
     if not text:
         raise DiscussionApiError(None, "note body is required")
@@ -838,6 +1282,12 @@ def file_note_to_existing_discussion(
             "discussion_title": title,
             "note_id": None,
         }
+    from .chat_write_go import (
+        authorize_chat_note_post,
+        awaiting_go_reason,
+        finish_chat_note_post,
+        unconfirmed_was_not_added,
+    )
     from .discussion_note_ledger import (
         DiscussionNoteLedgerError,
         SENT_UNCONFIRMED,
@@ -879,7 +1329,7 @@ def file_note_to_existing_discussion(
             if not allow_repost and note_still_blocks_repost(already):
                 return _note_result(
                     "already_posted",
-                    reason=already_added_question(already.get("posted_at")),
+                    reason=unconfirmed_was_not_added(),
                     applicant=applicant,
                     discussion_id=discussion_id,
                     title=title,
@@ -902,16 +1352,21 @@ def file_note_to_existing_discussion(
                 idempotent=True,
             )
     if recent is not None and not allow_repost:
+        unconfirmed = note_was_unconfirmed(recent)
         return _note_result(
             "already_posted",
-            reason=already_added_question(recent.get("posted_at")),
+            reason=(
+                unconfirmed_was_not_added()
+                if unconfirmed
+                else already_added_question(recent.get("posted_at"))
+            ),
             applicant=applicant,
             discussion_id=discussion_id,
             title=title,
             note_id=str(recent.get("note_id") or "").strip() or None,
             read_back=False,
             verified_by=None,
-            confirmation=SENT_UNCONFIRMED if note_was_unconfirmed(recent) else None,
+            confirmation=SENT_UNCONFIRMED if unconfirmed else None,
         )
     getter = getattr(client, "get_discussion", None)
     if not callable(getter):
@@ -932,6 +1387,19 @@ def file_note_to_existing_discussion(
             discussion_id=discussion_id,
             title=title,
         )
+    from .live_turn_guard import assert_live_write_allowed
+
+    # Re-read the job now. A cancel that landed during the discussion
+    # lookup must not reach DiscussionApi.
+    assert_live_write_allowed()
+    if not authorize_chat_note_post():
+        return _note_result(
+            "awaiting_go",
+            reason=awaiting_go_reason(title, text),
+            applicant=applicant,
+            discussion_id=discussion_id,
+            title=title,
+        )
     try:
         begin_unconfirmed_note(
             applicant,
@@ -941,6 +1409,7 @@ def file_note_to_existing_discussion(
             ledger_path=ledger_path,
         )
     except DiscussionNoteLedgerError as exc:
+        finish_chat_note_post()
         return _note_result(
             "held",
             reason=str(exc),
@@ -950,10 +1419,24 @@ def file_note_to_existing_discussion(
         )
     try:
         created = client.append_note(discussion_id, text, note_type=note_type)
+    except DiscussionSelectionError as exc:
+        finish_chat_note_post()
+        return {
+            "status": "pending",
+            "reason_code": exc.code,
+            "reason": str(exc),
+            "applicant_id": applicant,
+            "discussion_id": None,
+            "note_id": None,
+            "matches": list(getattr(exc, "matches", []) or []),
+        }
     except Exception:
-        # A timeout or error does not prove that the server rejected the POST.
-        # Retain the durable uncertainty marker so retry cannot duplicate it.
+        finish_chat_note_post()
+        # Typed API/transport failures also do not prove POST rejection.
+        # Keep the unconfirmed row so a retry cannot post it twice.
         raise
+    else:
+        finish_chat_note_post()
     try:
         after_record = getter(discussion_id)
     except Exception:
@@ -980,6 +1463,9 @@ def file_note_to_existing_discussion(
             )
         identity = _new_note_identity(after_record, after, text, created)
         if identity is None:
+            # A higher count, or a new most-recent id with no note text and
+            # no returned id, is not a receipt. Hold it so it is not posted
+            # again as if it were confirmed.
             if _payload_has_note_bodies(after_record) and not _posted_text_matches(
                 after_record, text
             ):
@@ -1057,6 +1543,34 @@ def file_note_to_existing_discussion(
     )
 
 
+def _stable_count_reread(
+    getter: Any, discussion_id: str, after: dict[str, Any]
+) -> str | None:
+    """Latest id when a second read still shows the same one new note.
+
+    Live reads have no note text. A second read that moved, failed, or
+    grew a note body is not this signal.
+    """
+
+    try:
+        record = getter(discussion_id)
+    except Exception:
+        return None
+    if _payload_has_note_bodies(record):
+        return None
+    again = discussion_note_snapshot(record)
+    latest = str(again.get("most_recent_note_id") or "")
+    same = (
+        again.get("note_count") == after.get("note_count")
+        and bool(latest)
+        and latest == str(after.get("most_recent_note_id") or "")
+        and str(again.get("title") or "") == str(after.get("title") or "")
+    )
+    if not same:
+        return None
+    return latest
+
+
 def _new_note_identity(
     after_record: Any,
     after: dict[str, Any],
@@ -1090,6 +1604,43 @@ def _new_note_identity(
     return None
 
 
+def _persist_landed_note(result: dict[str, Any]) -> None:
+    """A note id that came back is on the job, even if a later step fails."""
+    note_id = str(result.get("note_id") or "").strip()
+    status = str(result.get("status") or "")
+    if not note_id or status not in {"filed", "sent", "held", "already_posted"}:
+        return
+    try:
+        from .live_turn_guard import acting_db_path, acting_job_id
+        from .store import JobStore
+
+        job_id = acting_job_id({})
+        db_path = acting_db_path({})
+        if not job_id or not db_path:
+            return
+        store = JobStore(db_path)
+        current = store.get_checkpoint(job_id, "discussion_note") or {}
+        if str(current.get("note_id") or "").strip() == note_id and current.get("note_text"):
+            return
+        store.checkpoint(
+            job_id,
+            "discussion_note",
+            {
+                "status": "filed" if status == "filed" else status,
+                "note_id": note_id,
+                "discussion_id": result.get("discussion_id"),
+                "discussion_title": result.get("discussion_title"),
+                "applicant_id": result.get("applicant_id"),
+                "note_text": str(result.get("note_text") or current.get("note_text") or ""),
+                "read_back": bool(result.get("read_back")),
+                "verified_by": result.get("verified_by"),
+                "reason": result.get("reason"),
+            },
+        )
+    except Exception:
+        return
+
+
 def _note_result(
     status: str,
     *,
@@ -1121,6 +1672,7 @@ def _note_result(
         result["idempotent"] = True
     if response is not None:
         result["response"] = response
+    _persist_landed_note(result)
     return result
 
 
