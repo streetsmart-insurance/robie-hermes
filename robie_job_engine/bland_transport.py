@@ -132,7 +132,17 @@ def _send(method: str, path: str, body: dict | None, *, api_key: str, urlopen) -
         HOST + path,
         data=data,
         method=method,
-        headers={"Authorization": api_key, "Content-Type": "application/json"},
+        headers={
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+            # Bland's API sits behind Cloudflare, which 403s non-browser
+            # user agents (urllib's default Python-urllib/x.y included).
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        },
     )
     try:
         with opener(request, timeout=_TIMEOUT_S) as response:
@@ -169,3 +179,4 @@ def _json_object(raw) -> dict:
     except (ValueError, AttributeError, UnicodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
