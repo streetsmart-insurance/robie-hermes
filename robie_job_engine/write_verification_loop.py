@@ -380,6 +380,18 @@ def _coerce_write(write: Any) -> str:
     return " ".join(str(write).split()).strip()
 
 
+def _saved_note_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    """The plan stores the note the tool will write, not the whole request."""
+    cleaned = dict(values)
+    for key, raw in list(cleaned.items()):
+        if str(key).casefold() not in {"note_text", "note", "body", "text", "note_body"}:
+            continue
+        exact = _exact_note_text(str(raw))
+        if exact:
+            cleaned[key] = exact
+    return cleaned
+
+
 def _exact_note_text(text: str) -> str:
     """Drop a repeated 'Add a note ...:' prompt. Keep the text after the colon."""
     from .request_routing import discussion_note_body
@@ -488,6 +500,7 @@ def lock_stated_plan(store: Any, job: Mapping[str, Any], statement: Mapping[str,
     if existing is not None:
         return existing
     clean = _validated_statement(bind_plan_applicant(statement, job) or statement)
+    clean["values"] = _saved_note_values(clean["values"])
     record = {
         "locked": True,
         "source": "model",

@@ -3738,6 +3738,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 # The waiting turn consumes this reply. A new session would
                 # lose the link and leave the original job blocked in clarify.
                 return
+        if job_id and await self._halt_expired_answer(event, job_id):
+            return
         related_only = chat_message_is_related_only(
             text,
             expected_attachment_count=attachment_count,
@@ -4283,12 +4285,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
         }
 
     async def _announce_expired_questions(self, event: MessageEvent) -> None:
-        """One line when a clarify job passed the 10-minute limit."""
+        """One line when a clarify job passed the 30-minute limit."""
         source = event.source
         if source is None:
             return
         from robie_job_engine.chat_job_controls import expire_stale_waiting_jobs
 
+        self._expired_announced_ids = set()
         try:
             expired = await asyncio.to_thread(
                 expire_stale_waiting_jobs, JobStore(ROBIE_JOB_DB)
@@ -4297,6 +4300,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             logger.exception("[GoogleChat] could not expire stale questions")
             return
         for item in expired:
+            self._expired_announced_ids.add(str(item.get("id") or ""))
             chat_id = str(item.get("conversation_id") or "")
             if not chat_id.startswith("spaces/"):
                 chat_id = source.chat_id
@@ -4343,6 +4347,47 @@ class GoogleChatAdapter(BasePlatformAdapter):
             },
         )
         release_chat_lock(self, chat_id, job_id)
+        return True
+
+    async def _halt_expired_answer(
+        self, event: MessageEvent, job_id: Optional[str]
+    ) -> bool:
+        """An answer to an expired question is not a new job."""
+        if not job_id:
+            return False
+        note = await asyncio.to_thread(
+            JobStore(ROBIE_JOB_DB).get_checkpoint, job_id, "expired_answer"
+        )
+        if str((note or {}).get("message_id") or "") != str(event.message_id or ""):
+            return False
+        reply = str((note or {}).get("reply") or "").strip()
+        if not reply:
+            return False
+        announced = getattr(self, "_expired_announced_ids", set())
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if job_id not in announced and chat_id:
+            from robie_job_engine.chat_thread import read_job_chat_thread
+
+            stored = await asyncio.to_thread(
+                read_job_chat_thread, JobStore(ROBIE_JOB_DB), job_id
+            )
+            await self.send(
+                chat_id,
+                reply,
+                reply_to=event.message_id,
+                metadata={
+                    "thread_id": stored
+                    or getattr(event.source, "thread_id", None),
+                    "robie_job_id": job_id,
+                    "robie_delivery_kind": "notice",
+                },
+            )
+        elif chat_id:
+            await self._retire_suppressed_typing_card(chat_id)
+        from robie_job_engine.chat_turn_control import release_chat_lock
+
+        if chat_id:
+            release_chat_lock(self, chat_id, job_id)
         return True
 
     async def _halt_note_already_done(
@@ -5306,6 +5351,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if suppress_model_reply(reply_store, job_id, content):
                 if engine_question_already_sent(reply_store, job_id):
                     note_generation_delivered(job_id)
+                # The question is already in the thread. Retire the thinking
+                # card so the turn cannot rewrite it to "(no reply)".
+                await self._retire_suppressed_typing_card(chat_id)
                 return SendResult(success=True, message_id=None)
         thread_spec = self._thread_spec_for_outbound(
             chat_id,
@@ -6442,6 +6490,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     exc_info=True,
                 )
         return SendResult(success=True, message_id=resp.get("name"))
+
+    async def _retire_suppressed_typing_card(self, chat_id: str) -> None:
+        """Patch a leftover thinking card so it cannot become "(no reply)"."""
+        current = self._typing_messages.get(chat_id)
+        if not current or current == _TYPING_CONSUMED_SENTINEL:
+            return
+        self._typing_messages.pop(chat_id, None)
+        try:
+            await self._patch_message(current, {"text": "·"})
+        except Exception:
+            logger.debug(
+                "[GoogleChat] suppressed-reply typing card retire failed",
+                exc_info=True,
+            )
+        self._mark_typing_card_consumed(chat_id)
 
     def _mark_typing_card_consumed(self, chat_id: str) -> None:
         """The thinking card was patched. Hold it so this turn does not post another."""

@@ -612,9 +612,13 @@ def _discussion_stamp(row: dict[str, Any]) -> str:
 
 
 def recent_discussion_titles(
-    rows: list[dict[str, Any]], *, limit: int = 5
+    rows: list[dict[str, Any]], *, limit: int = 5, preferred: str = ""
 ) -> list[str]:
-    """Up to ``limit`` titles, newest dated rows first."""
+    """Up to ``limit`` titles, newest dated rows first.
+
+    A title that exactly matches ``preferred`` is listed first even when
+    it is older than the recency window. The question can then name it.
+    """
     dated = [row for row in rows if _discussion_stamp(row)]
     undated = [row for row in rows if not _discussion_stamp(row)]
     dated.sort(key=_discussion_stamp, reverse=True)
@@ -624,23 +628,29 @@ def recent_discussion_titles(
         if not title or title in titles:
             continue
         titles.append(title)
-        if len(titles) >= limit:
-            break
-    return titles
+    wanted = " ".join(str(preferred or "").split()).casefold()
+    if wanted:
+        exact = [title for title in titles if title.casefold() == wanted]
+        if len(exact) == 1:
+            titles = [exact[0]] + [title for title in titles if title != exact[0]]
+    return titles[:limit]
 
 
 def ambiguous_discussion_question(titles: list[str], hint: str = "") -> str:
-    """One question. At most five titles, so the person can pick."""
-    label = " ".join(str(hint or "").split()).strip()
-    subject = f"{label} discussion" if label else "discussion"
+    """One question. At most five titles, so the person can pick.
+
+    The subject stays "discussion". The requested title is a choice, not
+    the thing the question is asking the person to name twice.
+    """
+    del hint
     shown = [title for title in titles if str(title).strip()][:5]
     if not shown:
-        return f"Which {subject} should I use?"
+        return "Which discussion should I use?"
     if len(shown) == 1:
         choices = shown[0]
     else:
         choices = ", ".join(shown[:-1]) + f", or {shown[-1]}"
-    return f"Which {subject} should I use: {choices}?"
+    return f"Which discussion should I use: {choices}?"
 
 
 def _job_request_text() -> str | None:
@@ -771,6 +781,41 @@ def _refuse_unasked_discussion(discussion_id: str) -> None:
     )
 
 
+_BOT_MENTION = re.compile(
+    r"^(?:(?:<users/[^>]+>|@robie(?:-[\w]+)?)[\s,]*)+",
+    re.IGNORECASE,
+)
+_QUOTED_SPAN = re.compile(
+    r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)'
+)
+_SELECTION_GUARD = re.compile(
+    r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
+    r"|\bask me\b|\bwhich discussion\b"
+)
+
+
+def _strip_bot_mention(text: str) -> str:
+    """Drop a leading @Robie or <users/...> mention. The title after it stays."""
+    return _BOT_MENTION.sub("", str(text or "")).strip()
+
+
+def _exact_discussion_row(
+    rows: list[dict[str, Any]], text: str
+) -> dict[str, Any] | None:
+    """The one discussion whose full title is this answer, or None."""
+    wanted = " ".join(_strip_bot_mention(text).casefold().split()).strip(" .!\"'")
+    if not wanted:
+        return None
+    matched = [
+        row
+        for row in rows
+        if discussion_title_of(row).strip().casefold() == wanted
+    ]
+    if len(matched) == 1:
+        return matched[0]
+    return None
+
+
 def select_discussion_for_note(
     discussions: list[dict[str, Any]] | None, *, title_hint: str | None = None
 ) -> dict[str, Any]:
@@ -803,9 +848,19 @@ def select_discussion_for_note(
     from .turn_finalization import bound_model_context
 
     owner, generation, owner_db = bound_model_context()
-    if owner and hint_raw:
-        import re
+    if owner:
+        from .store import JobStore
 
+        store = JobStore(owner_db)
+        reply = store.get_checkpoint(owner, "clarification_reply") or {}
+        # A resume stores the answer without a generation. A different
+        # generation is an older answer and does not choose.
+        reply_generation = reply.get("generation")
+        if not reply_generation or reply_generation == generation:
+            chosen = _exact_discussion_row(rows, str(reply.get("text") or ""))
+            if chosen is not None:
+                return chosen
+    if owner and hint_raw:
         from .store import JobStore
 
         store = JobStore(owner_db)
@@ -813,46 +868,77 @@ def select_discussion_for_note(
         payload = job.get("payload") or {}
         reply = store.get_checkpoint(owner, "clarification_reply") or {}
         texts = [str(payload.get(key) or "") for key in ("request_text", "original_text")]
-        clarification = (
-            str(reply.get("text") or "") if reply.get("generation") == generation else ""
-        )
+        reply_generation = reply.get("generation")
+        clarification = ""
+        if not reply_generation or reply_generation == generation:
+            clarification = str(reply.get("text") or "")
+
+        def _instruction(normalized: str) -> str:
+            """The choosing sentence. A note body after the colon is not it."""
+            raw = normalized
+            match = re.search(r"\badd\s+a\s+note\b", raw)
+            if match:
+                quote = 0
+                for index, char in enumerate(raw[match.end():], match.end()):
+                    if char == '"':
+                        quote = 0 if quote else 1
+                    elif char == "“":
+                        quote += 1
+                    elif char == "”" and quote:
+                        quote -= 1
+                    elif char == ":" and quote == 0:
+                        raw = raw[:index]
+                        break
+            return re.split(
+                r"\b(?:with text|note text|note body|saying|that says)\b",
+                raw,
+                maxsplit=1,
+            )[0].strip()
 
         def selected(text: str, *, answer: bool = False) -> bool:
             normalized = " ".join(text.casefold().replace("’", "'").split())
-            if answer and normalized.strip(" .!\"'") == hint_raw:
-                return True
-            outer = re.sub(
-                r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)',
-                " ",
-                normalized,
+            if answer:
+                answered = " ".join(
+                    _strip_bot_mention(normalized).split()
+                ).strip(" .!\"'")
+                if answered == hint_raw:
+                    return True
+            instruction = _instruction(normalized)
+            bare = _QUOTED_SPAN.sub(" ", instruction)
+            if _SELECTION_GUARD.search(bare):
+                return False
+            # A quoted title after on/in/to/into the discussion is the choice.
+            # The same title quoted only inside the note body was cut off above.
+            quoted = (
+                r'["“]'
+                + re.escape(hint_raw)
+                + r'["”](?:\s+discussion)?\s*(?:[.!;:,]|$)'
             )
-            if any(token in outer for token in ('"', "“", "”", "`")):
-                return False
             if re.search(
-                r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
-                r"|\bask me\b|\bwhich discussion\b",
-                outer,
+                r"\b(?:on|in|to|into)\s+(?:the\s+)?discussion\s+" + quoted,
+                instruction,
+            ) or re.search(
+                r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+"
+                r"(?:the\s+)?(?:discussion\s+)?" + quoted,
+                instruction,
             ):
+                return True
+            if any(token in bare for token in ('"', "“", "”", "`")):
                 return False
-            outer = re.split(
-                r"\b(?:with text|note text|note body|saying|that says)\b",
-                outer,
-                maxsplit=1,
-            )[0].strip()
             title = (
                 r"(?:the\s+)?(?:discussion\s+)?"
                 + re.escape(hint_raw)
-                + r"(?:\s+discussion)?\s*(?:[.!;]|$)"
+                + r"(?:\s+discussion)?\s*(?:[.!;:,]|$)"
             )
             return bool(
                 re.search(
                     r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+" + title,
-                    outer,
+                    bare,
                 )
                 or re.search(
                     r"(?:^|[.!;])\s*(?:please\s+)?(?:add|file|post|append|put|write|record)\b"
-                    r"[^.!;?]*\b(?:in|to)\s+" + title,
-                    outer,
+                    r"[^.!;?]*\b(?:on|in|to|into)\s+" + title,
+                    bare,
                 )
             )
 
@@ -865,7 +951,7 @@ def select_discussion_for_note(
             raise DiscussionSelectionError(
                 AMBIGUOUS_DISCUSSIONS,
                 "discussion title was not selected by the requester; refusing to guess",
-                matches=recent_discussion_titles(rows),
+                matches=recent_discussion_titles(rows, preferred=hint_raw),
             )
         exact = [
             row
@@ -876,7 +962,7 @@ def select_discussion_for_note(
             raise DiscussionSelectionError(
                 AMBIGUOUS_DISCUSSIONS,
                 "requester selection must identify exactly one full discussion title",
-                matches=recent_discussion_titles(rows),
+                matches=recent_discussion_titles(rows, preferred=hint_raw),
             )
         return exact[0]
     hint = authorized_discussion_hint(title_hint).lower()
@@ -889,13 +975,13 @@ def select_discussion_for_note(
             AMBIGUOUS_DISCUSSIONS,
             f"title hint {title_hint!r} matched {len(matched)} of {len(rows)} "
             "discussions; refusing to guess",
-            matches=recent_discussion_titles(pool),
+            matches=recent_discussion_titles(pool, preferred=hint),
         )
     raise DiscussionSelectionError(
         AMBIGUOUS_DISCUSSIONS,
         f"applicant has {len(rows)} discussions and no title hint was given; "
         "refusing to guess",
-        matches=recent_discussion_titles(rows),
+        matches=recent_discussion_titles(rows, preferred=hint_raw),
     )
 
 

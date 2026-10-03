@@ -1368,6 +1368,27 @@ def open_chat_job(
     except Exception:
         logger.exception("stale waiting-job expire failed; continuing")
     try:
+        from .chat_job_controls import (
+            expired_clarify_job_for_reply,
+            expired_question_reply,
+        )
+
+        expired_job = expired_clarify_job_for_reply(store, text, inbound_thread_id)
+    except Exception:
+        logger.exception("expired clarify lookup failed; continuing")
+        expired_job = None
+    if expired_job is not None:
+        expired_id = str(expired_job.get("id") or "")
+        store.checkpoint(
+            expired_id,
+            "expired_answer",
+            {
+                "message_id": message_id,
+                "reply": expired_question_reply(store, expired_job),
+            },
+        )
+        return expired_id
+    try:
         from .hitl_ladder import expire_unanswered_hitl_jobs
 
         expire_unanswered_hitl_jobs(store)
