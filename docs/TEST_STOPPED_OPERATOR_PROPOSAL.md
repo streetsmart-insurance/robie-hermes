@@ -43,8 +43,8 @@ message-runtime configurator, driver lock acquisition or browser login is used.
 Its root approval must additionally supply exactly six reviewed auxiliary unit
 names, the actual Test worker flock path/device/inode and source contract, evidence
 that the observer is in the host PID namespace, a bounded drain timeout, and
-reviewed stop contracts for every planned stop. Those inventory facts are not
-available in the checkout and are deliberately absent from the disabled template.
+reviewed stop contracts for every planned stop. The six names supplied by the parent are recorded in the disabled template and
+inspector, pending live revalidation. The actual lock contract remains unknown.
 The auxiliary units must already have no workers and be inactive/failed; the
 helper only observes them. Browser and global driver are compared unchanged;
 it does not require Production or the global driver to be empty.
@@ -215,20 +215,11 @@ changed infrastructure from recorded backups. It never removes runtime masks,
 starts services, or releases backlog. Partial runtime recovery follows the exact
 approved stopped-install runbook with preserved evidence and separate authority.
 
-## Minimal Mac-independent bootstrap option (not implemented or authorized)
+## Mac-independent inspection bootstrap (implemented locally, not authorized)
 
-The observed existing protected-main Actions WIF/IAP/root route can install the
-reviewed helpers without a Mac terminal or new IAM. This is a separate, bounded
-setup change: first prove the connector's actual comment actor and issue event
-with a credentialless workflow, then review an immutable bootstrap commit with
-an owner-approved protected execution gate. A fixed bootstrap installs only the
-exact approved helper/config bytes into the destinations above, preserves prior
-files/metadata, verifies returned hashes, and provisions the retained original
-TGZ after checksum verification. It must not take arbitrary shell text or paths
-from comments, start/stop runtime units, or manufacture outage attestations.
-The original runtime release/digest stays unchanged. Temporary one-hour OS Login
-registration and execution need explicit setup approval; no registration or
-bootstrap execution has occurred. Actual trigger delivery, reviewer identity,
-setup publication and host read-back remain unproven. No native workflow-dispatch
-tool is available in this cloud session. Do not call the route operational until
-that end-to-end proof succeeds from a fresh cloud session with the Mac offline.
+The minimal inspection-only bootstrap and credential-free event-proof workflows
+are implemented locally. See TEST_OPERATOR_BOOTSTRAP.md for exact fixed writes,
+settings, proof gates, approval wording and current connector limits. It installs
+only inspection, leaving the stopped helper/config and runtime artifact alone.
+The resulting bounded host observations inform a later stopped-operation approval;
+they do not manufacture worker-lock, cron-handler, outage or handoff evidence.

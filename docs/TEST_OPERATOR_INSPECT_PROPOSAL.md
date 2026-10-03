@@ -2,8 +2,7 @@
 
 Status: REVIEW ONLY. Not published, enabled, installed, or live-tested. This describes
 the inspect-only component. The separate bounded hold/install proposal is
-`TEST_STOPPED_OPERATOR_PROPOSAL.md`; neither component is enabled. Mac-led
-approved hold/install work must proceed independently. No command here resumes
+`TEST_STOPPED_OPERATOR_PROPOSAL.md`; neither component is enabled. The concrete Mac-independent setup is documented in TEST_OPERATOR_BOOTSTRAP.md. No command here resumes
 services, masks units, changes browser/global driver, reads a job database, or
 creates an outage receipt. Existing unit files, prior-state backups and receipts
 are never touched. Inspection does NOT prove a drained or fenced host.
@@ -38,8 +37,8 @@ The execution job uses the exact default-branch event controller SHA, WIF and
 IAP. It sends validated JSON through stdin to one fixed, preinstalled root-owned
 helper. The helper uses isolated Python, a fixed unit list and fixed pointer
 paths. No arbitrary path, program, shell, environment, operation or release
-argument is accepted. Output includes only bounded unit properties, Test release
-pointers and helper hash. Workflow compares installed helper bytes to controller
+argument is accepted. Output includes bounded unit properties, Test release pointers, helper hash, and
+fixed cron/lock prerequisite diagnostics described in TEST_OPERATOR_BOOTSTRAP.md. Workflow compares installed helper bytes to controller
 bytes. Output explicitly refuses hold/installation certification.
 
 The helper treats the authorized SSH principal as the transport authority. Its
@@ -79,19 +78,17 @@ No item below has been changed by this proposal.
 | GCP identity | Existing `robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com` | Existing IAP/sudo success is evidence of capability, NOT least privilege |
 | IAP/OS Login | Existing Test-only IAP and OS Login, needed Compute metadata reads and attached-SA actAs | Read live bindings before any proposed diff; no grants are part of this patch |
 | SSH key | Runner-created OS Login key, TTL 1h | Explicit enablement includes this bounded credential registration; require instance enable-oslogin TRUE; never fall back to metadata keys |
-| Host helper | `/usr/local/libexec/robie-test-operator.py`, root-owned, non-writable by login user, trusted parent directories | Privileged owner installs reviewed `scripts/test_operator_inspect.py`; workflow never uploads/installs it |
+| Host helper | `/usr/local/libexec/robie-test-operator.py`, root-owned, non-writable by login user, trusted parent directories | Privileged owner installs reviewed `scripts/test_operator_inspect.py`; routine inspection never uploads/installs it; separate approved bootstrap does |
 | Host config | `/etc/robie-test-operator.json`, root:root 0600 | Populate enabled, commit, sha256, numeric actor_ids array, numeric issue; exact IDs as above |
 | Host state | `/var/lib/robie-test-operator`, root:root 0700 | New ledger/lock only; preserve across sessions/reboots; no reset to retry |
 | sudo | Exact command `/usr/bin/python3 -I -B /usr/local/libexec/robie-test-operator.py inspect`, NOPASSWD for verified OS Login principal | No wildcard args, arbitrary python/shell, SETENV or writable helper; validate proposed sudoers with visudo |
 
-If that principal retains osAdminLogin or another unrestricted sudo rule, this
-specific rule does NOT narrow its effective authority. Owner must inspect and
-choose either a separate inspection principal with ordinary OS Login, or a
-reviewed migration removing unrestricted privilege without breaking deploys.
-The YAML currently names the existing identity to avoid inventing an account;
-changing it requires the owner-reviewed permission diff. Production identity,
-runtime SA storage permissions, firewall, public access, client data and secret
-payload permissions are outside this proposal. No storage.admin is required.
+The observed principal already has broad sudo. This proposal does not narrow it
+and requires no new IAM/sudo identity or grant. The authoritative concrete setup
+sequence and exact approval wording are in TEST_OPERATOR_BOOTSTRAP.md; the earlier
+conceptual owner-install sequence below is superseded by that bounded workflow.
+No Production identity, runtime-SA expansion, firewall/public access or secret
+payload permission is added.
 
 ## One-time owner actions, in order (not executed)
 

@@ -131,7 +131,7 @@ class OperatorTests(unittest.TestCase):
             self.assertIsNone(result['units']['crond.service']['MainPID'])
             self.assertIsNone(result['units']['robie-scheduler.timer']['MainPID'])
             self.assertEqual(result['units']['robie-scheduler.timer']['SubState'], 'waiting')
-            self.assertEqual(len(calls), len(host.UNITS))
+            self.assertEqual(len(calls), len(host.UNITS + host.AUXILIARY_UNITS))
             self.assertTrue(all(command[:2] == ['/usr/bin/systemctl', 'show'] for command in calls))
             (root / 'current').unlink()
             (root / 'current').symlink_to('/tmp')

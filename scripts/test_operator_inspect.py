@@ -25,6 +25,7 @@ UNITS = ('robie-gateway.service', 'hermes-gateway.service',
          'robie-ezlynx-keepalive-test.timer', 'robie-ezlynx-keepalive-test.service',
          'hermes-email-watcher.timer', 'hermes-email-watcher.service',
          'cron.service', 'crond.service')
+AUXILIARY_UNITS = ('robie-verification-audit-4246.timer', 'robie-verification-audit-4246.service', 'robie-verification-manual-renewal-4247.timer', 'robie-verification-manual-renewal-4247.service', 'robie-verification-mortgagee-4372.timer', 'robie-verification-mortgagee-4372.service')
 PROPERTIES = ('LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlPID', 'UnitFileState')
 
 
@@ -97,7 +98,7 @@ def unit_properties(unit, output):
 
 def snapshot(runner=subprocess.run, root=ROOT):
     units = {}
-    for unit in UNITS:
+    for unit in UNITS + AUXILIARY_UNITS:
         result = runner(['/usr/bin/systemctl', 'show', unit, '--no-pager', '--all',
                          '--property=' + ','.join(PROPERTIES)],
                         capture_output=True, text=True, check=True, timeout=10)
@@ -114,6 +115,98 @@ def snapshot(runner=subprocess.run, root=ROOT):
             'database_checked': False, 'external_producers_checked': False}
 
 
+# Fixed, bounded diagnostic reads. No environment, command line or lock content.
+STOP_FIELDS = ('ExecStop', 'ExecStopPost', 'KillMode', 'KillSignal', 'SendSIGKILL',
+               'Restart', 'OnFailure', 'OnSuccess', 'FailureAction', 'SuccessAction',
+               'PropagatesStopTo', 'ConsistsOf', 'BoundBy', 'JobTimeoutAction',
+               'TriggeredBy', 'SendSIGHUP', 'UpheldBy', 'RequiredBy')
+
+
+def stop_diagnostic(unit, runner):
+    service_only = {'ExecStop', 'ExecStopPost', 'KillMode', 'KillSignal', 'SendSIGKILL', 'SendSIGHUP', 'Restart'}
+    fields = tuple(f for f in STOP_FIELDS if unit.endswith('.service') or f not in service_only)
+    output = runner(['/usr/bin/systemctl', 'show', unit, '--no-pager', '--all',
+                     '--property=' + ','.join(fields)],
+                    capture_output=True, text=True, check=True, timeout=10).stdout
+    require(len(output) <= 32768)
+    values = {}
+    for line in output.splitlines():
+        key, value = line.split('=', 1)
+        require(key in fields and key not in values)
+        values[key] = value
+    public = {}
+    for key, value in values.items():
+        if key in {'ExecStop', 'ExecStopPost'}:
+            public[key] = {'present': bool(value)}
+        else:
+            require(re.fullmatch(r'[A-Za-z0-9_.@:/ -]{0,4096}', value) is not None)
+            public[key] = value
+    return dict(properties=public, missing_properties=sorted(set(fields) - set(values)),
+                properties_sha256=hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest())
+
+
+def lock_candidates(root, proc=Path('/proc')):
+    # Discover observed filenames only within the fixed Test data directory.
+    # Presence/ownership is not a claim that a candidate serializes all workers.
+    directory = root / 'robie-job-engine/data'
+    if not directory.is_dir() or directory.is_symlink():
+        return {'status': 'DATA_DIRECTORY_UNAVAILABLE', 'candidates': []}
+    require(directory.resolve().is_relative_to(root.resolve()))
+    paths = []
+    for path in directory.iterdir():
+        if re.fullmatch(r'[A-Za-z0-9_.-]{1,100}\.lock', path.name):
+            paths.append(path)
+            require(len(paths) <= 64)
+    observed = []
+    locks = (proc / 'locks').read_text()
+    require(len(locks) <= 1024 * 1024)
+    namespace_matches = os.readlink(proc / 'self/ns/pid') == os.readlink(proc / '1/ns/pid')
+    for path in sorted(paths):
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            observed.append(dict(path=str(path), status='NOT_REGULAR'))
+            continue
+        owners = []
+        key = (os.major(before.st_dev), os.minor(before.st_dev), before.st_ino)
+        for line in locks.splitlines():
+            fields = line.split()
+            if '->' in fields:
+                fields.remove('->')
+            require(len(fields) >= 8)
+            device = fields[5].split(':')
+            require(len(device) == 3)
+            if (int(device[0], 16), int(device[1], 16), int(device[2])) == key:
+                owners.append(dict(type=fields[1], pid=fields[4], access=fields[3]))
+        after = path.lstat()
+        require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino))
+        observed.append(dict(path=str(path), device=before.st_dev, inode=before.st_ino, owners=owners))
+    return dict(status='OBSERVED', pid_namespace_matches_init=namespace_matches, candidates=observed)
+
+
+def prerequisites(snapshot, runner=subprocess.run, root=ROOT, proc=Path('/proc')):
+    stops = {unit: stop_diagnostic(unit, runner) for unit in UNITS
+             if snapshot['units'][unit]['LoadState'] != 'not-found'}
+    cron = {}
+    for unit in ('cron.service', 'crond.service'):
+        pid = snapshot['units'][unit].get('MainPID')
+        if pid is None or pid == '0':
+            cron[unit] = {'status': 'NO_RUNNING_EXECUTABLE_OBSERVED'}
+            continue
+        require(re.fullmatch('[1-9][0-9]{0,9}', pid) is not None)
+        directory = proc / pid
+        before = (directory / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+        executable = (directory / 'exe').resolve(strict=True)
+        require(str(executable).startswith(('/usr/bin/', '/usr/sbin/', '/bin/', '/sbin/')))
+        info = executable.stat()
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= 32 * 1024 * 1024)
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        after = (directory / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+        require(before == after and (directory / 'exe').resolve(strict=True) == executable)
+        cron[unit] = dict(status='OBSERVED', pid=pid, start_time=before, executable=str(executable), sha256=digest)
+    return dict(stop_diagnostics=stops, cron_executables=cron, worker_lock_observations=lock_candidates(root, proc),
+                worker_lock_contract_verified=False, cron_handler_semantics_verified=False)
+
+
 def main():
     require(sys.argv[1:] == ['inspect'])
     require(os.geteuid() == 0 and socket.gethostname().split('.')[0] == 'hermes-test-01')
@@ -128,6 +221,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         consume(request, STATE)
         result = snapshot()
+        result.update(prerequisites(result))
         result['helper_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         print(json.dumps(result, sort_keys=True))
 

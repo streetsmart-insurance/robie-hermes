@@ -1,0 +1,48 @@
+name: Test operator connector event proof
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED }}
+  OPERATOR_ISSUE: ${{ vars.ROBIE_TEST_OPERATOR_ISSUE }}
+  OPERATOR_ACTOR_IDS: '320188404'
+  OPERATOR_SETUP_COMMIT: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+
+jobs:
+  prove:
+    name: Prove connector event
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'streetsmart-insurance/robie-hermes' &&
+      github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT &&
+      vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED == 'EVENT_PROOF_V1' &&
+      !github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/robie-test event-proof ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate connector event without cloud credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+      - name: Record controller identity
+        run: python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"controller-commit.txt").write_text(os.environ["GITHUB_SHA"]+"\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-operator-event-proof-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/operator-request.json
+            ${{ runner.temp }}/controller-commit.txt
+          if-no-files-found: error
