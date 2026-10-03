@@ -139,8 +139,9 @@ def make_ports(**over) -> Any:
 
 
 def make_config(**over) -> Any:
-    kw = dict(dry_run=False, require_outcome_verification=True,
-              outcome_poll_tries=1, outcome_poll_interval_s=0)
+    # NOTE: there is no verification opt-out. Outcome verification is
+    # unconditional: a placement ack alone never marks the task ok.
+    kw = dict(dry_run=False, outcome_poll_tries=1, outcome_poll_interval_s=0)
     kw.update(over)
     return rch.RobieCallConfig(**kw)
 
@@ -381,3 +382,204 @@ def test_instruction_naming_different_person_fails_closed(clean_state):
     assert result["ok"] is False
     assert bland.dials == 0
     assert "Mary Johnson" in (result.get("error") or "")
+
+
+# ---------------------------------------------------------------------------
+# 8. checkpoint failures are real failures (fail or retry), never success
+# ---------------------------------------------------------------------------
+
+class FailingReadCheckpoint(FakeCheckpoint):
+    def get_checkpoint(self, key: str) -> Dict[str, Any]:
+        raise RuntimeError("read failed (simulated)")
+
+
+class FailNthSaveCheckpoint(FakeCheckpoint):
+    """Fails exactly the Nth set_checkpoint call, succeeds the rest."""
+
+    def __init__(self, fail_at: int):
+        super().__init__()
+        self.fail_at = fail_at
+
+    def set_checkpoint(self, key: str, value: Dict[str, Any]) -> None:
+        self.saves += 1
+        if self.saves == self.fail_at:
+            raise RuntimeError(f"save #{self.saves} failed (simulated)")
+        self.data[key] = dict(value)
+
+
+class FailFromSaveCheckpoint(FakeCheckpoint):
+    """Fails every set_checkpoint call from N onward (persistent outage).
+
+    Use when the save under test is retried: a single-shot failure would
+    be masked by _save_checkpoint_retrying, which is the designed
+    behavior for transient errors."""
+
+    def __init__(self, fail_from: int):
+        super().__init__()
+        self.fail_from = fail_from
+
+    def set_checkpoint(self, key: str, value: Dict[str, Any]) -> None:
+        self.saves += 1
+        if self.saves >= self.fail_from:
+            raise RuntimeError(f"save #{self.saves} failed (simulated outage)")
+        self.data[key] = dict(value)
+
+
+class FlakyCheckpoint(FakeCheckpoint):
+    """Fails the first N saves (transient), then succeeds."""
+
+    def __init__(self, fail_first_n: int):
+        super().__init__()
+        self.fail_first_n = fail_first_n
+
+    def set_checkpoint(self, key: str, value: Dict[str, Any]) -> None:
+        self.saves += 1
+        if self.saves <= self.fail_first_n:
+            raise RuntimeError(f"transient failure #{self.saves} (simulated)")
+        self.data[key] = dict(value)
+
+
+def test_save_checkpoint_raises_not_swallows():
+    """Fix 1 (unit): a failed checkpoint write raises CheckpointError —
+    it is never caught and ignored."""
+    ports = make_ports(checkpoint=FakeCheckpoint(fail_on_save=True))
+    with pytest.raises(rch.CheckpointError):
+        rch._save_checkpoint(ports, "T-1", {"a": 1})
+
+
+def test_checkpoint_write_retried_then_succeeds(monkeypatch):
+    """Fix 1 (unit): transient write failures are retried with backoff."""
+    monkeypatch.setattr(rch.time, "sleep", lambda s: None)
+    ports = make_ports(checkpoint=FlakyCheckpoint(fail_first_n=2))
+    rch._merge_checkpoint(ports, "T-1", {"a": 1})  # must not raise
+    cp = ports.job_checkpoint
+    assert cp.data[rch._checkpoint_key("T-1")] == {"a": 1}
+    assert cp.saves == 3  # 2 transient failures + 1 success
+
+
+def test_checkpoint_write_gives_up_after_retries(monkeypatch):
+    """Fix 1 (unit): persistent write failures raise after retries."""
+    monkeypatch.setattr(rch.time, "sleep", lambda s: None)
+    ports = make_ports(checkpoint=FakeCheckpoint(fail_on_save=True))
+    with pytest.raises(rch.CheckpointError):
+        rch._merge_checkpoint(ports, "T-1", {"a": 1})
+
+
+def test_dial_intent_save_failure_means_zero_dials(clean_state):
+    """Fix 1: if the pre-dial intent cannot be saved, the handler must NOT
+    dial. Zero Bland calls; the task fails open for a later retry."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland, checkpoint=FakeCheckpoint(fail_on_save=True))
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert result.get("checkpoint_failed") is True
+    assert "dial intent" in (result.get("error") or "").lower()
+
+
+def test_post_dial_checkpoint_failure_fails_loudly(clean_state):
+    """Fix 1: the dial went out but the post-dial checkpoint write failed.
+    The task must fail (never report success) and alert — the next run
+    reconciles via recent-calls instead of redialing."""
+    bland = FakeBland()
+    # save #1 = dial intent (6a, must succeed or no dial); the post-dial
+    # merge (save #2, plus its retries) hits a persistent outage.
+    ports = make_ports(bland=bland, checkpoint=FailFromSaveCheckpoint(fail_from=2))
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert bland.dials == 1  # the call did go out
+    assert result["ok"] is False
+    assert result.get("checkpoint_failed") is True
+    assert result.get("chat_alerted") is True
+    assert "checkpoint" in (result.get("error") or "").lower()
+
+
+def test_completion_checkpoint_failure_is_not_ok(clean_state):
+    """Fix 1: call placed, note filed, but the completion marker could not
+    be saved. The task must NOT report ok=True with a lost checkpoint."""
+    bland = FakeBland()
+    # saves: 1=intent, 2=post-dial, 3=note marker succeed; the completion
+    # merge (save #4 + retries) hits a persistent outage.
+    ports = make_ports(bland=bland, checkpoint=FailFromSaveCheckpoint(fail_from=4))
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert bland.dials == 1
+    assert result["ok"] is False
+    assert result.get("checkpoint_failed") is True
+
+
+# ---------------------------------------------------------------------------
+# 9. duplicate-call protection: retry/restart never dials twice
+# ---------------------------------------------------------------------------
+
+def test_checkpoint_read_failure_means_zero_dials(clean_state):
+    """Fix 2: an unreadable checkpoint blinds every anti-redial guard
+    (completed_at, call_ids, dial_intent). The handler must NOT dial."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland, checkpoint=FailingReadCheckpoint())
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert "checkpoint unreadable" in (result.get("error") or "").lower()
+
+
+def test_restart_after_completed_dial_never_redials(clean_state):
+    """Fix 2: a process restart after a completed dial reconciles from the
+    durable checkpoint — it must not place a second call."""
+    bland = FakeBland()
+    checkpoint = FakeCheckpoint()
+    ports = make_ports(bland=bland, checkpoint=checkpoint)
+    r1 = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert r1["ok"] is True
+    assert bland.dials == 1
+
+    # Simulate a process restart: wipe in-memory state, keep the durable
+    # checkpoint, re-run the same task.
+    rch._reset_module_state_for_tests()
+    ports2 = make_ports(bland=bland, checkpoint=checkpoint)
+    r2 = rch.handle_robie_call_task(make_task(), make_config(), ports2)
+    assert bland.dials == 1  # no second call
+    assert r2.get("duplicate_suppressed") is True
+
+
+def test_restart_after_dial_reconciles_outcome(clean_state):
+    """Fix 2: a restart after the dial but before completion recovers the
+    call_ids from the checkpoint and verifies the outcome — no redial."""
+    bland = FakeBland()
+    checkpoint = FakeCheckpoint()
+    ports = make_ports(bland=bland, checkpoint=checkpoint)
+    # Run 1: dial, then simulate a crash by wiping in-memory state BEFORE
+    # completion is recorded. We do this by failing the completion save.
+    ports_fail = make_ports(
+        bland=bland, checkpoint=FailNthSaveCheckpoint(fail_at=99))
+    # Instead: manually seed the checkpoint as run 1 would have left it
+    # after step 7 (call_ids saved, not completed).
+    checkpoint.data[rch._checkpoint_key("T-100")] = {
+        "bland_call_ids": ["call-1"],
+        "phone": "+15551234567",
+        "completed_at": None,
+        "dial_intent": None,
+    }
+    rch._reset_module_state_for_tests()
+    ports2 = make_ports(bland=bland, checkpoint=checkpoint)
+    r2 = rch.handle_robie_call_task(make_task(), make_config(), ports2)
+    assert bland.dials == 0  # recovered, never redialed
+    assert r2.get("recovered_from_checkpoint") is True
+    assert r2["ok"] is True  # FakeBland reports completed/human
+
+
+def test_failed_intent_save_then_retry_dials_once(clean_state):
+    """Fix 2: run 1 fails to save the intent (no dial); run 2 with a fixed
+    store dials exactly once. No double-dial across the retry."""
+    bland = FakeBland()
+    checkpoint = FakeCheckpoint(fail_on_save=True)
+    ports = make_ports(bland=bland, checkpoint=checkpoint)
+    r1 = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert r1["ok"] is False
+    assert bland.dials == 0
+
+    # Store recovers; retry the same task.
+    checkpoint.fail_on_save = False
+    rch._reset_module_state_for_tests()
+    ports2 = make_ports(bland=bland, checkpoint=checkpoint)
+    r2 = rch.handle_robie_call_task(make_task(), make_config(), ports2)
+    assert r2["ok"] is True
+    assert bland.dials == 1
