@@ -31,6 +31,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from tests.durable_temp import ROOT as DURABLE_TEST_ROOT
 
 from robie_job_engine.job_schema import bounded_schema_hold_reason
 from robie_job_engine.request_routing import BOUNDED_ENGINE_ACTIONS, WORKER_FOR_ACTION
@@ -41,8 +42,8 @@ TODAY = date(2026, 9, 10)
 
 
 def _make_db_dir() -> Path:
-    # DurableWorkLedger refuses /tmp paths; mirror the mortgagee fixture base.
-    base = Path.home() / ".cache" / "robie-integration-tests"
+    # Preserve the non-/tmp contract without requiring a writable home directory.
+    base = DURABLE_TEST_ROOT / "verification-integration"
     base.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix="robie-integration-", dir=str(base)))
 

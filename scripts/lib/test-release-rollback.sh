@@ -48,15 +48,26 @@ rollback_test_release() {
   local releases_current_link="$5"
   local policy_skill_link="$6"
   local gateway_unit="$7"
+  local restore_policy_skill="${8:-true}"
+  local restart_gateway="${9:-true}"
   local systemctl_bin="${ROBIE_SYSTEMCTL:-systemctl}"
+
+  [[ "${restart_gateway}" == true || "${restart_gateway}" == false ]] || return 2
 
   atomic_pointer "${old_current}" "${current_link}"
   atomic_pointer "${old_releases_current}" "${releases_current_link}"
+  if [[ "${restore_policy_skill}" == true ]]; then
   if [[ -n "${old_policy_skill_target}" ]]; then
     atomic_pointer "${old_policy_skill_target}" "${policy_skill_link}"
   else
     rm -f "${policy_skill_link}"
   fi
-  "${systemctl_bin}" restart "${gateway_unit}"
-  "${systemctl_bin}" is-active --quiet "${gateway_unit}"
+  fi
+  if [[ "${restart_gateway}" == true ]]; then
+    "${systemctl_bin}" restart "${gateway_unit}"
+    "${systemctl_bin}" is-active --quiet "${gateway_unit}"
+  else
+    # Persistent masks, checked by the stopped installer, are never removed.
+    [[ "$("${systemctl_bin}" show "${gateway_unit}" -p ActiveState --value)" == inactive ]]
+  fi
 }

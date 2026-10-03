@@ -259,6 +259,9 @@ def normalize(text: str) -> str:
     if body.lower().startswith("subject:") and "\n\n" in body:
         body = body.split("\n\n", 1)[1]
     body = _MENTION.sub("", body.strip())
+    # Canonical matching only. Keep the original proposal/body untouched so
+    # exact note text is never rewritten for punctuation convenience.
+    body = body.translate(str.maketrans({"\u2019": "'", "\u2018": "'"}))
     return " ".join(body.casefold().split())
 
 
@@ -416,6 +419,25 @@ def _is_reply_request(norm: str) -> bool:
 
 def _blocked(norm: str) -> tuple[str, str] | None:
     if _SOURCE.search(norm):
+        return ("read_source_or_tokens", "I can't read source code, job files, or tokens.")
+    # A status question is not an instruction to reinstate. Never apply this
+    # exemption to a mixed request that includes a mutation verb.
+    if re.fullmatch(r"is .+ (?:still cancelled|cancelled|active)(?: or did it reinstate)?\?", norm) and not re.search(
+        r"\b(?:change|update|bind|set|add|remove|process)\b|\breinstate\b(?!\?)", norm
+    ):
+        return None
+    if re.search(r"\b(?:process|execute|switch)\b.{0,40}\b(?:bor|agent)\b", norm):
+        return ("bor_change", "I can't process a BOR or switch the agent. A person has to handle that.")
+    if re.search(r"\b(?:bump|change|raise|set|increase)\b.{0,32}\b(?:bi|deductible|limits?|coverage)\b", norm):
+        return ("premium_effective_limit_coverage", "I can't change a limit, deductible, or coverage.")
+    # A factual premium discrepancy note can clarify its destination. This
+    # narrow exemption never accepts an extra command or an approval claim.
+    if re.fullmatch(
+        r"add note to the policy change discussion that premium (?:doesn't|does not) match carrier endo, needs agent review[.!]?",
+        norm,
+    ):
+        return None
+    if _SOURCE.search(norm):
         return (
             "read_source_or_tokens",
             "I can't read source code, job files, or tokens.",
@@ -466,6 +488,7 @@ def _base_proposal(kind: str, original: str) -> Proposal:
         kind=kind,
         client=client,
         applicant_id=_applicant_id(original, client),
+        body=original,
     )
 
 
@@ -520,6 +543,10 @@ def _match_allowed(original: str, norm: str) -> Decision | None:
         proposal.discussion_title = title
         proposal.old_value = "none"
         proposal.new_value = f"note on {title}"
+        content = re.search(r"\bsaying\s+(.+)$", original, re.I | re.S)
+        if not content or not content.group(1).strip():
+            return Decision(VAGUE, question="What exact text should I add to that discussion?", proposal=proposal)
+        proposal.body = content.group(1).strip()
         question = _missing_client(proposal)
         if question:
             return Decision(VAGUE, question=question, proposal=proposal)
@@ -609,6 +636,23 @@ def classify_playground_request(text: str) -> Decision:
             VAGUE,
             question="What should I do? Name the client and the task you want finished.",
         )
+    # Natural CSR phrasing must clarify missing facts, not become an SOP
+    # answer. These paths prepare work only; they never bypass the allowlist,
+    # approval, writer capability check, or destination readback.
+    if re.match(r"^(?:can (?:you|u) (?:check|do)|what(?:'s| is) the status|need limits|check if|pull the policy and do|endorsement came in|look up the insured and fix|add what we talked about)\b", norm):
+        return Decision(VAGUE, question="Which client or policy, and what exactly should I check or change?")
+    if re.match(r"^(?:add (?:a )?note|note the|add to|add this to)\b", norm) and "discussion" in norm:
+        return Decision(VAGUE, question="Which client and existing discussion, and what exact note should I add?")
+    if re.match(r"^(?:fix the typo|client says new mailing|update .+ cell)\b", norm):
+        return Decision(VAGUE, question="Which client is this for, and what are the current and new values?")
+    if re.match(r"^(?:pull up|need the dec page|does |is .+ still cancelled|who is the mortgagee|compare the endo)\b", norm):
+        return Decision(LOOKUP, proposal=_base_proposal(LOOKUP, original))
+    if re.match(r"^draft a cert\b", norm):
+        return Decision(VAGUE, question="Which client, holder, and coverage should the certificate use?")
+    # Explicit process questions are procedure retrieval, not the broad
+    # What-is policy lookup. Hard blocks and vague/mixed edits ran first.
+    if _is_question(norm) and re.search(r"\b(?:procedure|process|sop|workflow)\b", norm) and not _WRITE_VERB.search(norm):
+        return Decision(SOP, proposal=_base_proposal(SOP, original))
     allowed = _match_allowed(original, norm)
     if allowed is not None:
         return allowed

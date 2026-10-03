@@ -324,16 +324,26 @@ def generic_stuck_human_text(
 ) -> str:
     ask = reply_instruction(channel)
     happened = " ".join(str(what_happened or "").split())
-    lowered = happened.casefold()
-    for prefix in (
+    prefixes = (
         "playwright_blocked:",
         "robie_blocked:",
         "robie hitl:",
         "robie_outcome_unknown:",
-    ):
-        if lowered.startswith(prefix):
-            happened = happened.split(":", 1)[-1].strip()
-            lowered = happened.casefold()
+        "missing_required_field:",
+    )
+    while happened:
+        lowered = happened.casefold()
+        matched = next((prefix for prefix in prefixes if lowered.startswith(prefix)), "")
+        if not matched:
+            break
+        happened = happened.split(":", 1)[-1].strip()
+    happened = re.sub(
+        r"\b(?:ROBIE_BLOCKED|PLAYWRIGHT_BLOCKED|MISSING_REQUIRED_FIELD)\b\s*:?\s*",
+        "",
+        happened,
+        flags=re.IGNORECASE,
+    )
+    happened = " ".join(happened.split())
     happened = (
         happened.replace("STOP AND ASK.", "")
         .replace("STOP AND ASK", "")

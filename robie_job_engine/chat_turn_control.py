@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +166,14 @@ def request_agent_stop(job_id: str | None) -> None:
         return
     with _PROC_LOCK:
         _ABORTED_JOBS.add(str(job_id))
+
+
+def clear_agent_stop(job_id: str | None) -> None:
+    """A user reply starts a new turn. The previous turn's stop does not apply."""
+    if not job_id:
+        return
+    with _PROC_LOCK:
+        _ABORTED_JOBS.discard(str(job_id))
 
 
 def agent_stop_requested(job_id: str | None) -> bool:
@@ -412,6 +421,7 @@ STOPPED_OUTPUT = (
 
 BUSY_SESSION_REPLY = "I'm finishing another job, one moment."
 NOTHING_RUNNING_REPLY = "Nothing is running right now."
+ALREADY_FINISHED_REPLY = "That job already finished."
 
 
 def stop_reply_line(job_id: str) -> str:
@@ -424,12 +434,20 @@ def job_was_stopped_or_ceiling(store: Any, job: dict | None) -> bool:
     if not job or store is None:
         return False
     status = str(job.get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return True
     if status not in {JobStatus.FAILED.value, "FAILED"}:
         return False
     job_id = str(job.get("id") or "")
     if not job_id:
         return False
-    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+    for kind in (
+        "agent_abort",
+        "cancelled",
+        "gateway_turn_timeout",
+        "hard_block",
+        "waiting_expired",
+    ):
         try:
             if store.get_checkpoint(job_id, kind):
                 return True
@@ -458,6 +476,246 @@ def chat_turn_keeps_context(db_path: str, job_id: str | None) -> bool:
         return bool(JobStore(db_path).get_checkpoint(job_id, "keep_chat_context"))
     except Exception:
         return False
+
+
+_WAITING_ON_USER = {
+    JobStatus.NEEDS_CLARIFICATION.value,
+    JobStatus.AWAITING_HUMAN_INPUT.value,
+}
+
+
+def job_is_waiting_on_user(job: dict | None) -> bool:
+    """The job has asked the user for something and is not working."""
+    if not job:
+        return False
+    return str(job.get("status") or "") in _WAITING_ON_USER
+
+
+_CHAT_ADAPTERS: weakref.WeakSet = weakref.WeakSet()
+
+
+def register_chat_adapter(adapter: Any) -> None:
+    """Remember the live Chat adapter so a finished job can drop its lock."""
+    if adapter is not None:
+        _CHAT_ADAPTERS.add(adapter)
+
+
+def release_finished_job_session(
+    db_path: str,
+    job_id: str | None,
+    *,
+    stop_agent: bool,
+) -> None:
+    """Stop the heartbeat and drop the session lock for a terminal job.
+
+    ``stop_agent`` is for the moment after the reply is already posted.
+    Cancelling the turn before that post drops the answer.
+    """
+    if not job_id:
+        return
+    if stop_agent:
+        request_agent_stop(job_id)
+    if db_path:
+        try:
+            from .chat_guard import stop_generic_chat_job_heartbeat
+
+            stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
+        except Exception:
+            pass
+    for adapter in list(_CHAT_ADAPTERS):
+        _release_adapter_job(adapter, str(job_id), cancel_turn=stop_agent)
+
+
+def _release_adapter_job(adapter: Any, job_id: str, *, cancel_turn: bool) -> None:
+    turns = getattr(adapter, "_gateway_turns", None)
+    chat_ids: list[str] = []
+    threads: list[str] = []
+    if isinstance(turns, dict):
+        for key, record in list(turns.items()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("job_id") or "") != job_id:
+                continue
+            if isinstance(key, tuple) and key:
+                chat_ids.append(str(key[0]))
+                if len(key) > 1 and key[1]:
+                    threads.append(str(key[1]))
+            if cancel_turn:
+                _cancel_turn_task(record.get("task"))
+                _cancel_turn_task(record.get("watchdog"))
+            turns.pop(key, None)
+    active = getattr(adapter, "_active_chat_job", None)
+    if isinstance(active, dict):
+        for chat_id, owner in list(active.items()):
+            if str(owner) == job_id and str(chat_id) not in chat_ids:
+                chat_ids.append(str(chat_id))
+    keys: list[str] = []
+    for chat_id in chat_ids:
+        # Runner keys can collapse multiple thread turns to one shared DM
+        # session. Never release or unblock that session while another job
+        # still owns a running turn in the space.
+        if isinstance(turns, dict) and any(
+            isinstance(key, tuple) and key and str(key[0]) == chat_id
+            and isinstance(record, dict)
+            and str(record.get("job_id") or "") != job_id
+            and _turn_record_running(record)
+            for key, record in turns.items()
+        ):
+            continue
+        for key in _iter_live_session_keys(adapter):
+            matched = _key_matches_chat(key, chat_id, "") or any(
+                _key_matches_chat(key, chat_id, thread) for thread in threads
+            )
+            if matched and key not in keys:
+                keys.append(key)
+    if keys:
+        _release_session_leases(adapter, keys)
+        if cancel_turn:
+            agent = None
+            for key in keys:
+                agent = _running_agent_for_key(adapter, key)
+                if agent is not None:
+                    break
+            _unblock_parked_waits(adapter, agent, keys)
+    for chat_id in chat_ids:
+        release_chat_lock(adapter, chat_id, job_id)
+
+
+def _cancel_turn_task(task: Any) -> None:
+    if task is None:
+        return
+    done = getattr(task, "done", None)
+    if callable(done):
+        try:
+            if done():
+                return
+        except Exception:
+            return
+    cancel = getattr(task, "cancel", None)
+    if not callable(cancel):
+        return
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if current is not None and task is current:
+        return
+    try:
+        cancel()
+    except Exception:
+        return
+
+
+def release_chat_lock(adapter: Any, chat_id: str, job_id: str | None) -> None:
+    """Drop the in-memory chat hold as soon as the reply is out.
+
+    A finished or parked job must not keep the space busy until the
+    10-minute stop. Another job still running in this space keeps its
+    own session. The job row's lease is released by the status change.
+    """
+    turns = getattr(adapter, "_gateway_turns", None)
+    if isinstance(turns, dict) and job_id:
+        for key, record in list(turns.items()):
+            if isinstance(record, dict) and str(record.get("job_id") or "") == str(job_id):
+                turns.pop(key, None)
+    active = getattr(adapter, "_active_chat_job", None)
+    if isinstance(active, dict) and job_id and active.get(str(chat_id)) == str(job_id):
+        active.pop(str(chat_id), None)
+    if not chat_id:
+        return
+    if isinstance(turns, dict):
+        for key, record in turns.items():
+            if not isinstance(key, tuple) or str(key[0]) != str(chat_id):
+                continue
+            if _turn_record_running(record):
+                return
+    for key in list(_iter_live_session_keys(adapter)):
+        if chat_id not in str(key):
+            continue
+        _release_session_guard(adapter, str(key))
+        _drop_runner_session(adapter, str(key))
+
+
+def _drop_runner_session(adapter: Any, key: str) -> None:
+    """Forget a finished turn so the next message is not stuck behind it."""
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None or not key:
+        return
+    for name in ("_running_agents", "_sessions", "_active_session_leases"):
+        mapping = getattr(runner, name, None)
+        if isinstance(mapping, dict):
+            mapping.pop(key, None)
+    for method in ("_drop_turn_slot", "_release_running_agent_state"):
+        drop = getattr(runner, method, None)
+        if not callable(drop):
+            continue
+        try:
+            drop(key)
+        except Exception:
+            continue
+
+
+def busy_session_should_defer(adapter: Any, event: Any, *, db_path: str = "") -> bool:
+    """True when a second message must wait.
+
+    A session looks busy while its turn record is still up. A reply in
+    the thread of a job that is waiting is never the busy reply, even
+    when another job in the space is still running.
+    """
+    if db_path:
+        from .chat_job_controls import inbound_answers_waiting_job
+
+        if inbound_answers_waiting_job(db_path, event):
+            return False
+    if not session_is_busy(adapter, event):
+        return False
+    if db_path and _only_questions_are_running(db_path, adapter, event):
+        return False
+    job_id = running_chat_job_id(adapter, event)
+    if not job_id or not db_path:
+        return True
+    try:
+        from .store import JobStore
+
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return True
+    if job_is_waiting_on_user(job):
+        return False
+    return True
+
+
+def _job_is_question_only(db_path: str, job_id: str) -> bool:
+    try:
+        from .answer_only import is_answer_only_job, is_informational_ask
+        from .store import JobStore
+
+        job = JobStore(db_path).get_job(job_id)
+    except Exception:
+        return False
+    payload = dict(job.get("payload") or {})
+    text = str(payload.get("text") or payload.get("request_text") or "")
+    return is_answer_only_job(job) or is_informational_ask(text)
+
+
+def _only_questions_are_running(db_path: str, adapter: Any, event: Any) -> bool:
+    """A question-only turn does not hold the space for the next message."""
+    chat_id, _thread_id = _event_chat_thread(event)
+    turns = getattr(adapter, "_gateway_turns", None)
+    if not isinstance(turns, dict) or not chat_id:
+        return False
+    live: list[str] = []
+    for key, record in turns.items():
+        if not isinstance(key, tuple) or str(key[0]) != chat_id:
+            continue
+        if not isinstance(record, dict) or not _turn_record_running(record):
+            continue
+        job_id = str(record.get("job_id") or "")
+        if job_id:
+            live.append(job_id)
+    if not live:
+        return False
+    return all(_job_is_question_only(db_path, job_id) for job_id in live)
 
 
 def incoming_message_action(*, session_busy: bool, is_stop: bool) -> str:
@@ -733,14 +991,17 @@ def sent_message_id(result: Any) -> str:
 
 def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
     """Block a tool call when this job was stopped or hit the ceiling."""
+    from .turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
     job_id = str(
-        (kwargs or {}).get("job_id")
+        owner or (kwargs or {}).get("job_id")
         or os.environ.get("ROBIE_JOB_ID")
         or os.environ.get("JOB_ID")
         or ""
     ).strip()
     db_path = str(
-        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+        owner_db or (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()
     store = None
     if job_id and db_path:
@@ -750,7 +1011,155 @@ def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
             store = JobStore(db_path)
         except Exception:
             store = None
+    stopped = agent_output_blocked(job_id, store)
+    if stopped:
+        return stopped
+    if job_id:
+        try:
+            job = store.get_job(job_id) if store is not None else None
+            if not job or JobStatus(job['status']) in TERMINAL_STATUSES:
+                return 'JOB_TOOL_REFUSED: no active job; job already finished or is unavailable.'
+            if owner:
+                state = store.get_checkpoint(owner, "model_generation") or {}
+                if not state.get("running") or state.get("generation") != _generation:
+                    return 'JOB_TOOL_REFUSED: generation is no longer running.'
+        except Exception:
+            return 'JOB_TOOL_REFUSED: job state could not be read.'
     return agent_output_blocked(job_id, store)
+
+
+_GATEWAY_STATUS_NOTICE = re.compile(
+    r"interrupting current task|\(interrupted\)|\(no reply\)",
+    re.IGNORECASE,
+)
+
+
+def is_gateway_status_notice(text: str) -> bool:
+    """True for a gateway progress line. It is not an answer to the question."""
+    body = " ".join(str(text or "").split())
+    if not body or len(body) > 180:
+        return False
+    return _GATEWAY_STATUS_NOTICE.search(body) is not None
+
+
+_TOOL_PROGRESS_LINE = re.compile(
+    r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)?"
+    r"(?:playwright_exec|ezlynx_discussion_note|ezlynx_document_upload|"
+    r"web_search|terminal|execute_code|read_file|gemini_unique_field)\b"
+    r"(?:\s*[:：].*|\s*\u2026.*|\s*\.\.\..*|\s*)$",
+    re.IGNORECASE,
+)
+
+
+def is_tool_progress_text(text: str) -> bool:
+    """True for a raw tool-progress bubble. It is not a reply to the person.
+
+    A run of these lines is still progress when there are more than a handful.
+    Job 598820fc stored seven ``\U0001F3AD playwright_exec`` lines and that count used
+    to fall through as an answer.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(_line_is_tool_trace(line) for line in lines)
+
+
+_HEARTBEAT_LINE = re.compile(
+    r"\b(?:"
+    r"iteration\s+\d+\s*/\s*\d+"
+    r"|(?:working|thinking)\s*[—–\-]\s*\d+"
+    r")",
+    re.IGNORECASE,
+)
+_STATUS_ONLY = frozenset(
+    {
+        "working",
+        "still working",
+        "thinking",
+        "still thinking",
+    }
+)
+
+
+def is_progress_heartbeat_or_thinking(text: str) -> bool:
+    """True for a progress, heartbeat, or thinking line. Never a final answer.
+
+    ``\u23F3 Working \u2014 6 min \u2014 iteration 21/500, clarify`` is the gateway
+    talking to itself. It must not be stored as the reply or close the job.
+    """
+    if (
+        is_tool_progress_text(text)
+        or content_is_only_progress(text)
+        or is_gateway_status_notice(text)
+    ):
+        return True
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or len(lines) > 3:
+        return False
+    body = " ".join(lines)
+    if len(body) > 240:
+        return False
+    if _HEARTBEAT_LINE.search(body):
+        return True
+    stripped = re.sub(
+        r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+",
+        "",
+        body,
+    ).strip()
+    folded = stripped.casefold().rstrip(".\u2026 ")
+    return folded in _STATUS_ONLY
+
+
+def is_refused_tool_text(text: str) -> bool:
+    """True when this text is a tool refusal handed back to the model.
+
+    A worker's final ``ROBIE_BLOCKED:`` line is not this. That line still
+    parks the job. A refused tool call does not.
+    """
+    body = " ".join(str(text or "").split())
+    if not body or len(body) > 2500:
+        return False
+    folded = body.casefold()
+    # These are tool results handed back mid-turn, including when the tool
+    # prefixes them with PLAYWRIGHT_BLOCKED. Job 598820fc closed COMPLETE on
+    # "do not guess an EZLynx search URL" while the agent was still calling tools.
+    if "do not guess an ezlynx search url" in folded:
+        return True
+    if "do not drive ezlynx screens by hand" in folded:
+        return True
+    if "playwright_exec is refused" in folded:
+        return True
+    if "policy_setup_order" in folded:
+        return True
+    if "ezlynx_write_scope_refused" in folded:
+        return True
+    if "this action was refused before it started" in folded:
+        return True
+    # A worker's final PLAYWRIGHT_BLOCKED line still parks the job.
+    # Only the tool-refusal text handed back mid-turn is skipped here.
+    if folded.startswith("robie_blocked") or folded.startswith("playwright_blocked"):
+        return False
+    return False
+
+
+def job_was_explicitly_stopped(store: Any, job_id: str | None) -> bool:
+    """True for /stop, a cancel, or the time ceiling. A normal finish is not a stop."""
+    if not job_id or store is None:
+        return False
+    try:
+        job = store.get_job(job_id)
+    except Exception:
+        return False
+    status = str((job or {}).get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return True
+    for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
+        try:
+            if store.get_checkpoint(job_id, kind):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
@@ -766,6 +1175,8 @@ def agent_output_blocked(job_id: str | None, store: Any = None) -> str | None:
     except Exception:
         return None
     status = str((job or {}).get("status") or "")
+    if status in {JobStatus.CANCELLED.value, "CANCELLED"}:
+        return STOPPED_OUTPUT
     if status not in {JobStatus.FAILED.value, "FAILED"}:
         return None
     for kind in ("agent_abort", "cancelled", "gateway_turn_timeout"):
@@ -1086,7 +1497,7 @@ async def terminate_gateway_agent(
     runner interrupt cannot finish in-process.
     """
     request_agent_stop(job_id)
-    resolved, derived = resolve_running_session_key(adapter, event)
+    resolved, derived, keys = stop_session_keys(adapter, event, job_id, store)
     chat_id, _thread_id = _event_chat_thread(event)
     logger.warning(
         "stop session keys resolved=%s derived=%s chat=%s reason=%s",
@@ -1125,17 +1536,14 @@ async def terminate_gateway_agent(
                 stop_generic_chat_job_heartbeat(str(db_path), str(job_id))
             except Exception:
                 pass
+    if not keys:
+        return
     source = getattr(event, "source", None)
-    keys = [resolved]
-    if derived and derived not in keys:
-        keys.append(derived)
-    for key in _iter_live_session_keys(adapter):
-        if _key_matches_chat(key, chat_id, _thread_id) and key not in keys:
-            keys.append(key)
     tasks = _tasks_for_keys(adapter, keys)
-    captured = _capture_session_task(adapter, event, resolved)
-    if captured is not None and captured not in tasks:
-        tasks.append(captured)
+    for key in keys:
+        stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+        if stamp and len(stamp) > 3 and stamp[3] is not None and stamp[3] not in tasks:
+            tasks.append(stamp[3])
     agent = _running_agent_for_key(adapter, resolved)
     _hard_stop_agent(agent)
     # The clarify/question wait lives on a worker thread. Cancel the
@@ -1173,6 +1581,10 @@ async def terminate_gateway_agent(
             except Exception:
                 result = None
             await _await_interrupt(result)
+    # An awaited interrupt may have yielded to a new owner. Do not clear
+    # that replacement's lease, task, transcript or runner state.
+    if not _session_owned_for_stop(adapter, resolved, job_id, store, chat_id, allow_released=True):
+        return
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
@@ -1180,6 +1592,8 @@ async def terminate_gateway_agent(
             await _await_interrupt(result)
         except Exception:
             pass
+    if not _session_owned_for_stop(adapter, resolved, job_id, store, chat_id, allow_released=True):
+        return
     if runner is not None:
         drop = getattr(runner, "_drop_turn_slot", None)
         if callable(drop):
@@ -1211,27 +1625,32 @@ async def terminate_gateway_agent(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
-    _close_session_history(adapter, keys, chat_id=chat_id, thread_id=_thread_id)
+    keys = [key for key in keys if _session_owned_for_stop(adapter, key, job_id, store, chat_id, allow_released=True)]
+    _close_session_history(adapter, keys)
     for key in keys:
         _release_session_guard(adapter, key)
 
 
 def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
-    """Mark the linked running job FAILED/cancelled. Does not open a new job.
+    """Mark the linked running job CANCELLED. Does not open a new job.
 
-    A job that is already finished is left untouched. /stop with nothing
-    running must not add a cancelled checkpoint or replay that job's answer.
+    A job that is already finished is left untouched and answered with
+    ``ALREADY_FINISHED_REPLY``. An empty job id is "nothing is running":
+    that path must not add a cancelled checkpoint or replay an answer.
     """
     if not job_id:
         return NOTHING_RUNNING_REPLY
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
-        return NOTHING_RUNNING_REPLY
+        if status == JobStatus.CANCELLED:
+            from .chat_queue import DurableChatEventQueue
+            DurableChatEventQueue(str(store.path)).deactivate_job_links(job_id)
+        return ALREADY_FINISHED_REPLY
     reply = stop_reply_line(job_id)
     store.transition(
         job_id,
-        JobStatus.FAILED,
+        JobStatus.CANCELLED,
         expected={status},
         error="Cancelled.",
         release_lease=True,
@@ -1241,4 +1660,168 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
         "cancelled",
         {"by": "/stop", "reason": "Cancelled."},
     )
+    from .chat_queue import DurableChatEventQueue
+
+    DurableChatEventQueue(str(store.path)).deactivate_job_links(job_id)
     return reply
+
+
+def _line_is_tool_trace(line: str) -> bool:
+    return _TOOL_PROGRESS_LINE.match(line.strip()) is not None
+
+
+def _line_is_heartbeat(line: str) -> bool:
+    """One Working\u2026 / thinking / iteration line. Not a sentence that mentions work."""
+    body = line.strip()
+    if not body or len(body) > 240:
+        return False
+    if _HEARTBEAT_LINE.search(body):
+        return True
+    stripped = re.sub(
+        r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\uFE0F?\s*)+",
+        "",
+        body,
+    ).strip()
+    folded = stripped.casefold().rstrip(".\u2026 ")
+    return folded in _STATUS_ONLY
+
+
+def content_is_only_progress(text: str) -> bool:
+    """True when every line is a tool trace or a Working\u2026 heartbeat.
+
+    That text is never an answer and never finalizes a job by itself.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(_line_is_tool_trace(line) or _line_is_heartbeat(line) for line in lines)
+
+
+def remember_session_owner(adapter: Any, event: Any, job_id: str, generation: str, task: Any = None) -> None:
+    """Record the actual live object, so a later turn cannot inherit stop authority."""
+    chat, thread = _event_chat_thread(event)
+    owners = getattr(adapter, "_robie_session_owners", None)
+    if owners is None:
+        owners = adapter._robie_session_owners = {}
+    exact = session_key_from_adapter(adapter, event)
+    keys = [exact] if _running_agent_for_key(adapter, exact) is not None else [
+        key for key in _iter_live_session_keys(adapter)
+        if _running_agent_for_key(adapter, key) is not None
+        and _key_matches_stop(key, chat, thread)
+    ]
+    # Never stamp every matching DM/thread agent as this turn's owner.
+    # Legacy key discovery is safe only when there is a single candidate.
+    if len(keys) == 1:
+        key = keys[0]
+        owners[key] = (str(job_id), str(generation), _running_agent_for_key(adapter, key), task)
+
+
+def _session_owned_for_stop(adapter: Any, key: str, job_id: str | None,
+                            store: Any, chat: str, *, allow_released: bool = False) -> bool:
+    if not job_id:
+        return False
+    # A shared DM session may already belong to the next job. Check even
+    # legacy turns that predate durable generation/session stamps.
+    for turn_key, record in (getattr(adapter, "_gateway_turns", {}) or {}).items():
+        if (isinstance(turn_key, tuple) and len(turn_key) > 1
+                and turn_key[0] == chat and _turn_record_running(record)
+                and str(record.get("job_id")) != str(job_id)
+                and (not turn_key[1] or _key_matches_stop(key, chat, str(turn_key[1])))):
+            return False
+    active = (getattr(adapter, "_active_chat_job", {}) or {}).get(chat)
+    if active and str(active) != str(job_id) and _key_matches_chat(key, chat, ""):
+        return False
+    try:
+        state = store.get_checkpoint(job_id, "model_generation") if store is not None else None
+    except Exception:
+        return False
+    stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+    if state or stamp:
+        return bool(state and stamp and stamp[0] == str(job_id)
+                    and stamp[1] == state.get("generation")
+                    and (stamp[2] is _running_agent_for_key(adapter, key)
+                         or (allow_released and _running_agent_for_key(adapter, key) is None)))
+    return True  # Legacy, exact local session with no conflicting turn.
+
+
+def stop_session_keys(
+    adapter: Any,
+    event: Any,
+    job_id: str | None = None,
+    store: Any = None,
+) -> tuple[str, str, list[str]]:
+    """``(resolved, derived, keys)`` for the job being stopped.
+
+    A top-level ``/stop`` has an empty thread, so the adapter fallback is
+    ``chat:spaces/<id>:``. That key does not own the thread turn. The
+    resolved key is the live ``agent:`` session for the job's thread.
+    """
+    derived = session_key_from_adapter(adapter, event)
+    chat_id, thread_id = _event_chat_thread(event)
+    threads: list[str] = []
+    if thread_id:
+        threads.append(thread_id)
+    if store is not None and job_id:
+        try:
+            from .chat_thread import read_job_chat_thread
+
+            stored = str(read_job_chat_thread(store, str(job_id)) or "")
+        except Exception:
+            stored = ""
+        if stored and stored not in threads:
+            threads.append(stored)
+    turns = getattr(adapter, "_gateway_turns", None)
+    if isinstance(turns, dict) and job_id:
+        for key, record in turns.items():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("job_id") or "") != str(job_id):
+                continue
+            if isinstance(key, tuple) and key and not chat_id:
+                chat_id = str(key[0])
+            if isinstance(key, tuple) and len(key) > 1 and key[1]:
+                extra = str(key[1])
+                if extra not in threads:
+                    threads.append(extra)
+    matched: list[str] = []
+    for key in _iter_live_session_keys(adapter):
+        if chat_id and chat_id not in str(key):
+            continue
+        if threads:
+            if any(_key_matches_stop(key, chat_id, thread) for thread in threads):
+                matched.append(key)
+        elif _key_is_running(adapter, key):
+            matched.append(key)
+    matched = [key for key in matched if _session_owned_for_stop(adapter, key, job_id, store, chat_id)]
+    agent_keys = [key for key in matched if str(key).startswith("agent:")]
+    if agent_keys:
+        resolved = agent_keys[0]
+    elif matched:
+        resolved = matched[0]
+    else:
+        resolved = derived if (not threads or any(_key_matches_stop(derived, chat_id, thread) for thread in threads)) and _session_owned_for_stop(adapter, derived, job_id, store, chat_id) else ""
+    keys: list[str] = []
+    for key in (resolved, *matched):
+        if key and key not in keys:
+            keys.append(key)
+    return resolved, derived, keys
+
+
+def job_turn_is_alive(
+    adapter: Any,
+    event: Any,
+    job_id: str | None,
+    store: Any = None,
+) -> bool:
+    """True when this job's agent is still running after the row was closed."""
+    _resolved, _derived, keys = stop_session_keys(adapter, event, job_id, store)
+    return any(_key_is_running(adapter, key) for key in keys)
+
+
+def _key_matches_stop(key: str, chat_id: str, thread_id: str) -> bool:
+    if _key_matches_chat(key, chat_id, thread_id):
+        return True
+    if not chat_id or chat_id not in str(key) or not thread_id:
+        return False
+    tail = thread_id.rstrip('/').split('/')[-1]
+    return str(key).endswith('/threads/' + tail) or str(key).endswith(':' + tail)

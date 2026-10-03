@@ -476,6 +476,13 @@ def _ezlynx_write_scope_block_reason(
         and str(selector or "").strip().casefold() == "#search"
     ):
         return None
+    # A name lookup types into the global search box. That is a read.
+    # The write allowlist still applies to every other control.
+    from robie_job_engine.client_name_lookup import is_readonly_client_search
+
+    looked_up = selector if selector else locator_selector_text(owner)
+    if is_readonly_client_search(method_name, looked_up):
+        return None
     try:
         from robie_job_engine.ezlynx_write_scope import (
             ezlynx_control_scope_block_reason,

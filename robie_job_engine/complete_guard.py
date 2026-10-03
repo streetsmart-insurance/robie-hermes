@@ -54,6 +54,7 @@ IDENTITY_FALLBACK_KEYS = (
     "destination_id",
     "policy_number",
     "ezlynx_note_id",
+    "discussion_id",
 )
 WEAK_ONLY_EXPECTED_KEYS = frozenset({"ok"})
 WORKFLOW_EXPECTED_KEYS = frozenset(
@@ -73,6 +74,7 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
         "document_id",
         "note_id",
         "ezlynx_note_id",
+        "discussion_id",
         "assignee_id",
         "assignee_name",
         "destination_id",

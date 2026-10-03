@@ -13,7 +13,9 @@ def test_workflow_is_protected_keyless_and_pins_release_inputs():
     assert "id-token: write" in text
     assert "service_account: robie-production-deployer@streetsmart-hermes-poc" in text
     assert "workloadIdentityPools/github-production/providers/github-main" in text
-    assert "ref: ${{ inputs.commit }}" in text
+    assert "release_promotion download" in text
+    assert '--commit "${REQUESTED_COMMIT}" --sha256 "${REQUESTED_SHA256}"' in text
+    assert '--run-id "${TEST_RUN_ID}" --artifact-id "${TEST_ARTIFACT_ID}"' in text
     assert 'test "${release_commit}" = "${REQUESTED_COMMIT}"' in text
     assert 'test "${release_sha256}" = "${REQUESTED_SHA256}"' in text
     assert "git pull" not in text

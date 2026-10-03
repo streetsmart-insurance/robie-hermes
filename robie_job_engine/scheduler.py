@@ -87,6 +87,12 @@ def run_once(db_path: str) -> dict[str, int]:
     except Exception:
         playground_expired = []
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
+    try:
+        from .chat_job_controls import sweep_dead_running_jobs
+
+        sweep_dead_running_jobs(jobs)
+    except Exception:
+        pass
     if orphaned_chat_jobs:
         from .chat_guard import notify_terminal_chat_job
         from .recording import RecordingManager

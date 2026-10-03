@@ -392,12 +392,16 @@ def note_or_document_write_missing_api_id(
 
 
 def note_id_in_discussion(record: Any, note_id: str) -> bool:
-    """True when a discussion payload contains ``note_id``."""
+    """True when a discussion payload contains ``note_id``.
+
+    A live discussion read has no note bodies. The latest note id on that
+    metadata is enough when it is the id being confirmed.
+    """
 
     want = str(note_id or "").strip()
     if not want or not isinstance(record, dict):
         return False
-    for key in ("noteId", "NoteId", "id", "Id"):
+    for key in ("mostRecentNoteId", "MostRecentNoteId", "noteId", "NoteId", "id", "Id"):
         if str(record.get(key) or "").strip() == want:
             return True
     for key in ("notes", "Notes", "items", "Items", "data", "Data"):
@@ -489,6 +493,9 @@ def add_note_to_discussion(
     discussion_client: Any | None = None,
     note_type: str = "Note",
     dry_run: bool = False,
+    document_id: str | None = None,
+    ledger_path: Any = None,
+    allow_repost: bool = False,
 ) -> dict[str, Any]:
     """File a note on an existing titled discussion and read it back.
 
@@ -513,10 +520,17 @@ def add_note_to_discussion(
         title_hint=hint,
         note_type=note_type,
         dry_run=dry_run,
+        document_id=document_id,
+        ledger_path=ledger_path,
+        allow_repost=allow_repost,
     )
     if filed.get("status") != "filed":
         return filed
-    if filed.get("read_back") and str(filed.get("verified_by") or "") == "text":
+    if filed.get("read_back") and str(filed.get("verified_by") or "") in {
+        "text",
+        "discussion",
+        "ledger",
+    }:
         return filed
     note_id = str(filed.get("note_id") or "").strip()
     discussion_id = str(filed.get("discussion_id") or "").strip()

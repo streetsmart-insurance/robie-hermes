@@ -285,24 +285,44 @@ def find_direct_message_space(
     return space
 
 
+def _scrub_card_text(cards: list[dict[str, Any]], scrub) -> list[dict[str, Any]]:
+    """Run the outbound sanitizer over text fields in a card payload."""
+
+    def _walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return scrub(value)
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        if isinstance(value, dict):
+            return {key: _walk(item) for key, item in value.items()}
+        return value
+
+    return _walk(cards)
+
+
 def post_as_chat_app(
     space_name: str,
     text: str,
     *,
     thread_name: str | None = None,
+    thread_key: str | None = None,
     chat: Any | None = None,
 ) -> dict[str, Any]:
     """POST spaces.messages.create as the Chat APP. Fail-closed on auth errors."""
     if not space_name.startswith("spaces/"):
         raise ValueError("Chat APP posts stay in an existing space")
     from .hitl import sanitize_hitl_chat_text
+    from .user_reply import format_user_reply
 
-    text = sanitize_hitl_chat_text(text)
+    text = format_user_reply(sanitize_hitl_chat_text(text))
     client = chat if chat is not None else _chat_app_client()
     body: dict[str, Any] = {"text": text}
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}
     if thread_name:
         body["thread"] = {"name": thread_name}
+        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    elif thread_key:
+        body["thread"] = {"threadKey": thread_key}
         kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     result = client.spaces().messages().create(**kwargs).execute()
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
@@ -313,6 +333,7 @@ def post_card_as_chat_app(
     cards_v2: list[dict[str, Any]],
     *,
     thread_name: str | None = None,
+    thread_key: str | None = None,
     chat: Any | None = None,
 ) -> dict[str, Any]:
     """POST spaces.messages.create with cardsV2 as the Chat APP.
@@ -326,11 +347,19 @@ def post_card_as_chat_app(
         raise ValueError("Chat APP posts stay in an existing space")
     if not isinstance(cards_v2, list) or not cards_v2:
         raise ValueError("cardsV2 must be a non-empty list")
+    from .user_reply import format_user_reply
+
+    cards_v2 = _scrub_card_text(
+        cards_v2, lambda value: format_user_reply(value, collapse=False)
+    )
     client = chat if chat is not None else _chat_app_client()
     body: dict[str, Any] = {"cardsV2": list(cards_v2)}
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}
     if thread_name:
         body["thread"] = {"name": thread_name}
+        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    elif thread_key:
+        body["thread"] = {"threadKey": thread_key}
         kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     result = client.spaces().messages().create(**kwargs).execute()
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
@@ -382,12 +411,23 @@ def post_hitl_to_originating_thread(
     if target is None:
         return False
     space, thread = target
+    from .user_reply import format_user_reply
+
+    message = format_user_reply(str(message or ""))
     send = poster if poster is not None else post_as_chat_app
     try:
         try:
-            send(space, message, thread_name=thread)
+            if thread:
+                send(space, message, thread_name=thread)
+            else:
+                from .chat_thread import job_thread_key
+
+                send(space, message, thread_key=job_thread_key(job_key))
         except TypeError:
-            send(space, message)
+            try:
+                send(space, message, thread_name=thread)
+            except TypeError:
+                send(space, message)
         return True
     except ChatAppIdentityError as exc:
         # The Chat identity is broken: page the operator on the email/ops

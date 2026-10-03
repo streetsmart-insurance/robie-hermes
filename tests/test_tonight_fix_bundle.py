@@ -50,6 +50,7 @@ from robie_job_engine.chat_turn_control import (
     STOPPED_OUTPUT,
     _abandon_timed_out_gateway_turn,
     agent_output_blocked,
+    ALREADY_FINISHED_REPLY,
     NOTHING_RUNNING_REPLY,
     fail_cancelled_chat_job,
     fresh_turn_history,
@@ -169,9 +170,13 @@ class QuestionPathTests(unittest.TestCase):
             self.assertIn("Travelers and Hanover", reply)
             self.assertNotIn("google_token", reply)
             self.assertNotIn("did not finish", reply.casefold())
-            self.assertIn("Details", reply)
-            self.assertIn("No EZLynx destination check", reply)
-            self.assertIn(f"Ref: job {job['id']}", reply)
+            self.assertNotIn("Ref: job", reply)
+            self.assertNotIn("Jev", reply)
+            self.assertNotIn("UNVERIFIED", reply)
+            self.assertNotIn("not verified", reply.casefold())
+            audit = store.get_checkpoint(job["id"], "end_state_report") or {}
+            self.assertIn("No EZLynx destination check", str(audit.get("text") or ""))
+            self.assertIn(f"Ref: job {job['id']}", str(audit.get("text") or ""))
             self.assertIn("Judge the answer only", scorer.questions["satisfied"]["instructions"])
             self.assertIn("no EZLynx destination", scorer.questions["satisfied"]["instructions"])
 
@@ -299,7 +304,7 @@ class StopCommandTests(unittest.TestCase):
             cancelled = store.get_checkpoint(job["id"], "cancelled")
         self.assertEqual(count, 1)
         self.assertEqual(before["id"], saved["id"])
-        self.assertEqual(saved["status"], "FAILED")
+        self.assertEqual(saved["status"], "CANCELLED")
         self.assertEqual(saved["last_error"], "Cancelled.")
         self.assertIn("cancelled", reply.casefold())
         self.assertIn(f"Ref: job {job['id']}", reply)
@@ -597,11 +602,15 @@ class ProveFollowUpTests(unittest.TestCase):
                 )
             job = JobStore(db).get_job(job_id)
         self.assertTrue(job["payload"]["answer_only"])
+        self.assertTrue(job["payload"]["answered"])
         self.assertEqual(job["action_type"], "hermes.plain_english")
-        self.assertEqual(job["status"], "UNVERIFIED")
-        self.assertEqual(job["last_error"], "answer only; no EZLynx destination readback")
+        self.assertEqual(job["status"], "COMPLETE")
+        self.assertFalse(job.get("last_error"))
         self.assertIn("Travelers and Hanover", reply)
         self.assertNotIn("no structured destination", reply)
+        self.assertNotIn("UNVERIFIED", reply)
+        self.assertNotIn("not verified", reply.casefold())
+        self.assertNotIn(job_id, reply)
 
     def test_address_change_routes_to_policy_change(self):
         text = "Change the mailing address for Buster Brown to 100 Test Mailing Rd"
@@ -649,6 +658,7 @@ class ProveFollowUpTests(unittest.TestCase):
             def __init__(self):
                 self._session_tasks = {}
                 self._background_tasks = {task}
+                self._session_tasks = {"chat:spaces/1:thread": task}
                 self.calls = []
 
             def interrupt_session_activity(self, key, chat_id):
@@ -1737,7 +1747,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
             adapter = Adapter()
             event = Event()
             await terminate_gateway_agent(
-                adapter, event, None, reason="gateway_max_turn_seconds", store=None
+                adapter, event, "history-owner", reason="gateway_max_turn_seconds", store=None
             )
             self.assertEqual(adapter.gateway_runner._session_history[real], [])
             self.assertEqual(adapter.gateway_runner.session_store.session_id, "fresh-session")
@@ -1789,7 +1799,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
             self.assertEqual(resolve_stop_target(None, session_busy=False)[1], NOTHING_RUNNING_REPLY)
             self.assertIsNone(resolve_stop_target(None, session_busy=False)[0])
             reply = fail_cancelled_chat_job(store, job["id"])
-            self.assertEqual(reply, NOTHING_RUNNING_REPLY)
+            self.assertEqual(reply, ALREADY_FINISHED_REPLY)
             self.assertEqual(store.get_job(job["id"])["status"], JobStatus.FAILED.value)
             self.assertIsNone(store.get_checkpoint(job["id"], "cancelled"))
             self.assertIsNone(store.get_checkpoint(job["id"], "agent_abort"))
@@ -1815,6 +1825,32 @@ class ProveSessionReleaseTests(unittest.TestCase):
         self.assertNotIn("conversation_job_for_event", idle)
 
     def test_stop_kills_the_recording_process_group(self):
+        # Keep subreaper state isolated from the rest of the test runner.
+        if os.environ.get("ROBIE_TEST_RECORDING_SUBREAPER") != "1":
+            child_code = """
+import ctypes, os, sys, unittest
+# unittest discovery adds tests/ only to the parent interpreter's sys.path.
+# Bootstrap that same import root explicitly in this isolated interpreter.
+sys.path.insert(0, os.path.join(os.getcwd(), "tests"))
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+os.environ["ROBIE_TEST_RECORDING_SUBREAPER"] = "1"
+unittest.main(module="test_tonight_fix_bundle", argv=[
+    "recording-reaper-proof",
+    "ProveSessionReleaseTests.test_stop_kills_the_recording_process_group",
+])
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", child_code], cwd=str(ROOT),
+                # Keep the hosted CI root-only path even when a local runner
+                # supplies PYTHONPATH=.:tests, so this import regression stays covered.
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
         proc = subprocess.Popen(
             ["bash", "-c", "sleep 60 & sleep 60 & wait"],
             start_new_session=True,
@@ -1848,6 +1884,21 @@ class ProveSessionReleaseTests(unittest.TestCase):
             self.assertIsNotNone(proc.poll())
             self.assertNotEqual(proc.returncode, 0)
             for child in children:
+                # Killed grandchildren are adopted by this isolated subreaper.
+                # Reap them ourselves instead of depending on container PID 1.
+                deadline = time.monotonic() + 3
+                try:
+                    waited, status = os.waitpid(child, os.WNOHANG)
+                except ChildProcessError:
+                    # The shell can reap a child before it is killed itself.
+                    # Absence remains mandatory; a live or zombie PID fails.
+                    self.assertFalse(Path(f"/proc/{child}").exists(), child)
+                    continue
+                while waited == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    waited, status = os.waitpid(child, os.WNOHANG)
+                self.assertEqual(waited, child, "recording child did not exit")
+                self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
                 self.assertFalse(Path(f"/proc/{child}").exists(), child)
             self.assertEqual(saved["failure"], "stopped")
         finally:
@@ -2056,12 +2107,23 @@ class ProveSessionReleaseTests(unittest.TestCase):
             send.index('get("robie_job_id")'),
             send.index("conversation_job_for_event"),
         )
-        stop = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
-        stop = stop.split("async def _apply_chat_stop", 1)[1].split(
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
+        stop = adapter.split("async def _apply_chat_stop", 1)[1].split(
             "async def _stop_chat_queue_heartbeat", 1
         )[0]
-        self.assertIn('"robie_job_id": job_id', stop)
-        self.assertIn('"robie_delivery_kind": "stop"', stop)
+        # The stop line is posted from this handler, before the first await,
+        # and the delivery is recorded against that job id.
+        self.assertLess(
+            stop.index("_post_stop_confirmation_now"),
+            stop.index("await self._terminate_running_agent"),
+        )
+        self.assertIn('kind="stop"', stop)
+        poster = adapter.split("def _post_stop_confirmation_now", 1)[1].split(
+            "async def _apply_chat_stop", 1
+        )[0]
+        self.assertIn("record_chat_delivery", poster)
+        self.assertIn("request_agent_stop", poster)
+        self.assertIn("job_id", poster)
 
     def test_ceiling_reply_is_the_one_line_only(self):
         from robie_job_engine.chat_guard import guard_chat_notice
@@ -2357,14 +2419,26 @@ class Round6ConversationTests(unittest.TestCase):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             store = JobStore(db)
+            from robie_job_engine.chat_thread import bind_job_chat_thread
+
+            thread = "spaces/clarify/threads/book"
             first = open_chat_job(db, "m-vague", ask, conversation_id="spaces/clarify")
             self.assertEqual(store.get_job(first)["status"], JobStatus.NEEDS_CLARIFICATION.value)
+            bind_job_chat_thread(store, first, thread)
+            top_level = open_chat_job(
+                db, "m-top", reply, conversation_id="spaces/clarify"
+            )
+            self.assertNotEqual(top_level, first)
             continued = open_chat_job(
-                db, "m-reply", reply, conversation_id="spaces/clarify"
+                db,
+                "m-reply",
+                reply,
+                conversation_id="spaces/clarify",
+                inbound_thread_id=thread,
             )
             self.assertEqual(continued, first)
             with sqlite3.connect(db) as conn:
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
             payload = store.get_job(first)["payload"]
             self.assertIn(ask, payload["text"])
             self.assertIn(reply, payload["text"])
@@ -2380,7 +2454,7 @@ class Round6ConversationTests(unittest.TestCase):
             ceiling.index("self.handle_message"),
         )
 
-    def test_note_without_id_is_confirmed_by_text_and_not_posted_twice(self):
+    def test_note_without_a_second_signal_is_not_filed_or_posted_twice(self):
         from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
 
         title = "Policy Change Request Checkup - Mailing Address update"
@@ -2389,30 +2463,46 @@ class Round6ConversationTests(unittest.TestCase):
         class Client:
             def __init__(self):
                 self.appended = 0
-                self.notes: list[dict] = []
+                self.note_count = 4
+                self.latest = "old-note"
 
             def get_discussions(self, applicant_id):
                 return [{"discussionId": "d-mail", "title": title}]
 
             def get_discussion(self, discussion_id):
-                return {"discussionId": discussion_id, "title": title, "notes": list(self.notes)}
+                return {
+                    "discussionId": discussion_id,
+                    "title": title,
+                    "noteCount": self.note_count,
+                    "mostRecentNoteId": self.latest,
+                }
 
             def append_note(self, discussion_id, text, note_type="Note"):
                 self.appended += 1
-                self.notes.append({"body": text})
+                self.note_count += 1
+                self.latest = "new-note"
                 return {}
 
         client = Client()
-        first = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
-        self.assertEqual(first["status"], "filed")
-        self.assertTrue(first["read_back"])
-        self.assertEqual(first["verified_by"], "text")
-        self.assertEqual(first["discussion_title"], title)
-        self.assertEqual(client.appended, 1)
-        self.assertNotIn("no note_id", str(first.get("reason") or ""))
-        second = file_note_to_existing_discussion(client, "220250093", body, title_hint=title)
-        self.assertEqual(second["status"], "filed")
-        self.assertTrue(second.get("idempotent"))
+        with durable_temporary_directory() as tmp:
+            ledger = str(Path(tmp) / "notes.json")
+            first = file_note_to_existing_discussion(
+                client, "220250093", body, title_hint=title, ledger_path=ledger
+            )
+            # No note text and no returned id: count alone is not our receipt.
+            self.assertEqual(first["status"], "held")
+            self.assertFalse(first["read_back"])
+            self.assertIsNone(first["note_id"])
+            self.assertIsNone(first.get("verified_by"))
+            self.assertEqual(first["discussion_title"], title)
+            self.assertEqual(client.appended, 1)
+            self.assertNotIn("note_id", str(first.get("reason") or ""))
+            second = file_note_to_existing_discussion(
+                client, "220250093", body, title_hint=title, ledger_path=ledger
+            )
+        self.assertEqual(second["status"], "already_posted")
+        self.assertFalse(second.get("read_back"))
+        self.assertIn("Want me to add it again?", second["reason"])
         self.assertEqual(client.appended, 1)
 
     def test_holder_note_and_field_reply_say_what_was_and_was_not_done(self):
