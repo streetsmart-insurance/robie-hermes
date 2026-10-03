@@ -144,6 +144,19 @@ class JobStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_playwright_exec_job
                     ON playwright_exec(job_id, id);
+                CREATE TABLE IF NOT EXISTS jev_evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    verdict TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    escalate INTEGER NOT NULL,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_jev_evaluations_job
+                    ON jev_evaluations(job_id, id);
                 """
             )
 
@@ -260,11 +273,12 @@ class JobStore:
     ) -> list[str]:
         """Fail generic Chat Jobs that nothing is actually executing.
 
-        JobEngine never claims ``hermes.google_chat_task`` (it is not a
-        bounded action), so RUNNING + attempt 0 + ``lease_owner IS NULL`` is
-        the normal start state. A job is abandoned only when that ledger
-        state is stale *and* hermes-gateway has not written a recent
-        ``gateway_progress`` heartbeat.
+        JobEngine never claims ``hermes.google_chat_task`` or
+        ``hermes.plain_english`` (they are not bounded actions), so
+        RUNNING + attempt 0 + ``lease_owner IS NULL`` is the normal start
+        state. A job is abandoned only when that ledger state is stale
+        *and* hermes-gateway has not written a recent ``gateway_progress``
+        heartbeat.
         """
         if older_than_seconds < 1:
             raise ValueError("orphan timeout must be positive")
@@ -278,7 +292,9 @@ class JobStore:
         with self.transaction() as conn:
             rows = conn.execute(
                 """SELECT id FROM jobs
-                   WHERE status=? AND action_type='hermes.google_chat_task'
+                   WHERE status=? AND action_type IN (
+                         'hermes.google_chat_task', 'hermes.plain_english'
+                     )
                      AND attempt_count=0 AND lease_owner IS NULL
                      AND updated_at<=?
                      AND NOT EXISTS (
@@ -307,6 +323,122 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
+        return job_ids
+
+    def fail_dead_running_jobs(
+        self,
+        *,
+        older_than_seconds: int = 600,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Fail RUNNING jobs that have no live lease and no fresh heartbeat.
+
+        A ``gateway_progress`` row newer than the cutoff means a worker is
+        still alive. Those jobs stay RUNNING.
+        """
+        if older_than_seconds < 1:
+            raise ValueError("dead-running timeout must be positive")
+        at = now or datetime.now(timezone.utc)
+        cutoff = (at - timedelta(seconds=older_than_seconds)).isoformat()
+        stamp = at.isoformat()
+        reason = (
+            "The job was still running with no live worker. "
+            f"It was stopped after {older_than_seconds} seconds."
+        )
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=?
+                     AND updated_at<=?
+                     AND NOT (
+                       lease_owner IS NOT NULL AND TRIM(lease_owner)!=''
+                       AND lease_expires_at IS NOT NULL AND lease_expires_at>?
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM checkpoints
+                       WHERE checkpoints.job_id=jobs.id
+                         AND checkpoints.kind='gateway_progress'
+                         AND checkpoints.created_at>?
+                     )""",
+                (JobStatus.RUNNING.value, cutoff, stamp, cutoff),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'dead_running', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason, "cutoff": cutoff}),
+                        stamp,
+                    ),
+                )
+        self._stop_capture(job_ids)
+        return job_ids
+
+    def fail_gateway_restart_orphans(
+        self,
+        *,
+        now: datetime | None = None,
+        exclude: set[str] | None = None,
+    ) -> list[str]:
+        """Fail Chat jobs still RUNNING after the gateway process died.
+
+        A fresh ``gateway_progress`` heartbeat does not keep the job alive.
+        The process that wrote it is gone. Jobs this process is still
+        running can be passed in ``exclude``.
+        """
+        actions = (
+            "hermes.google_chat_task",
+            "hermes.plain_english",
+            "ezlynx.quote",
+            "ezlynx.commercial_auto",
+            "ezlynx.policy_change",
+            "ezlynx.policy_setup",
+            "ezlynx.certificate",
+        )
+        at = now or datetime.now(timezone.utc)
+        stamp = at.isoformat()
+        reason = (
+            "The gateway restarted while this job was still running. "
+            "It was stopped. Send it again if you still want it done."
+        )
+        keep = {str(item) for item in (exclude or set()) if item}
+        placeholders = ",".join("?" for _ in actions)
+        with self.transaction() as conn:
+            rows = conn.execute(
+                f"""SELECT id FROM jobs
+                    WHERE status=? AND action_type IN ({placeholders})
+                      AND lease_owner IS NULL""",
+                (JobStatus.RUNNING.value, *actions),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows if str(row["id"]) not in keep]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'restart_orphan', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason}),
+                        stamp,
+                    ),
+                )
+        self._stop_capture(job_ids)
         return job_ids
 
     def retarget_unattempted(
@@ -531,7 +663,70 @@ class JobStore:
                     job_id,
                 ),
             )
-            return self.get_job(job_id, conn=conn)
+            job = self.get_job(job_id, conn=conn)
+        if status in TERMINAL_STATUSES:
+            self._stop_capture([job_id])
+            self._release_turn_lock(job_id)
+            if status == JobStatus.CANCELLED or (
+                status == JobStatus.FAILED and "cancel" in str(error or "").casefold()
+            ):
+                self._clear_cancelled_conversation_link(job_id)
+        return job
+
+    def _clear_cancelled_conversation_link(self, job_id: str) -> None:
+        """A cancelled job must not stay the active conversation link.
+
+        Preflight treats an active link to a terminal job as a failure.
+        /stop used to leave that row active=1.
+        """
+        try:
+            from .chat_queue import DurableChatEventQueue
+
+            DurableChatEventQueue(str(self.path)).deactivate_job_links(job_id)
+        except Exception:
+            return
+
+    def _release_turn_lock(self, job_id: str) -> None:
+        """A terminal job does not keep the Chat turn lock.
+
+        Interrupt the running agent now. Job 598820fc stayed COMPLETE for
+        about a minute while its turn kept calling tools. Kill registered
+        tool processes. Do not set the /stop flag: a normal finish is not a
+        stop, and the confirmation send still has to post.
+        """
+        try:
+            from .chat_turn_control import (
+                kill_agent_processes,
+                release_finished_job_session,
+            )
+
+            status = ""
+            try:
+                status = str((self.get_job(job_id) or {}).get("status") or "")
+            except Exception:
+                status = ""
+            # CANCELLED sets the stop flag so a later tool call cannot write.
+            # COMPLETE and UNVERIFIED do not: the confirmation send still posts.
+            # Every terminal status still drops the session lease and the clarify.
+            release_finished_job_session(
+                self.path,
+                job_id,
+                stop_agent=status == "CANCELLED",
+            )
+            kill_agent_processes(job_id)
+        except Exception:
+            logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
+
+    def _stop_capture(self, job_ids: list[str]) -> None:
+        """A terminal job writes the browser_capture stop file."""
+        if not job_ids:
+            return
+        try:
+            from .recording import touch_browser_capture_stop_files
+        except Exception:
+            return
+        for job_id in job_ids:
+            touch_browser_capture_stop_files(self.path, job_id)
 
     def increment(self, job_id: str, field: str) -> int:
         if field not in {"attempt_count", "verification_count"}:
@@ -930,6 +1125,55 @@ class JobStore:
                 values,
             ).fetchall()
         return [self._decode_job(row) for row in rows]
+
+    def add_jev_evaluation(
+        self,
+        job_id: str,
+        *,
+        verdict: str,
+        confidence: int,
+        reason: str,
+        escalate: bool,
+        request: dict[str, Any],
+        response: dict[str, Any],
+    ) -> int:
+        """Store one Jev score. The API key must already be absent."""
+        request = redact_mapping(dict(request or {}))
+        response = redact_mapping(dict(response or {}))
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """INSERT INTO jev_evaluations
+                   (job_id,verdict,confidence,reason,escalate,request_json,response_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    str(verdict or ""),
+                    int(confidence),
+                    redact_text(str(reason or "")),
+                    int(bool(escalate)),
+                    canonical_json(request),
+                    canonical_json(response),
+                    utc_now(),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_jev_evaluations(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id,job_id,verdict,confidence,reason,escalate,
+                          request_json,response_json,created_at
+                   FROM jev_evaluations WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["request"] = json.loads(item.pop("request_json") or "{}")
+            item["response"] = json.loads(item.pop("response_json") or "{}")
+            item["escalate"] = bool(item["escalate"])
+            result.append(item)
+        return result
 
     @staticmethod
     def _decode_job(row: sqlite3.Row) -> dict[str, Any]:

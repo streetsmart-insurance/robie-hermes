@@ -12,12 +12,14 @@ EXPECTED_HOST="hermes-poc-01"
 archive=""
 checksum=""
 commit=""
+install_policy_setup=true
 expected_digest=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --archive) archive="$2"; shift 2 ;;
     --checksum) checksum="$2"; shift 2 ;;
     --commit) commit="$2"; shift 2 ;;
+    --skip-policy-setup) install_policy_setup=false; shift ;;
     --digest) expected_digest="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -131,9 +133,12 @@ from robie_job_engine.ezlynx_write_scope import (
 )
 
 allowed = "220250093"
-# Unset/empty ROBIE_EZLYNX_WRITE_APPLICANT_IDS = agency-wide. A comma list
-# restricts. This proof records the mode actually compiled into the release
-# process environment; it does not perform a live EZLynx write.
+# Unset or empty ROBIE_EZLYNX_WRITE_APPLICANT_IDS allows only test account
+# 220250093. A comma list restricts writes to those ids. All clients requires
+# ROBIE_EZLYNX_WRITE_SCOPE=all plus ROBIE_PLAYGROUND=1 and its guardrails
+# (hard blocks, read-back-then-go, and the undo log). This proof records the
+# mode actually compiled into the release process environment; it does not
+# perform a live EZLynx write.
 if write_allowlist_is_unrestricted():
     assert ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
     assert require_allowed_ezlynx_write_applicant(allowed) == allowed
@@ -203,7 +208,9 @@ for target, raw_link in ((sys.argv[1], sys.argv[3]), (sys.argv[2], sys.argv[4]))
     tmp.replace(link)
 PY
   local rollback_failed=0
+  if [[ "${install_policy_setup:-true}" == true ]]; then
   PYTHONPATH="${release_root}" python3 -m robie_job_engine.policy_skill_release restore "${OPT_ROOT}" "${release_root}" "${policy_skill_attempt}" || rollback_failed=1
+  fi
   # Always try to restart the old release even if restoring its skill failed.
   systemctl restart "${GATEWAY_UNIT}" || rollback_failed=1
   systemctl is-active --quiet "${GATEWAY_UNIT}" || rollback_failed=1
@@ -256,7 +263,7 @@ PY
 
 # This separately reviewed skill install preserves the previous directory/link.
 # It does not modify unrelated user-owned skills.
-if ! PYTHONPATH="${release_root}" python3 -m robie_job_engine.policy_skill_release install "${OPT_ROOT}" "${release_root}" "${policy_skill_attempt}"; then
+if [[ "${install_policy_setup}" == true ]] && ! PYTHONPATH="${release_root}" python3 -m robie_job_engine.policy_skill_release install "${OPT_ROOT}" "${release_root}" "${policy_skill_attempt}"; then
   rollback_release
   exit 2
 fi
@@ -295,7 +302,7 @@ evidence_dir="${OPT_ROOT}/deployments/${short}"
 mkdir -p "${evidence_dir}"
 python3 - "${evidence_dir}/production-deploy-evidence.json" "${inventory}" \
   "${commit}" "${archive_digest}" "${release_root}" "${old_current}" \
-  "${GATEWAY_UNIT}" "${after}" "${proof}" "${applicant_verification}" <<'PY'
+  "${GATEWAY_UNIT}" "${after}" "${proof}" "${applicant_verification}" "${install_policy_setup}" <<'PY'
 import json
 import pathlib
 import sys
@@ -318,6 +325,7 @@ payload = {
     "official_install_proof": sys.argv[9],
     "predeploy_job_inventory": json.loads(sys.argv[2]),
     "ezlynx_write_scope": json.loads(sys.argv[10]),
+    "policy_setup_changed": sys.argv[11] == "true",
     "verified_at": datetime.now(timezone.utc).isoformat(),
 }
 path = pathlib.Path(sys.argv[1])

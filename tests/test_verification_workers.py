@@ -344,8 +344,11 @@ def test_waiting_actions_are_held_in_live_mode(tmp_path, monkeypatch):
 
 def test_4359_registry_in_sync_with_ingestion_gate():
     spec = report_registry.VERIFIED_REPORTS["4359"]
-    assert spec.schema_verified is True
-    # The gate run_worker enforces must not block 4359 without a bypass.
+    # Registry kill-switch stays False until 3 clean hermes-test-01 audits.
+    # The ingestion SCHEMA_VERIFIED flag is a separate parse gate.
+    assert spec.schema_verified is False
+    assert spec.identity_fields == ("policy_number", "change_request_created_date")
+    assert spec.look_id == "4602"
     ing.check_report_gate("4359", allow_unverified=False)
 
 
@@ -812,13 +815,17 @@ def test_4372_parser_accepts_test_ho_note_fallback_row():
     assert ing.identity_value("4372", rows[0]) == "TEST-HO-08312026-01"
 
 
-def test_4372_parser_still_rejects_truly_identityless_row():
-    """The parser must still fail closed on a 4372 row with no Policy Number
-    AND no TEST-HO identity in the Note — the fallback is not a blanket
-    pass for empty identities."""
+def test_4372_parser_skips_identityless_row_when_note_fallback_fails(caplog):
+    """When the TEST-HO note fallback finds nothing, main's skip-with-warning
+    applies. A report that then has zero usable rows still fails closed."""
     csv_bytes = _make_4372_csv([
         ("220250093", "ROBIE Test LLC", "Open", "",
          "Regular note with no test identity"),
     ])
-    with pytest.raises(ing.GmailReportIngestionError, match="identity column"):
-        ing.parse_and_validate_csv("4372", csv_bytes)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ing.GmailReportIngestionError, match="no data rows"):
+            ing.parse_and_validate_csv("4372", csv_bytes)
+    assert any(
+        "skipping row with empty identity" in record.message
+        for record in caplog.records
+    )

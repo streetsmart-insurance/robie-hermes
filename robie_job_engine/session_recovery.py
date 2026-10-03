@@ -25,6 +25,7 @@ factory so it is testable without a browser, a network, or a box.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Callable, Mapping
 
 from .secrets import redact_exception
@@ -102,6 +103,110 @@ def attempt_session_recovery(
             "reason": f"{RECOVERY_ERROR}: {redact_exception(exc)}",
         }
     return {"recovered": True, "state": state.value, "marker": RECOVERED}
+
+
+# Login can leave the CDP tab list on /auth/account/login for longer than the
+# old ~4s post-relogin read. A single immediate recheck false-fails
+# SESSION_LOGGED_OUT after a successful credential submit.
+POST_LOGIN_CHECK_ATTEMPTS = 10
+POST_LOGIN_CHECK_DELAY_SECONDS = 3.0
+
+
+def confirm_session_after_recovery(
+    check: Callable[[], Mapping[str, Any]],
+    *,
+    attempts: int = POST_LOGIN_CHECK_ATTEMPTS,
+    delay_seconds: float = POST_LOGIN_CHECK_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    """Re-read the browser after login until it is no longer provably logged out.
+
+    ``attempts`` reads are spaced by ``delay_seconds``. The default window is
+    about 30 seconds, not a single 4-second glance.
+    """
+    pause = sleeper or time.sleep
+    last: dict[str, Any] = {"blocking": True, "reason": "SESSION_LOGGED_OUT"}
+    total = max(1, int(attempts))
+    for index in range(total):
+        last = dict(check() or {})
+        if not last.get("blocking"):
+            return last
+        if index < total - 1:
+            pause(delay_seconds)
+    return last
+
+
+DRIVER_NOT_HELD = (
+    "This environment does not hold the EZLynx driver, so I did not sign in."
+)
+
+
+def prepare_chat_sign_in(
+    store: Any,
+    job_id: str,
+    *,
+    gate: Callable[[], Any] | None = None,
+    recover: Callable[[], Mapping[str, Any]] | None = None,
+) -> str:
+    """Try to sign in before asking the user.
+
+    Returns ``rerun`` when the session is back, ``refused`` when this
+    environment does not hold the driver lease, and ``ask`` when recovery
+    failed. The suite does not launch a browser unless the caller passes
+    ``recover``.
+    """
+    if gate is None or recover is None:
+        from .client_name_lookup import _running_under_test
+
+        if _running_under_test() and (gate is None or recover is None):
+            # A test that wants the real decision passes both callables.
+            if gate is None and recover is None:
+                return "ask"
+    if gate is None:
+        from .ezlynx_driver_gate import require_driver_in
+
+        gate = require_driver_in
+    if recover is None:
+        recover = attempt_session_recovery
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
+    try:
+        gate()
+    except EzlynxDriverGateRefused as exc:
+        try:
+            store.checkpoint(
+                job_id,
+                "session_recovery",
+                {"recovered": False, "refused": True, "reason": str(exc)},
+            )
+        except Exception:
+            pass
+        return "refused"
+    try:
+        result = dict(recover() or {})
+    except EzlynxDriverGateRefused as exc:
+        try:
+            store.checkpoint(
+                job_id,
+                "session_recovery",
+                {"recovered": False, "refused": True, "reason": str(exc)},
+            )
+        except Exception:
+            pass
+        return "refused"
+    except Exception as exc:  # noqa: BLE001 - recovery must not raise into Chat
+        result = {"recovered": False, "reason": redact_exception(exc)}
+    try:
+        store.checkpoint(job_id, "session_recovery", result)
+    except Exception:
+        pass
+    if result.get("recovered"):
+        try:
+            store.checkpoint(job_id, "session_recovery_rerun", {"rerun": True})
+        except Exception:
+            pass
+        return "rerun"
+    return "ask"
 
 
 def recovery_summary(result: Mapping[str, Any] | None) -> str:

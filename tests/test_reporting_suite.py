@@ -188,3 +188,26 @@ def test_daily_report_lists_magellan_sad_calls_without_transcript_content():
     assert "Policy Transfer, Delay" in daily
     assert "producer: Ricardo" in daily
     assert "private transcript" not in daily
+
+
+def test_daily_report_prefers_magellan_client_name_and_phone_fields():
+    suite = ReportingSuite()
+    daily = suite.build_daily_report(
+        {"source_status": "available", "unreturned_calls": []},
+        {"source_status": "available", "overdue_by_rep": {}},
+        magellan_data={
+            "source_status": "available",
+            "sad_calls": [{
+                "client_name": "Client From Magellan",
+                "account_name": "Agency Should Not Win",
+                "client_phone": "(908) 555-0199",
+                "caller_phone_masked": "(732) 462-8343",
+                "occurred_at": "3:01 PM",
+                "tags": ["Billing"],
+            }],
+        },
+    )
+    assert "Client From Magellan" in daily
+    assert "(908) 555-0199" in daily
+    assert "Agency Should Not Win" not in daily
+    assert "(732) 462-8343" not in daily

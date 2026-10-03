@@ -4,14 +4,17 @@ The allowlist is fixed at process start. It is read once from
 ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` (preferred) or the legacy alias
 ``EZLYNX_WRITE_APPLICANT_IDS`` (comma-separated applicant IDs).
 
-Ops flip (Carlo 2026-09-17):
+Ops flip (Carlo 2026-09-17; fail-closed default 2026-09-26):
 
-- **Agency-wide** (default): leave the variable unset or empty. Any
-  plausible EZLynx applicant ID is write-eligible for note append,
-  document upload, and other already write-scoped PolicyApi calls.
-- **Restricted**: set the variable to a comma list, e.g.
-  ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093``. Only those IDs pass
-  the compiled allowlist.
+- **Test-account only** (default): leave the variable unset or empty. Only
+  the test account 220250093 is write-eligible for note append, document
+  upload, and other write-scoped calls. This is the safe default.
+- **Widened**: set the variable to a comma list, e.g.
+  ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093,123456789``. Only those IDs
+  pass the compiled allowlist.
+- **All clients**: set ``ROBIE_EZLYNX_WRITE_SCOPE=all`` (or the id list to
+  ``*``). This is honored only while Playground guardrails are active.
+  Otherwise the id list above is used. Default is closed.
 
 A Job payload, prompt, or any other runtime input cannot widen a
 restricted list — authorizing a new account is a deployment-config
@@ -32,6 +35,7 @@ rule is enforced separately.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -39,10 +43,16 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
 ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "ROBIE_EZLYNX_WRITE_APPLICANT_IDS"
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "EZLYNX_WRITE_APPLICANT_IDS"
+# Explicit all-clients switch. Default closed. Honored only while the
+# Playground hard blocks, read-back-then-go, and undo log are active.
+ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR = "ROBIE_EZLYNX_WRITE_SCOPE"
+WRITE_SCOPE_ALL = "all"
 # Preferred name first; legacy alias kept so existing Test/CI env still applies.
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VARS = (
     ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR,
@@ -100,6 +110,14 @@ def requested_message_applicant(payload: dict) -> str | None:
         if applicant and re.fullmatch(r'[1-9]\d*', applicant):
             found.add(applicant)
     for applicant in re.findall(r'\b(?:applicant(?:\s+id)?|ezlynx\s+account(?:\s+id)?)(?:\s*[:#]\s*|\s+)([1-9]\d*)\b', text, flags=re.I):
+        found.add(applicant)
+    # One id the user typed, alone or after a name ("Buster Brown 26356199").
+    # Digits that appear only inside a URL stay on the host check above.
+    # Digits inside a policy number or other hyphenated token (TEST-HO-20260911-E01)
+    # are not an applicant. A second different id still fails closed.
+    # This does not widen the allowlist.
+    prose = re.sub(r'https?://\S+', ' ', text)
+    for applicant in re.findall(r'(?<![\dA-Za-z-])([1-9]\d{5,9})(?![\dA-Za-z-])', prose):
         found.add(applicant)
     if len(found) != 1:
         return None
@@ -165,26 +183,137 @@ def _raw_allowlist_env() -> str | None:
     return None
 
 
-def _load_allowed_applicant_ids() -> frozenset[str] | None:
+def _load_allowed_applicant_ids() -> frozenset[str]:
     """Read the allowlist once at import; job payloads can never widen it.
 
-    ``None`` means unrestricted (env unset or empty). A frozenset means
-    only those applicant IDs are compiled-allowed.
+    Fail-closed: when the env var is unset or empty, the allowlist defaults
+    to just the test account (220250093). Set ROBIE_EZLYNX_WRITE_APPLICANT_IDS
+    explicitly to widen it — a deployment-config change, never a runtime input.
     """
 
     raw = _raw_allowlist_env()
+    if raw is None or not raw.strip():
+        return frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
+    ids: set[str] = set()
+    for part in raw.split(","):
+        token = normalize_applicant_id(part)
+        if not token or token == "*" or token.casefold() == WRITE_SCOPE_ALL:
+            continue
+        ids.add(token)
+    return frozenset(ids) if ids else frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
+
+
+def write_scope_requests_all() -> bool:
+    """True only for an explicit all-clients setting. Default closed.
+
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is the switch. ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*``
+    means the same request. Any other value, including empty, stays on the
+    id list.
+    """
+
+    scope = str(os.environ.get(ROBIE_EZLYNX_WRITE_SCOPE_ENV_VAR) or "").strip().casefold()
+    if scope == WRITE_SCOPE_ALL:
+        return True
+    raw = _raw_allowlist_env()
     if raw is None:
-        return None
-    ids = {normalize_applicant_id(part) for part in raw.split(",")}
-    ids.discard("")
-    return frozenset(ids) if ids else None
+        return False
+    parts = {normalize_applicant_id(part) for part in raw.split(",") if part.strip()}
+    return "*" in parts
+
+
+def all_clients_scope_honored() -> bool:
+    """All-clients counts only while Playground guardrails are active.
+
+    Hard blocks, read-back-then-go, and the undo log have to be in force.
+    Otherwise this falls back to the applicant id list.
+    """
+
+    if not write_scope_requests_all():
+        return False
+    from .playground_config import playground_guardrails_active
+
+    return playground_guardrails_active()
+
+
+def describe_write_scope() -> str:
+    """One startup line. All-clients is named only when it is actually honored."""
+
+    if write_scope_requests_all() and all_clients_scope_honored():
+        return (
+            "EZLynx write scope is all clients. Playground guardrails are active: "
+            "hard blocks, read-back-then-go, and the undo log. "
+            "Bind, delete, billing, coverage, and client email stay blocked."
+        )
+    if write_scope_requests_all():
+        return (
+            "ROBIE_EZLYNX_WRITE_SCOPE=all was requested, but Playground guardrails "
+            "are not active. Falling back to the applicant allowlist."
+        )
+    count = 0 if ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None else len(ALLOWED_EZLYNX_WRITE_APPLICANT_IDS)
+    return (
+        f"EZLynx write scope is the applicant allowlist ({count} ids). "
+        "All-clients is closed."
+    )
+
+
+def log_write_scope_at_startup() -> str:
+    """Log the scope once per process start. Returns the same line for tests."""
+
+    message = describe_write_scope()
+    if "Falling back" in message:
+        logger.warning(message)
+    else:
+        logger.info(message)
+    return message
 
 
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
 
 
+#: Certificate-sweep index allowlist (process-scoped).
+#:
+#: The certificate sweep matches requests against the full-book applicant
+#: index (``CERT_APPLICANT_INDEX_PATH``) and files for ANY client in that
+#: directory — the index IS the allowlist for the sweep. This is registered
+#: once at sweep startup via :func:`register_cert_sweep_applicant_index`
+#: and is ``None`` (unregistered) in every other process, so policy-setup
+#: and other jobs keep the restrictive compiled allowlist above.
+#:
+#: Third-party senders (holders, lenders, brokers) are never checked here:
+#: the allowlist governs the DESTINATION applicant only. The sender is
+#: matched as an applicant through the normal index path; a non-client
+#: sender simply never becomes a write destination.
+_CERT_SWEEP_INDEX_APPLICANT_IDS: frozenset[str] | None = None
+
+
+def register_cert_sweep_applicant_index(applicant_ids) -> None:
+    """Register the cert-sweep applicant index as an additional allowlist.
+
+    Call once at certificate-sweep startup after loading
+    ``CERT_APPLICANT_INDEX_PATH``. Process-scoped: it affects only the
+    process that calls it. Never call from policy-setup or Chat paths —
+    their restrictive allowlist must not be widened.
+    """
+
+    global _CERT_SWEEP_INDEX_APPLICANT_IDS
+    normalized = {normalize_applicant_id(a) for a in applicant_ids or ()}
+    normalized.discard("")
+    _CERT_SWEEP_INDEX_APPLICANT_IDS = frozenset(normalized)
+
+
+def cert_sweep_index_is_registered() -> bool:
+    """True when the cert-sweep applicant index allowlist was registered."""
+
+    return _CERT_SWEEP_INDEX_APPLICANT_IDS is not None
+
+
 def write_allowlist_is_unrestricted() -> bool:
-    """True when ops left the allowlist unset/empty (agency-wide writes)."""
+    """True only when the allowlist was explicitly cleared (legacy mode).
+
+    The default compiled allowlist is fail-closed to the test account; this
+    returns True only if ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None (e.g.
+    monkeypatched in tests simulating the old agency-wide mode).
+    """
 
     return ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
 
@@ -200,10 +329,30 @@ def applicant_is_write_allowed(value: object) -> bool:
         return applicant == live
     if write_allowlist_is_unrestricted():
         return True
-    return applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    if all_clients_scope_honored():
+        return True
+    if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
+        return True
+    # Certificate-sweep process: the applicant index IS the allowlist. The
+    # sweep matched this applicant against the full-book directory before
+    # any write was attempted. Only registered by the cert-sweep driver;
+    # policy-setup and other jobs never register it, so their restrictive
+    # scope is unchanged.
+    if (
+        _CERT_SWEEP_INDEX_APPLICANT_IDS is not None
+        and applicant in _CERT_SWEEP_INDEX_APPLICANT_IDS
+    ):
+        return True
+    return False
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
+    from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+    # The driver lease and the startup snapshot are checked before the
+    # allowlist global. Agent code that widens that global fails here.
+    assert_write_checks_intact()
+    driver_gate_for_write()
     applicant_id = normalize_applicant_id(value)
     if not applicant_is_write_allowed(applicant_id):
         display = applicant_id or "<missing>"
@@ -288,3 +437,6 @@ def ezlynx_control_scope_block_reason(
             "write-allowed"
         )
     return None
+
+
+log_write_scope_at_startup()

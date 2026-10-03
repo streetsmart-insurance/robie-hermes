@@ -153,25 +153,14 @@ def _run(run_id="run-1", fields=None):
 
 class StartRunRefusalTests(unittest.TestCase):
     def test_4359_start_run_refuses_before_browser(self):
-        # The registry's unverified-schema block is tested with a
-        # temporarily patched unverified copy; the real 4359 entry is
-        # schema_verified=True (see test_4359_registry_in_sync_with_ingestion_gate).
-        import dataclasses
-        from robie_job_engine import report_registry
-        real_spec = report_registry.get_report_spec("4359")
-        unverified = dataclasses.replace(real_spec, schema_verified=False)
-        # Patch via the registry's internal mapping for a contained test.
-        with unittest.mock.patch.dict(
-            report_registry.VERIFIED_REPORTS, {"4359": unverified}, clear=False
-        ):
-            with durable_temporary_directory() as tmp:
-                with self.assertRaises(ReportRegistryError) as ctx:
-                    rf.fetch_report_rows(
-                        report_id="4359",
-                        db_path=f"{tmp}/jobs.db",
-                        session=_NoTouch(),
-                    )
-                self.assertIn("4359", str(ctx.exception))
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ReportRegistryError) as ctx:
+                rf.fetch_report_rows(
+                    report_id="4359",
+                    db_path=f"{tmp}/jobs.db",
+                    session=_NoTouch(),
+                )
+            self.assertIn("4359", str(ctx.exception))
 
     def test_unknown_report_id_refuses(self):
         with durable_temporary_directory() as tmp:
@@ -357,7 +346,114 @@ class ExportFailClosedTests(unittest.TestCase):
         self.assertEqual(rows, [{"loan_number": "L1", "policy_number": "P1"}])
 
 
+class PolicyChange4359AliasTests(unittest.TestCase):
+    def test_looker_headers_map_to_csv_identity(self):
+        spec = get_report_spec("4359")
+        self.assertFalse(spec.schema_verified)
+        self.assertEqual(spec.look_id, "4602")
+        self.assertEqual(LOOK_ID_BY_REPORT["4359"], "4602")
+        self.assertEqual(
+            spec.identity_fields, ("policy_number", "change_request_created_date")
+        )
+        self.assertEqual(list(rf.ALIASES["4359"].values()), ing.expected_headers("4359"))
+        self.assertEqual(len(rf.ALIASES["4359"]), 19)
+        self.assertNotIn("request_id", rf.ALIASES["4359"])
+
+        headers = list(rf.ALIASES["4359"])
+        first = [
+            "Example Trucking LLC",
+            "A-100",
+            "POL-4359-001",
+            "Commercial Auto",
+            "09/15/2026",
+            "Example Carrier",
+            "Open",
+            "CSR Example",
+            "1500.00",
+            "2400.00",
+            "Commercial Lines",
+            "Commercial Lines",
+            "Service A",
+            "Producer Example",
+            "CSR Example",
+            "English",
+            "VIP",
+            "Audit",
+            "09/01/2026",
+        ]
+        second = list(first)
+        second[2] = "POL-4359-001"
+        second[-1] = "09/15/2026"
+        duplicate = list(first)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerow(first)
+        writer.writerow(second)
+        writer.writerow(duplicate)
+        rows = rf._parse_report_csv(buffer.getvalue(), spec=spec, fields=None)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["policy_number"], "POL-4359-001")
+        self.assertEqual(rows[0]["Policy Number"], "POL-4359-001")
+        self.assertEqual(rows[0]["change_request_created_date"], "09/01/2026")
+        self.assertEqual(rows[0]["Change Request Created Date"], "09/01/2026")
+        self.assertEqual(rows[0]["Premium - Annualized"], "2400.00")
+        self.assertEqual(
+            rows[0]["Policy Transaction Data Annualized Premium"], "2400.00"
+        )
+        self.assertEqual(rows[1]["change_request_created_date"], "09/15/2026")
+        self.assertNotIn("request_id", rows[0])
+
+    def test_look_4602_title_exports_mapped_identity(self):
+        spec = get_report_spec("4359")
+        page = _FakePage(
+            csv_text=(
+                "Policy Change Request Detail Policy Number,"
+                "Policy Change Request Detail Change Request Created Date\n"
+                "POL-4359-001,09/01/2026\n"
+            ),
+            body_text="Policy Change Request Confirmation Queue - ROBIE",
+        )
+        with durable_temporary_directory() as tmp:
+            rows = rf._export_looker_report_csv(
+                page, spec=spec, run=_run(), download_dir=Path(tmp), fields=None
+            )
+        self.assertEqual(rows[0]["policy_number"], "POL-4359-001")
+        self.assertEqual(rows[0]["change_request_created_date"], "09/01/2026")
+        self.assertTrue(any("/report/4602" in url for url in page.visited))
+
+    def test_look_4602_without_title_fails_closed(self):
+        spec = get_report_spec("4359")
+        page = _FakePage(
+            csv_text="Policy Number,Change Request Created Date\nP1,09/01/2026\n",
+            body_text="some other Shared look",
+        )
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        self.assertIn("Policy Change Request Confirmation Queue - ROBIE", str(ctx.exception))
+
+    def test_request_id_only_csv_fails_closed(self):
+        spec = get_report_spec("4359")
+        csv_text = "request_id,change_description\nREQ-1,add vehicle\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        message = str(ctx.exception)
+        self.assertIn("missing identity columns", message)
+        self.assertIn("policy_number", message)
+        self.assertIn("change_request_created_date", message)
+
+
 class LookIdMapTests(unittest.TestCase):
+    def test_4359_maps_to_look_4602(self):
+        self.assertEqual(LOOK_ID_BY_REPORT["4359"], "4602")
+        self.assertEqual(rf.LOOK_ID_BY_REPORT["4359"], "4602")
+        self.assertEqual(get_report_spec("4359").look_id, "4602")
+        self.assertEqual(rf.look_id_for_report("4359"), "4602")
+        self.assertEqual(rf.looker_look_url("4602"), f"{rf.REPORTS_5_BASE_URL}/report/4602")
+
     def test_4372_maps_to_look_4601(self):
         self.assertEqual(LOOK_ID_BY_REPORT["4372"], "4601")
         self.assertEqual(rf.LOOK_ID_BY_REPORT["4372"], "4601")
@@ -496,9 +592,13 @@ class EmailCsvLiveFetchTests(unittest.TestCase):
         from robie_job_engine import report_email_source as email_source
         from tests.test_report_email_source import FakeScheduledReportGmail, DAY, NOW
         for report_id, row in (("4247", _row4247()), ("4246", _row4360())):
+            # 4246's real daily mail carries the dedicated audit-queue
+            # subject, not the generic daily-CSV envelope (proven 2026-09-25).
+            subject = ing.AUDIT_4246_SUBJECT if report_id == "4246" else "ROBIE daily CSV"
             service = FakeScheduledReportGmail(
                 csv_bytes=_email_csv(report_id, [row]),
-                filename="ROBIE_daily_CSV_2026-09-20T0600.csv", received_at=NOW)
+                filename="ROBIE_daily_CSV_2026-09-20T0600.csv", received_at=NOW,
+                subject=subject)
             with self.subTest(report_id=report_id), durable_temporary_directory() as tmp, \
                  unittest.mock.patch.dict("os.environ", {"ROBIE_ENV": "PRODUCTION"}), \
                  unittest.mock.patch.object(email_source, "build_default_gmail_service", return_value=service) as factory, \

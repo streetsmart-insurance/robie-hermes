@@ -29,6 +29,8 @@ REQUEST = f'Upload the attachment to https://app.ezlynx.com/web/account/{CLIENT}
     ({'text': f'https://app.ezlynx.com.evil.invalid/web/account/{CLIENT}/overview'}, None),
     ({'text': f'https://evil.invalid/web/account/{CLIENT}/overview'}, None),
     ({'text': f'https://app.ezlynx.com/web/account/{CLIENT}/overview and applicant {CLIENT}'}, CLIENT),
+    ({'request_text': 'Create policy number TEST-HO-20260911-E01 on applicant 220250093'}, '220250093'),
+    ({'request_text': 'Create policy number TEST-HO-20260911-E01'}, None),
 ])
 def test_original_message_resolves_one_client(payload, expected):
     assert scope.requested_message_applicant(payload) == expected

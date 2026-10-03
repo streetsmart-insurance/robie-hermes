@@ -13,7 +13,10 @@ into worker-facing row dicts.
 
 Used by :func:`robie_job_engine.report_fetcher.fetch_report_rows` for
 report ids 4247 (manual renewals), 4246 (audits; daily feed is the
-4360 Active-filtered transaction CSV), and 4372 (mortgagee).
+4360 Active-filtered transaction CSV), 4372 (mortgagee), and 4359
+(policy change; Look 4602 fallback only when the email is missing).
+Report 4359's registry ``schema_verified`` flag still blocks
+``fetch_report_rows`` until it is flipped after Test audits.
 
 Fail closed: missing email, stale delivery, or a header/schema mismatch
 raises. Rows are never guessed. A wrong-subject robie@ CSV is ignored
@@ -38,7 +41,7 @@ from .gmail_report_ingestion import (
 logger = logging.getLogger("robie.report_email_source")
 
 # Live workers that prefer today's robie@ CSV over Looker favorites.
-EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4372"})
+EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4372", "4359"})
 
 # 4246's daily email is scheduled report 4360 (Active policies only).
 AUDIT_4360_STATUS_COLUMN = "Current Policy Status"
@@ -108,6 +111,29 @@ COLUMN_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "CSR": ("csr",),
         "Note": ("note",),
     },
+    # 4359 Policy Change / Look 4602. CSV short headers only (the 19 columns
+    # gmail_report_ingestion already fingerprints). No request_id.
+    "4359": {
+        "Account Name": ("account_name", "insured_name"),
+        "Applicant ID": ("applicant_id",),
+        "Policy Number": ("policy_number",),
+        "Line Of Business": ("line_of_business",),
+        "Effective Date": ("effective_date",),
+        "Master Company": ("master_company", "carrier"),
+        "Request Status": ("request_status",),
+        "Created By": ("created_by",),
+        "Written Premium": ("written_premium",),
+        "Premium - Annualized": ("annualized_premium",),
+        "Branch": ("branch",),
+        "Department": ("department",),
+        "Service Team": ("service_team",),
+        "Assigned Producer": ("assigned_producer",),
+        "CSR": ("csr",),
+        "Preferred Language": ("preferred_language",),
+        "Applicant Labels": ("applicant_labels",),
+        "Policy Labels": ("policy_labels",),
+        "Change Request Created Date": ("change_request_created_date",),
+    },
 }
 
 
@@ -128,13 +154,41 @@ def eastern_today(now: datetime | None = None) -> date:
         return now.date()
 
 
+def _read_sa_from_accountability_env() -> str:
+    """Fallback: read the delegated SA from the accountability env file.
+
+    The verification worker systemd units load robie-recording.env and
+    robie-evidence-loop.env but not robie-accountability.env, so the
+    ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT env var is never set
+    for them. The service user can read that file (group-readable), so
+    fall back to parsing it directly rather than failing closed.
+    The value is never logged.
+    """
+    path = os.environ.get(
+        "ROBIE_ACCOUNTABILITY_ENV_PATH",
+        "/etc/streetsmart-hermes-test/robie-accountability.env",
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def delegated_gmail_service_account() -> str:
-    return (
+    sa = (
         os.environ.get("ROBIE_VERIFICATION_GMAIL_DELEGATED_SERVICE_ACCOUNT")
         or os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
         or os.environ.get("ROBIE_GMAIL_DELEGATION_SA")
         or ""
     ).strip()
+    if not sa:
+        sa = _read_sa_from_accountability_env()
+    return sa
 
 
 def build_default_gmail_service() -> Any:

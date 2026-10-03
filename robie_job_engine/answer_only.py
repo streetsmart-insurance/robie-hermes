@@ -1,0 +1,569 @@
+"""Question replies and short vague asks.
+
+A question such as "Which carriers do we quote for NJ homeowners?" is not
+an EZLynx write. Destination readback must not run, and the reply is the
+answer. A short ask with no client, policy, carrier, or attachment is not
+a job to investigate.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from typing import Any
+
+_QUESTION_PREFIXES = (
+    "which ",
+    "what ",
+    "who ",
+    "why ",
+    "when ",
+    "where ",
+    "how ",
+    "do we ",
+    "do you ",
+    "is there ",
+    "are there ",
+    "tell me ",
+)
+
+# These are work requests, even when they end in a question mark.
+_ACTION_REQUEST = re.compile(
+    r"\b(?:certificate of insurance|certificate request|certificates?|cois?|"
+    r"policy change|endorsements?|endorse|mailing address|"
+    r"upload|bind|delete|draft|issue|create|file a note|add a note)\b"
+    r"|\b(?:change|update)\b.{0,40}\b(?:policy|address|mailing)\b",
+    re.IGNORECASE,
+)
+
+_POLITE_PREFIX = re.compile(
+    r"^(?:@\s*robie\b[,\s]*|(?:please|can you|could you|would you)\b[\s,]*)",
+    re.IGNORECASE,
+)
+
+_WORK_MARKERS = re.compile(
+    r"\b(?:applicant|policy|policies|carrier|carriers|certificate|certificates|"
+    r"cert|certs|coi|quote|quotes|endorsement|endorsements|mailing|address|"
+    r"insured|client|homeowners|auto)\b",
+    re.IGNORECASE,
+)
+
+_CLIENT_NAME = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
+
+_VAGUE_WORD_LIMIT = 6
+
+# A short polite ask that names a real task is still a job.
+_TASK_VERBS = re.compile(
+    r"\b(?:finish|file|update|change|issue|draft|create|send|upload|explain|"
+    r"remind|check|read|open|run|set|add|write|move|delete|apply|quote|"
+    r"complete|fill|bind|edit|reassign|audit|sync|generate|submit|perform|"
+    r"verify|inspect|navigate|download|attach|endorse)\b",
+    re.IGNORECASE,
+)
+
+CLARIFICATION_QUESTION = (
+    "What should I do? Name the client, the policy, or the task you want finished."
+)
+
+CERT_ROUTE = (
+    "Route: certificate. Use ezlynx_discussion_note and "
+    "robie_job_engine.certificate_filing to draft and file the holder note "
+    "on the existing discussion. Draft only. "
+    "The note must say the certificate holder was requested/drafted until a "
+    "readback shows the holder was added. Do not say the holder was added "
+    "before that readback. "
+    "Do not bind, take payment, or email the client or the certificate holder. "
+    "Do not browse EZLynx by hand. Do not read Robie's source, jobs.db, or token files."
+)
+
+POLICY_CHANGE_ROUTE = (
+    "Route: policy change. File the note with ezlynx_discussion_note on the "
+    "existing discussion title named in the request. For a mailing-address "
+    "change, use that existing title (for example Policy Change Request "
+    "Checkup - Mailing Address update). Do not create a discussion. "
+    "The note must say the mailing-address change was requested until a "
+    "readback shows the new address. Do not say the mailing address was "
+    "updated before that readback. "
+    "Do not use Playwright Add Note or Save Note. "
+    "Do not bind, take payment, or email the client. "
+    "Do not read Robie's source, jobs.db, or token files."
+)
+
+DISCUSSION_NOTE_ROUTE = (
+    "Route: discussion note. This is an EZLynx write. "
+    "Use ezlynx_discussion_note once, on the existing discussion named in "
+    "the request. Do not create a discussion. Do not post the note twice. "
+    "Pass plan as an object with three fields: "
+    "write is the string \"discussion note\" (not an object), "
+    "target is an object whose discussion is the existing title "
+    "(for example \"follw up 1\"), "
+    "and values is an object whose note_text is the exact note "
+    "(not a string). "
+    "If the tool says the plan field is wrong, fix the plan and call the tool again. "
+    "Do not tell the user the note was filed until the tool says it was. "
+    "If the tool says the note was posted or is verifying, stop. "
+    "Do not use Playwright Add Note or Save Note. "
+    "Do not bind, take payment, or email the client. "
+    "Do not read Robie's source, jobs.db, or token files."
+)
+
+_VERIFIER_NOISE = re.compile(r"file-mutation verifier", re.IGNORECASE)
+
+_ADDRESS_COMPLETION_CLAIMS = (
+    (
+        re.compile(r"\bupdated the mailing address\b", re.IGNORECASE),
+        "requested a mailing address change",
+    ),
+    (
+        re.compile(r"\bmailing address has been updated\b", re.IGNORECASE),
+        "mailing address change was requested",
+    ),
+    (
+        re.compile(r"\bmailing address was updated\b", re.IGNORECASE),
+        "mailing address change was requested",
+    ),
+    (
+        re.compile(r"\bmailing address updated\b", re.IGNORECASE),
+        "mailing address change requested",
+    ),
+)
+
+
+def strip_answer_verifier_noise(text: str) -> str:
+    """Drop Hermes verifier warnings from an answer-only reply."""
+    kept = [
+        line
+        for line in str(text or "").splitlines()
+        if not _VERIFIER_NOISE.search(line)
+    ]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def address_readback_proved(args: dict | None = None) -> bool:
+    """True only when this call or a checkpoint says the new address was read back."""
+    payload = dict(args or {})
+    flag = payload.get("address_readback_proved")
+    if flag is True or str(flag or "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    import os
+
+    job_id = str(
+        payload.get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        note = JobStore(db_path).get_checkpoint(job_id, "address_readback")
+    except Exception:
+        return False
+    if not note:
+        return False
+    if note.get("passed") is True or note.get("proved") is True:
+        return True
+    return str(note.get("status") or "").casefold() == "passed"
+
+
+def rewrite_unproved_address_note(note_text: str, *, proved: bool = False) -> str:
+    """Keep a completion claim only after the address readback proved it."""
+    text = str(note_text or "")
+    if proved:
+        return text
+    for pattern, replacement in _ADDRESS_COMPLETION_CLAIMS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+_HOLDER_COMPLETION_CLAIMS = (
+    (
+        re.compile(r"\badded certificate holder\b", re.IGNORECASE),
+        "Requested/drafted certificate holder",
+    ),
+    (
+        re.compile(r"\bcertificate holder was added\b", re.IGNORECASE),
+        "certificate holder was requested/drafted",
+    ),
+    (
+        re.compile(r"\bcertificate holder added\b", re.IGNORECASE),
+        "certificate holder requested/drafted",
+    ),
+)
+
+
+def holder_readback_proved(args: dict | None = None) -> bool:
+    """True only when this call or a checkpoint says the holder was read back."""
+    payload = dict(args or {})
+    flag = payload.get("holder_readback_proved")
+    if flag is True or str(flag or "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    import os
+
+    job_id = str(
+        payload.get("job_id")
+        or os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        from .store import JobStore
+
+        note = JobStore(db_path).get_checkpoint(job_id, "holder_readback")
+    except Exception:
+        return False
+    if not note:
+        return False
+    if note.get("passed") is True or note.get("proved") is True:
+        return True
+    return str(note.get("status") or "").casefold() == "passed"
+
+
+def rewrite_unproved_holder_note(note_text: str, *, proved: bool = False) -> str:
+    """A holder note says requested/drafted until a readback proves the add."""
+    text = str(note_text or "")
+    if proved:
+        return text
+    for pattern, replacement in _HOLDER_COMPLETION_CLAIMS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def field_change_user_reply(discussion: str, *, kind: str) -> str:
+    """What Robie tells the user when the note landed and the field write did not."""
+    title = " ".join(str(discussion or "").split()).strip() or "the discussion"
+    field = "holder" if str(kind or "").casefold() == "holder" else "address"
+    return (
+        f"I noted the request on {title}; I can't change the {field} myself yet, "
+        "so a CSR needs to make it."
+    )
+
+
+_BLANK_SAVED_SPAN = re.compile(r"\s*saved to\s+through\s*\.?", re.IGNORECASE)
+
+
+def saved_span_sentence(start_path: str, end_path: str) -> str:
+    """Name both files, or say nothing when a path is missing.
+
+    An empty interpolation used to post ``saved to  through .``
+    """
+    start = str(start_path or "").strip()
+    end = str(end_path or "").strip()
+    if start and end:
+        return f"saved to {start} through {end}."
+    if start or end:
+        return f"saved to {start or end}."
+    return ""
+
+
+def strip_blank_saved_span(text: str) -> str:
+    """Drop the broken save sentence. Do not leave the empty path clause."""
+    cleaned = _BLANK_SAVED_SPAN.sub(" ", str(text or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+FORBIDDEN_READ_RULE = (
+    "Do not read Robie's own source, the repository, tests, fixtures, "
+    "scripts, jobs.db, .hermes/google_token.json, or any token file during a job. "
+    "Do not grep the server. Do not answer from test files. "
+    "If a live EZLynx lookup fails, say that it failed. "
+    "Use the purpose-built tool named in the task."
+)
+
+FIXTURE_POLICY_MARKER = "BB-2026-ASC-001"
+LIVE_LOOKUP_FAILED = (
+    "The live EZLynx lookup failed. I cannot report a record from test files."
+)
+_INTERNAL_USER_MARKER = re.compile(
+    r"(?:ROBIE_BLOCKED|PLAYWRIGHT_BLOCKED)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_internal_user_markers(text: str) -> str:
+    """Drop worker markers on the way out to a CSR. Detection uses the raw text."""
+    cleaned = _INTERNAL_USER_MARKER.sub("", str(text or ""))
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    return cleaned.strip()
+
+
+_ZERO_WIDTH_CHARS = str.maketrans("", "", "\u200b\u200c\u200d\ufeff")
+
+
+def scrub_user_reply(text: str) -> str:
+    """User text only. Fixture policy numbers are not agency records."""
+    raw = str(text or "").translate(_ZERO_WIDTH_CHARS)
+    if FIXTURE_POLICY_MARKER in raw:
+        return LIVE_LOOKUP_FAILED
+    from .chat_job_controls import plain_missing_field_question
+
+    return plain_missing_field_question(strip_internal_user_markers(raw))
+
+
+def _normalized(text: str) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _ask_body(text: str) -> str:
+    raw = str(text or "").strip()
+    if raw.lower().startswith("subject:") and "\n\n" in raw:
+        raw = raw.split("\n\n", 1)[1]
+    return raw.strip()
+
+
+def core_request(text: str) -> str:
+    """Drop @Robie and can you / please / could you, repeatedly."""
+    normalized = _normalized(_ask_body(text))
+    previous = None
+    while previous != normalized:
+        previous = normalized
+        normalized = _POLITE_PREFIX.sub("", normalized).strip()
+    return normalized.strip(" .!?")
+
+
+def has_client_name(text: str) -> bool:
+    """A two-word capitalized name, ignoring the @Robie mention."""
+    cleaned = re.sub(r"@\s*Robie\b", "", str(text or ""), flags=re.IGNORECASE)
+    return _CLIENT_NAME.search(cleaned) is not None
+
+
+def is_vague_short_request(text: str, *, attachment_count: int = 0) -> bool:
+    """Short polite ask with nothing to act on.
+
+    The "can you / please" prefix is what used to turn this into a full
+    plain-English job. A short operational phrase with no polite prefix
+    stays a job.
+    """
+    if attachment_count:
+        return False
+    if not _POLITE_PREFIX.search(_normalized(_ask_body(text))):
+        return False
+    core = core_request(text)
+    words = [word for word in core.split() if word]
+    if not words or len(words) > _VAGUE_WORD_LIMIT:
+        return False
+    if _WORK_MARKERS.search(core) or _TASK_VERBS.search(core):
+        return False
+    if re.search(r"\b\d{5,}\b", core):
+        return False
+    if has_client_name(_ask_body(text)):
+        return False
+    return True
+
+
+def is_certificate_or_policy_change(text: str) -> bool:
+    from .request_routing import _is_certificate_request, _is_policy_change_request
+
+    normalized = _normalized(_ask_body(text))
+    if "mailing address" in normalized:
+        return True
+    return _is_certificate_request(normalized) or _is_policy_change_request(normalized)
+
+
+def purpose_built_instructions(text: str) -> str:
+    """Name the existing tool. Empty when this is not a cert, note, or policy change."""
+    normalized = _normalized(_ask_body(text))
+    from .request_routing import (
+        _is_certificate_request,
+        _is_discussion_note_request,
+        _is_policy_change_request,
+    )
+
+    if _is_certificate_request(normalized):
+        return CERT_ROUTE
+    if _is_policy_change_request(normalized) or "mailing address" in normalized:
+        return POLICY_CHANGE_ROUTE
+    if _is_discussion_note_request(normalized):
+        return DISCUSSION_NOTE_ROUTE
+    return ""
+
+
+def is_informational_ask(text: str) -> bool:
+    """A question to answer, not an EZLynx write or a vague shrug.
+
+    Prefixes are checked on the request after @Robie / please / can you
+    are stripped, so "@Robie which..." and "Can you tell me which..."
+    are questions. The word "quote" inside a question is not a quote job.
+    """
+    body = _ask_body(text)
+    core = core_request(text)
+    if is_vague_short_request(body, attachment_count=0) and not body.rstrip().endswith("?"):
+        # "can you do a book for me" is vague, not a question to research.
+        if not core.startswith(_QUESTION_PREFIXES):
+            return False
+    normalized = _normalized(body)
+    if not core and not normalized:
+        return False
+    if re.search(
+        r"\b(?:get a quote|need a quote|new quote|quote request|request a quote)\b",
+        core,
+    ):
+        return False
+    asks = core.startswith(_QUESTION_PREFIXES) or core.endswith("?") or normalized.endswith("?")
+    work_verb = re.search(
+        r"\b(?:change|update|issue|create|file|draft|bind|endorse|upload)\b",
+        core,
+    )
+    if asks and not work_verb:
+        return True
+    if _ACTION_REQUEST.search(normalized) or "mailing address" in normalized:
+        return False
+    # "get a quote" is work. "which carriers do we quote" is a question.
+    if re.search(r"\bquotes?\b", core) and not asks:
+        return False
+    if purpose_built_instructions(body):
+        return False
+    return asks
+
+
+ANSWER_LOCATOR = "answer:question"
+
+
+def is_answered_without_write(job: dict[str, Any] | None) -> bool:
+    """A question that never tried an EZLynx write."""
+    payload = dict((job or {}).get("payload") or {})
+    if str((job or {}).get("action_type") or "").startswith("ezlynx."):
+        return False
+    if payload.get("answered") or payload.get("answer_only"):
+        return True
+    text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
+    return is_informational_ask(str(text))
+
+
+def mark_answered_question(store: Any, job_id: str, answer: str) -> dict[str, Any]:
+    """Close a question as answered. This is not an EZLynx write receipt.
+
+    The ledger is COMPLETE so health counts do not call it UNVERIFIED.
+    The answer text stays on the reply. The evidence only records that a
+    question was answered and nothing was written.
+    """
+    from .models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence
+    from .store import utc_now
+
+    job = store.get_job(job_id)
+    payload = dict(job.get("payload") or {})
+    payload["answer_only"] = True
+    payload["answered"] = True
+    payload["locator"] = {"locator": ANSWER_LOCATOR}
+    store.update_payload(job_id, payload)
+    store.checkpoint(
+        job_id,
+        "action",
+        {
+            "action": "answer",
+            "destination": {"locator": ANSWER_LOCATOR},
+        },
+    )
+    store.checkpoint(
+        job_id,
+        "answer_only_close",
+        {"reason": "answered", "wrote": False},
+    )
+    expected = {
+        "status": "answered",
+        "outcome": "answered",
+        "locator": ANSWER_LOCATOR,
+        "content": "answered",
+    }
+    captured = utc_now()
+    store.add_evidence(
+        job_id,
+        True,
+        VerificationEvidence(
+            method="answer_text",
+            source="question",
+            expected=expected,
+            observed=dict(expected),
+            authoritative=True,
+            captured_at=captured,
+            locator=ANSWER_LOCATOR,
+        ),
+    )
+    current = JobStatus(store.get_job(job_id)["status"])
+    if current == JobStatus.COMPLETE:
+        return store.get_job(job_id)
+    if current != JobStatus.VERIFYING:
+        store.transition(
+            job_id,
+            JobStatus.VERIFYING,
+            expected={current},
+            release_lease=True,
+        )
+    store.transition(
+        job_id,
+        JobStatus.COMPLETE,
+        expected={JobStatus.VERIFYING},
+        authority=VERIFIER_AUTHORITY,
+        release_lease=True,
+    )
+    del answer
+    return store.get_job(job_id)
+
+
+def action_claims_mutation(action: dict[str, Any] | None) -> bool:
+    """True when this checkpoint is a note or document write, not a search."""
+    dest = dict((action or {}).get("destination") or {})
+    if str(dest.get("note_text") or "").strip():
+        return True
+    docs = dest.get("document_names") or []
+    return bool(docs)
+
+
+def is_answer_only_job(job: dict[str, Any] | None) -> bool:
+    payload = dict((job or {}).get("payload") or {})
+    if str((job or {}).get("action_type") or "").startswith("ezlynx."):
+        return False
+    if payload.get("answer_only"):
+        return True
+    from .client_name_lookup import job_is_named_lookup
+
+    if job_is_named_lookup(job):
+        return True
+    text = payload.get("request_text") or payload.get("text") or payload.get("prompt") or ""
+    return is_informational_ask(str(text))
+
+
+def _outcome_verifier_type():
+    from .message_verification import MessageOutcomeVerifier
+
+    return MessageOutcomeVerifier
+
+
+class SkipDestinationReadback(_outcome_verifier_type()):
+    """Do not re-read EZLynx for an answer-only question.
+
+    This stays a MessageOutcomeVerifier so the Chat wiring check still
+    sees the destination reader. Answer-only jobs return before that read.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.reader = getattr(inner, "reader", inner)
+
+    def verify(self, job: dict[str, Any], action: dict[str, Any]) -> Any:
+        if is_answer_only_job(job) and not action_claims_mutation(action):
+            from .models import VerificationEvidence, VerificationResult
+
+            return VerificationResult(
+                False,
+                VerificationEvidence(
+                    method="answer_text",
+                    source="question",
+                    expected={"answer_only": True},
+                    observed={"ezlynx_readback": "not_run"},
+                    authoritative=False,
+                    captured_at=datetime.now(timezone.utc).isoformat(),
+                ),
+                retryable=False,
+                error="answer only; no EZLynx destination readback",
+            )
+        return self.inner.verify(job, action)

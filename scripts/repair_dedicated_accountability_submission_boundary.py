@@ -146,6 +146,18 @@ def _write_repaired(path: Path, updated: str, backup_suffix: str) -> None:
 def repair_browser(path: Path) -> str:
     path = path.expanduser().resolve()
     original = path.read_text(encoding="utf-8")
+    # Live dedicated VM may already carry a newer equivalent range reader
+    # (_read_page_rows) while still exposing the required terminal-boundary
+    # markers. Treat that as already repaired instead of refusing.
+    already_markers = (
+        'full_dataset_exhausted = False',
+        '"full_dataset_exhausted": full_dataset_exhausted',
+        '"boundary_kind": "first_closed_row" if first_closed_page is not None else "pager_exhausted"',
+        'start, end, _ = _pager_range(page)',
+    )
+    if all(original.count(marker) == 1 for marker in already_markers):
+        if original.count(BROWSER_RANGE_OLD) == 0:
+            return "already_repaired"
     updated = _replace_once(original, BROWSER_INIT_OLD, BROWSER_INIT_NEW, "browser-init")
     updated = _replace_once(updated, BROWSER_LOOP_OLD, BROWSER_LOOP_NEW, "browser-loop")
     updated = _replace_once(updated, BROWSER_RESULT_OLD, BROWSER_RESULT_NEW, "browser-result")

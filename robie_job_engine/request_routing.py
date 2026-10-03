@@ -9,6 +9,8 @@ WORKER_FOR_ACTION = {
     "accountability.daily": "accountability-report",
     "accountability.weekly": "accountability-report",
     "accountability.monthly": "accountability-report",
+    "meeting.synthesis.weekly": "meeting-synthesis",
+    "staff.fun.monthly": "staff-fun",
     "drive.skill_sync": "drive-skill-sync",
     "carrier.proposal": "carrier-proposal",
     "browser.read": "browser-read",
@@ -25,6 +27,15 @@ WORKER_FOR_ACTION = {
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
     "hermes.unavailable": "hermes-cua",
+    # Playground Chat types. Not bounded: they run on the general agent.
+    # Production job-type gate is not bypassed because they are not in
+    # BOUNDED_ENGINE_ACTIONS; classification itself stays off unless playground.
+    "ezlynx.quote": "hermes-cua",
+    "ezlynx.commercial_auto": "hermes-cua",
+    "ezlynx.policy_change": "hermes-cua",
+    "ezlynx.policy_setup": "hermes-cua",
+    "ezlynx.certificate": "hermes-cua",
+    "ezlynx.discussion_note": "hermes-cua",
     "manual_renewal_verification": "manual-renewal",
     "audit_verification": "audit-verification",
     "mortgagee_verification": "mortgagee-verification",
@@ -37,6 +48,8 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "accountability.daily",
         "accountability.weekly",
         "accountability.monthly",
+        "meeting.synthesis.weekly",
+        "staff.fun.monthly",
         "drive.skill_sync",
         "carrier.proposal",
         "browser.read",
@@ -112,6 +125,77 @@ class RequestClassification:
     action_type: str
     worker: str
     hold_status: str | None = None
+    answer_only: bool = False
+
+
+# General-agent framing for playground Chat types. Existing EZLynx skills
+# are named where they exist. A missing readback must not block the reply.
+PLAYGROUND_TASK_FRAMING = {
+    "ezlynx.quote": (
+        "Task: quote request. Use the EZLynx quote flow. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx applicant, document, or note readback is available, "
+        "keep it as evidence. Do not wait on that readback to answer."
+    ),
+    "ezlynx.commercial_auto": (
+        "Task: commercial auto from an existing quote. Follow the "
+        "ezlynx-commercial-auto-from-quote skill. A policy shell is not done. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.policy_change": (
+        "Task: policy change. File the note with ezlynx_discussion_note on the "
+        "existing discussion title named in the request. For a mailing-address "
+        "change, use that existing title. Do not create a discussion. "
+        "Do not use Playwright Add Note or Save Note. "
+        "Do not bind, take payment, or email the client. "
+        "Do not read Robie's source, jobs.db, or token files. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.policy_setup": (
+        "Task: homeowners policy setup on the EZLynx test account. "
+        "Call the ezlynx_policy_setup tool before any browser step. "
+        "Do not bind, take payment, or email the client. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.certificate": (
+        "Task: certificate request. Use ezlynx_discussion_note and "
+        "robie_job_engine.certificate_filing to draft and file the holder note "
+        "on the existing discussion. Draft only. "
+        "Do not bind, take payment, or email the client or the certificate holder. "
+        "Do not browse EZLynx by hand. Do not read Robie's source, jobs.db, or token files. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+}
+
+_QUOTE_RE = re.compile(
+    r"\b(?:quote request|get a quote|need a quote|new quote|request a quote|quotes?)\b"
+)
+_POLICY_CHANGE_RE = re.compile(
+    r"\b(?:policy change|change the policy|change this policy|endorsements?|endorse)\b"
+    r"|\b(?:change|update|endorse)\b.{0,48}\bpolic"
+    r"|\bpolic\w*\b.{0,48}\b(?:change|update|endorsement)\b"
+    r"|\b(?:change|update|correct|set)\b.{0,48}\b(?:address|deductible|lienholder|mortgagee|limit|garaging)\b"
+)
+_ADDRESS_CHANGE_RE = re.compile(
+    r"\b(?:change|update|correct|set|move)\b.{0,60}\b(?:mailing address|garaging address|address)\b"
+    r"|\b(?:mailing address|garaging address)\b.{0,40}\b(?:change|update|to)\b"
+)
+_CERTIFICATE_RE = re.compile(
+    r"\b(?:certificate of insurance|certificate request|cert request|certificates?|coi)\b"
+)
+_DISCUSSION_NOTE_RE = re.compile(
+    r"\b(?:add|file|post|leave)\s+(?:a\s+)?note\b"
+)
+_NOTE_BODY_SPLIT = re.compile(r"\b(?:saying|that)\b|:\s")
 
 
 def _normalized(text: str) -> str:
@@ -177,11 +261,199 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification(
             "appsheet.qa_audit", WORKER_FOR_ACTION["appsheet.qa_audit"]
         )
+    # Vague short asks and questions win before "can you " becomes a job
+    # and before playground treats the word "quote" as an EZLynx write.
+    from .answer_only import is_informational_ask, is_vague_short_request
+
+    if is_vague_short_request(text, attachment_count=attachment_count):
+        return RequestClassification(
+            "hermes.needs_clarification",
+            WORKER_FOR_ACTION["hermes.needs_clarification"],
+            hold_status="NEEDS_CLARIFICATION",
+        )
+    if is_informational_ask(text):
+        return RequestClassification(
+            "hermes.plain_english",
+            WORKER_FOR_ACTION["hermes.plain_english"],
+            answer_only=True,
+        )
+    if _is_explicit_discussion_note(text):
+        return RequestClassification(
+            "ezlynx.discussion_note",
+            WORKER_FOR_ACTION["ezlynx.discussion_note"],
+        )
+    instruction = _routing_instruction(normalized)
+    if _is_address_change(instruction):
+        return RequestClassification(
+            "ezlynx.policy_change",
+            WORKER_FOR_ACTION["ezlynx.policy_change"],
+        )
+    playground_route = _classify_playground_ezlynx(instruction)
+    if playground_route is not None:
+        return playground_route
+    if _is_discussion_note_request(normalized):
+        return RequestClassification(
+            "ezlynx.discussion_note",
+            WORKER_FOR_ACTION["ezlynx.discussion_note"],
+        )
     if _is_plain_english(normalized, attachment_count):
         return RequestClassification("hermes.plain_english", WORKER_FOR_ACTION["hermes.plain_english"])
     return RequestClassification(
         "hermes.google_chat_task", WORKER_FOR_ACTION["hermes.google_chat_task"]
     )
+
+
+def _classify_playground_ezlynx(text: str) -> RequestClassification | None:
+    """Quote, policy-change, and certificate types when playground is on.
+
+    Flag off returns None on Test and Production, so classification stays
+    exactly as it is today. Existing bounded routes above this call still
+    win. Where an EZLynx skill already exists, the action type names it;
+    otherwise the general agent gets the task framing. Readback is
+    evidence, not a gate.
+    """
+    from .runtime_env import playground_enabled
+
+    if not playground_enabled():
+        return None
+    if _is_commercial_auto_from_quote(text):
+        return RequestClassification(
+            "ezlynx.commercial_auto", WORKER_FOR_ACTION["ezlynx.commercial_auto"]
+        )
+    if _is_quote_request(text):
+        return RequestClassification("ezlynx.quote", WORKER_FOR_ACTION["ezlynx.quote"])
+    from .policy_setup_dispatch import detect_policy_setup_request
+
+    if detect_policy_setup_request(text):
+        return RequestClassification(
+            "ezlynx.policy_setup", WORKER_FOR_ACTION["ezlynx.policy_setup"]
+        )
+    if _is_policy_change_request(text):
+        return RequestClassification(
+            "ezlynx.policy_change", WORKER_FOR_ACTION["ezlynx.policy_change"]
+        )
+    if _is_certificate_request(text):
+        return RequestClassification(
+            "ezlynx.certificate", WORKER_FOR_ACTION["ezlynx.certificate"]
+        )
+    return None
+
+
+def _is_commercial_auto_from_quote(text: str) -> bool:
+    return "commercial auto" in text and "quote" in text
+
+
+def _routing_instruction(text: str) -> str:
+    """The requested action. Words inside the note body are not the action."""
+    raw = str(text or "")
+    match = _DISCUSSION_NOTE_RE.search(raw)
+    if not match:
+        return raw
+    tail = raw[match.end():]
+    body = _NOTE_BODY_SPLIT.search(tail)
+    if body:
+        return raw[: match.end() + body.start()]
+    return raw[: match.end()]
+
+
+def _is_quote_request(text: str) -> bool:
+    return _QUOTE_RE.search(text) is not None
+
+
+def _is_address_change(text: str) -> bool:
+    """Mailing-address and other simple address edits, playground or not."""
+    return _ADDRESS_CHANGE_RE.search(text) is not None
+
+
+def _is_policy_change_request(text: str) -> bool:
+    return _POLICY_CHANGE_RE.search(text) is not None or _is_address_change(text)
+
+
+def _is_certificate_request(text: str) -> bool:
+    return _CERTIFICATE_RE.search(text) is not None
+
+
+def _is_explicit_discussion_note(text: str) -> bool:
+    """'add a note ... on the discussion \"X\"' is a note, not a policy change.
+
+    The title may say Policy Change or Mailing Address. Those words name
+    the discussion. They are not an instruction to change the policy.
+    """
+    raw = " ".join(str(text or "").split())
+    return _EXPLICIT_DISCUSSION_NOTE.search(raw) is not None
+
+
+_EXPLICIT_DISCUSSION_NOTE = re.compile(
+    r'\b(?:add|file|post|leave)\s+(?:a\s+)?note\b.{0,300}?\bon\s+the\s+discussion\s+["“]',
+    re.IGNORECASE,
+)
+
+
+def discussion_note_body(text: str) -> str:
+    """The note is the text after the instruction's colon.
+
+    A planned note that repeats the prompt ("...please ignore Add a note
+    to Buster Brown 26356199: ...") keeps only the text after that colon.
+    A colon inside the quoted discussion title is not the split.
+    A note that is already just the body is returned unchanged, including
+    its line breaks.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    match = re.search(r"\badd\s+a\s+note\b", raw, re.IGNORECASE)
+    if not match:
+        return raw
+    quote = 0
+    for index, char in enumerate(raw[match.end():], match.end()):
+        if char == '"':
+            quote = 0 if quote else 1
+        elif char == "“":
+            quote += 1
+        elif char == "”" and quote:
+            quote -= 1
+        elif char == ":" and quote == 0:
+            body = raw[index + 1:].strip()
+            return body or raw
+    return raw
+
+
+def parse_named_discussion_note(text: str) -> dict[str, str] | None:
+    """Applicant, discussion title, and note body from one named-discussion ask."""
+    raw = " ".join(str(text or "").split())
+    if not _is_explicit_discussion_note(raw):
+        return None
+    title_match = re.search(
+        r'\bon\s+the\s+discussion\s+["“]([^"”]+)["”]',
+        raw,
+        re.IGNORECASE,
+    )
+    if not title_match:
+        return None
+    instruction = raw[: title_match.end()]
+    ids = re.findall(r"(?<!\d)([1-9]\d{5,9})(?!\d)", instruction)
+    applicant = ids[0] if len(set(ids)) == 1 else ""
+    return {
+        "applicant_id": applicant,
+        "discussion": " ".join(title_match.group(1).split()),
+        "body": discussion_note_body(raw),
+    }
+
+
+def _is_discussion_note_request(text: str) -> bool:
+    """A plain 'add a note' is a discussion write, not a freeform chat task.
+
+    Certificate and policy-change words inside the note body do not change
+    the action. Those routes win only when the request itself asks for them.
+    """
+    if not _DISCUSSION_NOTE_RE.search(text or ""):
+        return False
+    instruction = _routing_instruction(text)
+    if _is_address_change(instruction) or _is_policy_change_request(instruction):
+        return False
+    if _is_certificate_request(instruction):
+        return False
+    return True
 
 
 def is_skill_sync_command(text: str) -> bool:
@@ -267,6 +539,74 @@ def _positive_request_text(text: str) -> str:
 def _is_skill_update(text: str) -> bool:
     has_target = "skill.md" in text or " skill file" in text or " skill-file" in text
     return has_target and any(word in text for word in ("update", "edit", "write", "create"))
+
+
+_UI_DRIVING_ACTIONS = frozenset(
+    {
+        "ezlynx.commercial_auto",
+        "ezlynx.policy_setup",
+        "ezlynx.quote",
+    }
+)
+_API_ROUTE_ACTIONS = frozenset(
+    {
+        "ezlynx.policy_change",
+        "ezlynx.certificate",
+        "ezlynx.reassign",
+        "ezlynx.discussion_note",
+    }
+)
+_GENERAL_CHAT_ACTIONS = frozenset(
+    {"hermes.google_chat_task", "hermes.plain_english"}
+)
+_UI_MARKERS = (
+    "ezlynx",
+    "playwright",
+    "commercial auto",
+    "form entry",
+    "formentry",
+    "app.ezlynx",
+    "useascend.com",
+)
+_API_TEXT_MARKERS = (
+    "mailing address",
+    "certificate of insurance",
+    "discussion note",
+    "ezlynx_discussion_note",
+)
+_NEGATED_UI = re.compile(
+    r"\b(?:no|not|without|never|don't|do not)\b(?:\s+\w+){0,5}\s+"
+    r"\b(?:ezlynx|browser|playwright|chrome)\b"
+)
+
+
+def chat_turn_expects_ui(
+    text: str,
+    action_type: str,
+    *,
+    answer_only: bool = False,
+) -> bool:
+    """Whether this routed turn should drive a browser.
+
+    Called when the job is opened. The Playwright audit reads the stored
+    flag and does not look at the request text again.
+    """
+    if answer_only:
+        return False
+    action = str(action_type or "")
+    if action in _API_ROUTE_ACTIONS:
+        return False
+    if action in _UI_DRIVING_ACTIONS:
+        return True
+    if action not in _GENERAL_CHAT_ACTIONS:
+        return False
+    folded = _normalized(text)
+    if _NEGATED_UI.search(folded):
+        return False
+    if any(marker in folded for marker in _API_TEXT_MARKERS):
+        return False
+    positive = _positive_request_text(folded)
+    return any(marker in positive for marker in _UI_MARKERS)
 
 
 def _is_plain_english(text: str, attachment_count: int) -> bool:

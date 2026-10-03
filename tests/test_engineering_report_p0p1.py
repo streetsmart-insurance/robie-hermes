@@ -5,7 +5,6 @@ No live EZLynx. No real credentials. Production release stays FAIL.
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import threading
 import time
@@ -31,7 +30,6 @@ from robie_job_engine.idempotency import DurableWorkLedger, IdempotencyError, as
 from robie_job_engine.model_fallback import ModelTarget
 from robie_job_engine.models import ACTION_OUTCOME_UNKNOWN, VERIFIER_AUTHORITY, JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 from robie_job_engine.release_gate import production_release_decision
-from robie_job_engine import report_registry
 from robie_job_engine.report_registry import ReportRegistryError, ReportRunRegistry, get_report_spec
 from robie_job_engine.runs import IsolatedRunStore, RunIsolationError
 from robie_job_engine.runtime_env import ProductionGuardError
@@ -329,17 +327,8 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         self.assertEqual(started["facts"]["policy_number"]["kind"], "configured")
         self.assertEqual(started["facts"]["policy_number"]["value"], "PN-1")
         self.assertTrue(started["fingerprint"])
-        # 4359's schema is now verified: the registry flag is in sync with the
-        # ingestion gate (see test_4359_registry_in_sync_with_ingestion_gate), so
-        # start_run no longer blocks it. The unverified-schema block mechanism
-        # is exercised with a temporarily-unverified copy of the 4359 spec.
-        spec_4359 = get_report_spec("4359")
-        unverified_4359 = dataclasses.replace(spec_4359, schema_verified=False)
-        with patch.dict(report_registry.VERIFIED_REPORTS, {"4359": unverified_4359}):
-            with self.assertRaises(ReportRegistryError):
-                registry.start_run(run_id="run-4359-blocked", report_id="4359")
-        started_4359 = registry.start_run(run_id="run-4359", report_id="4359")
-        self.assertEqual(started_4359["report_id"], "4359")
+        with self.assertRaises(ReportRegistryError):
+            registry.start_run(run_id="run-4359", report_id="4359")
         with self.assertRaises(ReportRegistryError):
             registry.start_run(run_id="run-missing", report_id="4247", fields=["unrelated"])
         started_4372 = registry.start_run(

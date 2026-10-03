@@ -3,7 +3,8 @@
 Runs on Chat/Job Engine terminal close-out and answers four factual checks
 from jobs.db, destination evidence rows, and the published recording. Worker
 prose is never treated as destination evidence. A missing jobs.db, recording,
-or session is UNKNOWN/FAIL, not a skip-as-pass.
+or session is UNKNOWN/FAIL unless the server-owned executable contract marks
+that job type recording-exempt and the engine persisted the matching exemption.
 """
 
 from __future__ import annotations
@@ -52,6 +53,41 @@ NAVIGATION_CLAIM_RE = re.compile(
 
 class PostJobAuditError(RuntimeError):
     """Fail-closed audit construction error. Never used to authorize COMPLETE."""
+
+
+_API_READBACK_METHODS = frozenset(
+    {
+        "EZLYNX_API",
+        "EZLYNX_API_DESTINATION_READBACK",
+        "DiscussionApi",
+    }
+)
+
+
+def api_readback_confirms_write(store: JobStore, job_id: str) -> bool:
+    """True when a fresh API read, not the tool's own receipt, confirmed the write.
+
+    The recording is supporting evidence after this. It does not decide the
+    audit verdict. A discussion-note checkpoint with ``read_back`` set is the
+    tool's own claim and does not count.
+    """
+    readback = store.get_checkpoint(job_id, "write_readback") or {}
+    if readback.get("passed"):
+        return True
+    note_readback = store.get_checkpoint(job_id, "discussion_note_readback") or {}
+    if note_readback.get("matched"):
+        return True
+    for item in store.list_evidence(job_id):
+        if not item.get("verified") or not item.get("authoritative"):
+            continue
+        observed = item.get("observed") or {}
+        if isinstance(observed, dict) and observed.get("note_text_matched"):
+            return True
+        method = str(item.get("method") or "")
+        source = str(item.get("source") or "").casefold()
+        if method in _API_READBACK_METHODS or "discussionapi" in source:
+            return True
+    return False
 
 
 def _verdict(*parts: str) -> str:
@@ -385,6 +421,22 @@ def audit_recording_motion(
     except Exception as exc:
         return _unknown(f"recording ledger unavailable: {type(exc).__name__}: {exc}")
     if not segments:
+        try:
+            from .job_schema import get_executable_skill_contract
+
+            job_store = JobStore(db_path)
+            job = job_store.get_job(job_id)
+            exemption = job_store.get_checkpoint(job_id, "recording_exemption")
+            contract = get_executable_skill_contract(str(job.get("action_type") or ""))
+        except Exception:
+            exemption = None
+            contract = None
+        if exemption and contract and contract.recording_policy == "EXEMPT":
+            return _pass(
+                exempt=True,
+                policy="EXEMPT",
+                reason=str(exemption.get("reason") or "server-owned recording exemption"),
+            )
         return _fail("missing recording")
     published = [
         item
@@ -537,13 +589,25 @@ def run_post_job_audit(
         store, job_id, motion, session_root=hermes_home
     )
     mismatch_result = str(mismatch.get("result") or "UNKNOWN")
-    verdict = _verdict(
-        str(heartbeat.get("result") or "UNKNOWN"),
-        str(evidence.get("result") or "UNKNOWN"),
-        str(motion.get("result") or "UNKNOWN"),
-        "FAIL" if mismatch_result == "MISMATCH" else mismatch_result,
-        str(playwright_log.get("result") or "UNKNOWN"),
-    )
+    confirmed = api_readback_confirms_write(store, job_id)
+    if confirmed:
+        motion = dict(motion)
+        motion["supporting_only"] = True
+        mismatch = dict(mismatch)
+        mismatch["supporting_only"] = True
+        verdict = _verdict(
+            str(heartbeat.get("result") or "UNKNOWN"),
+            str(evidence.get("result") or "UNKNOWN"),
+            str(playwright_log.get("result") or "UNKNOWN"),
+        )
+    else:
+        verdict = _verdict(
+            str(heartbeat.get("result") or "UNKNOWN"),
+            str(evidence.get("result") or "UNKNOWN"),
+            str(motion.get("result") or "UNKNOWN"),
+            "FAIL" if mismatch_result == "MISMATCH" else mismatch_result,
+            str(playwright_log.get("result") or "UNKNOWN"),
+        )
     return {
         "job_id": job["id"],
         "job_status": job["status"],

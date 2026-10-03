@@ -14,7 +14,7 @@
 - EZLynx Reports 5.0 Activity Detail, Change Request Detail, Sales Center Detail, Submission Center, and relevant account Activity discussions.
 - Existing policy-change and COI Google Sheets trackers.
 - AppSheet backing sheet `Employees`, limited to Name, Position, Email, Department, App Roles, and Employment Status.
-- Gmail metadata for approved active employees; Gmail readonly only for the reporting mailbox and attachments.
+- Gmail metadata for approved active employees; Gmail readonly only for the reporting mailbox and attachments, plus the opt-in handled-verification path (`collection.gmail_accountability.verify_handled`): per approved employee mailbox, reply/forward detection across the employee Sent and configured shared mailboxes, and extractive summaries of genuinely unhandled client mail. Forwarded-to-another-mailbox items count as handled; FYI/no-clear-action items are excluded from reply-rate denominators.
 
 ## Package
 
@@ -31,12 +31,12 @@
 Use the same order in the agency summary and every department tab:
 
 1. Phone & Queue Service — over-two-minute hold/wait exceptions first, then queue scorecard, employee call/talk measures, voicemail, and callback service risk.
-2. Client Follow-Up — callback verification, repeated callers, EZLynx account links, and email-response aging.
+2. Client Follow-Up — callback verification, repeated callers, EZLynx account links, and email-response aging. When handled verification is enabled, email findings carry a Handled-via value (reply / forward / unhandled, with who/when detail) and unhandled items carry a one-line summary plus action flag instead of the bare "no later reply in thread" finding.
 3. Policy Service — policy changes, ownership, dependency, request age, and next action.
 4. Sales — Sales Center assigned producer, lead source, stage, last touch, and no-touch age.
 5. Tasks & Activities — overdue tasks, applicant/account, owner, age, latest evidence, and department offenders.
 6. COIs & Submissions — pending COIs and Submission Center exceptions with original request date and blocker.
-7. Customer Sentiment — Magellan sad/at-risk calls and corroborated service concerns.
+7. Customer sentiment (SAD) — Magellan: sad/at-risk calls and corroborated service concerns.
 8. Validation — source window, evidence gaps, unresolved ownership, and release gates.
 
 ## Default recipient allowlist

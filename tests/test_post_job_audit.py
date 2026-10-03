@@ -17,6 +17,7 @@ from robie_job_engine.chat_guard import (
 from robie_job_engine.models import JobStatus, VerificationEvidence
 from robie_job_engine.post_job_audit import (
     analyze_recording_motion,
+    audit_recording_motion,
     audit_terminal_job,
     format_audit_chat_message,
     frames_show_motion,
@@ -72,6 +73,46 @@ class FrameDiffTests(unittest.TestCase):
 
 
 class PostJobAuditTests(unittest.TestCase):
+    def test_registered_recording_exemption_is_audited_as_pass(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "ezlynx.overdue_submission_reports",
+                {
+                    "resource_id": "ezlynx:submission-center:overview:submissions",
+                    "manifest_path": "/test/manifest.json",
+                    "authorized_actions": ["send_producer_reports"],
+                },
+            )
+            store.checkpoint(
+                job["id"],
+                "recording_exemption",
+                {"reason": "authentication may display credentials or MFA data"},
+            )
+
+            result = audit_recording_motion(db, job["id"])
+
+            self.assertEqual(result["result"], "PASS")
+            self.assertTrue(result["exempt"])
+            self.assertEqual(result["policy"], "EXEMPT")
+
+    def test_unregistered_recording_exemption_cannot_bypass_missing_recording(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job("unregistered.test", {})
+            store.checkpoint(
+                job["id"],
+                "recording_exemption",
+                {"reason": "worker-authored exemption"},
+            )
+
+            result = audit_recording_motion(db, job["id"])
+
+            self.assertEqual(result["result"], "FAIL")
+            self.assertIn("missing recording", result["reason"])
+
     def test_heartbeat_absent_is_no(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
@@ -370,14 +411,14 @@ class PostJobAuditTests(unittest.TestCase):
             job_id = open_chat_job(db, "message-chat-post", "move it")
             posted = []
             response = guard_chat_response(db, job_id, "Done")
-            self.assertIn("UNVERIFIED", response)
-            self.assertIn("ROBIE post-job audit", response)
+            self.assertIn("Not verified.", response)
+            self.assertIn("What happened:", response)
             self.assertIn(job_id, response)
-            self.assertIn("Heartbeat gateway_progress", response)
-            self.assertIn("Destination evidence", response)
-            self.assertIn("Recording motion", response)
-            self.assertIn("Tool vs recording", response)
-            self.assertIn("does not authorize COMPLETE", response)
+            self.assertNotIn("ROBIE post-job audit", response)
+            self.assertNotIn("Heartbeat gateway_progress", response)
+            self.assertNotIn("Recording motion", response)
+            self.assertNotIn("Tool vs recording", response)
+            self.assertNotIn("does not authorize COMPLETE", response)
             stored = JobStore(db).get_checkpoint(job_id, "post_job_audit")
             self.assertIsNotNone(stored)
             self.assertFalse(stored["authorizes_complete"])

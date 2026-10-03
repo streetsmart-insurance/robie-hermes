@@ -29,6 +29,16 @@ def exec_row(url, tool="playwright.goto", status="ok"):
     }
 
 
+def write_row(url):
+    """A real field write. A bare page open is not one."""
+    return {
+        "tool": "playwright_exec",
+        "status": "ok",
+        "code_preview": f'page.goto("{url}"); page.fill("#mailing", "100 Test")',
+        "result_json": '{"ok": true}',
+    }
+
+
 def result_row(url):
     """Some tools record the URL only in the result, not the code."""
     return {
@@ -163,7 +173,7 @@ class CheckpointTests(unittest.TestCase):
 class BindTests(unittest.TestCase):
 
     def test_binding_writes_checkpoint_and_patches_payload(self):
-        store = FakeStore([exec_row(ACCOUNT_URL)])
+        store = FakeStore([write_row(ACCOUNT_URL)])
         job = {"id": "85f5eae0", "payload": {"prompt": "set up the bond"}}
         b = bind_destination_for_job(store, job, {"policy_number": POLICY})
         self.assertTrue(b.bindable)
@@ -177,6 +187,25 @@ class BindTests(unittest.TestCase):
         job = {"id": "j", "payload": {"applicant_id": "111111111"}}
         bind_destination_for_job(store, job, {"policy_number": POLICY})
         self.assertEqual(job["payload"]["applicant_id"], "111111111")
+
+    def test_readonly_navigation_is_not_a_write(self):
+        store = FakeStore([exec_row(ACCOUNT_URL)])
+        job = {"id": "overview", "payload": {"prompt": "open the account"}}
+        binding = bind_destination_for_job(store, job, {})
+        self.assertFalse(binding.bindable)
+        self.assertEqual(store.checkpoints, {})
+        refused = {
+            "tool": "playwright_exec",
+            "status": "refused",
+            "code_preview": f'page.goto("{ACCOUNT_URL}"); page.fill("#mailing", "100")',
+            "result_json": '{"ok": false, "error": "PLAYWRIGHT_BLOCKED: refused"}',
+        }
+        store = FakeStore([refused])
+        binding = bind_destination_for_job(
+            store, {"id": "refused", "payload": {}}, {}
+        )
+        self.assertFalse(binding.bindable)
+        self.assertEqual(store.checkpoints, {})
 
     def test_a_refused_binding_writes_nothing(self):
         rows = [exec_row(ACCOUNT_URL), exec_row("https://app.ezlynx.com/web/account/999/x")]
@@ -199,7 +228,9 @@ class BindTests(unittest.TestCase):
                 job["id"],
                 "playwright_exec",
                 "ok",
-                code_preview=f'page.goto("{UAT_ACCOUNT_URL}")',
+                code_preview=(
+                    f'page.goto("{UAT_ACCOUNT_URL}"); page.fill("#mailing", "100 Test")'
+                ),
                 result={"url": UAT_ACCOUNT_URL},
             )
             b = bind_destination_for_job(

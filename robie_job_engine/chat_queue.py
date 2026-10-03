@@ -429,6 +429,33 @@ class DurableChatEventQueue:
             ).fetchone()
         return self._decode_link(row) if row is not None else None
 
+    def latest_terminal_job_id(
+        self,
+        conversation_id: str,
+        *,
+        statuses: tuple[str, ...],
+    ) -> str | None:
+        """Newest linked job in this thread whose status is in ``statuses``.
+
+        Includes inactive links so a later message can still find the last
+        failed or unverified job. Does not delete history.
+        """
+        if not conversation_id or not statuses:
+            return None
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""SELECT links.job_id
+                    FROM conversation_job_links AS links
+                    JOIN jobs ON jobs.id = links.job_id
+                    WHERE links.conversation_id=?
+                      AND jobs.status IN ({placeholders})
+                    ORDER BY links.created_at DESC, links.id DESC
+                    LIMIT 1""",
+                (conversation_id, *statuses),
+            ).fetchone()
+        return str(row["job_id"]) if row is not None else None
+
     def conversation_job_for_event(self, event_id: str) -> dict[str, Any] | None:
         """Resolve an inbound/reply message to its durable Job correlation."""
         with self._connect() as conn:
@@ -474,6 +501,20 @@ class DurableChatEventQueue:
                    SET pending_decision_id=NULL,interaction_state_json='{}',updated_at=?
                    WHERE pending_decision_id=?""",
                 (_stamp(), decision_id),
+            ).rowcount
+
+    def deactivate_job_links(self, job_id: str) -> int:
+        """Drop the active link for one job. The row stays for the audit."""
+        ident = str(job_id or "").strip()
+        if not ident:
+            return 0
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                UPDATE conversation_job_links SET active=0,updated_at=?
+                WHERE job_id=? AND active=1
+                """,
+                (_stamp(), ident),
             ).rowcount
 
     def deactivate_conversation(self, conversation_id: str) -> int:

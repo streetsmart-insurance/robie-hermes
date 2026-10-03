@@ -9,3 +9,8 @@ google-cloud-secret-manager==2.24.0
 openpyxl==3.1.5
 playwright==1.52.0
 playwright-stealth==1.0.6
+# playwright-stealth imports pkg_resources. setuptools 82 drops that module,
+# and setuptools 81 warns on import. This pin keeps pkg_resources in the
+# Test gateway venv. The runner also skips stealth when it is still missing,
+# so a missing module cannot become a 45 second browser timeout.
+setuptools>=70,<81

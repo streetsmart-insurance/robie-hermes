@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 LEFTOVER_RETRY_REFUSED = "LEFTOVER_RETRY_REFUSED"
 _RETRY_TEXTS = frozenset({"retry", "/retry"})
+PLAYGROUND_RETRY_MAX_AGE = timedelta(hours=24)
+_PLAYGROUND_RETRY_STATUSES = frozenset({JobStatus.FAILED, JobStatus.UNVERIFIED})
 RECONCILIATION_REQUIRED_ACTIONS = frozenset(
     {"ezlynx.reassign", "ezlynx.move_document", "ezlynx.apply_label"}
 )
@@ -66,7 +68,12 @@ def leftover_retry_hold_reason(
     and younger than ``LIVE_TAB_CLAIM_MAX_AGE``. Terminal FAILED /
     UNVERIFIED / leftover ids must not resume via RETRY. New @robie is
     the path. No auto-retry.
+
+    Playground (``ROBIE_PLAYGROUND=1``, including Production when that flag
+    is set) also allows FAILED / UNVERIFIED younger than 24 hours. With the
+    flag off, this refusal text stays the same on every environment.
     """
+    from .runtime_env import playground_enabled
     from .tab_cleanup import LIVE_TAB_CLAIM_MAX_AGE, job_holds_live_tab_claim
 
     job = dict(job or {})
@@ -78,6 +85,8 @@ def leftover_retry_hold_reason(
             f"{LEFTOVER_RETRY_REFUSED}: leftover job {job_id} has no usable "
             "status. RETRY is refused. Start a new @robie. No auto-retry."
         )
+    if playground_enabled() and status in _PLAYGROUND_RETRY_STATUSES:
+        return _playground_terminal_retry_reason(job, status, job_id, now=now)
     if status != JobStatus.AWAITING_HUMAN_INPUT:
         return (
             f"{LEFTOVER_RETRY_REFUSED}: leftover RETRY is refused for "
@@ -92,6 +101,57 @@ def leftover_retry_hold_reason(
             "new @robie. No auto-retry."
         )
     return None
+
+
+def _playground_terminal_retry_reason(
+    job: dict[str, Any],
+    status: JobStatus,
+    job_id: str,
+    *,
+    now: datetime | None,
+) -> str | None:
+    """Allow a recent failed or unverified retry only while playground is on.
+
+    The caller must already have checked ``playground_enabled()``. Older
+    than 24 hours stays refused on every environment.
+    """
+    from .tab_cleanup import job_claim_stamp
+
+    stamp = job_claim_stamp(job)
+    if stamp is None:
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: {status.value} job {job_id} has no "
+            "timestamp. Playground retry needs a job younger than 24 hours. "
+            "Start a new request."
+        )
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if (moment - stamp) > PLAYGROUND_RETRY_MAX_AGE:
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: {status.value} job {job_id} is older "
+            "than 24 hours. Playground retry was refused. Start a new request."
+        )
+    return None
+
+
+def resume_terminal_for_playground_retry(store: Any, job: dict[str, Any]) -> dict[str, Any]:
+    """Re-open a failed or unverified job so the same thread can run it again.
+
+    Call only after ``leftover_retry_hold_reason`` returned None. Does not
+    mark COMPLETE and does not touch the EZLynx write allowlist.
+    """
+    status = JobStatus(job.get("status"))
+    if status not in _PLAYGROUND_RETRY_STATUSES:
+        return job
+    job_id = str(job.get("id") or "")
+    return store.transition(
+        job_id,
+        JobStatus.PENDING,
+        expected={status},
+        error=None,
+        release_lease=True,
+    )
 
 
 def resolve_worker_name(action_type, payload):
@@ -261,6 +321,15 @@ class JobEngine:
             and contract.recording_policy == "REQUIRED"
             and (self.enforce_recording_policy or self.recordings.enabled)
         )
+        question_only = False
+        try:
+            from .chat_guard import question_only_skips_recording
+
+            question_only = question_only_skips_recording(self.store, job, "")
+        except Exception:
+            question_only = False
+        if question_only:
+            recording_required = False
         recording_started = False
         recording_finalized = False
         if recording_required:
@@ -277,6 +346,10 @@ class JobEngine:
                 )
                 runs.terminate(run["id"], "FAILED")
                 return failed
+        elif question_only:
+            # A resume must not replace the question-only exemption with
+            # "not an executable Skill" and then start a recorder.
+            pass
         else:
             if job["action_type"] == "drive.skill_sync":
                 reason = (
@@ -341,7 +414,11 @@ class JobEngine:
             maybe_snapshot_and_bind(self.store.path, job_id, phase="start")
             if self._job_requires_browser(job):
                 from .session_preflight import check as check_session_preflight
-                from .session_recovery import attempt_session_recovery, recovery_summary
+                from .session_recovery import (
+                    attempt_session_recovery,
+                    confirm_session_after_recovery,
+                    recovery_summary,
+                )
 
                 session_check = check_session_preflight()
                 if session_check.get("blocking"):
@@ -354,7 +431,9 @@ class JobEngine:
                     recovery = attempt_session_recovery()
                     self.store.checkpoint(job_id, "session_recovery", recovery)
                     if recovery.get("recovered"):
-                        session_check = check_session_preflight()
+                        session_check = confirm_session_after_recovery(
+                            check_session_preflight
+                        )
                         self.store.checkpoint(
                             job_id, "session_preflight_recheck", session_check
                         )
@@ -492,6 +571,12 @@ class JobEngine:
                 except RunIsolationError:
                     pass
             if status_name in {"COMPLETE", "FAILED", "UNVERIFIED"}:
+                if self.recordings is not None:
+                    # Chat starts the recording outside this engine, so
+                    # recording_started is false and the audit used to read
+                    # a row still marked RECORDING. Stop it first. safe_stop
+                    # does not change the job status.
+                    self.recordings.safe_stop(job_id, status_name)
                 try:
                     from .playwright_observability import (
                         fail_closed_zero_playwright_rows,
@@ -522,6 +607,22 @@ class JobEngine:
                         status_name,
                         redact_exception(exc),
                     )
+
+    def _remember_hold_question(self, job_id: str, error: str | None) -> None:
+        """Park a missing page as a question the person can answer."""
+        from .browser_read import clarification_for_hold
+
+        question = clarification_for_hold(error)
+        if not question:
+            return
+        try:
+            self.store.checkpoint(
+                job_id,
+                "clarification",
+                {"question": question, "asked": True},
+            )
+        except Exception:
+            logger.exception("could not store clarification job=%s", job_id)
 
     def _perform(
         self,
@@ -655,6 +756,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,
@@ -869,6 +971,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,

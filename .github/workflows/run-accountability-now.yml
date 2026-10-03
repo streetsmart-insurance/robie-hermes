@@ -121,6 +121,12 @@ jobs:
           cp scripts/preflight_dedicated_accountability_submission.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_recipients.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_google_docs.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_magellan_sentiment_heading.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_magellan_sad_identity.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_magellan_session_acl.py "${bundle_dir}/"
+          cp scripts/magellan_session_acl.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_magellan_empty.py "${bundle_dir}/"
+          cp scripts/magellan_empty_gate.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_submission_gate.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_submission_boundary.py "${bundle_dir}/"
           (cd "${bundle_dir}" && sha256sum *.py > SHA256SUMS)
@@ -140,6 +146,10 @@ jobs:
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_submission_gate.py" --path "${APP_ROOT}/src/production_main.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_submission_boundary.py" --browser-path "${APP_ROOT}/src/extractors/ezlynx_submission_browser.py" --adapter-path "${APP_ROOT}/src/extractors/ezlynx_submission_center.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/reporters/stable_google_doc.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan_sentiment_heading.py" --path "${APP_ROOT}/src/reporters/stable_google_doc.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan_sad_identity.py" --production-main "${APP_ROOT}/src/production_main.py" --magellan-extractor "${APP_ROOT}/src/extractors/magellan_playwright.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan_empty.py" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan_session_acl.py" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_submission.py" --app-root "${APP_ROOT}" --reliability-attempts 2
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_magellan.py" --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
@@ -165,6 +175,7 @@ jobs:
             recipient_args+=(--recipient jake@streetsmart.insurance)
             recipient_args+=(--recipient ashley@streetsmart.insurance)
             recipient_args+=(--recipient gabrielac@streetsmart.insurance)
+            recipient_args+=(--recipient sandy@streetsmart.insurance)
           fi
           python scripts/verify_dedicated_accountability_delivery.py \
             --mode preflight \

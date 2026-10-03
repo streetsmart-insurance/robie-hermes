@@ -22,6 +22,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -149,17 +150,101 @@ def job_text(job: dict[str, Any]) -> str:
     )
 
 
+_API_NOT_UI_ACTIONS = frozenset(
+    {
+        "ezlynx.policy_change",
+        "ezlynx.certificate",
+        "ezlynx.reassign",
+    }
+)
+# Chat routes whose missing Playwright rows are a silent gap. Other
+# browser actions prove themselves through their own verifiers. The audit
+# reads this set or payload["expected_ui"] and does not scan request text.
+_UI_DRIVING_ACTIONS = frozenset(
+    {
+        "ezlynx.commercial_auto",
+        "ezlynx.policy_setup",
+        "ezlynx.quote",
+    }
+)
+
+
+def deterministic_path_succeeded(store: JobStore, job: dict[str, Any] | None) -> bool:
+    """True when readback or an answer-only close already proved the job."""
+    if not job:
+        return False
+    from .answer_only import is_answer_only_job
+
+    if is_answer_only_job(job):
+        return True
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    try:
+        if store.get_checkpoint(job_id, "answer_only_close"):
+            return True
+    except Exception:
+        pass
+    try:
+        evidence = store.list_evidence(job_id)
+    except Exception:
+        evidence = []
+    for item in evidence:
+        if item.get("verified") and item.get("authoritative"):
+            return True
+    for kind in ("address_readback", "destination_readback"):
+        try:
+            note = store.get_checkpoint(job_id, kind) or {}
+        except Exception:
+            note = {}
+        if note.get("passed") is True or note.get("proved") is True:
+            return True
+        if str(note.get("status") or "").casefold() == "passed":
+            return True
+    return False
+
+
+def _payload_expected_ui(job: dict[str, Any] | None) -> bool | None:
+    payload = dict((job or {}).get("payload") or {})
+    if "expected_ui" not in payload:
+        return None
+    return bool(payload.get("expected_ui"))
+
+
 def job_requires_playwright(job: dict[str, Any] | None) -> bool:
-    """True when a Chat job asked for EZLynx / Playwright browser work."""
+    """True when the route or expected-UI flag says this job drives a screen.
+
+    Request wording is not consulted. ``no EZLynx, no browser`` does not
+    fail a job whose route did not expect a browser.
+    """
     if not job:
         return False
     action = str(job.get("action_type") or "")
-    if action not in CHAT_PLAYWRIGHT_ACTIONS:
+    if action in _API_NOT_UI_ACTIONS:
         return False
-    text = " ".join(job_text(job).casefold().split())
-    if any(text.startswith(marker) or marker == text for marker in CONVERSATION_ONLY_MARKERS):
+    flagged = _payload_expected_ui(job)
+    if flagged is False:
         return False
-    return any(marker in text for marker in PLAYWRIGHT_REQUEST_MARKERS)
+    screen_route = action in _UI_DRIVING_ACTIONS
+    if flagged is True:
+        return screen_route or action in CHAT_PLAYWRIGHT_ACTIONS
+    return screen_route
+
+
+def job_expected_to_drive_ui(job: dict[str, Any] | None) -> bool:
+    """True only when this job was supposed to drive a browser screen.
+
+    Notes, certificates, mailing-address changes, and answers use the API
+    or a plain reply. A missing Playwright row is not a failure for those.
+    The decision is the routed type or ``expected_ui`` flag set when the
+    job was opened, never a keyword in the request text.
+    """
+    if not job:
+        return False
+    payload = dict(job.get("payload") or {})
+    if payload.get("answer_only"):
+        return False
+    return job_requires_playwright(job)
 
 
 def sanitize_tab_url(url: str) -> str:
@@ -364,6 +449,16 @@ def persist_playwright_exec_finish(
             status = "error"
         else:
             status = "ok"
+    error_text = ""
+    if isinstance(payload, dict):
+        error_text = str(payload.get("error") or "")
+    if status == "error" and re.search(
+        r"PLAYWRIGHT_BLOCKED|do not drive ezlynx screens by hand|"
+        r"playwright_exec is refused|POLICY_SETUP_ORDER",
+        error_text,
+        re.IGNORECASE,
+    ):
+        status = "refused"
     try:
         JobStore(db_path).update_playwright_exec(row_id, status=status, result=payload)
     except Exception:
@@ -406,6 +501,10 @@ def fail_closed_zero_playwright_rows(
     Playwright. UNVERIFIED prose is not an allowed hide.
     """
     current = store.get_job(job["id"])
+    if deterministic_path_succeeded(store, current):
+        return current
+    if not job_expected_to_drive_ui(current):
+        return current
     if not job_requires_playwright(current):
         return current
     if list_playwright_exec(store, current["id"]):

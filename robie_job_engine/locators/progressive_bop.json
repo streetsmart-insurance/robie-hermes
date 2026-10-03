@@ -1,0 +1,75 @@
+{
+  "portal": "progressive_fao",
+  "page_name": "bop_pending_cancel_nonpayment",
+  "version": "1.0",
+  "fields": {
+    "manage_policies": {
+      "name": "manage_policies",
+      "primary_strategy": "role",
+      "primary_selector": "link:Manage Policies",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Manage Policies",
+      "exact": true,
+      "description": "FAO shell link or button. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "businessowner_contractor_gl": {
+      "name": "businessowner_contractor_gl",
+      "primary_strategy": "role",
+      "primary_selector": "link:Businessowner/Contractor GL",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Businessowner/Contractor GL",
+      "exact": true,
+      "description": "Opens the Businessowner/Contractor GL product in one new window. Off FAO shell Home the click is this exact name after Manage Policies. Already on shell Home skips Manage Policies and accepts this exact name or exact 'Go to Businessowner/Contractor GL policy search'. Zero or several matches hold. Live name on /landingpages/managepolicies/ is UNVERIFIED until the next hermes-test-01 prove.",
+      "last_updated": "2026-09-27"
+    },
+    "view_reports": {
+      "name": "view_reports",
+      "primary_strategy": "role",
+      "primary_selector": "link:View Reports",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:View Reports",
+      "exact": true,
+      "description": "View Reports on the BOP application. Live 2026-09-28 label is VIEW REPORTS on bop.americanstrategic.com. The FAO HPLanding popup that only says Close this window is not this page. Zero or several matches hold.",
+      "last_updated": "2026-09-28"
+    },
+    "pending_cancel_nonpayment": {
+      "name": "pending_cancel_nonpayment",
+      "primary_strategy": "role",
+      "primary_selector": "link:Pending Cancel for Nonpayment",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Pending Cancel for Nonpayment",
+      "exact": true,
+      "description": "Pending Cancel for Nonpayment report. Live accessible name is UNVERIFIED.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_search": {
+      "name": "policy_search",
+      "primary_strategy": "role",
+      "primary_selector": "searchbox:Search",
+      "fallback_strategy": "role",
+      "fallback_selector": "textbox:Policy number",
+      "exact": true,
+      "description": "FAO shell policy search. Exactly one of the known search fields may match. Live name is UNVERIFIED.",
+      "last_updated": "2026-09-26"
+    },
+    "documents": {
+      "name": "documents",
+      "primary_strategy": "role",
+      "primary_selector": "link:Documents",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Documents",
+      "exact": true,
+      "description": "Documents for the searched policy. Live accessible name is UNVERIFIED.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_documents_tab": {
+      "name": "policy_documents_tab",
+      "primary_strategy": "role",
+      "primary_selector": "tab:Policy",
+      "exact": true,
+      "description": "Policy document tab. The run holds unless aria-selected becomes true.",
+      "last_updated": "2026-09-26"
+    }
+  }
+}

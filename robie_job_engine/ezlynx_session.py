@@ -16,9 +16,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .ezlynx_session_lock import EzlynxSessionLockTimeout, exclusive_session
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -47,6 +48,7 @@ AUTH_CODES = {
 }
 LOGIN_URL = "https://app.ezlynx.com/auth/account/login"
 APP_URL = "https://app.ezlynx.com/"
+APP_WEB_URL = "https://app.ezlynx.com/web/"
 
 
 def _now() -> str:
@@ -161,6 +163,35 @@ class SessionVerificationFailed(RuntimeError):
     pass
 
 
+# After credential submit the login URL can linger. One immediate state()
+# read (about the old 4s load) false-fails SESSION_LOGGED_OUT.
+POST_LOGIN_STATE_ATTEMPTS = 10
+POST_LOGIN_STATE_DELAY_SECONDS = 3.0
+
+
+def wait_for_post_login_state(
+    read_state: Callable[[], SessionState],
+    *,
+    attempts: int = POST_LOGIN_STATE_ATTEMPTS,
+    delay_seconds: float = POST_LOGIN_STATE_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> SessionState:
+    """Poll until the page leaves the login URL, or the attempt budget ends.
+
+    MFA and other non-login states return immediately. Only LOGIN_REQUIRED
+    is retried, because that URL is what the preflight treats as logged out.
+    """
+    pause = sleeper or time.sleep
+    state = read_state()
+    total = max(1, int(attempts))
+    for index in range(total - 1):
+        if state is not SessionState.LOGIN_REQUIRED:
+            return state
+        pause(delay_seconds)
+        state = read_state()
+    return state
+
+
 def authenticated_app_evidence(
     url: str,
     *,
@@ -201,31 +232,98 @@ class PlaywrightEzlynxSession:
             self._page.goto(APP_URL, wait_until="domcontentloaded")
 
     def state(self) -> SessionState:
-        self._ensure_page()
+        """Judge the session on the app page, not on a blank login tab."""
+        try:
+            self._page.goto(APP_WEB_URL, wait_until="domcontentloaded")
+        except Exception:
+            return SessionState.UNVERIFIED
         url = self._page.url.casefold()
-        body = self._page.locator("body").inner_text(timeout=10_000).casefold()
+        try:
+            body = self._page.locator("body").inner_text(timeout=10_000).casefold()
+        except Exception:
+            body = ""
         if "captcha" in body or "verification code" in body or "multi-factor" in body:
             return SessionState.INTERACTIVE_AUTH_REQUIRED
-        if "/auth/account/login" in url or "/auth/account/logout" in url:
+        if "limited to 2 active sessions" in body and (
+            "log out the session" in body or "continue will log out" in body
+        ):
             return SessionState.LOGIN_REQUIRED
+        try:
+            internal_web_links = self._page.locator('a[href*="/web/"]').count()
+            login_controls = self._page.locator("#txtUserName,#txtPassword,#btnLogin").count()
+        except Exception:
+            return SessionState.UNVERIFIED
         if authenticated_app_evidence(
             url,
-            internal_web_links=self._page.locator('a[href*="/web/"]').count(),
-            login_controls=self._page.locator("#txtUserName,#txtPassword,#btnLogin").count(),
+            internal_web_links=internal_web_links,
+            login_controls=login_controls,
         ):
             return SessionState.SIGNED_IN
+        if "/auth/account/login" in url or "/auth/account/logout" in url:
+            return SessionState.LOGIN_REQUIRED
         return SessionState.UNVERIFIED
 
-    def login(self, username: str, password: str) -> SessionState:
-        self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    def _wait_for_login_form(self) -> None:
+        """A blank login page has no form until it reloads."""
+        field = self._page.locator("#txtUserName")
         try:
+            field.wait_for(state="visible", timeout=8_000)
+            return
+        except Exception:
+            self._page.reload(wait_until="domcontentloaded")
+        field.wait_for(state="visible", timeout=15_000)
+
+    def _continue_two_session(self, username: str, password: str) -> SessionState:
+        """The login helper's one-Continue path. Same fill, same proof, same rc."""
+        from ezlynx_login_bootstrap import (
+            SESSION_LIMIT_LOGIN_FAILED,
+            SESSION_LIMIT_REFUSED,
+            handle_two_session_prompt,
+        )
+        from robie_job_engine.ezlynx_driver_gate import (
+            EzlynxDriverGateRefused,
+            require_driver_in,
+        )
+
+        code = handle_two_session_prompt(
+            self._page,
+            gate=require_driver_in,
+            username=username,
+            password=password,
+        )
+        if code == 0:
+            return SessionState.SIGNED_IN
+        if code == SESSION_LIMIT_REFUSED:
+            raise EzlynxDriverGateRefused(
+                "This environment does not hold the EZLynx driver, so Continue was not pressed."
+            )
+        if code == SESSION_LIMIT_LOGIN_FAILED:
+            raise SessionVerificationFailed(
+                "EZLynx did not confirm login after one Continue. "
+                "The other session is still active."
+            )
+        raise SessionVerificationFailed(
+            "EZLynx two-session prompt did not reach the app page."
+        )
+
+    def login(self, username: str, password: str) -> SessionState:
+        from ezlynx_login_bootstrap import begin_login_run, session_limit_on
+
+        begin_login_run()
+        self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
+        try:
+            self._wait_for_login_form()
             self._page.locator("#txtUserName").fill(username)
             self._page.locator("#txtPassword").fill(password)
             self._page.locator("#btnLogin").click()
             self._page.wait_for_load_state("domcontentloaded", timeout=20_000)
         except Exception as exc:
             raise RuntimeError("EZLynx login interaction failed") from exc
-        return self.state()
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
+        return wait_for_post_login_state(self.state)
 
 
 def ensure_ezlynx_session(
@@ -258,24 +356,34 @@ def ensure_ezlynx_session(
 
 
 def main() -> None:
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
     parser = argparse.ArgumentParser(description="Ensure the Hermes EZLynx session is authenticated")
     parser.add_argument(
         "--cdp-url",
         default=os.environ.get("ROBIE_BROWSER_CDP_URL", "http://127.0.0.1:9222"),
     )
     args = parser.parse_args()
-    browser = PlaywrightEzlynxSession(args.cdp_url)
     try:
-        state = ensure_ezlynx_session(browser)
-        print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+        with exclusive_session():
+            browser = PlaywrightEzlynxSession(args.cdp_url)
+            try:
+                state = ensure_ezlynx_session(browser)
+                print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+            finally:
+                browser.close()
+    except EzlynxDriverGateRefused as exc:
+        print(json.dumps({"ezlynx_session": "DRIVER_NOT_IN", "error": str(exc)}, sort_keys=True))
+        raise SystemExit(4)
+    except EzlynxSessionLockTimeout:
+        print(json.dumps({"ezlynx_session": "LOCK_TIMEOUT"}, sort_keys=True))
+        raise SystemExit(5)
     except InteractiveAuthenticationRequired:
         print(json.dumps({"ezlynx_session": SessionState.INTERACTIVE_AUTH_REQUIRED.value}, sort_keys=True))
         raise SystemExit(2)
     except SessionVerificationFailed as exc:
         print(json.dumps({"ezlynx_session": SessionState.UNVERIFIED.value, "error": str(exc)}, sort_keys=True))
         raise SystemExit(3)
-    finally:
-        browser.close()
 
 
 if __name__ == "__main__":

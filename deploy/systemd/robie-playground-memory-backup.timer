@@ -1,0 +1,17 @@
+# Test host only. This pull request does not install or enable this timer.
+# 2:15 AM America/New_York, every day. Persistent so a missed night
+# still copies after the VM comes back.
+# Do not install on hermes-poc-01.
+
+[Unit]
+Description=Nightly Playground memory snapshot
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=robie-playground-memory-backup.service
+
+[Install]
+WantedBy=timers.target

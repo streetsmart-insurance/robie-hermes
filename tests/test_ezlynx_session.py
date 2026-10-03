@@ -10,6 +10,7 @@ from robie_job_engine.ezlynx_session import (
     SessionState,
     authenticated_app_evidence,
     ensure_ezlynx_session,
+    wait_for_post_login_state,
 )
 from robie_job_engine.secret_manager import EzlynxCredentials, load_ezlynx_credentials
 
@@ -104,6 +105,33 @@ class EzlynxSessionTests(unittest.TestCase):
         rendered = repr(credentials)
         self.assertNotIn("visible-user", rendered)
         self.assertNotIn("visible-password", rendered)
+
+    def test_post_login_state_retries_while_the_login_url_lingers(self):
+        seen = iter([
+            SessionState.LOGIN_REQUIRED,
+            SessionState.LOGIN_REQUIRED,
+            SessionState.SIGNED_IN,
+        ])
+        delays = []
+        state = wait_for_post_login_state(
+            lambda: next(seen),
+            attempts=6,
+            delay_seconds=3,
+            sleeper=delays.append,
+        )
+        self.assertEqual(state, SessionState.SIGNED_IN)
+        self.assertEqual(delays, [3, 3])
+
+    def test_post_login_state_returns_mfa_without_waiting(self):
+        delays = []
+        state = wait_for_post_login_state(
+            lambda: SessionState.INTERACTIVE_AUTH_REQUIRED,
+            attempts=6,
+            delay_seconds=3,
+            sleeper=delays.append,
+        )
+        self.assertEqual(state, SessionState.INTERACTIVE_AUTH_REQUIRED)
+        self.assertEqual(delays, [])
 
     def test_missing_secret_references_fail_before_access(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(RuntimeError):

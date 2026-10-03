@@ -119,3 +119,131 @@ def test_api_error_fails_open():
     skip, _ = should_skip_send(service, "a@b.com", "Subject")
     assert skip is False
     assert find_recent_sent(service, "a@b.com", "Subject") == []
+
+
+def test_metadata_scope_403_retries_without_query_and_finds_the_sent_message():
+    """gmail.metadata 403s on q=. Listing SENT without q still catches a duplicate."""
+    message = _sent_message("s9", "one@streetsmart.insurance", "Action required")
+    calls = []
+
+    class Messages:
+        def list(self, **kwargs):
+            calls.append(dict(kwargs))
+            if "labelIds" in kwargs or "q" in kwargs:
+                raise RuntimeError(
+                    "HttpError 403: Metadata scope does not support the q parameter"
+                )
+            result = Mock()
+            result.execute.return_value = {"messages": [{"id": "s9"}]}
+            return result
+
+        def get(self, **kwargs):
+            result = Mock()
+            result.execute.return_value = message
+            return result
+
+    service = Mock()
+    service.users.return_value.messages.return_value = Messages()
+    skip, reason = should_skip_send(
+        service, "one@streetsmart.insurance", "Action required"
+    )
+    assert skip is True
+    assert "s9" in reason
+    assert calls[0].get("labelIds") == ["SENT"]
+    assert "q" not in calls[0]
+    assert "q" not in calls[1]
+    assert "labelIds" not in calls[1]
+
+
+def _plain_part(body):
+    import base64
+
+    return {
+        "mimeType": "text/plain",
+        "body": {"data": base64.urlsafe_b64encode(body.encode("utf-8")).decode("ascii")},
+    }
+
+
+def _thread_service(sent_message, inbound_bodies):
+    service = _service_with_sent(sent_message)
+    messages = [
+        {
+            "id": f"in-{index}",
+            "labelIds": ["INBOX"],
+            "payload": _plain_part(body),
+        }
+        for index, body in enumerate(inbound_bodies)
+    ]
+    service.users.return_value.threads.return_value.get.return_value.execute.return_value = {
+        "messages": messages
+    }
+    return service
+
+
+def test_new_body_in_the_same_thread_is_a_correction():
+    service = _thread_service(
+        _sent_message("s1", "jake@streetsmart.insurance", "Re: Astra Gold"),
+        [
+            "Create the Fortegra agreement.",
+            "Use Fortegra Specialty in Jacksonville.",
+        ],
+    )
+    skip, reason = should_skip_send(
+        service,
+        "jake@streetsmart.insurance",
+        "Re: Astra Gold",
+        incoming_body="Use Fortegra Specialty in Jacksonville.",
+        thread_id="thread-1",
+        expected_mailbox="",
+    )
+    assert skip is False
+    assert "correction" in reason
+
+
+def test_same_body_in_the_thread_still_skips():
+    body = "Create the Fortegra agreement."
+    service = _thread_service(
+        _sent_message("s1", "jake@streetsmart.insurance", "Re: Astra Gold"),
+        [body, body],
+    )
+    skip, reason = should_skip_send(
+        service,
+        "jake@streetsmart.insurance",
+        "Re: Astra Gold",
+        incoming_body=body,
+        thread_id="thread-1",
+    )
+    assert skip is True
+    assert "s1" in reason
+
+
+def test_current_message_alone_does_not_count_as_new_content():
+    body = "Create the Fortegra agreement."
+    service = _thread_service(
+        _sent_message("s1", "jake@streetsmart.insurance", "Re: Astra Gold"),
+        [body],
+    )
+    skip, reason = should_skip_send(
+        service,
+        "jake@streetsmart.insurance",
+        "Re: Astra Gold",
+        incoming_body=body,
+        thread_id="thread-1",
+    )
+    assert skip is True
+    assert "s1" in reason
+
+
+def test_wrong_mailbox_does_not_count_as_an_empty_sent_folder():
+    service = Mock()
+    profile = service.users.return_value.getProfile.return_value.execute
+    profile.return_value = {"emailAddress": "someone.else@streetsmart.insurance"}
+    skip, reason = should_skip_send(
+        service,
+        "one@streetsmart.insurance",
+        "Action required",
+        expected_mailbox="robie@streetsmart.insurance",
+    )
+    assert skip is False
+    assert reason == "sent check skipped: wrong mailbox"
+    service.users.return_value.messages.return_value.list.assert_not_called()

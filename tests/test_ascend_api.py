@@ -26,6 +26,7 @@ from durable_temp import durable_temporary_directory
 
 
 INSURED_ID = str(uuid4())
+CONTACT_ID = str(uuid4())
 PRODUCER_ID = str(uuid4())
 MANAGER_ID = str(uuid4())
 PROGRAM_ID = str(uuid4())
@@ -158,7 +159,10 @@ class AscendApiTests(unittest.TestCase):
         self.assertEqual(transport.calls[1][3]["program_id"], PROGRAM_ID)
         self.assertEqual(transport.calls[0][3]["metadata"]["robie_idempotency_key"], "key-1")
 
-    def test_worker_does_not_retry_after_partial_creation(self):
+    def test_worker_fails_closed_after_partial_creation(self):
+        # A program whose billables fail must NEVER be reported as success:
+        # the old code returned succeeded=True and the workflow composed an
+        # "Agreement Ready" email for a program with no billables.
         class Partial(FakeTransport):
             def request(self, method, path, *, query=None, json_body=None):
                 if method == "POST" and path == "/billables":
@@ -168,10 +172,60 @@ class AscendApiTests(unittest.TestCase):
         client = AscendApiClient(Partial())
         job = {"id": str(uuid4()), "action_type": ACTION_TYPE, "payload": {**payload(), "execute": True}}
         result = AscendCreateProgramWorker(lambda: client).perform(job, idempotency_key="key-2")
-        self.assertTrue(result.succeeded)
+        self.assertFalse(result.succeeded)
         self.assertFalse(result.retryable)
         self.assertEqual(result.destination["program_id"], PROGRAM_ID)
         self.assertIn("partial_failure", result.detail)
+        self.assertIn("NOT ready", result.error or "")
+
+    def test_find_or_create_insured_sends_mailing_address_and_primary_contact(self):
+        # Ascend rejects new-insured creation without mailing_address_* and
+        # insured_contacts. The workflow resolves both from the EZLynx record;
+        # this asserts they actually reach the create payload.
+        created = {}
+        contact_created = {}
+
+        class InsuredTransport(FakeTransport):
+            def request(self, method, path, *, query=None, json_body=None):
+                if method == "GET" and path == "/insureds":
+                    return {"data": []}
+                if method == "GET" and path == "/contacts":
+                    return {"data": []}
+                if method == "POST" and path == "/contacts":
+                    contact_created.update(json_body or {})
+                    return {"id": CONTACT_ID, **(json_body or {})}
+                if method == "POST" and path == "/insureds":
+                    created.update(json_body or {})
+                    return {"id": INSURED_ID, **(json_body or {})}
+                return super().request(method, path, query=query, json_body=json_body)
+
+        client = AscendApiClient(InsuredTransport())
+        insured_id, _ = client.find_or_create_insured(
+            business_name="Acme Landscaping LLC",
+            address={
+                "mailing_address_street_one": "42 Riva Ave",
+                "mailing_address_city": "North Brunswick",
+                "mailing_address_state": "NJ",
+                "mailing_address_zip_code": "08902",
+            },
+            contact={
+                "first_name": "Mike",
+                "last_name": "Fingerhut",
+                "email": "mjfingerhut@gmail.com",
+                "phone": "7322668111",
+            },
+        )
+        self.assertEqual(insured_id, INSURED_ID)
+        self.assertEqual(created["mailing_address_street_one"], "42 Riva Ave")
+        self.assertEqual(created["mailing_address_city"], "North Brunswick")
+        self.assertEqual(created["mailing_address_state"], "NJ")
+        self.assertEqual(created["mailing_address_zip_code"], "08902")
+        self.assertEqual(len(created["insured_contacts"]), 1)
+        self.assertEqual(created["insured_contacts"][0]["id"], CONTACT_ID)
+        # The contact itself was created with the EZLynx-resolved details.
+        self.assertEqual(contact_created["first_name"], "Mike")
+        self.assertEqual(contact_created["last_name"], "Fingerhut")
+        self.assertEqual(contact_created["email"], "mjfingerhut@gmail.com")
 
     def test_verifier_freshly_reads_program_and_billable(self):
         transport = FakeTransport()
@@ -240,6 +294,136 @@ class AscendApiTests(unittest.TestCase):
                 final = engine.run(job["id"])
         self.assertEqual(final["status"], JobStatus.COMPLETE.value)
         self.assertEqual([call[0] for call in transport.calls], ["POST", "POST", "GET", "GET"])
+
+
+class TestResolveUser(unittest.TestCase):
+    """resolve_user must fail closed: no match -> None, never a guessed id."""
+
+    def _client(self):
+        class UserTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                assert (method, path) == ("GET", "/users")
+                return {
+                    "data": [
+                        {
+                            "id": "user-robie",
+                            "first_name": "Robie",
+                            "last_name": "AI",
+                            "email": "robie@streetsmart.insurance",
+                        },
+                        {
+                            "id": "user-matthew",
+                            "first_name": "Matthew",
+                            "last_name": "Mancina",
+                            "email": "matthew@streetsmart.insurance",
+                        },
+                    ]
+                }
+
+        return AscendApiClient(UserTransport())
+
+    def test_resolve_user_returns_none_for_unknown_sender(self):
+        client = self._client()
+        self.assertIsNone(client.resolve_user("jake@streetsmart.insurance"))
+        self.assertIsNone(client.resolve_user("Nobody Here"))
+
+    def test_resolve_user_matches_email_and_name(self):
+        client = self._client()
+        self.assertEqual(client.resolve_user("robie@streetsmart.insurance"), "user-robie")
+        self.assertEqual(client.resolve_user("Matthew Mancina"), "user-matthew")
+        self.assertEqual(client.resolve_user("matthew@streetsmart.insurance"), "user-matthew")
+
+    def test_list_users_follows_pagination(self):
+        # Jake Ferrara sat on page 2 of 39 in production; a single-page
+        # fetch missed him and fail-closed incorrectly.
+        pages = {
+            None: {"data": [{"id": "u1", "first_name": "A", "last_name": "One",
+                             "email": "a@example.com"}],
+                   "meta": {"count": 2, "prev": None, "next": 2}},
+            2: {"data": [{"id": "user-jake", "first_name": "Jake",
+                          "last_name": "Ferrara",
+                          "email": "jake@streetsmart.insurance"}],
+                "meta": {"count": 2, "prev": 1, "next": None}},
+        }
+
+        class PagedTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                assert (method, path) == ("GET", "/users")
+                page = (query or {}).get("page")
+                return pages[page]
+
+        client = AscendApiClient(PagedTransport())
+        self.assertEqual(len(client.list_users()), 2)
+        self.assertEqual(client.resolve_user("jake@streetsmart.insurance"),
+                         "user-jake")
+        self.assertEqual(client.resolve_user("Jake Ferrara"), "user-jake")
+
+    def test_find_program_by_policy_skips_unrelated_billables(self):
+        """The /billables search can return billables for other policies.
+        They must be skipped, never returned as a false duplicate."""
+        p_wrong = "2d74e0fe-22b3-42e6-9ed0-3f58a2b072a3"
+        p_right = "c37b837a-5763-45a6-8040-a88df9e23d41"
+
+        class SearchTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    # Search returns an UNRELATED billable first
+                    return {"data": [
+                        {"id": "b-unrelated", "program_id": p_wrong,
+                         "policy_number": "OTHER-999",
+                         "billable_identifier": "OTHER-999"},
+                        {"id": "b-right", "program_id": p_right,
+                         "policy_number": "TARGET-123",
+                         "billable_identifier": "TARGET-123"},
+                    ]}
+                if (method, path) == ("GET", f"/programs/{p_right}"):
+                    return {"id": p_right}
+                if (method, path) == ("GET", "/programs"):
+                    return {"data": []}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(SearchTransport())
+        result = client.find_program_by_policy("TARGET-123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["program_id"], p_right)
+        self.assertEqual(result["billable"]["id"], "b-right")
+
+    def test_find_program_by_policy_returns_none_when_no_match(self):
+        class EmptyTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    return {"data": [
+                        {"id": "b-unrelated", "program_id": "2d74e0fe-22b3-42e6-9ed0-3f58a2b072a3",
+                         "policy_number": "OTHER-999",
+                         "billable_identifier": "OTHER-999"},
+                    ]}
+                if (method, path) == ("GET", "/programs"):
+                    return {"data": []}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(EmptyTransport())
+        self.assertIsNone(client.find_program_by_policy("NOTHING-000"))
+
+    def test_find_program_by_policy_matches_suffixed_identifier(self):
+        """billable_identifier like 'POL-123-MTC' matches policy 'POL-123'."""
+        p_sfx = "458258a7-f460-4e03-9362-f03418e42a62"
+
+        class SuffixTransport:
+            def request(self, method, path, *, query=None, json_body=None):
+                if (method, path) == ("GET", "/billables"):
+                    return {"data": [
+                        {"id": "b-sfx", "program_id": p_sfx,
+                         "policy_number": "",
+                         "billable_identifier": "POL-123-MTC"},
+                    ]}
+                if (method, path) == ("GET", f"/programs/{p_sfx}"):
+                    return {"id": p_sfx}
+                raise AssertionError((method, path))
+
+        client = AscendApiClient(SuffixTransport())
+        result = client.find_program_by_policy("POL-123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["program_id"], p_sfx)
 
 
 if __name__ == "__main__":

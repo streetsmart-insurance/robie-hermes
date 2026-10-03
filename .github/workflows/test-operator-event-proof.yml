@@ -1,0 +1,71 @@
+name: Test operator connector event proof
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED }}
+  OPERATOR_PR_NUMBER: ${{ vars.ROBIE_TEST_OPERATOR_PR_NUMBER }}
+  OPERATOR_PR_ID: ${{ vars.ROBIE_TEST_OPERATOR_PR_ID }}
+  OPERATOR_CONTROLLER_TREE: ${{ vars.ROBIE_TEST_OPERATOR_CONTROLLER_TREE }}
+  OPERATOR_ACTOR_IDS: '320188404'
+  OPERATOR_SETUP_COMMIT: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+
+jobs:
+  prove:
+    name: Prove connector event
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'streetsmart-insurance/robie-hermes' &&
+      vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED == 'EVENT_PROOF_V1' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/robie-test event-proof ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('OPERATOR_SETUP_COMMIT', '')
+              tree = os.environ.get('OPERATOR_CONTROLLER_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
+          persist-credentials: false
+      - name: Validate connector event without cloud credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+      - name: Record controller identity
+        run: python3 -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"controller-commit.txt").write_text(os.environ["OPERATOR_SETUP_COMMIT"]+"\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-operator-event-proof-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/operator-request.json
+            ${{ runner.temp }}/controller-evidence.json
+            ${{ runner.temp }}/controller-commit.txt
+          if-no-files-found: error

@@ -467,19 +467,12 @@ class EzlynxApiClient:
         config: EzlynxApiConfig,
         urlopen: Callable[..., Any] | None = None,
         clock: Callable[[], float] | None = None,
-        session_cookie_header: str | None = None,
-        session_cookie_loader: Callable[[], str] | None = None,
-        session_cookies: list[dict[str, Any]] | None = None,
     ) -> None:
         self._config = config
         self._urlopen = urlopen or _urlopen
         self._clock = clock or time.time
         self._token: str | None = None
         self._token_expires_at: float = 0.0
-        # Portal org-label writes use CDP session cookies, not OAuth Bearer.
-        self._session_cookie_header = str(session_cookie_header or "").strip()
-        self._session_cookie_loader = session_cookie_loader
-        self._session_cookies = list(session_cookies or [])
 
     def _agency_document_api_username(self) -> str:
         """Secret Manager ``username`` (SSRobie). Never ``vendor_username`` / ssr_userPROD."""
@@ -538,6 +531,12 @@ class EzlynxApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
+
+                assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -571,7 +570,12 @@ class EzlynxApiClient:
         Added for the verified writers (discussion notes). ``path`` is
         relative to the API origin, e.g. ``"/DiscussionApi/discussions/v1/notes"``.
         Fail-closed: transport and HTTP errors raise EzlynxApiError.
+        The driver lease is checked here so a patched caller cannot skip it.
         """
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        assert_write_checks_intact()
+        driver_gate_for_write()
         url = self._origin() + "/" + str(path or "").lstrip("/")
         data = json.dumps(payload).encode("utf-8")
         headers = {
@@ -621,6 +625,12 @@ class EzlynxApiClient:
         raises EzlynxApiError as before (status is in the exception).
         """
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
+
+                assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             http_status = None
             status_source = None
@@ -941,13 +951,17 @@ class EzlynxApiClient:
         policy_master_id: str | int | None = None,
         file_content_type: str = "application/octet-stream",
     ) -> str:
-        """OAuth POST DocumentApi upload. Write-gated by ezlynx_write_scope.
+        """OAuth POST DocumentApi upload. Write-gated to ROBIE Test 220250093.
 
         Proven path: ``/DocumentApi/documents/v1/account/{ApplicantID}/document``.
         Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
-        200 body is a numeric document id. Applicant eligibility follows
-        ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` (unset/empty = agency-wide).
+        200 body is a numeric document id. Never uploads to a live applicant.
         """
+        from .chat_write_boundary import assert_chat_applicant
+        from .live_turn_guard import assert_live_write_allowed
+
+        assert_chat_applicant(applicant_id)
+        assert_live_write_allowed()
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
         if not name:
@@ -982,98 +996,3 @@ class EzlynxApiClient:
             error_label="EZLynx DocumentApi",
         )
         return parse_uploaded_document_id(raw)
-
-    def list_organization_labels(self) -> list[dict[str, Any]]:
-        """OAuth GET of agency org labels. Read-only. Never creates a label.
-
-        Path: ``/EZLynxPortalAPI/Organizations/GetOrganizationLabels``.
-        This is HTTP API (Bearer), not Playwright.
-        """
-        from .ezlynx_org_labels import ORG_LABELS_LIST_PATH, normalize_org_label_rows
-
-        url = (
-            self._origin()
-            + ORG_LABELS_LIST_PATH
-            + "?"
-            + parse.urlencode({"includeNonActive": "false"})
-        )
-        headers = {
-            "Authorization": f"Bearer {self.get_token()}",
-            "Accept": "application/json",
-        }
-        parsed = self._request_json("GET", url, data=None, headers=headers)
-        return normalize_org_label_rows(parsed)
-
-    def apply_applicant_organization_label(
-        self, applicant_id: str, label_id: str
-    ) -> dict[str, Any]:
-        """OAuth POST of one org label onto an applicant.
-
-        Proven 2026-09-18: this Bearer Portal write returns HTTP 403 for
-        SSRobie (``x-ezlynx-user u438318``). DiscussionApi note writes with
-        the same token succeed. Do not use this for Ascend NOC — call
-        :meth:`apply_note_organization_label` (CDP session cookies).
-        Kept so tests can assert the 403 is fail-closed.
-        """
-        from .ezlynx_org_labels import applicant_labels_path
-
-        applicant = require_allowed_ezlynx_write_applicant(applicant_id)
-        resolved_id = str(label_id or "").strip()
-        if not resolved_id:
-            raise EzlynxApiError(None, "organization label id is required")
-        parsed = self.post_json(
-            applicant_labels_path(applicant),
-            {
-                "applicantId": applicant,
-                "organizationLabelIds": [resolved_id],
-            },
-        )
-        if isinstance(parsed, dict):
-            return parsed
-        return {"result": parsed}
-
-    def _portal_session_cookie_header(self) -> str:
-        if self._session_cookie_header:
-            return self._session_cookie_header
-        if self._session_cookie_loader is not None:
-            header = str(self._session_cookie_loader() or "").strip()
-            if header:
-                return header
-        from .ezlynx_portal_session import load_cdp_session_cookie_header
-
-        return load_cdp_session_cookie_header()
-
-    def apply_note_organization_label(
-        self, note_id: str, label_id: str
-    ) -> dict[str, Any]:
-        """Apply one org label onto a discussion note via CDP session cookies.
-
-        Path: ``POST /EZLynxPortalAPI/Notes/{noteId}/OrganizationLabels``.
-        This is the UI / working-CDP path for Activities-enabled ``Ascend NOC``.
-        No OAuth Bearer. No Playwright clicking. Fail-closed on HTTP 403.
-        """
-        from .ezlynx_org_labels import note_labels_path
-        from .ezlynx_portal_session import portal_session_headers, portal_session_json
-
-        note = str(note_id or "").strip()
-        resolved_id = str(label_id or "").strip()
-        if not note:
-            raise EzlynxApiError(None, "note id is required for organization label apply")
-        if not resolved_id:
-            raise EzlynxApiError(None, "organization label id is required")
-        origin = self._origin()
-        headers = portal_session_headers(
-            self._portal_session_cookie_header(),
-            origin,
-            cookies=self._session_cookies or None,
-        )
-        parsed = portal_session_json(
-            self._urlopen,
-            "POST",
-            origin + note_labels_path(note),
-            {"organizationLabelIds": [resolved_id]},
-            headers,
-        )
-        if isinstance(parsed, dict):
-            return parsed
-        return {"result": parsed}
