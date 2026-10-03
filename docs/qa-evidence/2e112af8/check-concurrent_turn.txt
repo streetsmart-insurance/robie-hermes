@@ -1,0 +1,2 @@
+Task worker v2 release 2e112af8 - concurrent_turn
+Chat adapter unchanged

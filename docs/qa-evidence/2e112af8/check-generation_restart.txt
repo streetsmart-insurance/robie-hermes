@@ -1,0 +1,2 @@
+Task worker v2 release 2e112af8 - generation_restart
+Chat adapter unchanged

@@ -1,0 +1,4 @@
+Task worker v2 files present
+2
+2
+Smoke test: 7 Robie AI tasks parsed from real CSV, all flagged, 7/7 idempotent on repeat
