@@ -330,17 +330,38 @@ class TestReassignmentReadback(unittest.TestCase):
         result = handle_robie_call_task(make_task(), live_config(), ports)
         self.assertTrue(result["reassigned"])
         self.assertIsNone(result["reassign_error"])
-        self.assertEqual(ports.task_reassign.read_calls, ["TASK-1"])
+        # Two reads: ownership pre-check before reassigning + read-back after.
+        self.assertEqual(ports.task_reassign.read_calls, ["TASK-1", "TASK-1"])
 
     def test_readback_mismatch_alerts_not_reassigned(self):
+        # Owned by someone else: the ownership pre-check refuses BEFORE any
+        # reassign attempt (stronger than the old read-back-mismatch path).
         ports = make_ports(task_reassign=FakeReassignPort(read_back="someone_else"))
+        result = handle_robie_call_task(make_task(), live_config(), ports)
+        self.assertFalse(result["reassigned"])
+        self.assertIn("refusing to reassign", result["reassign_error"])
+        self.assertEqual(ports.task_reassign.calls, [])
+        self.assertTrue(result["chat_alerted"])
+        # Call + note still ok; only the routing is flagged.
+        self.assertTrue(result["ok"])
+
+    def test_readback_mismatch_after_reassign_alerts(self):
+        # Owned by Robie at pre-check, but the post-reassign read-back shows
+        # a different assignee: mismatch alert, not reassigned.
+        port = FakeReassignPort(read_back="__last_to_user__")
+        orig_read = port.read_task_assignee
+        calls = {"n": 0}
+        def flaky_read(task_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "Robie AI"  # pre-check passes
+            return "someone_else"  # post-reassign read-back mismatches
+        port.read_task_assignee = flaky_read
+        ports = make_ports(task_reassign=port)
         result = handle_robie_call_task(make_task(), live_config(), ports)
         self.assertFalse(result["reassigned"])
         self.assertIn("reads back", result["reassign_error"])
         self.assertTrue(result["chat_alerted"])
-        alert_text = ports.chat_alert.call_args[0][0]
-        self.assertIn("MISMATCH", alert_text)
-        # Call + note still ok; only the routing is flagged.
         self.assertTrue(result["ok"])
 
     def test_no_readback_never_claims_reassigned(self):

@@ -318,16 +318,19 @@ class TestNameMismatch(unittest.TestCase):
         self.assertIsNone(_instruction_name_mismatch(
             "Call about the renewal documents", "John Test"))
 
-    def test_mismatch_flagged_in_note(self):
+    def test_mismatch_fails_closed_before_dial(self):
+        # Naming a different person than the applicant is now a hard gate:
+        # no dial, clarification note filed, task left open.
         task = make_task(**{
             "Task Description": "Call Mary Smith about her renewal.",
         })
         ports = make_ports()
         result = handle_robie_call_task(task, live_config(), ports)
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertIn("Mary Smith", result["error"])
         body = ports.discussion_client.appended[0]["body"]
         self.assertIn("Mary Smith", body)
-        self.assertIn("check the right person was reached", body)
 
 
 class TestContentDedup(unittest.TestCase):

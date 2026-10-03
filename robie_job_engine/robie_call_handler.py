@@ -1583,8 +1583,8 @@ def _handle_call_task(
     # The placement ack is not proof. Poll Bland for a terminal status.
     if config.dry_run:
         outcome: Dict[str, Any] = {
-            "verified": True, "available": True, "statuses": {},
-            "source": "dry_run",
+            "verified": True, "successful": True, "available": True,
+            "statuses": {}, "source": "dry_run",
         }
     else:
         outcome = _verify_call_outcome(ports.bland, call_ids, config)
@@ -1849,12 +1849,16 @@ def _finalize_call(
     # CRITICAL: verified alone is not enough — the call must have SUCCEEDED
     # (connected). A verified "failed"/"busy"/"no-answer" is not task success.
     verification_required = bool(config.require_outcome_verification)
-    ok = wb_ok and (outcome_verified or not verification_required) and outcome_successful
+    # Opt-out waives both verification AND the success requirement: without a
+    # status API there is no way to know the outcome, and the worker has
+    # explicitly (and auditably) accepted the placement ack instead.
+    outcome_ok = (not verification_required) or (outcome_verified and outcome_successful)
+    ok = wb_ok and outcome_ok
     if ok:
         error = None
     elif not outcome_verified and verification_required:
         error = "call outcome unverified"
-    elif not outcome_successful:
+    elif not outcome_successful and verification_required:
         error = "call ended without success"
     else:
         error = writeback.get("reason") or writeback.get("error") or "writeback failed"
@@ -1915,8 +1919,8 @@ def _recover_interrupted_call(
     """
     if config.dry_run:
         outcome: Dict[str, Any] = {
-            "verified": True, "available": True, "statuses": {},
-            "source": "dry_run",
+            "verified": True, "successful": True, "available": True,
+            "statuses": {}, "source": "dry_run",
         }
     else:
         outcome = _verify_call_outcome(ports.bland, recovered_ids, config)
