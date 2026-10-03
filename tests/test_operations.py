@@ -377,5 +377,5 @@ def test_unverified_chat_response_suppresses_worker_success_claim(tmp_path: Path
     store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
     result = guard_chat_response(str(db), job["id"], "SUCCESS: I definitely uploaded it")
     assert "definitely uploaded" not in result
-    assert "UNVERIFIED" in result
+    assert "Not verified." in result
     assert "suppressed" in result

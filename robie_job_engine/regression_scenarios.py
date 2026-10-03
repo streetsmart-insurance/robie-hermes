@@ -542,10 +542,9 @@ def run_false_success_scenario(*, work_dir: Path) -> dict[str, Any]:
             and status != JobStatus.COMPLETE.value
             and action is None
             and evidence == []
-            # Headline block (Jake's three lines) must not claim COMPLETE.
-            # Details legitimately carries the guard's own documented
-            # disclaimer "does not authorize COMPLETE" plus the labeled
-            # worker report, so scope the check above the Details section.
+            # Headline block must not claim COMPLETE. The audit checklist
+            # stays in the job log, so this reply has no "does not authorize
+            # COMPLETE" line. Scope the check above the Details section.
             and "COMPLETE" not in response.split("Details")[0]
             and not response.startswith("Done.")
             and ("Not verified." in response or "Couldn't finish." in response)
@@ -1145,7 +1144,7 @@ def run_zero_playwright_tool_row_scenario(*, work_dir: Path) -> dict[str, Any]:
             and rows == []
             and store.list_attempts(job_id) == []
             and "PLAYWRIGHT_SILENT" in str(job.get("last_error") or "")
-            and "FAILED" in response
+            and "Failed." in response
             and "— UNVERIFIED" not in response
             and ZERO_PLAYWRIGHT_TOOL_ROWS[:20] in str(job.get("last_error") or "")
         )
@@ -1216,8 +1215,8 @@ def run_unverified_unmask_scenario(*, work_dir: Path) -> dict[str, Any]:
             and store.list_evidence(job_id) == []
             and claimed["status"] == JobStatus.UNVERIFIED.value
             and claimed["status"] != JobStatus.COMPLETE.value
-            and "UNVERIFIED" in claimed_response
-            and "FAILED" in response
+            and "Not verified." in claimed_response
+            and "Failed." in response
         )
         return _result(
             UNVERIFIED_UNMASK_SCENARIO_ID,

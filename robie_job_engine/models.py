@@ -19,9 +19,15 @@ class JobStatus(str, Enum):
     COMPLETE = "COMPLETE"
     UNVERIFIED = "UNVERIFIED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
-TERMINAL_STATUSES = {JobStatus.COMPLETE, JobStatus.UNVERIFIED, JobStatus.FAILED}
+TERMINAL_STATUSES = {
+    JobStatus.COMPLETE,
+    JobStatus.UNVERIFIED,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+}
 WAITING_STATUSES = {
     JobStatus.PAUSED,
     JobStatus.NEEDS_SKILL,

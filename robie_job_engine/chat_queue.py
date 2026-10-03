@@ -503,6 +503,20 @@ class DurableChatEventQueue:
                 (_stamp(), decision_id),
             ).rowcount
 
+    def deactivate_job_links(self, job_id: str) -> int:
+        """Drop the active link for one job. The row stays for the audit."""
+        ident = str(job_id or "").strip()
+        if not ident:
+            return 0
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                UPDATE conversation_job_links SET active=0,updated_at=?
+                WHERE job_id=? AND active=1
+                """,
+                (_stamp(), ident),
+            ).rowcount
+
     def deactivate_conversation(self, conversation_id: str) -> int:
         """Clear the active correlation without deleting its audit history."""
         with self._connect() as conn:

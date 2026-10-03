@@ -17,6 +17,10 @@ So: the POLICY RECORD is the proof. Documents are proof. The note is
 recorded in ``observed`` as a receipt and can never make evidence
 authoritative on its own.
 
+The exception is a job whose write IS the note. That readback keys on
+applicant id plus discussion id: GET the discussion and match the note
+text. A policy number is required only for a policy-level write.
+
 Read-only by construction. Every read is a fresh authenticated API call --
 never a DOM snapshot, never the worker's report of what it did.
 """
@@ -26,6 +30,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from .ezlynx_discussions import _note_id_of, find_identical_note
 from .models import VerificationEvidence, VerificationResult
 
 
@@ -104,6 +109,10 @@ class HermesChatEzlynxDestinationVerifier:
             if str(name).strip()
         ]
         discussion_title = str(claimed.get("discussion_title") or "").strip()
+        discussion_id = str(
+            payload.get("discussion_id") or claimed.get("discussion_id") or ""
+        ).strip()
+        note_text = str(payload.get("note_text") or claimed.get("note_text") or "").strip()
 
         expected = {
             "applicant_id": applicant_id,
@@ -121,6 +130,14 @@ class HermesChatEzlynxDestinationVerifier:
                 "worker claimed a different applicant than the Job is bound to",
                 locator=None,
                 retryable=False,
+            )
+
+        if not policy_number and applicant_id and discussion_id and note_text:
+            return self._verify_discussion_note(
+                applicant_id=applicant_id,
+                discussion_id=discussion_id,
+                note_text=note_text,
+                discussion_title=discussion_title,
             )
 
         if not policy_number:
@@ -266,6 +283,101 @@ class HermesChatEzlynxDestinationVerifier:
 
     # ------------------------------------------------------------------ #
 
+    def _verify_discussion_note(
+        self,
+        *,
+        applicant_id: str,
+        discussion_id: str,
+        note_text: str,
+        discussion_title: str,
+    ) -> VerificationResult:
+        """Re-read the discussion and match the note. No policy number."""
+        expected = {
+            "applicant_id": applicant_id,
+            "discussion_id": discussion_id,
+            "note_text": note_text,
+        }
+        getter = getattr(self._port, "get_discussion", None)
+        if not callable(getter):
+            return self._fail(
+                expected,
+                {"discussion_id": discussion_id, "note_text_matched": False},
+                "discussion readback is not available on this port",
+                locator=discussion_id,
+                retryable=False,
+                method="DiscussionApi",
+                source="ezlynx-discussionapi",
+            )
+        try:
+            record = getter(discussion_id)
+        except Exception as exc:
+            return self._fail(
+                expected,
+                {
+                    "discussion_id": discussion_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "note_text_matched": False,
+                },
+                f"DiscussionApi read-back failed; discussion {discussion_id} was not re-read",
+                locator=discussion_id,
+                retryable=True,
+                method="DiscussionApi",
+                source="ezlynx-discussionapi",
+            )
+        if not isinstance(record, dict):
+            record = {}
+        record_applicant = _discussion_applicant_id(record)
+        if record_applicant and _norm(record_applicant) != _norm(applicant_id):
+            return self._fail(
+                expected,
+                {
+                    "applicant_id": applicant_id,
+                    "discussion_id": discussion_id,
+                    "discussion_applicant_id": record_applicant,
+                    "note_text_matched": False,
+                },
+                (
+                    f"discussion {discussion_id} belongs to applicant "
+                    f"{record_applicant}, not {applicant_id}"
+                ),
+                locator=discussion_id,
+                retryable=False,
+                authoritative=True,
+                method="DiscussionApi",
+                source="ezlynx-discussionapi",
+            )
+        matched = find_identical_note(record, note_text)
+        observed: dict[str, Any] = {
+            "applicant_id": applicant_id,
+            "discussion_id": discussion_id,
+            "note_text": note_text,
+            "note_text_matched": bool(matched),
+            "read_method": "DiscussionApi",
+            "discussion_title": discussion_title,
+        }
+        if not matched:
+            return self._fail(
+                expected,
+                observed,
+                f"note text is not on discussion {discussion_id}",
+                locator=discussion_id,
+                retryable=False,
+                authoritative=True,
+                method="DiscussionApi",
+                source="ezlynx-discussionapi",
+            )
+        observed["note_id"] = _note_id_of(matched)
+        evidence = VerificationEvidence(
+            method="DiscussionApi",
+            source="ezlynx-discussionapi",
+            expected=expected,
+            observed=observed,
+            authoritative=True,
+            captured_at=_utc_now(),
+            locator=discussion_id,
+        )
+        return VerificationResult(True, evidence, retryable=False, error=None)
+
     def _fail(
         self,
         expected: dict[str, Any],
@@ -275,10 +387,12 @@ class HermesChatEzlynxDestinationVerifier:
         locator: str | None,
         retryable: bool,
         authoritative: bool = False,
+        method: str = "EZLYNX_API_DESTINATION_READBACK",
+        source: str = "ezlynx-policyapi+documentapi",
     ) -> VerificationResult:
         evidence = VerificationEvidence(
-            method="EZLYNX_API_DESTINATION_READBACK",
-            source="ezlynx-policyapi+documentapi",
+            method=method,
+            source=source,
             expected=expected,
             observed=observed,
             authoritative=authoritative,
@@ -286,6 +400,24 @@ class HermesChatEzlynxDestinationVerifier:
             locator=locator,
         )
         return VerificationResult(False, evidence, retryable=retryable, error=error)
+
+
+def _discussion_applicant_id(record: dict[str, Any]) -> str:
+    """Applicant on a discussion payload, if the API sent one."""
+    for key in ("applicantId", "ApplicantId", "applicant_id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    for key in ("applicant", "Applicant"):
+        nested = record.get(key)
+        if isinstance(nested, dict):
+            for inner in ("applicantId", "ApplicantId", "id", "Id", "applicant_id"):
+                value = str(nested.get(inner) or "").strip()
+                if value:
+                    return value
+        elif nested is not None and str(nested).strip().isdigit():
+            return str(nested).strip()
+    return ""
 
 
 def _policy_matches(
