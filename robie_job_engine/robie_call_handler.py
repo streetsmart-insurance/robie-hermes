@@ -163,6 +163,15 @@ TERMINAL_CALL_STATUSES = frozenset({
     "completed", "failed", "busy", "no-answer", "canceled", "cancelled",
 })
 
+# Terminal statuses that count as a SUCCESSFUL call outcome. A call that
+# ended as "failed", "busy", "no-answer", or "canceled" is terminal (it
+# ended) but NOT successful — it must not count as task completion.
+# "completed" alone is not enough; the caller must verify actual connection
+# (answered_by human/voicemail, or positive duration) via _call_was_connected.
+SUCCESSFUL_TERMINAL_STATUSES = frozenset({
+    "completed",
+})
+
 
 # ---------------------------------------------------------------------------
 # Ports (production wiring supplied by the task worker)
@@ -372,6 +381,7 @@ _TASK_FIELD_ALIASES: Dict[str, List[str]] = {
     "applicant_id": ["Applicant ID", "ApplicantID", "applicant_id", "Applicant Id"],
     "applicant_name": ["Account Name", "Applicant Name", "applicant_name", "Client Name"],
     "assigned_by": ["Task Created By", "Assigned By", "Created By", "assigned_by", "CreatedBy"],
+    "assigned_to": ["Assigned To", "AssignedTo", "assigned_to", "Task Assigned To"],
     "due_date": ["Task Due Date", "Due Date", "due_date"],
 }
 
@@ -721,14 +731,44 @@ def _poll_call_status(
     return last
 
 
+def _call_was_connected(status_result: Dict[str, Any]) -> bool:
+    """Did this terminal call status represent an actual successful connection?
+
+    A call that ended as "failed", "busy", "no-answer", or "canceled" is
+    terminal but NOT successful. Only "completed" with evidence of actual
+    connection (answered_by human/voicemail, or positive duration) counts.
+    This separates "call ended" from "task succeeded."
+    """
+    if not status_result.get("terminal"):
+        return False
+    status = str(status_result.get("status") or "").lower()
+    if status not in SUCCESSFUL_TERMINAL_STATUSES:
+        return False
+    # "completed" needs evidence of actual connection
+    answered = str(status_result.get("answered_by") or "").lower()
+    if answered in ("human", "voicemail"):
+        return True
+    try:
+        dur = float(status_result.get("duration")
+                    or status_result.get("duration_s")
+                    or status_result.get("call_duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    return dur > 0
+
+
 def _verify_call_outcome(
     bland_port: Any, call_ids: List[str], config: RobieCallConfig
 ) -> Dict[str, Any]:
     """Verify every placed call_id against Bland.
 
-    Returns {"verified": bool, "available": bool,
+    Returns {"verified": bool, "successful": bool, "available": bool,
              "statuses": {call_id: poll-result}}.
     verified=True when at least one call reached a terminal status.
+    successful=True only when at least one call reached a SUCCESSFUL
+    terminal status with evidence of actual connection. A call that ended
+    as failed/busy/no-answer/canceled is verified (we know it ended) but
+    NOT successful (it must not count as task completion).
     """
     statuses: Dict[str, Dict[str, Any]] = {}
     available = False
@@ -738,7 +778,15 @@ def _verify_call_outcome(
         if res.get("available"):
             available = True
     verified = available and any(s.get("terminal") for s in statuses.values())
-    return {"verified": verified, "available": available, "statuses": statuses}
+    successful = available and any(
+        _call_was_connected(s) for s in statuses.values()
+    )
+    return {
+        "verified": verified,
+        "successful": successful,
+        "available": available,
+        "statuses": statuses,
+    }
 
 
 def _attach_verified_status(
@@ -881,6 +929,66 @@ def _writeback_outcome_note(
     except Exception as exc:  # noqa: BLE001 - surfaced in result dict
         logger.error("writeback failed for applicant %s: %s", applicant_id, exc)
         return {"status": "error", "error": str(exc)[:300], "discussion_id": None, "note_id": None}
+
+
+def _merge_checkpoint(ports: RobieCallPorts, task_id: str,
+                      update: Dict[str, Any]) -> None:
+    """Merge `update` into the existing checkpoint without clobbering it."""
+    current = _load_checkpoint(ports, task_id)
+    current.update(update)
+    _save_checkpoint(ports, task_id, current)
+
+
+def _writeback_once(
+    ports: RobieCallPorts,
+    task_id: str,
+    note_key: str,
+    applicant_id: str,
+    body: str,
+    title_hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Post a note at most once per task, even across restarts.
+
+    Before posting, checks the durable checkpoint: if a note with this
+    `note_key` was already filed (note_id recorded), returns the cached
+    success WITHOUT posting again. After a successful post, records the
+    note_id in the checkpoint.
+
+    An uncertain POST (status "held"/"pending"/"error") is NEVER recorded
+    as filed and is NEVER retried here — the caller fails closed and a
+    later run re-checks the checkpoint rather than blindly re-posting.
+    """
+    checkpoint = _load_checkpoint(ports, task_id)
+    filed = (checkpoint.get("notes_filed") or {}).get(note_key) or {}
+    if filed.get("note_id"):
+        logger.info("note %r already filed for task %s (note_id %s); not re-posting",
+                    note_key, task_id, filed.get("note_id"))
+        return {
+            "status": "filed",
+            "note_id": filed.get("note_id"),
+            "discussion_id": filed.get("discussion_id"),
+            "applicant_id": applicant_id,
+            "reason": "already filed (checkpoint); not re-posted",
+            "duplicate_suppressed": True,
+        }
+    result = _writeback_outcome_note(
+        ports.discussion_client, applicant_id, body, title_hint=title_hint)
+    if result.get("status") == "filed" and result.get("note_id"):
+        notes_filed = dict(checkpoint.get("notes_filed") or {})
+        notes_filed[note_key] = {
+            "note_id": result.get("note_id"),
+            "discussion_id": result.get("discussion_id"),
+            "filed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _merge_checkpoint(ports, task_id, {"notes_filed": notes_filed})
+        logger.info("note %r filed for task %s (note_id %s); recorded in checkpoint",
+                    note_key, task_id, result.get("note_id"))
+    elif result.get("status") not in ("filed", "dry_run"):
+        # Uncertain POST: held/pending/error. Do NOT record, do NOT retry.
+        logger.warning("note %r for task %s uncertain (status=%s); "
+                       "not recording, not retrying",
+                       note_key, task_id, result.get("status"))
+    return result
 
 
 def _format_outcome_note(
@@ -1071,6 +1179,20 @@ def _handle_call_task(
     if not is_call_task(task):
         return fail("task does not look like a call task; skipping")
 
+    # ---- 1b. Authorization: the task must be assigned to Robie ---------------
+    # An outbound client call is only ever placed for a task explicitly
+    # routed to Robie AI. A forged or misrouted task dict must not dial.
+    assigned_to = (_pick(task, "assigned_to") or "").strip()
+    if assigned_to and "robie" not in assigned_to.lower():
+        return fail(
+            f"task is assigned to {assigned_to!r}, not Robie; "
+            "refusing to place an outbound call"
+        )
+    if not assigned_to:
+        log.warning("task %s has no assigned_to field; proceeding — the "
+                    "intake only creates jobs for Robie-assigned tasks",
+                    task_id)
+
     # ---- 2. Idempotency (task_id) -------------------------------------------
     if _already_processed(task_id):
         log.info("task already processed within window; suppressing duplicate")
@@ -1152,8 +1274,9 @@ def _handle_call_task(
             "(for example, 'Call about the renewal documents'), "
             "and Robie will pick it up on the next check."
         )
-        wb = _writeback_outcome_note(
-            ports.discussion_client, applicant_id, clar_note, title_hint=None)
+        wb = _writeback_once(
+            ports, task_id, "clarification_instruction",
+            applicant_id, clar_note, title_hint=None)
         _mark_processed(task_id)
         _mark_content_processed(applicant_id, instruction)
         return fail(
@@ -1196,6 +1319,55 @@ def _handle_call_task(
             instruction, recovered_ids, checkpoint,
         )
 
+    # ---- 3d2. Dial intent recovery (timeout during POST) ----------------------
+    # If a previous run saved a dial intent but never recorded call_ids,
+    # the Bland POST may have timed out AFTER Bland accepted it. We do NOT
+    # dial again — we reconcile by checking Bland's recent calls for the
+    # number from the intent. A timeout or failed checkpoint must trigger
+    # reconciliation, never an automatic redial.
+    dial_intent = checkpoint.get("dial_intent") or {}
+    if dial_intent.get("status") == "dial_attempted":
+        intent_phone = dial_intent.get("phone")
+        intent_at = dial_intent.get("attempted_at", "unknown time")
+        log.warning(
+            "recovered dial intent for task %s (attempted at %s); "
+            "reconciling via Bland recent calls instead of redialing",
+            task_id, intent_at,
+        )
+        # Reconcile: check if Bland has a recent call to this number.
+        # If found, treat as recovered call_ids. If not found, the dial
+        # likely never went through — but we still do NOT auto-redial;
+        # we fail closed with a clear message for human review.
+        try:
+            recent = ports.bland.recent_calls(
+                intent_phone, since_seconds=IDEMPOTENCY_WINDOW_S
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("recent_calls check failed during intent recovery: %s", exc)
+            recent = {"ok": False}
+        if recent.get("ok") and recent.get("calls"):
+            found = recent["calls"][0]
+            found_id = found.get("call_id") or found.get("id")
+            if found_id:
+                log.warning(
+                    "dial intent reconciled: found Bland call %s; "
+                    "recovering instead of redialing", found_id)
+                return _recover_interrupted_call(
+                    task, config, ports, log, fail,
+                    task_id, applicant_id, applicant_name, assigned_by,
+                    instruction, [found_id], checkpoint,
+                )
+        # No recent call found — the dial likely never went through, but
+        # we do NOT auto-redial. Fail closed for human review.
+        _mark_processed(task_id)
+        return fail(
+            "previous dial attempt timed out with unknown outcome; no "
+            "recent Bland call found for reconciliation. NOT redialing "
+            "automatically — human review required.",
+            dial_intent_recovered=True,
+            dial_intent_at=intent_at,
+        )
+
     # ---- 4. Kill switch ----------------------------------------------------
     # Recovery above is not a new dial, so it runs even when halted; the
     # kill switch blocks NEW dials only.
@@ -1230,8 +1402,9 @@ def _handle_call_task(
             f"number to call (for example, 'call the cell number'), and "
             f"Robie will pick it up on the next check."
         )
-        wb = _writeback_outcome_note(
-            ports.discussion_client, applicant_id, clar_note, title_hint=None)
+        wb = _writeback_once(
+            ports, task_id, "clarification_phone",
+            applicant_id, clar_note, title_hint=None)
         _mark_processed(task_id)
         _mark_content_processed(applicant_id, instruction)
         return fail(
@@ -1274,8 +1447,9 @@ def _handle_call_task(
             f"If the client mentions a call from Eva, it was that attempt.\n"
             f"Eva identifies as an AI assistant for Jake from StreetSmart Insurance."
         )
-        writeback = _writeback_outcome_note(
-            ports.discussion_client, applicant_id, note_body, title_hint=None)
+        writeback = _writeback_once(
+            ports, task_id, "recent_call_skip",
+            applicant_id, note_body, title_hint=None)
         wb_ok = writeback.get("status") in ("filed", "dry_run")
         _mark_processed(task_id)
         _mark_content_processed(applicant_id, instruction)
@@ -1294,14 +1468,59 @@ def _handle_call_task(
         }
 
     # ---- 6. Place the call (double-dial) -----------------------------------
-    # Sloppy-human discrepancy flags (EZLynx is the source of truth for the
-    # number dialed, but staff should see the mismatch in the note).
+    # Identity gate: the task, applicant, and phone must all agree on WHO
+    # we are calling. If the instruction names a different person than the
+    # applicant ("call Mary Smith" on John Doe's account), do NOT dial —
+    # the phone belongs to the applicant, not the named person. Fail closed
+    # with a clarification note instead of merely flagging it in the note.
     phone_mismatch = _instruction_phone_mismatch(instruction, phone)
     name_mismatch = _instruction_name_mismatch(instruction, applicant_name)
+    if name_mismatch:
+        log.warning("instruction names %r but applicant is %r; failing closed",
+                    name_mismatch, applicant_name)
+        clar_note = (
+            f"Robie received a call task but couldn't place the call: the task "
+            f"says to call {name_mismatch}, but the account belongs to "
+            f"{applicant_name or 'someone else'}. Robie won't guess who to call. "
+            f"Please confirm who Robie should call and update the task, and "
+            f"Robie will pick it up on the next check."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_identity",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            f"instruction names {name_mismatch!r} but applicant is "
+            f"{applicant_name!r}; clarification note filed, task left open",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
     eva_task = _build_eva_task(instruction, applicant_name)
     first_sentence = _normalize_spoken(_build_first_sentence(instruction))
     voicemail_message = _normalize_spoken(_build_voicemail_message(instruction))
     metadata = {"task_id": task_id, "applicant_id": applicant_id, "source": "robie-call-task"}
+
+    # ---- 6a. Durable call intent (BEFORE the dial) --------------------------
+    # Save the intent to dial BEFORE the Bland POST. If the POST times out,
+    # the process crashes, or the checkpoint write after the dial fails,
+    # the next run sees this intent and RECONCILES (checks Bland recent
+    # calls for this number) instead of dialing again. A timeout or failed
+    # checkpoint must trigger reconciliation, never an automatic redial.
+    # The intent is cleared only when the dial is confirmed or reconciled.
+    if not config.dry_run:
+        _merge_checkpoint(ports, task_id, {
+            "bland_call_ids": [],
+            "phone": phone,
+            "completed_at": None,
+            "dial_intent": {
+                "attempted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "phone": phone,
+                "status": "dial_attempted",
+            },
+        })
+        log.info("durable dial intent saved for task %s (phone %s)",
+                 task_id, "***")
 
     if config.dry_run:
         log.info("[DRY_RUN] would place call to applicant %s", applicant_id)
@@ -1351,10 +1570,13 @@ def _handle_call_task(
     # ---- 7. Checkpoint IMMEDIATELY after the dial ---------------------------
     # A crash anywhere below must reconcile, never redial. This is the
     # durable write; the in-memory marks at the end are the fast path.
-    _save_checkpoint(ports, task_id, {
+    # The dial_intent from step 6a is cleared — we now have confirmed call_ids.
+    # Merge (not replace) so notes_filed entries recorded earlier survive.
+    _merge_checkpoint(ports, task_id, {
         "bland_call_ids": list(call_ids),
         "phone": phone,
         "completed_at": None,
+        "dial_intent": None,
     })
 
     # ---- 8. Outcome verification --------------------------------------------
@@ -1368,8 +1590,9 @@ def _handle_call_task(
         outcome = _verify_call_outcome(ports.bland, call_ids, config)
     call_result = _attach_verified_status(call_result, outcome)
     outcome_verified = bool(outcome.get("verified"))
-    log.info("outcome verification for task %s: verified=%s available=%s",
-             task_id, outcome_verified, outcome.get("available"))
+    outcome_successful = bool(outcome.get("successful"))
+    log.info("outcome verification for task %s: verified=%s successful=%s available=%s",
+             task_id, outcome_verified, outcome_successful, outcome.get("available"))
 
     if config.require_outcome_verification and not outcome_verified:
         # The call went out but Bland never confirmed a terminal status.
@@ -1381,8 +1604,9 @@ def _handle_call_task(
             applicant_name, instruction, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
         )
-        writeback = _writeback_outcome_note(
-            ports.discussion_client, applicant_id, note_body, title_hint=None
+        writeback = _writeback_once(
+            ports, task_id, "outcome_unverified",
+            applicant_id, note_body, title_hint=None
         )
         chat_alerted = _chat_alert(
             ports, config,
@@ -1399,6 +1623,43 @@ def _handle_call_task(
             call=call_result,
             writeback=writeback,
             outcome_verified=False,
+            outcome_verification_available=outcome.get("available"),
+            chat_alerted=chat_alerted,
+        )
+
+    if outcome_verified and not outcome_successful:
+        # The call ENDED but did NOT succeed (failed, busy, no-answer,
+        # canceled). This is not task completion — file the note honestly,
+        # alert, fail closed. NO reassignment. The checkpoint keeps the
+        # call_ids so a restart reconciles instead of redialing.
+        terminal_statuses = [
+            f"{cid}: {(outcome.get('statuses') or {}).get(cid, {}).get('status')}"
+            for cid in call_ids
+        ]
+        note_body = _format_outcome_note(
+            applicant_name, instruction, call_result, "skipped",
+            phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
+        )
+        writeback = _writeback_once(
+            ports, task_id, "outcome_unsuccessful",
+            applicant_id, note_body, title_hint=None
+        )
+        chat_alerted = _chat_alert(
+            ports, config,
+            f"Robie Call ENDED WITHOUT SUCCESS for applicant "
+            f"{applicant_id} (task {task_id}, {'; '.join(terminal_statuses)}). "
+            f"The call did not connect. Task left OPEN for human review — "
+            f"not reassigned.",
+        )
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "call ended without success (failed/busy/no-answer/canceled); "
+            "task left open",
+            call=call_result,
+            writeback=writeback,
+            outcome_verified=True,
+            outcome_successful=False,
             outcome_verification_available=outcome.get("available"),
             chat_alerted=chat_alerted,
         )
@@ -1439,6 +1700,7 @@ def _handle_call_task(
         note_body=note_body,
         outcome=outcome,
         outcome_verified=outcome_verified,
+        outcome_successful=outcome_successful,
         phone=phone,
         config=config,
         ports=ports,
@@ -1459,6 +1721,7 @@ def _finalize_call(
     note_body: str,
     outcome: Dict[str, Any],
     outcome_verified: bool,
+    outcome_successful: bool = True,
     phone: Optional[str],
     config: RobieCallConfig,
     ports: RobieCallPorts,
@@ -1470,8 +1733,9 @@ def _finalize_call(
     Used by both the normal path and the crash-recovery path.
     """
     call_ids = call_result.get("call_ids") or []
-    writeback = _writeback_outcome_note(
-        ports.discussion_client, applicant_id, note_body, title_hint=None
+    writeback = _writeback_once(
+        ports, task_id, "outcome",
+        applicant_id, note_body, title_hint=None
     )
     wb_ok = writeback.get("status") in ("filed", "dry_run")
     chat_alerted = False
@@ -1485,33 +1749,65 @@ def _finalize_call(
         )
         log.error("writeback failed after successful call: %s", writeback.get("reason") or writeback.get("error"))
 
-    # ---- Reassign (with read-back) ------------------------------------------
-    # reassigned=True ONLY on a matching read-back — the port's ok alone
-    # is never enough. A mismatch fires a chat alert: the task may be
-    # sitting with the wrong person.
+    # ---- Reassign (with pre-check + read-back) --------------------------------
+    # reassigned=True ONLY when ALL of these hold:
+    #   1. The task is currently assigned to Robie (driver ownership check).
+    #      Never steal a task that a human already moved elsewhere.
+    #   2. reassign_task(task_id, ...) reports ok for the EXACT task ID.
+    #   3. read_task_assignee(task_id) for that SAME task ID reads back as
+    #      the intended assignee.
+    # A mismatch at any step fires a chat alert: the task may be sitting
+    # with the wrong person.
     reassigned = False
     reassign_error: Optional[str] = None
     if wb_ok and assigned_by and ports.task_reassign is not None and not config.dry_run:
         try:
-            r = _retryable_call(
-                lambda: ports.task_reassign.reassign_task(  # type: ignore[union-attr]
-                    task_id,
-                    assigned_by,
-                    "Robie completed the call task. Outcome note filed in EZLynx.",
-                ),
-                what=f"task reassign {task_id}",
-            )
-            if not r.get("ok"):
-                reassign_error = str(r.get("error") or "reassign returned not-ok")[:200]
+            read_back = getattr(ports.task_reassign, "read_task_assignee", None)
+            # Step 1: verify driver ownership BEFORE touching the task.
+            if callable(read_back):
+                try:
+                    pre_assignee = read_back(task_id)
+                except Exception as exc:  # noqa: BLE001
+                    pre_assignee = None
+                    log.warning("pre-reassign assignee read failed for %s: %s",
+                                task_id, exc)
+                if pre_assignee is not None:
+                    owned = "robie" in (pre_assignee or "").strip().lower()
+                    if not owned:
+                        reassign_error = (
+                            "task not owned by Robie (currently assigned to "
+                            f"{pre_assignee!r}); refusing to reassign"
+                        )
+                        log.error("task %s: %s", task_id, reassign_error)
+                        chat_alerted = _chat_alert(
+                            ports, config,
+                            f"Task {task_id} reassignment REFUSED: the task is "
+                            f"currently assigned to {pre_assignee!r}, not Robie. "
+                            f"A human may have moved it. Not touching it.",
+                        ) or chat_alerted
             else:
-                read_back = getattr(ports.task_reassign, "read_task_assignee", None)
-                if not callable(read_back):
+                log.warning("task %s: no read_task_assignee available; "
+                            "skipping pre-reassign ownership check", task_id)
+            # Step 2: reassign by exact task ID (only if ownership held).
+            if reassign_error is None:
+                r = _retryable_call(
+                    lambda: ports.task_reassign.reassign_task(  # type: ignore[union-attr]
+                        task_id,
+                        assigned_by,
+                        "Robie completed the call task. Outcome note filed in EZLynx.",
+                    ),
+                    what=f"task reassign {task_id}",
+                )
+                if not r.get("ok"):
+                    reassign_error = str(r.get("error") or "reassign returned not-ok")[:200]
+                elif not callable(read_back):
                     reassign_error = (
                         "reassignment claimed by port but NOT verified "
                         "(no read-back available); left for human confirmation"
                     )
                     log.warning("task %s: %s", task_id, reassign_error)
                 else:
+                    # Step 3: read back that SAME task ID to confirm.
                     try:
                         current_assignee = read_back(task_id)
                     except Exception as exc:  # noqa: BLE001
@@ -1550,19 +1846,24 @@ def _finalize_call(
     # worker explicitly opted out of verification (auditable config).
     # Reassignment is reported separately (reassigned + reassign_error) — a
     # routing problem must not masquerade as a call failure, nor vice versa.
+    # CRITICAL: verified alone is not enough — the call must have SUCCEEDED
+    # (connected). A verified "failed"/"busy"/"no-answer" is not task success.
     verification_required = bool(config.require_outcome_verification)
-    ok = wb_ok and (outcome_verified or not verification_required)
+    ok = wb_ok and (outcome_verified or not verification_required) and outcome_successful
     if ok:
         error = None
     elif not outcome_verified and verification_required:
         error = "call outcome unverified"
+    elif not outcome_successful:
+        error = "call ended without success"
     else:
         error = writeback.get("reason") or writeback.get("error") or "writeback failed"
 
     # Mark the checkpoint complete ONLY on real completion. A failed task
     # keeps its call_ids with completed_at=None so the next cycle
-    # reconciles instead of treating it as done.
-    _save_checkpoint(ports, task_id, {
+    # reconciles instead of treating it as done. Merge (not replace) so
+    # the notes_filed write-once record survives.
+    _merge_checkpoint(ports, task_id, {
         "bland_call_ids": list(call_ids),
         "phone": phone,
         "completed_at": (
@@ -1581,13 +1882,14 @@ def _finalize_call(
         "reassign_error": reassign_error,
         "chat_alerted": chat_alerted,
         "outcome_verified": outcome_verified,
+        "outcome_successful": outcome_successful,
         "outcome_verification_available": outcome.get("available"),
         "error": error,
     }
     if call_result.get("recovered_from_checkpoint"):
         result["recovered_from_checkpoint"] = True
-    log.info("task complete: ok=%s reassigned=%s outcome_verified=%s",
-             ok, reassigned, outcome_verified)
+    log.info("task complete: ok=%s reassigned=%s outcome_verified=%s outcome_successful=%s",
+             ok, reassigned, outcome_verified, outcome_successful)
     return result
 
 
@@ -1630,13 +1932,16 @@ def _recover_interrupted_call(
     }
     call_result = _attach_verified_status(call_result, outcome)
     outcome_verified = bool(outcome.get("verified"))
-    log.info("recovery for task %s: outcome verified=%s", task_id, outcome_verified)
+    outcome_successful = bool(outcome.get("successful"))
+    log.info("recovery for task %s: outcome verified=%s successful=%s",
+             task_id, outcome_verified, outcome_successful)
 
     note_body = _format_recovery_note(applicant_name, instruction, call_result)
 
     if config.require_outcome_verification and not outcome_verified:
-        writeback = _writeback_outcome_note(
-            ports.discussion_client, applicant_id, note_body, title_hint=None
+        writeback = _writeback_once(
+            ports, task_id, "recovery_unverified",
+            applicant_id, note_body, title_hint=None
         )
         chat_alerted = _chat_alert(
             ports, config,
@@ -1652,6 +1957,32 @@ def _recover_interrupted_call(
             call=call_result,
             writeback=writeback,
             outcome_verified=False,
+            outcome_verification_available=outcome.get("available"),
+            recovered_from_checkpoint=True,
+            chat_alerted=chat_alerted,
+        )
+
+    if outcome_verified and not outcome_successful:
+        # Recovered call ended but did NOT succeed. File honestly, alert,
+        # fail closed. Task left OPEN.
+        writeback = _writeback_once(
+            ports, task_id, "recovery_unsuccessful",
+            applicant_id, note_body, title_hint=None
+        )
+        chat_alerted = _chat_alert(
+            ports, config,
+            f"Recovered Robie Call for applicant {applicant_id} (task "
+            f"{task_id}): the previous attempt's call ENDED WITHOUT SUCCESS "
+            f"(failed/busy/no-answer/canceled). Task left OPEN for human review.",
+        )
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "recovered call ended without success; task left open",
+            call=call_result,
+            writeback=writeback,
+            outcome_verified=True,
+            outcome_successful=False,
             outcome_verification_available=outcome.get("available"),
             recovered_from_checkpoint=True,
             chat_alerted=chat_alerted,
