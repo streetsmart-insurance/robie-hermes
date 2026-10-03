@@ -315,36 +315,46 @@ def test_arellano_open_pcr_still_nags_despite_complete_task(tmp_path):
     # Arellano 2026-09-27: the EZLynx task was Complete but the PCR was
     # still Open and the address was not updated anywhere. The worker has
     # no task input at all — Open status alone must trigger the nag.
-    rows = [row(account="Arellano's Future Landscaping LLC", applicant="111",
-                policy="13WECAT1F8T", created="2026-09-04",
-                csr="Lenin Perdomo", carrier="Hartford", producer="Andrea Illanes")]
-    search_map = {"13WECAT1F8T": [policy_row("13WECAT1F8T", account="111")]}
-    worker, sent = make_worker(tmp_path, rows, search_map, live_discussions())
-    result = worker.perform(job(), idempotency_key="k1")
-    assert result.succeeded
-    assert len(sent) == 1
-    assert sent[0]["to"] == ["lenin@streetsmart.insurance"]
-    # Producer "Andrea Illanes" resolves via the first+last alias to
-    # Andrea Nicole Illanes — the right mailbox, not a wrong CC.
-    assert "andrea@streetsmart.insurance" in sent[0]["cc"]
-    assert "13WECAT1F8T" in sent[0]["text_body"]
-    assert "23 days ago" in sent[0]["text_body"]
+    # Mock date.today() for deterministic "days ago" calculation.
+    from unittest.mock import patch
+    with patch("robie_job_engine.overdue_policy_change_reports.date") as mock_date:
+        mock_date.today.return_value = TODAY
+        mock_date.side_effect = lambda *args, **kw: date(*args, **kw)
+        rows = [row(account="Arellano's Future Landscaping LLC", applicant="111",
+                    policy="13WECAT1F8T", created="2026-09-04",
+                    csr="Lenin Perdomo", carrier="Hartford", producer="Andrea Illanes")]
+        search_map = {"13WECAT1F8T": [policy_row("13WECAT1F8T", account="111")]}
+        worker, sent = make_worker(tmp_path, rows, search_map, live_discussions())
+        result = worker.perform(job(), idempotency_key="k1")
+        assert result.succeeded
+        assert len(sent) == 1
+        assert sent[0]["to"] == ["lenin@streetsmart.insurance"]
+        # Producer "Andrea Illanes" resolves via the first+last alias to
+        # Andrea Nicole Illanes — the right mailbox, not a wrong CC.
+        assert "andrea@streetsmart.insurance" in sent[0]["cc"]
+        assert "13WECAT1F8T" in sent[0]["text_body"]
+        assert "23 days ago" in sent[0]["text_body"]
 
 
 def test_guarini_email_carries_discussion_context(tmp_path):
     # Guarini: a 9/15 "endorsement received" note exists but the queue row
     # is still Open — the nag must show the CSR the last activity so they
     # see what already happened.
-    rows = [row(account="John Guarini", applicant="222", policy="04283052",
-                created="2026-08-31", csr="Jackie Arriola",
-                producer="Taylor Cimei")]
-    search_map = {"04283052": [policy_row("04283052", account="222")]}
-    discussions = [disc("Commercial Auto Policy Change Request", 5,
-                        "2026-09-15T10:00:00")]
-    worker, sent = make_worker(tmp_path, rows, search_map, discussions)
-    result = worker.perform(job(), idempotency_key="k1")
-    assert result.succeeded
-    assert "5 notes, last activity 12 days ago" in sent[0]["text_body"]
+    # Mock date.today() for deterministic "days ago" calculation.
+    from unittest.mock import patch
+    with patch("robie_job_engine.overdue_policy_change_reports.date") as mock_date:
+        mock_date.today.return_value = TODAY
+        mock_date.side_effect = lambda *args, **kw: date(*args, **kw)
+        rows = [row(account="John Guarini", applicant="222", policy="04283052",
+                    created="2026-08-31", csr="Jackie Arriola",
+                    producer="Taylor Cimei")]
+        search_map = {"04283052": [policy_row("04283052", account="222")]}
+        discussions = [disc("Commercial Auto Policy Change Request", 5,
+                            "2026-09-15T10:00:00")]
+        worker, sent = make_worker(tmp_path, rows, search_map, discussions)
+        result = worker.perform(job(), idempotency_key="k1")
+        assert result.succeeded
+        assert "5 notes, last activity 12 days ago" in sent[0]["text_body"]
 
 
 # -- policy-number variants ----------------------------------------------------
