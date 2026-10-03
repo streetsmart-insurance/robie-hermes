@@ -15,19 +15,10 @@ Runs via cron (hourly). Checks the things that have actually bitten us:
   8. Sweep freshness: is each scheduled job producing successful runs on time?
   9. Service error scan: failure signatures (invalid_grant, tracebacks) in the
      trailing journal window per service.
-  10. Systems watchdog phase 2 (2026-09-28):
-      - Both phone Gmail keys probed separately (primary + backup)
-      - EZLynx login secret version states (ENABLED? states only, no payloads)
-      - Applicant ingest freshness (warn 30h, fail 36h — the fail-closed cliff)
-      - EOD local output proof + Drive delivery UNVERIFIED flag
-      - Task-verifier health (stuck PENDING/UNVERIFIED tasks, journal errors)
-      - 4359 Tuesday email proof (evidence-latest.json from most recent Tue)
-      - Chat intake liveness (reuses production_preflight.check_chat_intake)
 
 Output:
   - JSON status file (always written, even when healthy)
   - Google Chat ping ONLY on failure (quiet when healthy)
-  - --daily-digest: morning all-green/failure digest (phase 3; daily timer)
   - Exit 0 = healthy, 1 = issues found, 2 = check itself errored
 
 All probes are AUTH-ONLY / READ-ONLY: no operations, no writes, no sends.
@@ -299,56 +290,6 @@ TIMER_FRESHNESS = [
 GCP_PROJECT = os.environ.get("GCP_PROJECT", "streetsmart-hermes-poc")
 
 
-# ---------------------------------------------------------------------------
-# Systems watchdog phases 2–3 (added 2026-09-28)
-#
-# Phase 2 closes the monitoring gaps found in the 2026-09-28 inventory:
-# both phone Gmail keys (not just the live one), applicant ingest freshness
-# (36h cliff), EOD Drive delivery proof, task-verifier health, 4359 Tuesday
-# email proof, Chat intake liveness, and Secret Manager version states.
-#
-# Phase 3 adds the daily "all green" digest (explicit healthy confirmation
-# instead of silence-means-healthy) via --daily-digest, and the
-# accountability-VM probe (scripts/accountability_vm_health_probe.py).
-#
-# All probes are AUTH-ONLY / READ-ONLY: no operations, no writes, no sends.
-# Secret values are never logged — names and statuses only.
-# ---------------------------------------------------------------------------
-
-# Both phone-watchdog Gmail keys, probed separately. The primary died on
-# 2026-09-27 (invalid_grant); the backup is the live one. If the primary is
-# ever restored, this probe confirms it without masking the backup's state.
-PHONE_GMAIL_KEYS = [
-    ("/opt/streetsmart-phone-watchdog/service_key.json", "primary"),
-    ("/opt/streetsmart-phone-watchdog/service_key_hermes_poc.json", "backup"),
-]
-
-# Applicant ingest freshness: the "All Applicants Phone Match Export" must be
-# < 36h old or unknown callers fail closed (no callback tasks). Warn at 30h
-# so there's a 6h window to fix it before the cliff.
-APPLICANT_EXPORT_PATH = "/opt/streetsmart-phone-watchdog/data/applicant_phone_match_export.xls"
-APPLICANT_WARN_SECONDS = 30 * 3600
-APPLICANT_FAIL_SECONDS = 36 * 3600
-
-# EOD outputs land here locally; Drive delivery is verified separately.
-EOD_OUTPUT_DIR = "/opt/streetsmart-phone-watchdog/data/outputs"
-
-# EOD Sheet delivery (post-2026-09-28: Sheets replaced Excel+Drive upload).
-# The probe confirms the OUTCOME (most recent run's Sheet exists in Drive).
-EOD_SHEET_NAME_FMT = "EOD Phone Report -- {date}"  # date = YYYY-MM-DD
-EOD_SHEETS_FOLDER_ID_ENV = "EOD_SHEETS_FOLDER_ID"
-EOD_SA_KEY_PATH = "/opt/streetsmart-phone-watchdog/service_key.json"
-
-# Task verifier DB: set ROBIE_TASK_VERIFY_DB to override (matches the
-# verifier service's own env). Stuck = PENDING/UNVERIFIED older than this.
-TASK_VERIFY_DB_DEFAULT = "/home/carlo_streetsmart_insurance/.robie/task_verification/pending.db"
-TASK_VERIFY_STUCK_SECONDS = 2 * 3600  # verifier runs every 15m; 2h stuck = broken
-
-# 4359 Tuesday evidence.
-EVIDENCE_4359_PATH = ("/opt/streetsmart-hermes/robie-job-engine/data/"
-                      "overdue_policy_change_reports/evidence-latest.json")
-
-
 def _resolve_watchdog_service_key() -> str:
     """Return the --service-key path the phone-watchdog service actually uses.
 
@@ -592,401 +533,156 @@ def check_service_errors() -> tuple[bool, str, dict]:
     return True, "no failure signatures in trailing hour", extra
 
 
-def _probe_gmail_key(key_path: str) -> tuple[bool, str, dict]:
-    """Auth-only Gmail getProfile for one SA key file. Never logs secrets."""
-    extra: dict = {"key_path": key_path}
-    try:
-        with open(key_path) as f:
-            key_data = json.load(f)
-        client_email = str(key_data.get("client_email", ""))
-        extra["client_email"] = client_email
-        if not key_data.get("private_key") or not client_email:
-            return False, f"key file {key_path} is not a valid SA key", extra
+def check_duplicate_guard() -> tuple[bool, str, dict]:
+    """Does the outbound duplicate guard still behave correctly?
 
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        creds = service_account.Credentials.from_service_account_file(
-            key_path,
-            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
-            subject=WATCHDOG_MAILBOX,
-        )
-        svc = build("gmail", "v1", credentials=creds)
-        profile = svc.users().getProfile(userId="me").execute()
-        extra["gmail_user"] = profile.get("emailAddress", "")
-        return True, f"gmail SA key OK ({client_email})", extra
-    except FileNotFoundError:
-        return False, f"key file not found: {key_path}", extra
-    except Exception as exc:
-        return False, f"gmail auth failed: {type(exc).__name__}: {str(exc)[:120]}", extra
-
-
-def check_phone_gmail_keys() -> tuple[bool, str, dict]:
-    """Are BOTH phone-watchdog Gmail keys alive? Reported separately.
-
-    The 2026-09-27 incident: the primary key died (invalid_grant) while the
-    backup kept the daemon alive. Probing only the live key would have masked
-    the primary's death. Each key gets its own verdict.
-    """
-    extra: dict = {"keys": {}}
-    problems: list[str] = []
-    for key_path, label in PHONE_GMAIL_KEYS:
-        ok, detail, key_extra = _probe_gmail_key(key_path)
-        extra["keys"][label] = {"ok": ok, "detail": detail,
-                                "client_email": key_extra.get("client_email", "")}
-        if not ok:
-            problems.append(f"{label} ({key_path}): {detail}")
-    if problems:
-        return False, "; ".join(problems), extra
-    return True, f"both phone Gmail keys OK ({len(PHONE_GMAIL_KEYS)} probed)", extra
-
-
-def check_login_secret_states() -> tuple[bool, str, dict]:
-    """Do the EZLynx login secrets have an ENABLED version? States only.
-
-    Reuses robie_job_engine/login_secret_health.inspect_login_secrets, which
-    lists version states without ever reading payloads. Alerts only when a
-    watched secret has NO enabled version (a DESTROYED newest with an older
-    ENABLED still present is healthy — see that module's docstring).
+    Outcome probe (PR #735): a correction — same thread, same recipient and
+    subject, but DIFFERENT body — must NOT be skipped as a duplicate, while
+    an exact duplicate (identical body) MUST still be skipped. Uses a fake
+    Gmail service; no network, no sends. Fails if the guard regresses to
+    the pre-#735 thread-blind behavior or stops skipping true duplicates.
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
-        from robie_job_engine.login_secret_health import inspect_login_secrets
-
-        report = inspect_login_secrets()
+        from robie_job_engine.outbound_send_guard import should_skip_send
     except Exception as exc:
-        extra["error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
-        return False, f"secret state check failed: {type(exc).__name__}", extra
+        return False, f"cannot import should_skip_send: {type(exc).__name__}", extra
 
-    result = report.get("result", "UNKNOWN")
-    extra["result"] = result
-    extra["project"] = report.get("project", "")
-    for item in report.get("secrets", []):
-        extra[item.get("secret_id", "?")] = {
-            "enabled": item.get("enabled_versions", []),
-            "newest_state": item.get("newest_state"),
-            "alert": item.get("alert"),
+    import base64 as _b64
+    import time as _time
+
+    def _b64e(text: str) -> str:
+        return _b64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii")
+
+    def _msg(mid, to, subject, body, labels, internal_ms):
+        return {
+            "id": mid,
+            "threadId": "health-probe-thread",
+            "labelIds": labels,
+            "internalDate": str(internal_ms),
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": _b64e(body)},
+                "headers": [
+                    {"name": "To", "value": to},
+                    {"name": "Subject", "value": subject},
+                ],
+            },
         }
-    if result == "OK":
-        return True, report.get("reason", "each watched secret has an ENABLED version"), extra
-    if result == "UNKNOWN":
-        # Secret Manager unreachable — don't page, but don't claim healthy.
-        return True, f"secret states UNKNOWN ({report.get('reason', '')[:80]})", extra
-    return False, report.get("reason", "secret version alert"), extra
 
+    class _FakeMessages:
+        def __init__(self, svc):
+            self.svc = svc
 
-def check_applicant_ingest_freshness() -> tuple[bool, str, dict]:
-    """Is the applicant phone-match export fresh? Warn 30h, fail 36h.
+        def list(self, userId=None, q=None, maxResults=None, **kw):
+            return self
 
-    Past the 36h cliff, unknown callers fail closed — no callback tasks are
-    created. The 6h warning window gives time to fix the ingest before it
-    bites.
-    """
-    extra: dict = {"path": APPLICANT_EXPORT_PATH}
+        def get(self, userId=None, id=None, format=None,
+                metadataHeaders=None, **kw):
+            self.svc._last_get = {"id": id, "format": format}
+            return self
+
+        def execute(self):
+            if self.svc._last_get and self.svc._last_get.get("format") == "metadata":
+                return self.svc.sent_meta[self.svc._last_get["id"]]
+            if self.svc._last_get:
+                return self.svc.by_id[self.svc._last_get["id"]]
+            return {"messages": [{"id": m["id"]} for m in self.svc.sent_index]}
+
+    class _FakeThreads:
+        def __init__(self, svc):
+            self.svc = svc
+
+        def get(self, userId=None, id=None, format=None, **kw):
+            return self
+
+        def execute(self):
+            return {"messages": self.svc.thread_messages}
+
+    class _FakeUsers:
+        def __init__(self, svc):
+            self.svc = svc
+
+        def messages(self):
+            return _FakeMessages(self.svc)
+
+        def threads(self):
+            return _FakeThreads(self.svc)
+
+    class _FakeGmail:
+        def __init__(self, sent_index, sent_meta, by_id, thread_messages):
+            self.sent_index = sent_index
+            self.sent_meta = sent_meta
+            self.by_id = by_id
+            self.thread_messages = thread_messages
+            self._last_get = None
+
+        def users(self):
+            return _FakeUsers(self)
+
+    def _meta(mid, to, subject, internal_ms):
+        return {
+            "id": mid,
+            "internalDate": str(internal_ms),
+            "payload": {
+                "headers": [
+                    {"name": "To", "value": to},
+                    {"name": "Subject", "value": subject},
+                ]
+            },
+        }
+
     try:
-        mtime = os.path.getmtime(APPLICANT_EXPORT_PATH)
-    except FileNotFoundError:
-        return False, f"applicant export missing: {APPLICANT_EXPORT_PATH}", extra
-    except OSError as exc:
-        return False, f"applicant export unreadable: {type(exc).__name__}", extra
-    age = time.time() - mtime
-    extra["age_hours"] = round(age / 3600, 1)
-    extra["size_bytes"] = os.path.getsize(APPLICANT_EXPORT_PATH)
-    if age >= APPLICANT_FAIL_SECONDS:
-        return False, (
-            f"applicant export {age/3600:.1f}h old (cliff is 36h) — "
-            "unknown callers are failing closed"
-        ), extra
-    if age >= APPLICANT_WARN_SECONDS:
-        # Warn but don't page: return ok=False only past the cliff. A warning
-        # goes in the detail so the daily digest can surface it.
-        extra["warning"] = True
+        now_ms = int(_time.time() * 1000)
+        to = "robie@streetsmart.insurance"
+        subject = "Re: health-probe"
+        original = "original request body"
+        correction = "correction: different body content here"
+        reply = "robie reply body"
+
+        thread = [
+            _msg("m-orig", to, subject, original, ["INBOX"], now_ms - 7200_000),
+            _msg("m-reply", "probe@streetsmart.insurance", subject, reply,
+                 ["SENT"], now_ms - 3600_000),
+            _msg("m-corr", to, subject, correction, ["INBOX"], now_ms - 600_000),
+        ]
+        sent_meta = {
+            "m-reply": _meta("m-reply", "probe@streetsmart.insurance",
+                             subject, now_ms - 3600_000),
+        }
+        by_id = {m["id"]: m for m in thread}
+        svc = _FakeGmail([{"id": "m-reply"}], sent_meta, by_id, thread)
+
+        # 1. Correction must NOT be skipped.
+        skip_corr, reason_corr = should_skip_send(
+            svc, "probe@streetsmart.insurance", subject,
+            incoming_body=correction, thread_id="health-probe-thread",
+        )
+        extra["correction"] = {"skip": skip_corr, "reason": reason_corr}
+        if skip_corr:
+            return False, (
+                "duplicate guard REGRESSED: correction skipped as duplicate "
+                f"({reason_corr})"
+            ), extra
+
+        # 2. Exact duplicate MUST still be skipped.
+        svc2 = _FakeGmail([{"id": "m-reply"}], sent_meta, by_id, thread[:2])
+        skip_dup, reason_dup = should_skip_send(
+            svc2, "probe@streetsmart.insurance", subject,
+            incoming_body=original, thread_id="health-probe-thread",
+        )
+        extra["duplicate"] = {"skip": skip_dup, "reason": reason_dup}
+        if not skip_dup:
+            return False, (
+                "duplicate guard DISABLED: exact duplicate was not skipped "
+                f"({reason_dup})"
+            ), extra
+
         return True, (
-            f"applicant export {age/3600:.1f}h old — WARNING: 36h cliff in "
-            f"{(APPLICANT_FAIL_SECONDS - age)/3600:.1f}h"
+            "correction processed, exact duplicate skipped"
         ), extra
-    return True, f"applicant export {age/3600:.1f}h old", extra
-
-
-def _most_recent_eod_date(now: datetime | None = None) -> datetime:
-    """Return the date of the most recent expected EOD run.
-
-    EOD runs Mon-Fri at 17:00 ET. Returns the most recent weekday (Mon-Fri)
-    strictly before today: on Tue-Fri that's yesterday; on Mon/Sat/Sun
-    that's Friday. Checking for "today's" file in the morning was the
-    2026-09-29 false alarm — at 06:00, today's 17:00 run hasn't happened.
-    """
-    from datetime import timedelta
-    now = now or datetime.now()
-    d = now.date() - timedelta(days=1)
-    while d.weekday() > 4:  # 5=Sat, 6=Sun → walk back to Friday
-        d -= timedelta(days=1)
-    return datetime(d.year, d.month, d.day)
-
-
-def _check_eod_sheet_in_drive(date_str: str, extra: dict) -> tuple[bool, str]:
-    """Is there a Sheet named 'EOD Phone Report -- YYYY-MM-DD' in Drive?
-
-    Returns (found, detail). Any Drive/API/credential problem returns
-    (False, reason) with the problem recorded in extra — the caller decides
-    whether to fail or fall back to the local file. Never raises.
-    """
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-    except ImportError:
-        extra["drive_check"] = "skipped: google-api-python-client not installed"
-        return False, "Drive API client not installed"
-
-    folder_id = os.environ.get(EOD_SHEETS_FOLDER_ID_ENV, "").strip()
-    if not os.path.isfile(EOD_SA_KEY_PATH):
-        extra["drive_check"] = f"skipped: service key not found"
-        return False, "service key not found"
-    if not folder_id:
-        extra["drive_check"] = f"skipped: {EOD_SHEETS_FOLDER_ID_ENV} not set"
-        return False, f"{EOD_SHEETS_FOLDER_ID_ENV} not set"
-
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            EOD_SA_KEY_PATH,
-            scopes=["https://www.googleapis.com/auth/drive.readonly"])
-        svc = build("drive", "v3", credentials=creds)
-        sheet_name = EOD_SHEET_NAME_FMT.format(date=date_str)
-        # Escape single quotes for the Drive query language.
-        safe_name = sheet_name.replace("'", "\'")
-        q = (f"name='{safe_name}' and "
-             f"mimeType='application/vnd.google-apps.spreadsheet' and "
-             f"'{folder_id}' in parents and trashed=false")
-        res = svc.files().list(
-            q=q, corpora="drive", driveId=folder_id,
-            includeItemsFromAllDrives=True, supportsAllDrives=True,
-            fields="files(id,name,modifiedTime)").execute()
-        files = res.get("files", [])
-        extra["drive_check"] = f"found {len(files)} Sheet(s) named '{sheet_name}'"
-        if files:
-            extra["sheet_id"] = files[0]["id"]
-            extra["sheet_modified"] = files[0].get("modifiedTime", "")
-            return True, f"Sheet '{sheet_name}' found in Drive"
-        return False, f"Sheet '{sheet_name}' not found in Drive"
-    except Exception as exc:  # noqa: BLE001 - report, don't crash the probe
-        extra["drive_check"] = f"error: {type(exc).__name__}: {str(exc)[:100]}"
-        return False, f"Drive check failed: {type(exc).__name__}"
-
-
-def check_eod_drive_delivery() -> tuple[bool, str, dict]:
-    """Did the most recent EOD phone report land as a Google Sheet?
-
-    The EOD runs Mon-Fri at 17:00 ET. This confirms the OUTCOME: the most
-    recent expected run's report exists as a Google Sheet in the Shared
-    Drive. The 2026-09-29 false alarm checked for "today's" Excel at 06:00 —
-    today's 17:00 run can't have happened yet. The Sheet is the outcome now
-    (Excel+Drive upload was replaced 2026-09-28); the local file is only a
-    fallback when Drive is unreachable.
-    """
-    extra: dict = {}
-    expected = _most_recent_eod_date()
-    date_str = expected.strftime("%Y-%m-%d")      # Sheet name format
-    date_compact = expected.strftime("%Y%m%d")    # legacy Excel format
-    extra["expected_date"] = date_str
-
-    # Primary: the Google Sheet in the Shared Drive (the outcome).
-    found, detail = _check_eod_sheet_in_drive(date_str, extra)
-    if found:
-        return True, f"EOD report for {date_str} delivered as Google Sheet", extra
-
-    # Fallback: local Excel. Only fail if the local file is ALSO missing —
-    # Drive being temporarily unreachable shouldn't page when the report ran.
-    try:
-        names = os.listdir(EOD_OUTPUT_DIR)
-    except (FileNotFoundError, OSError) as exc:
-        extra["local_fallback"] = f"unreadable: {type(exc).__name__}"
-        return False, (
-            f"Yesterday's EOD phone report ({date_str}) is missing: no Google "
-            f"Sheet in Drive ({detail}) and the local output folder is "
-            f"unreadable. The 5 PM run may not have completed."
-        ), extra
-
-    xlsx = f"eod_phone_report_{date_compact}.xlsx"
-    md = f"eod_phone_leakage_{date_compact}.md"
-    extra["xlsx_present"] = xlsx in names
-    extra["md_present"] = md in names
-    if xlsx in names or md in names:
-        extra["local_fallback"] = "used"
-        return True, (
-            f"EOD report for {date_str} present locally; "
-            f"Drive Sheet check: {detail}"
-        ), extra
-
-    return False, (
-        f"Yesterday's EOD phone report ({date_str}) is missing: no Google "
-        f"Sheet in Drive ({detail}) and no local file ({xlsx}). "
-        f"The 5 PM run may not have completed."
-    ), extra
-
-
-def check_task_verifier_health() -> tuple[bool, str, dict]:
-    """Is the task verifier keeping up? Any tasks stuck unverified?
-
-    The verifier runs every 15m and checks phone-watchdog 'delivered' tasks
-    against EZLynx. Tasks stuck PENDING/UNVERIFIED for 2h+ mean the verifier
-    is broken or EZLynx is unreachable — either way, callback tasks may be
-    silently missing.
-    """
-    extra: dict = {}
-    db_path = os.environ.get("ROBIE_TASK_VERIFY_DB", TASK_VERIFY_DB_DEFAULT)
-    extra["db_path"] = db_path
-    problems: list[str] = []
-    try:
-        import sqlite3
-
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5)
-        try:
-            tables = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-            if "pending_tasks" not in tables:
-                return False, f"verifier DB missing pending_tasks table: {db_path}", extra
-            cutoff = time.time() - TASK_VERIFY_STUCK_SECONDS
-            # created_at is ISO text; compare as epoch via strftime. The CAST
-            # is required: strftime returns TEXT and SQLite sorts INTEGER
-            # before TEXT, so an uncast comparison never matches.
-            rows = conn.execute(
-                """SELECT COUNT(*), MAX(created_at) FROM pending_tasks
-                   WHERE status IN ('PENDING', 'UNVERIFIED')
-                     AND CAST(strftime('%s', created_at) AS INTEGER) < ?""",
-                (int(cutoff),),
-            ).fetchone()
-            stuck_count = rows[0] or 0
-            extra["stuck_count"] = stuck_count
-            extra["oldest_stuck"] = rows[1]
-            if stuck_count:
-                problems.append(
-                    f"{stuck_count} task(s) stuck PENDING/UNVERIFIED for 2h+ "
-                    f"(oldest {rows[1]})"
-                )
-            total = conn.execute(
-                "SELECT COUNT(*) FROM pending_tasks WHERE status IN ('PENDING','UNVERIFIED')"
-            ).fetchone()[0]
-            extra["open_count"] = total
-        finally:
-            conn.close()
     except Exception as exc:
-        return False, f"verifier DB unreadable: {type(exc).__name__}: {str(exc)[:80]}", extra
-
-    # Also check the verifier service's own journal for failures.
-    log = _journal_since("robie-task-verifier.service", "1 hour ago")
-    if log:
-        for pat in ("Traceback (most recent call last)", "OperationalError", "unable to open database"):
-            if pat in log:
-                problems.append(f"verifier journal shows '{pat}' in trailing hour")
-                break
-    extra["journal_checked"] = bool(log)
-    if problems:
-        return False, "; ".join(problems), extra
-    return True, f"verifier healthy ({extra.get('open_count', 0)} open, none stuck 2h+)", extra
-
-
-def _most_recent_tuesday(now: datetime) -> datetime:
-    """Return the most recent Tuesday 08:00 ET (the 4359 fire time)."""
-    # Tuesday is weekday 1. If today is Tuesday before 08:00 ET, the most
-    # recent run is last Tuesday.
-    from datetime import timedelta
-    days_back = (now.weekday() - 1) % 7
-    candidate = now.replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=days_back)
-    if days_back == 0 and now.hour < 8:
-        candidate -= timedelta(days=7)
-    return candidate
-
-
-def check_4359_tuesday_proof() -> tuple[bool, str, dict]:
-    """Did the most recent Tuesday 4359 run actually send (or explicitly hold)?
-
-    Checks evidence-latest.json: ran_at must be after the most recent Tuesday
-    08:00 ET, and it must show sent>0 or an explicit reason for 0 (held,
-    dry-run, no qualifying rows). A timer that fired but sent nothing with no
-    reason is a silent failure.
-    """
-    extra: dict = {"path": EVIDENCE_4359_PATH}
-    try:
-        with open(EVIDENCE_4359_PATH) as f:
-            ev = json.load(f)
-    except FileNotFoundError:
-        return False, f"4359 evidence missing: {EVIDENCE_4359_PATH}", extra
-    except PermissionError:
-        # The 2026-09-29 false alarm: the worker wrote evidence-latest.json
-        # mode 600 owned by streetsmart-hermes; the probe (different user)
-        # couldn't read it. The worker now writes 640; the health-check user
-        # must be in the file's group. This message says exactly that.
-        return False, (
-            f"4359 evidence not readable (permission denied): "
-            f"{EVIDENCE_4359_PATH}. The worker should write it group-readable "
-            f"(640) and the health-check user must be in the file's group."
-        ), extra
-    except (json.JSONDecodeError, OSError) as exc:
-        return False, f"4359 evidence unreadable: {type(exc).__name__}", extra
-
-    ran_at_raw = ev.get("ran_at", "")
-    extra["ran_at"] = ran_at_raw
-    try:
-        ran_at = datetime.fromisoformat(str(ran_at_raw).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return False, f"4359 evidence has unparsable ran_at: {ran_at_raw!r:.40}", extra
-
-    now = datetime.now(timezone.utc)
-    if ran_at.tzinfo is None:
-        ran_at = ran_at.replace(tzinfo=timezone.utc)
-    cutoff = _most_recent_tuesday(now)
-    # Compare in UTC; the 08:00 ET fire is 12:00/13:00 UTC — use a 6h grace.
-    from datetime import timedelta
-    grace_cutoff = cutoff - timedelta(hours=6)
-    extra["cutoff_utc"] = grace_cutoff.isoformat()
-    if ran_at < grace_cutoff:
-        return False, (
-            f"4359 evidence stale: last run {ran_at_raw} is before the most "
-            f"recent Tuesday fire ({cutoff.date()})"
-        ), extra
-
-    summary = ev.get("summary", {}) or {}
-    detail = ev.get("detail", {}) or {}
-    sent = summary.get("sent", detail.get("sent", 0))
-    extra["sent"] = sent
-    extra["succeeded"] = ev.get("succeeded")
-    if not ev.get("succeeded", True):
-        return False, f"4359 last run reported failure: {ev.get('error', '?')[:100]}", extra
-    if sent and int(sent) > 0:
-        return True, f"4359 Tuesday proof: {sent} email(s) sent ({ran_at_raw})", extra
-    # sent == 0: need an explicit reason, not silence.
-    reason = (ev.get("hold_status") or detail.get("hold_reason")
-              or ev.get("dry_run_note") or summary.get("note") or "")
-    extra["zero_reason"] = str(reason)[:120]
-    if reason:
-        return True, f"4359 Tuesday: 0 sent, reason given: {str(reason)[:80]}", extra
-    return False, "4359 Tuesday: 0 emails sent with no reason recorded", extra
-
-
-def check_chat_intake() -> tuple[bool, str, dict]:
-    """Is the Hermes Chat listener actually receiving inbound messages?
-
-    Reuses robie_job_engine/production_preflight.check_chat_intake: fails when
-    the gateway journal shows the listener wedged, or when inbound has gone
-    silent with no 'connected' marker. On 2026-09-28 this caught a real
-    outage: last inbound 2026-09-23, zero '[GoogleChat] Connected' markers in
-    7 days of journal — the listener wasn't initializing its subscription.
-    """
-    extra: dict = {}
-    try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
-        from robie_job_engine.production_preflight import check_chat_intake as _preflight_check
-
-        result = _preflight_check()
-    except Exception as exc:
-        extra["error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
-        return False, f"chat intake check failed: {type(exc).__name__}", extra
-    extra["evidence"] = result.get("evidence", "")
-    if result.get("ok"):
-        return True, result.get("evidence", "chat intake live"), extra
-    return False, result.get("evidence", "chat intake problem"), extra
+        return False, f"probe errored: {type(exc).__name__}: {exc}", extra
 
 
 CHECKS = [
@@ -1001,19 +697,12 @@ CHECKS = [
     ("ezlynx_auth", check_ezlynx_auth),
     ("sweep_freshness", check_sweep_freshness),
     ("service_errors", check_service_errors),
-    # Systems watchdog phases 2–3 (2026-09-28).
-    ("phone_gmail_keys", check_phone_gmail_keys),
-    ("login_secret_states", check_login_secret_states),
-    ("applicant_ingest_freshness", check_applicant_ingest_freshness),
-    ("eod_drive_delivery", check_eod_drive_delivery),
-    ("task_verifier_health", check_task_verifier_health),
-    ("tuesday_4359_proof", check_4359_tuesday_proof),
-    ("chat_intake", check_chat_intake),
+    ("duplicate_guard", check_duplicate_guard),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Chat alert (failure only) + daily digest (explicit all-green)
+# Chat alert (failure only)
 # ---------------------------------------------------------------------------
 
 def send_chat_alert(failures: list[dict]) -> bool:
@@ -1023,47 +712,6 @@ def send_chat_alert(failures: list[dict]) -> bool:
     lines = ["🚨 *ROBIE health check FAILED*"]
     for f in failures:
         lines.append(f"• *{f['name']}*: {f['detail']}")
-    lines.append(f"_{_now_iso()}_")
-    body = json.dumps({"text": "\n".join(lines)}).encode()
-    try:
-        req = urllib.request.Request(
-            webhook, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return 200 <= resp.status < 300
-    except Exception:
-        return False
-
-
-def send_daily_digest(results: list[dict]) -> bool:
-    """Post the morning all-green digest (or a failure summary).
-
-    Phase 3: silence-means-healthy is replaced by explicit confirmation. When
-    run with --daily-digest (intended for a ~07:00 ET timer, Dusty's lane),
-    this posts one concise Chat message every morning: either "all N checks
-    green" or the failure list. The hourly failure-only alerts are unchanged.
-    """
-    webhook = os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
-    if not webhook:
-        return False
-    failures = [r for r in results if not r["ok"]]
-    warnings = [r for r in results
-                if r["ok"] and r.get("extra", {}).get("warning")]
-    if failures:
-        lines = [f"🌅 *ROBIE morning digest — {len(failures)} issue(s)*"]
-        for f in failures:
-            lines.append(f"• *{f['name']}*: {f['detail']}")
-    else:
-        lines = [f"✅ *ROBIE morning digest — all {len(results)} checks green*"]
-    for w in warnings:
-        lines.append(f"⚠️ *{w['name']}*: {w['detail']}")
-    # One-line rollup of the proof checks Carlo cares about.
-    proof = {r["name"]: r["detail"] for r in results
-             if r["name"] in ("tuesday_4359_proof", "eod_drive_delivery",
-                              "applicant_ingest_freshness", "chat_intake")}
-    for name, detail in proof.items():
-        lines.append(f"  _{name}: {detail[:90]}_")
     lines.append(f"_{_now_iso()}_")
     body = json.dumps({"text": "\n".join(lines)}).encode()
     try:
@@ -1087,9 +735,6 @@ def main() -> int:
                     help="where to write status.json")
     ap.add_argument("--no-chat", action="store_true",
                     help="never send Chat alerts (status file only)")
-    ap.add_argument("--daily-digest", action="store_true",
-                    help="post the morning all-green/failure digest to Chat "
-                         "(intended for a daily ~07:00 ET timer; Dusty's lane)")
     args = ap.parse_args()
 
     results: list[dict] = []
@@ -1131,10 +776,6 @@ def main() -> int:
     if failures and not args.no_chat:
         sent = send_chat_alert(failures)
         print(f"chat alert sent: {sent}", flush=True)
-
-    if args.daily_digest and not args.no_chat:
-        digest_sent = send_daily_digest(results)
-        print(f"daily digest sent: {digest_sent}", flush=True)
 
     return 0 if healthy else 1
 
