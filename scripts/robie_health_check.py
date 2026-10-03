@@ -989,6 +989,158 @@ def check_chat_intake() -> tuple[bool, str, dict]:
     return False, result.get("evidence", "chat intake problem"), extra
 
 
+def check_duplicate_guard() -> tuple[bool, str, dict]:
+    """Does the outbound duplicate guard still behave correctly?
+
+    Outcome probe (PR #735): a correction — same thread, same recipient and
+    subject, but DIFFERENT body — must NOT be skipped as a duplicate, while
+    an exact duplicate (identical body) MUST still be skipped. Uses a fake
+    Gmail service; no network, no sends. Fails if the guard regresses to
+    the pre-#735 thread-blind behavior or stops skipping true duplicates.
+    """
+    extra: dict = {}
+    try:
+        from robie_job_engine.outbound_send_guard import should_skip_send
+    except Exception as exc:
+        return False, f"cannot import should_skip_send: {type(exc).__name__}", extra
+
+    import base64 as _b64
+    import time as _time
+
+    def _b64e(text: str) -> str:
+        return _b64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii")
+
+    def _msg(mid, to, subject, body, labels, internal_ms):
+        return {
+            "id": mid,
+            "threadId": "health-probe-thread",
+            "labelIds": labels,
+            "internalDate": str(internal_ms),
+            "payload": {
+                "mimeType": "text/plain",
+                "body": {"data": _b64e(body)},
+                "headers": [
+                    {"name": "To", "value": to},
+                    {"name": "Subject", "value": subject},
+                ],
+            },
+        }
+
+    class _FakeMessages:
+        def __init__(self, svc):
+            self.svc = svc
+
+        def list(self, userId=None, q=None, maxResults=None, **kw):
+            return self
+
+        def get(self, userId=None, id=None, format=None,
+                metadataHeaders=None, **kw):
+            self.svc._last_get = {"id": id, "format": format}
+            return self
+
+        def execute(self):
+            if self.svc._last_get and self.svc._last_get.get("format") == "metadata":
+                return self.svc.sent_meta[self.svc._last_get["id"]]
+            if self.svc._last_get:
+                return self.svc.by_id[self.svc._last_get["id"]]
+            return {"messages": [{"id": m["id"]} for m in self.svc.sent_index]}
+
+    class _FakeThreads:
+        def __init__(self, svc):
+            self.svc = svc
+
+        def get(self, userId=None, id=None, format=None, **kw):
+            return self
+
+        def execute(self):
+            return {"messages": self.svc.thread_messages}
+
+    class _FakeUsers:
+        def __init__(self, svc):
+            self.svc = svc
+
+        def messages(self):
+            return _FakeMessages(self.svc)
+
+        def threads(self):
+            return _FakeThreads(self.svc)
+
+    class _FakeGmail:
+        def __init__(self, sent_index, sent_meta, by_id, thread_messages):
+            self.sent_index = sent_index
+            self.sent_meta = sent_meta
+            self.by_id = by_id
+            self.thread_messages = thread_messages
+            self._last_get = None
+
+        def users(self):
+            return _FakeUsers(self)
+
+    def _meta(mid, to, subject, internal_ms):
+        return {
+            "id": mid,
+            "internalDate": str(internal_ms),
+            "payload": {
+                "headers": [
+                    {"name": "To", "value": to},
+                    {"name": "Subject", "value": subject},
+                ]
+            },
+        }
+
+    try:
+        now_ms = int(_time.time() * 1000)
+        to = "robie@streetsmart.insurance"
+        subject = "Re: health-probe"
+        original = "original request body"
+        correction = "correction: different body content here"
+        reply = "robie reply body"
+
+        thread = [
+            _msg("m-orig", to, subject, original, ["INBOX"], now_ms - 7200_000),
+            _msg("m-reply", "probe@streetsmart.insurance", subject, reply,
+                 ["SENT"], now_ms - 3600_000),
+            _msg("m-corr", to, subject, correction, ["INBOX"], now_ms - 600_000),
+        ]
+        sent_meta = {
+            "m-reply": _meta("m-reply", "probe@streetsmart.insurance",
+                             subject, now_ms - 3600_000),
+        }
+        by_id = {m["id"]: m for m in thread}
+        svc = _FakeGmail([{"id": "m-reply"}], sent_meta, by_id, thread)
+
+        # 1. Correction must NOT be skipped.
+        skip_corr, reason_corr = should_skip_send(
+            svc, "probe@streetsmart.insurance", subject,
+            incoming_body=correction, thread_id="health-probe-thread",
+        )
+        extra["correction"] = {"skip": skip_corr, "reason": reason_corr}
+        if skip_corr:
+            return False, (
+                "duplicate guard REGRESSED: correction skipped as duplicate "
+                f"({reason_corr})"
+            ), extra
+
+        # 2. Exact duplicate MUST still be skipped.
+        svc2 = _FakeGmail([{"id": "m-reply"}], sent_meta, by_id, thread[:2])
+        skip_dup, reason_dup = should_skip_send(
+            svc2, "probe@streetsmart.insurance", subject,
+            incoming_body=original, thread_id="health-probe-thread",
+        )
+        extra["duplicate"] = {"skip": skip_dup, "reason": reason_dup}
+        if not skip_dup:
+            return False, (
+                "duplicate guard DISABLED: exact duplicate was not skipped "
+                f"({reason_dup})"
+            ), extra
+
+        return True, (
+            "correction processed, exact duplicate skipped"
+        ), extra
+    except Exception as exc:
+        return False, f"probe errored: {type(exc).__name__}: {exc}", extra
+
+
 CHECKS = [
     ("worker_alive", check_worker_alive),
     ("code_version", check_code_version),
@@ -1009,6 +1161,7 @@ CHECKS = [
     ("task_verifier_health", check_task_verifier_health),
     ("tuesday_4359_proof", check_4359_tuesday_proof),
     ("chat_intake", check_chat_intake),
+    ("duplicate_guard", check_duplicate_guard),
 ]
 
 
