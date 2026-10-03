@@ -13,7 +13,7 @@ added. Controller changes are not a replacement runtime package.
 The strict existing issue grammar accepts `prepare-hold`, `hold`, `install`, or `verify` only
 when `ROBIE_TEST_STOPPED_OPERATOR_ENABLED=STOPPED_OPERATOR_V1`. Inspection retains
 its separate enable variable. Every request binds the original commit/digest,
-actor, designated issue, fresh nonce and 30-minute expiry. Fresh GitHub permission
+actor, designated merged PR number/ID, fresh nonce and 30-minute expiry. Fresh GitHub permission
 checks run before and after the protected execution queue. Shared concurrency
 starts only after authorization. No issue text is shell code or outage approval.
 
@@ -27,7 +27,7 @@ sudo -n /usr/bin/python3 -I -B /usr/local/libexec/robie-test-stopped-operator.py
 
 Validated request JSON arrives on stdin. The root helper independently requires
 an existing root-owned 0600 `/etc/robie-test-stopped-approval.json`, binding its
-own installed SHA256, exact package, allowed operations/actor/issue and a window
+own installed SHA256, exact package, allowed operations/actor/PR identity and a window
 of at most 24 hours. Approval needs actual outage, fencing, drain and operator
 handoff references. It must explicitly include all Test cron work, manual/direct
 producers, worker drain, exclusive handoff, and no resume. The supplied disabled
@@ -142,7 +142,7 @@ that identity is a separate security project, not a hidden setup dependency or
 permission grant in this proposal. No new IAM, sudo/WIF grant, storage.admin,
 public access, runtime-SA expansion or credentials are proposed.
 
-## Exact setup bundle to review before approval
+## Later stopped-operation setup (outside inspection bootstrap)
 
 The controller is not published. Its immutable local commit and helper hashes
 are supplied in the handoff/validation record after local review (a document
@@ -150,29 +150,31 @@ cannot contain its own future commit ID). Do not approve an unknown commit or
 a moving main. The proposed actions, once those identifiers are recorded:
 
 1. Publish/review/merge that exact controller change through normal protected-main
-   checks, without deploying it as the runtime. Create one dedicated ordinary
-   issue titled `ROBIE Test operator requests`. Record its returned numeric ID;
-   do not invent it. Approve actor allowlist containing only `320188404` initially.
+   checks, without deploying it as the runtime. Use that exact controller PR’s
+   merged conversation; record its returned number and immutable ID. Actor is
+   fixed to `320188404`. See TEST_OPERATOR_BOOTSTRAP.md for the main/tree pins.
 2. Create `Test-Operator-Inspect` with main-only access and no per-inspection
    reviewer after initial access proof. Create `Test-Operator-Stopped` main-only
    with an explicitly selected independent reviewer and self-review prevented.
    Reviewer identity and supported environment protection options remain unresolved.
-3. Through a separately reviewed, exact-commit bounded bootstrap workflow using
-   the existing protected-main WIF/IAP/sudo route, install reviewed helper files
+3. In a LATER separately reviewed setup using the existing protected-main
+   WIF/IAP/sudo route, install reviewed helper files
    root-owned and non-writable by the login user, preserving any prior files:
    `/usr/local/libexec/robie-test-operator.py` (inspect) and
    `/usr/local/libexec/robie-test-stopped-operator.py` (stopped operations).
+   The current inspection bootstrap installs ONLY the inspection helper/config;
+   stopped-helper/approval/package provisioning is not implemented by that workflow.
    Existing sudo already suffices; adding a helper rule would not restrict it.
 4. Create root:root 0700 `/var/lib/robie-test-operator/` and
    `approved/42e872f4c86fc4b4e37f859fc390f0b7c832f373/` below it. Provision the
    retained exact TGZ there root:root 0600 and independently compare its digest.
    Do not precreate installer/checksum files: helper creates those exclusively.
    No GCS bucket or additional storage permission is required.
-5. Create root-private inspect config with the actual issue/actor/release values.
+5. Create root-private inspect config with the actual PR number/ID, actor and release values.
    Install the stopped approval JSON DISABLED, with false fencing/drain fields.
    Creating this disabled file does not attest an outage. Record prior files,
    hashes and rollback before changes.
-6. Set repository issue/actor variables and enable inspection only after actual
+6. Set repository PR-identity/controller variables and enable inspection only after actual
    connector comment delivery/actor and workflow permission lookup are proven.
    Temporary OS Login registration is explicitly part of approved execution and
    has TTL 1h; no durable private key is placed in this cloud workspace.

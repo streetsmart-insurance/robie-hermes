@@ -40,5 +40,6 @@
   ],
   "worker_lock": null,
   "safe_stop": {},
-  "drain_timeout_seconds": 600
+  "drain_timeout_seconds": 600,
+  "pr_id": null
 }

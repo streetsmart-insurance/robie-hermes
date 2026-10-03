@@ -12,22 +12,23 @@ are never touched. Inspection does NOT prove a drained or fenced host.
 Runtime package remains commit `42e872f4c86fc4b4e37f859fc390f0b7c832f373`, SHA-256
 `876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064`.
 The local controller branch must not become a replacement runtime release.
-Both validator and host helper reject other release identifiers. Later general
+Both validator and host helper reject other release identifiers. The validator also
+binds the configured merged PR identity and approved main commit/tree; the host
+config binds its PR number and immutable PR ID. Later general
 release support needs a separately reviewed approval registry. The retained
 archive under `/workspace/stopped-install-evidence-42e872f4c86f/` is unchanged.
 
 ## Proposed trigger and trust boundaries
 
-The existing connector has comment tools but no native dispatch tool. One
-designated ordinary operations issue would accept exactly this single-line
+The existing connector has comment tools but no native dispatch tool. The controller’s exact merged PR conversation accepts exactly this single-line
 grammar (placeholders are NOT runnable):
 
 ```
 /robie-test inspect commit=<40 lowercase hex> sha256=<64 lowercase hex> nonce=<32 lowercase hex> expires=<UTC YYYY-MM-DDTHH:MM:SSZ>
 ```
 
-Only creation events qualify. The workflow rejects PR comments, edited/stale
-comments, other repositories/issues, non-main refs, workflow reruns, unapproved
+Only creation events qualify. The workflow rejects ordinary issues, other PRs, unmerged PRs, edited/stale
+comments, other repositories, non-main refs, workflow reruns, unapproved
 numeric actor IDs, bots and actors lacking current write/maintain/admin rights.
 It GETs the comment and collaborator permission from GitHub twice: before and
 after execution queue/environment waits. Expiry must fall within 30 minutes of creation.
@@ -70,56 +71,44 @@ No item below has been changed by this proposal.
 | --- | --- | --- |
 | GitHub connector | Existing repo-scoped comment creation + read access | Current-user reads identify `carlo504`, ID `320188404`; actual comment author/event still needs proof; no token copied to workspace |
 | Repository variable | `ROBIE_TEST_OPERATOR_ENABLED=INSPECT_ONLY_V1` | Set LAST, only after setup approval; absent/other value disables jobs |
-| Repository variable | `ROBIE_TEST_OPERATOR_ISSUE=<approved ordinary issue number>` | Owner selects one issue; no issue has been created |
-| Repository variable | `ROBIE_TEST_OPERATOR_ACTOR_IDS=<comma-separated approved numeric GitHub user IDs>` | Resolve IDs through authenticated GitHub; no guessed user IDs |
+| Repository variables | `ROBIE_TEST_OPERATOR_PR_NUMBER`, `ROBIE_TEST_OPERATOR_PR_ID` | Owner records the exact controller PR number and immutable ID after publication |
+| Actor | Fixed `320188404` in the workflows and validator | No configurable alternate actor |
 | Environment | `Test-Operator-Inspect` | Proposed routine inspect-only policy: main-only, no per-run human reviewer after initial owner-approved setup and access proof; verify plan supports branch protections. Hold/install must use a separate approval policy |
-| GitHub token | authorization: contents read, issues read; inspection adds id-token write | No Actions write needed for issue trigger; confirm collaborator-permission GET works with this token or fail closed |
+| GitHub token | authorization: contents read, issues read, pull-requests read; inspection adds id-token write | No Actions write needed for issue trigger; confirm collaborator-permission GET works with this token or fail closed |
 | WIF | Existing provider `projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github` | Inspect live trust first; approve exact repository/owner IDs, main and this workflow/environment claims, including issue_comment event; no broad trust |
 | GCP identity | Existing `robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com` | Existing IAP/sudo success is evidence of capability, NOT least privilege |
 | IAP/OS Login | Existing Test-only IAP and OS Login, needed Compute metadata reads and attached-SA actAs | Read live bindings before any proposed diff; no grants are part of this patch |
 | SSH key | Runner-created OS Login key, TTL 1h | Explicit enablement includes this bounded credential registration; require instance enable-oslogin TRUE; never fall back to metadata keys |
 | Host helper | `/usr/local/libexec/robie-test-operator.py`, root-owned, non-writable by login user, trusted parent directories | Privileged owner installs reviewed `scripts/test_operator_inspect.py`; routine inspection never uploads/installs it; separate approved bootstrap does |
-| Host config | `/etc/robie-test-operator.json`, root:root 0600 | Populate enabled, commit, sha256, numeric actor_ids array, numeric issue; exact IDs as above |
+| Host config | `/etc/robie-test-operator.json`, root:root 0600 | Populate enabled, commit, sha256, numeric actor_ids array, PR number in issue and immutable pr_id; exact IDs as above |
 | Host state | `/var/lib/robie-test-operator`, root:root 0700 | New ledger/lock only; preserve across sessions/reboots; no reset to retry |
 | sudo | Exact command `/usr/bin/python3 -I -B /usr/local/libexec/robie-test-operator.py inspect`, NOPASSWD for verified OS Login principal | No wildcard args, arbitrary python/shell, SETENV or writable helper; validate proposed sudoers with visudo |
 
 The observed principal already has broad sudo. This proposal does not narrow it
 and requires no new IAM/sudo identity or grant. The authoritative concrete setup
-sequence and exact approval wording are in TEST_OPERATOR_BOOTSTRAP.md; the earlier
-conceptual owner-install sequence below is superseded by that bounded workflow.
+sequence and exact approval wording are in TEST_OPERATOR_BOOTSTRAP.md; the bounded workflow below implements that sequence.
 No Production identity, runtime-SA expansion, firewall/public access or secret
 payload permission is added.
 
-## One-time owner actions, in order (not executed)
+## One-time owner actions (not executed)
 
-1. Review this local patch and tests. Resolve designated issue/approved actor IDs and the
-   transport principal decision. Inspect live WIF/IAM/sudo and environment support.
-2. Approve exact changes to those surfaces separately. Review/merge controller
-   through normal PR checks; do not rebuild or replace the approved runtime TGZ.
-3. Using already authorized privileged Test access, install the reviewed helper,
-   private config/state and exact sudo policy. Record hashes, prior configuration
-   and rollback. Do not interrupt or race the current Mac operator.
-4. Configure protected environment and variables, enabling last. Confirm WIF
-   trust accepts only the intended protected controller execution.
-5. Authorize one harmless command from a fresh cloud session with Mac offline.
-   Verify the real connector actor, permission read, issue event, protected-main gate,
-   WIF/IAP, helper digest and bounded returned artifact. Failure is a blocker,
-   not permission to broaden access. No live claim until this succeeds.
-   The owner-approved scope can then permit routine bounded inspections without
-   a new human approval each time. This does not approve hold/install mutations.
-6. Exercise negative tests: wrong actor/issue/ref, edited/expired command, wrong
-   digest, arbitrary operation, replay and simultaneous helper invocation.
-   Confirm no runtime or client writes and that fresh-runner access works again.
+Follow TEST_OPERATOR_BOOTSTRAP.md: publish the exact reviewed tree through normal
+protected-main checks, bind its own merged PR number/ID and merge SHA, prove the
+actual documented PR-comment connector route without cloud credentials, and then
+approve the bounded inspection-only bootstrap through the setup environment.
+No new ordinary issue or sudo/IAM policy is required. Main advances disable the
+pinned route; any migration requires separate review. A fresh cloud inspection
+with the Mac offline must succeed before claiming usable access.
 
 ## Separate stopped-operation component
 
 `TEST_STOPPED_OPERATOR_PROPOSAL.md` now describes the local hold/install/verify
 component, its separate disabled trigger, mandatory root-owned outage approval,
-and initial already-inactive-service limitation. The Mac's fresh access inventory
+and the bounded already-stopped-gateway preparation path. The Mac's fresh access inventory
 in that document supersedes earlier unverified IAM/sudo statements in this initial
 inspection manifest: functional access exists but includes unrestricted sudo.
 No new IAM is needed. Existing broad rights do not authorize new actions.
-Shared cron approval, real fencing/drain/handoff, the designated new issue,
+Shared cron approval, real fencing/drain/handoff, the designated merged controller PR,
 protected stopped-operation reviewer and trigger proof remain required.
 
 Rollback for initial access: disable repository enable variable first, revoke
@@ -148,5 +137,5 @@ was created. A harmless collaborator-permission read returned `admin` for this
 user on the repository. Available tools still contain no native workflow dispatch action;
 rerun tools cannot supply new inputs or establish the hold. No known setting or
 permission grant makes an absent tool callable. Native dispatch requires an
-actually supported connector capability; otherwise this reviewed issue trigger
+actually supported connector capability; otherwise this reviewed PR-conversation trigger
 needs the end-to-end proof above. No persistent workspace credential is proposed.

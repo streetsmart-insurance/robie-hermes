@@ -20,7 +20,7 @@ COMMIT = 'a' * 40
 
 
 def req():
-    return dict(operation='bootstrap-inspect', actor_id=320188404, issue=901, expires='2099-10-03T00:30:00Z',
+    return dict(operation='bootstrap-inspect', actor_id=320188404, issue=901, pr_id=12345, expires='2099-10-03T00:30:00Z',
                 commit=inspect['RELEASE'], sha256=inspect['DIGEST'], comment_id=123, nonce='a'*32)
 
 
@@ -82,7 +82,7 @@ def test_event_proof_has_no_cloud_credentials_or_deployment_queue():
     path = ROOT / '.github/workflows/test-operator-event-proof.yml'
     raw=path.read_text(); workflow=yaml.safe_load(raw)
     assert workflow['permissions'] == {}
-    assert workflow['jobs']['prove']['permissions'] == {'contents':'read','issues':'read'}
+    assert workflow['jobs']['prove']['permissions'] == {'contents':'read','issues':'read','pull-requests':'read'}
     assert 'id-token' not in raw and 'gcloud' not in raw and 'environment:' not in raw
     assert 'concurrency' not in raw and 'google-github-actions' not in raw
     assert 'github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT' in raw
@@ -220,13 +220,16 @@ def test_setup_commands_bind_actor_mode_and_controller(mode,operation):
                user={'id':320188404,'type':'User'},created_at='2026-10-03T00:00:00Z',updated_at='2026-10-03T00:00:00Z',
                issue_url='https://api.github.com/repos/streetsmart-insurance/robie-hermes/issues/901')
     event=dict(action='created',repository={'id':1343750842,'full_name':'streetsmart-insurance/robie-hermes'},
-               issue={'number':901},comment=copy.deepcopy(fresh),sender={'id':320188404})
+               issue={'number':901, 'pull_request':{'url':'https://api.github.com/repos/streetsmart-insurance/robie-hermes/pulls/901'}},comment=copy.deepcopy(fresh),sender={'id':320188404})
     config=dict(enabled=mode,ref='refs/heads/main',attempt='1',issue='901',actor_ids='320188404',
-                controller_commit=COMMIT,approved_controller_commit=COMMIT)
+                controller_commit=COMMIT,approved_controller_commit=COMMIT,pr_id='12345',
+                controller_tree='b'*40, checkout_tree='b'*40, approved_controller_tree='b'*40)
+    pr=dict(id=12345, number=901, merged=True, state='closed', merge_commit_sha=COMMIT,
+            base={'ref':'main','repo':{'id':1343750842,'full_name':'streetsmart-insurance/robie-hermes'}})
     permission={'user':{'id':320188404},'permission':'admin'}
     now=dt.datetime(2026,10,3,tzinfo=dt.timezone.utc)
-    assert trigger['validate'](event,fresh,permission,config,now)['operation']==operation
+    assert trigger['validate'](event,fresh,permission,config,now,pr)['operation']==operation
     for changed in (dict(config,enabled='INSPECT_ONLY_V1'),dict(config,approved_controller_commit='b'*40),
                     dict(config,actor_ids='320188404,42')):
         with pytest.raises(ValueError):
-            trigger['validate'](event,fresh,permission,changed,now)
+            trigger['validate'](event,fresh,permission,changed,now,pr)

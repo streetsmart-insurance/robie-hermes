@@ -106,10 +106,11 @@ def validate_approval(approval, request, now):
     need(stamp(approval['not_before']) <= now < stamp(approval['expires']))
     need(stamp(approval['expires']) - stamp(approval['not_before']) <= dt.timedelta(hours=24))
     need(now < stamp(request['expires']) <= now + dt.timedelta(minutes=30))
+    need(type(request['pr_id']) is int and request['pr_id'] == approval['pr_id'])
     need(type(request['comment_id']) is int and request['comment_id'] > 0)
     need(isinstance(request['nonce'], str) and re.fullmatch('[0-9a-f]{32}', request['nonce']))
     need(set(request) == {'version', 'operation', 'commit', 'sha256', 'nonce',
-                         'expires', 'comment_id', 'actor_id', 'issue'} and request['version'] == 1)
+                         'expires', 'comment_id', 'actor_id', 'issue', 'pr_id'} and request['version'] == 1)
     for key in ('approved_outage_reference', 'external_fence_reference',
                 'drain_evidence_reference', 'operator_handoff_reference'):
         need(isinstance(approval[key], str) and 1 <= len(approval[key]) <= 512)

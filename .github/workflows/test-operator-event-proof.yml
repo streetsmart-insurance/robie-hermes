@@ -8,7 +8,9 @@ permissions: {}
 
 env:
   OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED }}
-  OPERATOR_ISSUE: ${{ vars.ROBIE_TEST_OPERATOR_ISSUE }}
+  OPERATOR_PR_NUMBER: ${{ vars.ROBIE_TEST_OPERATOR_PR_NUMBER }}
+  OPERATOR_PR_ID: ${{ vars.ROBIE_TEST_OPERATOR_PR_ID }}
+  OPERATOR_CONTROLLER_TREE: ${{ vars.ROBIE_TEST_OPERATOR_CONTROLLER_TREE }}
   OPERATOR_ACTOR_IDS: '320188404'
   OPERATOR_SETUP_COMMIT: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
 
@@ -20,13 +22,14 @@ jobs:
       github.repository == 'streetsmart-insurance/robie-hermes' &&
       github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT &&
       vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED == 'EVENT_PROOF_V1' &&
-      !github.event.issue.pull_request &&
+      github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/robie-test event-proof ')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:

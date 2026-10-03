@@ -31,7 +31,7 @@ NOW = dt.datetime(2026, 10, 3, tzinfo=dt.timezone.utc)
 def approval(target):
     return dict(version=1, enabled='STOPPED_OPERATOR_V1', host='hermes-test-01',
                 commit=op.COMMIT, sha256=op.DIGEST, operations=['hold', 'install', 'verify'],
-                actor_ids=[42], issue=900, not_before='2026-10-03T00:00:00Z',
+                actor_ids=[42], issue=900, pr_id=12345, not_before='2026-10-03T00:00:00Z',
                 expires='2026-10-03T04:00:00Z', approved_outage_reference='fixture-approval',
                 external_fence_reference='fixture-fence', drain_evidence_reference='fixture-drain',
                 operator_handoff_reference='fixture-handoff', external_producers_fenced=True,
@@ -42,7 +42,7 @@ def approval(target):
 
 def request(operation='hold'):
     return dict(version=1, operation=operation, commit=op.COMMIT, sha256=op.DIGEST,
-                actor_id=42, issue=900, comment_id=123, nonce='a'*32,
+                actor_id=42, issue=900, pr_id=12345, comment_id=123, nonce='a'*32,
                 expires='2026-10-03T00:20:00Z')
 
 

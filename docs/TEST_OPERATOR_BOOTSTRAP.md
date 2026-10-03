@@ -3,7 +3,8 @@
 Local review preparation only. No publication, issue/comment creation, GitHub
 settings changes, SSH registration, helper installation or runtime action has
 occurred. The local commit and hashes are supplied in the accompanying validation
-manifest; preserve reviewed parent `5377150b280a05a47e1f4ac6996b304dcfe239e4`.
+manifest; preserve reviewed parents `5377150b280a05a47e1f4ac6996b304dcfe239e4` and
+`706f5a9f27300b406a5afd1a2e2cbe8f2b7db7d5`.
 Runtime remains `42e872f4c86fc4b4e37f859fc390f0b7c832f373`, retained TGZ SHA256
 `876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064`.
 This bootstrap neither transfers nor installs that runtime package.
@@ -15,8 +16,13 @@ This bootstrap neither transfers nor installs that runtime package.
    workflows. Record the resulting main SHA and verify its tree equals the
    reviewed tree before using it as the exact setup SHA; changed trees require
    new review. Do not use a moving branch as the approval identifier.
-2. Create one ordinary issue titled **ROBIE Test operator requests**. Record the
-   returned issue number. Approved initial actor is **320188404 (carlo504)**.
+2. Use that controller's OWN merged PR conversation as the single operations
+   thread. No new ordinary issue is created. Record its returned PR number,
+   immutable numeric PR ID and actual merge SHA. Before activation, compare the
+   merge commit's entire Git tree with the reviewed candidate tree from the
+   validation manifest. The owner configures these values AFTER publication;
+   none is embedded in the candidate, so there is no self-hash/PR-number cycle.
+   Approved actor is fixed in code to **320188404 (carlo504)**.
 3. Configure the repository variables below. Initially enable only event proof.
    Create `Test-Operator-Setup` restricted to protected main, with owner
    `320188404` as required reviewer and self-review permitted explicitly for this
@@ -24,10 +30,12 @@ This bootstrap neither transfers nor installs that runtime package.
    do not silently downgrade them. Create `Test-Operator-Inspect` main-only,
    allowing routine inspection after the approved setup without another reviewer.
 4. Through the actual connected GitHub comment route, create a fresh single-line
-   event-proof request on that issue. The proof workflow uses only the ordinary
+   event-proof request on that exact merged PR conversation. The proof workflow uses only the ordinary
    read-only GitHub workflow token: no cloud authentication, OIDC, environment,
    SSH or deployment concurrency. It validates the actual event/fresh comment,
-   ordinary issue, immutable controller, exact runtime pair, fixed human actor,
+   configured PR number/immutable ID, merged/closed state, same repository base
+   and main branch, merge SHA, GitHub commit tree, actual checkout SHA/tree,
+   exact runtime pair, fixed human actor,
    current write/admin permission, unedited body, nonce and 30-minute expiry.
    Record the successful proof run ID and uploaded request/controller evidence.
 5. Set the proof run variable and enable bootstrap. Submit a fresh
@@ -56,14 +64,31 @@ This bootstrap neither transfers nor installs that runtime package.
 
 | Variable | Approved value / source |
 | --- | --- |
-| `ROBIE_TEST_OPERATOR_SETUP_COMMIT` | Exact reviewed main SHA; must equal event `github.sha` |
-| `ROBIE_TEST_OPERATOR_ISSUE` | Returned number of the newly approved ordinary issue |
-| `ROBIE_TEST_OPERATOR_ACTOR_IDS` | `320188404` |
+| `ROBIE_TEST_OPERATOR_SETUP_COMMIT` | Actual controller PR merge SHA, after reviewed-tree verification; must equal event SHA and checkout HEAD |
+| `ROBIE_TEST_OPERATOR_CONTROLLER_TREE` | Reviewed candidate Git tree SHA from the final manifest; must equal merge tree and checkout tree |
+| `ROBIE_TEST_OPERATOR_PR_NUMBER` | Actual returned number of that controller PR |
+| `ROBIE_TEST_OPERATOR_PR_ID` | Actual immutable numeric ID of that controller PR, from fresh GitHub metadata |
 | `ROBIE_TEST_OPERATOR_EVENT_PROOF_ENABLED` | `EVENT_PROOF_V1` for proof only, then disable |
 | `ROBIE_TEST_OPERATOR_EVENT_PROOF_RUN_ID` | Actual successful same-commit proof run ID |
 | `ROBIE_TEST_OPERATOR_BOOTSTRAP_ENABLED` | `BOOTSTRAP_INSPECT_V1` only for approved setup, then disable |
 | `ROBIE_TEST_OPERATOR_ENABLED` | `INSPECT_ONLY_V1` only after successful bootstrap |
 | `ROBIE_TEST_STOPPED_OPERATOR_ENABLED` | Remains unset/disabled |
+
+`OPERATOR_ACTOR_IDS` is the literal `320188404` in all four workflows;
+`ROBIE_TEST_OPERATOR_ACTOR_IDS` is no longer a consumed repository variable.
+The obsolete `ROBIE_TEST_OPERATOR_ISSUE` is not used. Every workflow uses
+`issue_comment: types: [created]`, requires PR conversation context and exact
+approved main SHA, and checks out only `${{ github.sha }}`. All authorization
+jobs use contents/issues/pull-requests read permissions; bootstrap proof lookup
+also needs actions read. Only separately gated execution jobs request OIDC.
+Never use `pull_request_target`, a PR-head checkout, arbitrary issue code or a
+fallback target. The target is authorized by ID/number, never by PR title.
+
+Any later main advance makes new requests fail closed. Updating only the setup
+SHA cannot restore availability because it must still equal this fixed PR's
+merge SHA. Restoring service requires a separately reviewed controller migration
+and matching PR/config/helper binding; there is no automatic retargeting, SHA
+loosening or old-workflow rerun. This availability limit is part of the proposal.
 
 All three request operations use the existing strict grammar; placeholders are
 not runnable and must be replaced with fresh values:
@@ -76,8 +101,11 @@ not runnable and must be replaced with fresh values:
 
 Setup writes: `/usr/local/libexec/robie-test-operator.py` root:root 0644;
 `/etc/robie-test-operator.json` root:root 0600; and
-`/var/lib/robie-test-operator/` root:root 0700 containing the lock and 0600 setup
-claim/completion evidence. It may create `/usr/local/libexec` root:root 0755 if
+`/var/lib/robie-test-operator/` root-owned 0700 containing:
+`operator.lock`, `inspection-bootstrap.json` and
+`inspection-bootstrap-complete.json` (0600). Subsequent inspection requests add
+0600 `comment_id-<ID>` and `nonce-<nonce>` replay files. The root config binds the
+PR number in its existing `issue` field and the immutable PR ID in `pr_id`. It may create `/usr/local/libexec` root:root 0755 if
 absent. It does not install the stopped helper or root hold approval, modify
 units/sudo/IAM/WIF/firewalls, acquire the browser/global driver, touch client data,
 read a job database, or install/change the runtime. Existing broad sudo remains
@@ -111,11 +139,13 @@ separate runtime authorization.
 
 ## Access limits and proposed owner approval wording
 
-The cloud connector exposes code publication and issue creation. Its comment
-action is documented for PR conversation comments (`pr_number`), despite its
-issue-comment name; support for an ordinary issue has NOT been proven. The proof
-step must establish the real route before cloud access. Do not switch to PR code,
-weaken ordinary-issue/actor checks or substitute workflow reruns if it fails.
+The cloud connector's `add_comment_to_issue` action explicitly accepts
+`pr_number` and documents top-level PR conversation comments. This proposal uses
+that documented target, not an ordinary issue. Actual connector authorship/event
+delivery on the fixed merged PR still must be proven by the cloud-credential-free
+workflow before bootstrap. Fresh PR lookup uses the documented GitHub pull-request
+read endpoint with pull-requests read permission. No new API service is introduced.
+Do not broaden to another PR or fall back to workflow reruns if proof fails.
 No native dispatch, repository-variable/environment-management or pending-deployment
 approval action is currently exposed here. Those one-time GitHub settings and
 owner approval need GitHub UI or an already authorized supported admin route;
@@ -125,8 +155,8 @@ report the exact missing action instead of building a bypass.
 Proposed approval (replace the commit with the validation manifest's immutable ID):
 
 > I approve publication of controller commit `<exact reviewed controller commit>`
-> through protected-main review, creation of the ordinary issue “ROBIE Test
-> operator requests,” and the inspection-only setup configuration above for
+> through protected-main review, use of that exact controller PR’s merged
+> conversation as the sole operations thread, and the inspection-only setup for
 > actor 320188404. After the credential-free connector-event proof succeeds for
 > the verified reviewed main tree, I approve the bounded setup run using existing
 > WIF/IAP/sudo access to hermes-test-01, including one-hour OS Login key registration

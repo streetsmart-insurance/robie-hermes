@@ -75,7 +75,7 @@ def run(payload):
         need(json.loads(config.read_text()) == cfg)
         result = dict(status='INSPECTION BOOTSTRAP INSTALLED', host='hermes-test-01',
                       controller_commit=payload['controller_commit'], helper_sha256=payload['helper_sha256'],
-                      issue=cfg['issue'], actor_ids=cfg['actor_ids'], stopped_operations_enabled_by_bootstrap=False,
+                      issue=cfg['issue'], pr_id=cfg['pr_id'], actor_ids=cfg['actor_ids'], stopped_operations_enabled_by_bootstrap=False,
                       runtime_changed=False)
         write(state / 'inspection-bootstrap-complete.json', json.dumps(result, sort_keys=True).encode(), 0o600)
         print(json.dumps(result, sort_keys=True))
@@ -90,13 +90,14 @@ except Exception:
 def render(request, controller, approved, helper):
     if not (re.fullmatch('[0-9a-f]{40}', controller or '') and controller == approved
             and request['operation'] == 'bootstrap-inspect' and request['actor_id'] == 320188404
-            and type(request['issue']) is int and request['issue'] > 0):
+            and type(request['issue']) is int and request['issue'] > 0
+            and type(request['pr_id']) is int and request['pr_id'] > 0):
         raise ValueError('BOOTSTRAP_CONTROLLER_REFUSED')
     payload = dict(controller_commit=controller, expires=request['expires'],
         comment_id=request['comment_id'], nonce=request['nonce'],
         helper_base64=base64.b64encode(helper).decode(), helper_sha256=hashlib.sha256(helper).hexdigest(),
         config=dict(enabled='INSPECT_ONLY_V1', commit=request['commit'], sha256=request['sha256'],
-                    issue=request['issue'], actor_ids=[320188404]))
+                    issue=request['issue'], pr_id=request['pr_id'], actor_ids=[320188404]))
     # JSON data is decoded, not interpolated as Python/shell syntax.
     encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
     return "import base64,json\nPAYLOAD=json.loads(base64.b64decode('" + encoded + "'))\n" + REMOTE

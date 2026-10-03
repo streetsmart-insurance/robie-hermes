@@ -26,17 +26,21 @@ class OperatorTests(unittest.TestCase):
     def setUp(self):
         self.now = dt.datetime(2026, 10, 2, 23, 0, tzinfo=dt.timezone.utc)
         self.fresh = dict(id=100, body=f'/robie-test inspect commit={trigger.RELEASE} sha256={trigger.DIGEST} nonce={"a"*32} expires=2026-10-02T23:20:00Z',
-                          user=dict(id=42, type='User'), created_at='2026-10-02T23:00:00Z',
+                          user=dict(id=320188404, type='User'), created_at='2026-10-02T23:00:00Z',
                           updated_at='2026-10-02T23:00:00Z',
                           issue_url=f'https://api.github.com/repos/{trigger.REPO}/issues/900')
         self.event = dict(action='created', repository=dict(id=trigger.REPO_ID, full_name=trigger.REPO),
-                          issue=dict(number=900), comment=copy.deepcopy(self.fresh), sender=dict(id=42))
-        self.permission = dict(user=dict(id=42), permission='write')
-        self.config = dict(enabled='INSPECT_ONLY_V1', issue='900', actor_ids='42',
-                           ref='refs/heads/main', attempt='1')
+                          issue=dict(number=900, pull_request={'url': f'https://api.github.com/repos/{trigger.REPO}/pulls/900'}), comment=copy.deepcopy(self.fresh), sender=dict(id=320188404))
+        self.permission = dict(user=dict(id=320188404), permission='write')
+        self.config = dict(enabled='INSPECT_ONLY_V1', issue='900', actor_ids='320188404',
+                           ref='refs/heads/main', attempt='1', pr_id='12345',
+                           controller_commit='a'*40, approved_controller_commit='a'*40,
+                           controller_tree='b'*40, checkout_tree='b'*40, approved_controller_tree='b'*40)
+        self.pr = dict(id=12345, number=900, merged=True, state='closed', merge_commit_sha='a'*40,
+                       base={'ref':'main', 'repo':{'id':trigger.REPO_ID, 'full_name':trigger.REPO}})
 
     def request(self):
-        return trigger.validate(self.event, self.fresh, self.permission, self.config, self.now)
+        return trigger.validate(self.event, self.fresh, self.permission, self.config, self.now, self.pr)
 
     def test_valid(self):
         self.assertEqual(self.request()['operation'], 'inspect')
@@ -61,7 +65,7 @@ class OperatorTests(unittest.TestCase):
                    lambda: self.config.update(actor_ids='43'),
                    lambda: self.permission.update(permission='read'),
                    lambda: self.permission['user'].update(id=43),
-                   lambda: self.event['issue'].update(pull_request={}),
+                   lambda: self.event['issue'].pop('pull_request'),
                    lambda: self.event['issue'].update(number=901),
                    lambda: self.event['repository'].update(id=1),
                    lambda: self.event['sender'].update(id=43),
@@ -90,7 +94,7 @@ class OperatorTests(unittest.TestCase):
     def test_host_checks(self):
         request = self.request()
         config = dict(enabled='INSPECT_ONLY_V1', commit=host.RELEASE, sha256=host.DIGEST,
-                      actor_ids=[42], issue=900)
+                      actor_ids=[320188404], issue=900, pr_id=12345)
         host.validate(request, config, self.now)
         for key, value in [('operation', 'hold'), ('nonce', '../bad'), ('actor_id', 43),
                            ('issue', 901), ('comment_id', True), ('sha256', '0'*64),
@@ -187,3 +191,60 @@ class OperatorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FixedMergedPRTests(unittest.TestCase):
+    setUp = OperatorTests.setUp
+    request = OperatorTests.request
+
+    def test_wrong_pr_identity_or_merge_state_refused(self):
+        changes = [lambda p: p.update(id=999), lambda p: p.update(number=901),
+                   lambda p: p.update(id='12345'), lambda p: p.update(merged=False),
+                   lambda p: p.update(state='open'), lambda p: p.update(merge_commit_sha='c'*40),
+                   lambda p: p['base'].update(ref='other'),
+                   lambda p: p['base']['repo'].update(id=99),
+                   lambda p: p['base']['repo'].update(full_name='other/repository')]
+        for change in changes:
+            candidate = copy.deepcopy(self.pr)
+            change(candidate)
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                trigger.validate(self.event, self.fresh, self.permission, self.config, self.now, candidate)
+
+    def test_all_modes_require_reviewed_tree_and_exact_event_commit(self):
+        for mode, operation in [('EVENT_PROOF_V1','event-proof'), ('BOOTSTRAP_INSPECT_V1','bootstrap-inspect'),
+                                ('INSPECT_ONLY_V1','inspect'), ('STOPPED_OPERATOR_V1','prepare-hold')]:
+            self.setUp()
+            self.config['enabled']=mode
+            self.fresh['body']=self.event['comment']['body']=self.fresh['body'].replace('inspect',operation)
+            self.request()
+            for field in ('controller_commit','controller_tree','checkout_tree','approved_controller_tree'):
+                changed=dict(self.config, **{field:'c'*40})
+                with self.subTest(mode=mode,field=field), self.assertRaises(ValueError):
+                    trigger.validate(self.event,self.fresh,self.permission,changed,self.now,self.pr)
+
+    def test_pr_head_is_never_the_execution_identity(self):
+        self.pr['head']={'sha':'e'*40,'ref':'untrusted','repo':{'full_name':'fork/repo'}}
+        result=self.request()
+        self.assertEqual(result['pr_id'],12345)
+        self.assertNotIn('head',result)
+        self.event['issue']['pull_request']['url']='https://api.github.com/repos/other/repo/pulls/900'
+        with self.assertRaises(ValueError):
+            self.request()
+
+    def test_all_workflows_pin_main_and_require_pr_conversation(self):
+        for name in ('inspect','stopped','event-proof','bootstrap'):
+            text=(ROOT/f'.github/workflows/test-operator-{name}.yml').read_text()
+            data=yaml.safe_load(text)
+            self.assertIn("github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT",text)
+            self.assertIn("github.ref == 'refs/heads/main'",text)
+            self.assertIn('github.event.issue.pull_request &&',text)
+            self.assertNotIn('!github.event.issue.pull_request',text)
+            self.assertNotIn('pull_request_target',text)
+            self.assertNotIn('ROBIE_TEST_OPERATOR_ISSUE',text)
+            self.assertIn('OPERATOR_PR_ID:',text)
+            self.assertIn('OPERATOR_CONTROLLER_TREE:',text)
+            for job in data['jobs'].values():
+                self.assertEqual(job['permissions']['pull-requests'],'read')
+                for step in job['steps']:
+                    if step.get('uses','').startswith('actions/checkout@'):
+                        self.assertEqual(step['with']['ref'],'${{ github.sha }}')

@@ -8,7 +8,9 @@ permissions: {}
 
 env:
   OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_BOOTSTRAP_ENABLED }}
-  OPERATOR_ISSUE: ${{ vars.ROBIE_TEST_OPERATOR_ISSUE }}
+  OPERATOR_PR_NUMBER: ${{ vars.ROBIE_TEST_OPERATOR_PR_NUMBER }}
+  OPERATOR_PR_ID: ${{ vars.ROBIE_TEST_OPERATOR_PR_ID }}
+  OPERATOR_CONTROLLER_TREE: ${{ vars.ROBIE_TEST_OPERATOR_CONTROLLER_TREE }}
   OPERATOR_ACTOR_IDS: '320188404'
   OPERATOR_SETUP_COMMIT: ${{ vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT }}
   OPERATOR_EVENT_PROOF_RUN_ID: ${{ vars.ROBIE_TEST_OPERATOR_EVENT_PROOF_RUN_ID }}
@@ -20,12 +22,13 @@ jobs:
       github.repository == 'streetsmart-insurance/robie-hermes' &&
       vars.ROBIE_TEST_OPERATOR_BOOTSTRAP_ENABLED == 'BOOTSTRAP_INSPECT_V1' &&
       github.sha == vars.ROBIE_TEST_OPERATOR_SETUP_COMMIT &&
-      !github.event.issue.pull_request &&
+      github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/robie-test bootstrap-inspect ')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: read
+      pull-requests: read
       actions: read
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +56,7 @@ jobs:
     permissions:
       contents: read
       issues: read
+      pull-requests: read
       actions: read
       id-token: write
     steps:

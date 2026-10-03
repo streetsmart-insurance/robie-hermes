@@ -1,9 +1,10 @@
-"""Validate an issue command using fresh GitHub authorization; no cloud access."""
+"""Validate a fixed merged-PR conversation command using fresh GitHub authorization; no cloud access."""
 import datetime as dt
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import urllib.request
 
 REPO = 'streetsmart-insurance/robie-hermes'
@@ -18,7 +19,7 @@ def require(ok):
         raise ValueError('OPERATOR_REQUEST_REFUSED')
 
 
-def validate(event, fresh, permission, config, now):
+def validate(event, fresh, permission, config, now, pull_request):
     modes = {'INSPECT_ONLY_V1': {'inspect'}, 'STOPPED_OPERATOR_V1': {'prepare-hold', 'hold', 'install', 'verify'},
              'EVENT_PROOF_V1': {'event-proof'}, 'BOOTSTRAP_INSPECT_V1': {'bootstrap-inspect'}}
     require(config['enabled'] in modes)
@@ -26,7 +27,18 @@ def validate(event, fresh, permission, config, now):
     require(event['action'] == 'created')
     require(event['repository']['id'] == REPO_ID and event['repository']['full_name'] == REPO)
     issue, comment = event['issue'], event['comment']
-    require('pull_request' not in issue and issue['number'] == int(config['issue']))
+    require('pull_request' in issue and type(issue['number']) is int and issue['number'] == int(config['issue']))
+    require(issue['pull_request']['url'] == f'https://api.github.com/repos/{REPO}/pulls/{issue["number"]}')
+    require(type(pull_request['id']) is int and pull_request['id'] == int(config['pr_id']))
+    require(type(pull_request['number']) is int and pull_request['number'] == issue['number'])
+    require(pull_request['merged'] is True and pull_request['state'] == 'closed')
+    require(pull_request['base']['repo']['id'] == REPO_ID and pull_request['base']['repo']['full_name'] == REPO)
+    require(pull_request['base']['ref'] == 'main')
+    require(re.fullmatch('[0-9a-f]{40}', config['approved_controller_commit']) is not None)
+    require(config['controller_commit'] == config['approved_controller_commit'] == pull_request['merge_commit_sha'])
+    require(re.fullmatch('[0-9a-f]{40}', config['approved_controller_tree']) is not None)
+    require(config['controller_tree'] == config['checkout_tree'] == config['approved_controller_tree'])
+    require(config['actor_ids'] == '320188404' and fresh['user']['id'] == 320188404)
     require(fresh['issue_url'] == f'https://api.github.com/repos/{REPO}/issues/{issue["number"]}')
     require(comment['id'] == fresh['id'] and comment['body'] == fresh['body'])
     require(comment['user']['id'] == fresh['user']['id'] == event['sender']['id'])
@@ -39,17 +51,13 @@ def validate(event, fresh, permission, config, now):
     require(match is not None)
     operation, commit, digest, nonce, expires = match.groups()
     require(operation in modes[config['enabled']])
-    if config['enabled'] in {'EVENT_PROOF_V1', 'BOOTSTRAP_INSPECT_V1'}:
-        require(config['actor_ids'] == '320188404' and fresh['user']['id'] == 320188404)
-        require(re.fullmatch('[0-9a-f]{40}', config.get('controller_commit', '')) is not None)
-        require(config['controller_commit'] == config.get('approved_controller_commit'))
     require(commit == RELEASE and digest == DIGEST)
     expiry = dt.datetime.strptime(expires, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
     created = dt.datetime.fromisoformat(fresh['created_at'].replace('Z', '+00:00'))
     require(created <= now < expiry <= created + dt.timedelta(minutes=30))
     return dict(version=1, operation=operation, commit=commit, sha256=digest,
                 nonce=nonce, expires=expires, comment_id=fresh['id'],
-                actor_id=fresh['user']['id'], issue=issue['number'])
+                actor_id=fresh['user']['id'], issue=issue['number'], pr_id=pull_request['id'])
 
 
 def get(path):
@@ -70,13 +78,24 @@ def main():
     require(re.fullmatch(r'[A-Za-z0-9-]{1,39}', login) is not None)
     permission = get('/collaborators/' + login + '/permission')
     config = {key: os.environ[name] for key, name in {
-        'enabled': 'OPERATOR_ENABLED', 'issue': 'OPERATOR_ISSUE',
+        'enabled': 'OPERATOR_ENABLED', 'issue': 'OPERATOR_PR_NUMBER', 'pr_id': 'OPERATOR_PR_ID',
         'actor_ids': 'OPERATOR_ACTOR_IDS', 'ref': 'GITHUB_REF',
         'attempt': 'GITHUB_RUN_ATTEMPT'}.items()}
-    if config['enabled'] in {'EVENT_PROOF_V1', 'BOOTSTRAP_INSPECT_V1'}:
-        config.update(controller_commit=os.environ['GITHUB_SHA'],
-                      approved_controller_commit=os.environ['OPERATOR_SETUP_COMMIT'])
-    result = validate(event, fresh, permission, config, dt.datetime.now(dt.timezone.utc))
+    for field in ('issue', 'pr_id'):
+        require(re.fullmatch('[1-9][0-9]{0,19}', config[field]) is not None)
+    approved = os.environ['OPERATOR_SETUP_COMMIT']
+    require(re.fullmatch('[0-9a-f]{40}', approved) is not None)
+    pull_request = get('/pulls/' + config['issue'])
+    commit = get('/git/commits/' + approved)
+    require(commit['sha'] == approved)
+    config.update(controller_commit=os.environ['GITHUB_SHA'], approved_controller_commit=approved,
+                  approved_controller_tree=os.environ['OPERATOR_CONTROLLER_TREE'],
+                  controller_tree=commit['tree']['sha'],
+                  checkout_tree=subprocess.run(['git', 'rev-parse', 'HEAD^{tree}'],
+                     check=True, capture_output=True, text=True, timeout=10).stdout.strip())
+    require(subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True,
+                           text=True, timeout=10).stdout.strip() == approved)
+    result = validate(event, fresh, permission, config, dt.datetime.now(dt.timezone.utc), pull_request)
     Path(os.environ['RUNNER_TEMP'], 'operator-request.json').write_text(json.dumps(result))
 
 

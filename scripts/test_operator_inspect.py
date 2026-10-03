@@ -42,13 +42,14 @@ def private(path, directory=False):
 
 def validate(request, config, now):
     require(set(request) == {'version', 'operation', 'commit', 'sha256', 'nonce',
-                            'expires', 'comment_id', 'actor_id', 'issue'})
+                            'expires', 'comment_id', 'actor_id', 'issue', 'pr_id'})
     require(request['version'] == 1 and request['operation'] == 'inspect')
     require(config['enabled'] == 'INSPECT_ONLY_V1')
     require(request['commit'] == config['commit'] == RELEASE)
     require(request['sha256'] == config['sha256'] == DIGEST)
     require(type(request['actor_id']) is int and request['actor_id'] in config['actor_ids'])
     require(type(request['issue']) is int and request['issue'] == config['issue'])
+    require(type(request['pr_id']) is int and request['pr_id'] == config['pr_id'])
     require(type(request['comment_id']) is int and request['comment_id'] > 0)
     require(isinstance(request['nonce'], str) and re.fullmatch('[0-9a-f]{32}', request['nonce']))
     expiry = dt.datetime.strptime(request['expires'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dt.timezone.utc)
