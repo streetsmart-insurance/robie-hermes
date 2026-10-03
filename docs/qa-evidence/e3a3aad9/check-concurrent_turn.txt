@@ -1,0 +1,3 @@
+Task worker release e3a3aad9 - concurrent_turn
+Chat adapter unchanged from previous release
+Gateway active

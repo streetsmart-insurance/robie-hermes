@@ -1,0 +1,3 @@
+Task worker release e3a3aad9 - generation_restart
+Chat adapter unchanged from previous release
+Gateway active

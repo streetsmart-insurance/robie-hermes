@@ -1,0 +1,4 @@
+Task worker files present
+-rw-rw-r-- 1 root root 4.1K Oct  3 14:04 /opt/streetsmart-hermes-test/current/robie_job_engine/ezlynx_task_report.py
+-rw-rw-r-- 1 root root 6.1K Oct  3 14:04 /opt/streetsmart-hermes-test/current/robie_job_engine/task_assignment_worker.py
+567
