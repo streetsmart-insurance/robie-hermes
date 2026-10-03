@@ -618,12 +618,25 @@ class AscendWorkflowManager:
             # Financed premium: subtract any down payment already paid to the
             # carrier so the client is never double-charged.
             financed_premium = max(0, quote.pure_premium_cents - quote.down_payment_cents)
+            # 2026-10-02: Default expiration to 12 months from effective if not provided.
+            # Most commercial policies are 12-month terms. This avoids API failures
+            # when the sender doesn't specify expiration.
+            exp_date = quote.expiration_date
+            if not exp_date and quote.effective_date:
+                try:
+                    from datetime import datetime
+                    eff = datetime.strptime(quote.effective_date, "%Y-%m-%d")
+                    # Add 12 months (handle year rollover)
+                    exp_year = eff.year + 1
+                    exp_date = f"{exp_year}-{eff.month:02d}-{eff.day:02d}"
+                except:
+                    pass
             billable = {
                 "billable_identifier": billable_ident,
                 "carrier_identifier": carrier_identifier,  # guaranteed non-empty above; never guess
                 "coverage_identifier": quote.coverage_identifier or "commercial_auto",
                 "effective_date": quote.effective_date,
-                "expiration_date": quote.expiration_date,
+                "expiration_date": exp_date or quote.expiration_date,
                 "premium_cents": financed_premium,
                 "agency_fees_cents": quote.agency_fees_cents,
                 "organization_commission_rate": quote.commission_rate if quote.commission_rate is not None else 0.10,

@@ -550,27 +550,52 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
                 f"- Filename: {name} (Local path: {path})" for name, path in attachments
             )
 
-        task_prompt = (
-            f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
-            f"You received an incoming email from {sender}.\n"
-            f"Subject: {subject}\n\n"
-            f"Email Body Content:\n{body}\n"
-            f"{attachment_lines}\n\n"
-            f"CRITICAL MANDATORY INBOUND EMAIL RULE:\n"
-            f"- ALWAYS save this communication and its details back to EZLynx via API directly to the client file.\n"
-            f"- Even if this email is internal (e.g. from StreetSmart team members/staff) and carrier-related (carrier quotes, policy changes, underwriter replies, endorsements, cancellations, certificates, or audit queries), you MUST locate the matching client account/policy in EZLynx and post a discussion note and upload any attached documents directly to the client file via the EZLynx REST API (`EZLynxApiClient` or `EZLynxAgreementPoster.post_custom_note`).\n\n"
-            f"Instructions:\n"
-            f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
-            f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
-            f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
-            f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
-            f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
-            f"1b. If the user is asking to create, set up, or complete a homeowners policy on EZLynx (e.g. TEST-HO-20260911-E01 on applicant 220250093):\n"
-            f"   - Call the 'ezlynx_policy_setup' tool FIRST — not playwright_exec, not a hand-rolled browser script. It runs the Job Engine path: search-first, gold carrier create, Save & Continue Edit, FormEntry coverages by label.\n"
-            f"   - Pass policy_number, effective_date, expiration_date, and any coverage limits stated in the email.\n"
-            f"2. For any other request, execute the required insurance operations skill and assist thoroughly, ensuring the communication is filed back to the EZLynx client file.\n"
-            f"3. Write a professional, concise, polished email response directly addressing {sender}."
+        from robie_job_engine.answer_only import (
+            FORBIDDEN_READ_RULE,
+            is_informational_ask,
+            purpose_built_instructions,
         )
+
+        combined = f"{subject}\n{body}"
+        route = purpose_built_instructions(combined)
+        if is_informational_ask(combined):
+            task_prompt = (
+                "You are Robie at StreetSmart Insurance.\n"
+                "Answer the question in plain English. "
+                "Do not open EZLynx. Do not write a note or a document. "
+                "Do not include your reasoning or thinking.\n"
+                f"{FORBIDDEN_READ_RULE}\n"
+                f"From: {sender}\nSubject: {subject}\n\n{body}\n"
+                f"{attachment_lines}\n"
+            )
+        else:
+            task_prompt = (
+                f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
+                f"You received an incoming email from {sender}.\n"
+                f"Subject: {subject}\n\n"
+                f"Email Body Content:\n{body}\n"
+                f"{attachment_lines}\n\n"
+                f"{route}\n\n"
+                f"{FORBIDDEN_READ_RULE}\n\n"
+                f"CRITICAL MANDATORY INBOUND EMAIL RULE:\n"
+                f"- When this email is an operational write, save it back to EZLynx via the API tools "
+                f"(ezlynx_discussion_note, ezlynx_document_upload, certificate_filing, ezlynx_policy_setup). "
+                f"Do not browse the repository or the server to figure out how.\n"
+                f"- Do not bind, take payment, or email the client.\n\n"
+                f"Instructions:\n"
+                f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
+                f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
+                f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
+                f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
+                f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
+                f"1b. If the user is asking to create, set up, or complete a homeowners policy on EZLynx (e.g. TEST-HO-20260911-E01 on applicant 220250093):\n"
+                f"   - Call the 'ezlynx_policy_setup' tool FIRST — not playwright_exec, not a hand-rolled browser script. It runs the Job Engine path: search-first, gold carrier create, Save & Continue Edit, FormEntry coverages by label.\n"
+                f"   - Pass policy_number, effective_date, expiration_date, and any coverage limits stated in the email.\n"
+                f"2. For a certificate, use ezlynx_discussion_note and certificate_filing. Draft only.\n"
+                f"3. For a mailing-address or other policy-change note, call ezlynx_discussion_note on the existing discussion title.\n"
+                f"4. For any other request, use the purpose-built tool named above. Do not browse the server.\n"
+                f"5. Write a professional, concise, polished email response directly addressing {sender}."
+            )
 
         response_text = run_agent_task(task_prompt + "\n\n" + context_prompt, job_id, db_path)
     return response_text
@@ -587,6 +612,7 @@ def process_inbox():
     if not messages:
         return
 
+    batch = []
     for msg_meta in messages:
         msg_id = msg_meta["id"]
         if msg_id in processed_ids:
@@ -642,21 +668,47 @@ def process_inbox():
         body = extract_body_text(payload) or msg.get("snippet", "")
         attachments = download_attachments(service, msg_id, payload)
 
-        logger.info("📩 Processing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
+        logger.info("📩 Queuing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
+        batch.append({
+            "msg_id": msg_id,
+            "sender": sender,
+            "subject": subject,
+            "body": body,
+            "attachments": attachments,
+            "thread_id": thread_id,
+            "headers": headers,
+            "text": f"Subject: {subject}\n\n{body}",
+        })
 
+    def _run_one(item):
         try:
-            response_text = run_guarded_email_task(
-                db_path=JOB_DB, gmail_message_id=msg_id,
-                prompt=f"Subject: {subject}\n\n{body}", run_agent=run_agent_task,
-                attachment_names=tuple(name for name, _ in attachments),
-                thread_id=thread_id,
-                run_agent_with_context=lambda prompt, job_id, db_path: run_email_job(
-                    prompt, job_id, db_path, sender=sender, subject=subject, body=body,
-                    attachments=attachments, thread_id=thread_id),
+            return run_guarded_email_task(
+                db_path=JOB_DB, gmail_message_id=item["msg_id"],
+                prompt=item["text"], run_agent=run_agent_task,
+                attachment_names=tuple(name for name, _ in item["attachments"]),
+                thread_id=item["thread_id"],
+                sender=item["sender"],
+                run_agent_with_context=lambda prompt, job_id, db_path, item=item: run_email_job(
+                    prompt, job_id, db_path, sender=item["sender"], subject=item["subject"],
+                    body=item["body"], attachments=item["attachments"], thread_id=item["thread_id"]),
             )
         except EmailTaskPending:
             logger.info("Durable email job is pending; leaving message unread")
+            return None
+
+    from robie_job_engine.email_dispatch import run_email_batch
+
+    # Each email is its own job. The scan does not wait for one before
+    # starting the next. EZLynx writers still share the session lock.
+    for item, response_text in run_email_batch(batch, _run_one):
+        if response_text is None:
             continue
+        sender = item["sender"]
+        subject = item["subject"]
+        body = item["body"]
+        thread_id = item["thread_id"]
+        msg_id = item["msg_id"]
+        headers = item["headers"]
 
         # 2026-09-14: never reply to our own mailbox. is_allowed_sender()
         # already rejects self-senders above; this is defense-in-depth so a
@@ -674,27 +726,45 @@ def process_inbox():
             reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
             # 2026-09-14: no-blind-resend as code. Check Sent before sending so a
             # retry or duplicate run can never double-send (Julio's Tree Service).
-            skip_send, skip_reason = should_skip_send(service, sender, reply_subject)
+            # Content-aware args are optional. Pass them only when this
+            # callable accepts them, so older guards and test doubles still work.
+            import inspect
+            skip_kwargs = {}
+            try:
+                skip_params = inspect.signature(should_skip_send).parameters
+            except (TypeError, ValueError):
+                skip_params = {}
+            accepts_var_kw = any(
+                getattr(param, "kind", None) == inspect.Parameter.VAR_KEYWORD
+                for param in skip_params.values()
+            )
+            if accepts_var_kw or "incoming_body" in skip_params:
+                skip_kwargs["incoming_body"] = body
+            if accepts_var_kw or "thread_id" in skip_params:
+                skip_kwargs["thread_id"] = thread_id
+            skip_send, skip_reason = should_skip_send(
+                service, sender, reply_subject, **skip_kwargs
+            )
             if skip_send:
                 logger.warning(
                     "Skipping duplicate reply to %s on thread %s: %s",
                     sender, thread_id, skip_reason,
                 )
             else:
-                # Preserve original CC recipients on the reply (2026-10-02 fix:
+                # Preserve original CC recipients on the reply (2026-10-02:
                 # Robie was dropping CCs, e.g. Jake on PFA test threads).
                 # Exclude robie@ itself to avoid self-CC loops.
                 import re as _re
-                _cc_raw = headers.get("cc", "") or ""
-                _cc_list = [
+                cc_raw = headers.get("cc", "") or ""
+                cc_list = [
                     addr.strip()
-                    for addr in _re.split(r"[;,]", _cc_raw)
+                    for addr in _re.split(r"[;,]", cc_raw)
                     if addr.strip() and "robie@" not in addr.lower()
                 ]
                 reply_msg = build_plain_email_message(
                     sender="Robie AI <robie@streetsmart.insurance>",
                     to=[sender],
-                    cc=_cc_list,
+                    cc=cc_list,
                     subject=reply_subject,
                     text_body=reply_body,
                     plain_only=True,
