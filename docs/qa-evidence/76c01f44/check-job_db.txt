@@ -1,0 +1,5 @@
+=== 4. job_db ===
+565
+chat_event_queue
+chat_reply_outbox
+-rw-rw-r-- 1 streetsmart-hermes-test streetsmart-hermes-test 9.0M Oct  3 11:37 /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db

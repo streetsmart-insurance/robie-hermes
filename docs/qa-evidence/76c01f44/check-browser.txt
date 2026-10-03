@@ -1,0 +1,10 @@
+=== 3. browser ===
+streets+  159992  1.6  2.5 55264092 208640 ?     Ssl  Sep25 194:16 /usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --proxy-server=http://127.0.0.1:18080 --user-data-dir=/opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes-test/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check https://app.ezlynx.com/web/dashboard
+streets+  160020  0.0  0.2 54970580 18952 ?      S    Sep25   0:00 /opt/google/chrome/chrome --type=zygote --no-zygote-sandbox --headless=new --crashpad-handler-pid=160012 --enable-crash-reporter=, --noerrdialogs --user-data-dir=/opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx --change-stack-guard-on-fork=enable --no-first-run --ozone-platform=headless --ozone-override-screen-size=800,600 --use-angle=swiftshader-webgl
+
+{
+   "Browser": "Chrome/152.0.7977.64",
+   "Protocol-Version": "1.3",
+   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+   "V8-Version": "15.2.124.18",
+

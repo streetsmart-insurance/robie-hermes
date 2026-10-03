@@ -1,0 +1,17 @@
+=== 5. generation_restart / stale_receipt / concurrent_turn / reply_recovery ===
+Chat adapter deployed:
+-rw-rw-r-- 1 root root 321K Oct  3 11:34 /opt/streetsmart-hermes-test/current/integrations/google_chat/adapter.py
+
+Adapter version in release:
+    # Production supplies the versioned release root. Never insert the old
+
+Gateway active:
+active
+
+Reply recovery outbox:
+Error: in prepare, no such column: delivered
+  SELECT COUNT(*) as outbox_entries, SUM(CASE WHEN delivered=1 THEN 1 ELSE 0 END
+                                     error here ---^
+
+Chat event queue:
+11
