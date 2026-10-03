@@ -139,9 +139,16 @@ def artifact_url(env):
 
 
 def transfer(env, runner=subprocess.run):
+    cloud = bool(env.get('CLOUD_COMMENT_ID'))
+    key = '/tmp/hermes-test-deploy'
+    if cloud:
+        if (not re.fullmatch('[1-9][0-9]{0,19}', env['CLOUD_COMMENT_ID']) or
+                env.get('CLOUD_DEPLOY_ENABLED') != 'TEST_DEPLOY_V1'):
+            raise ValueError('Invalid cloud deployment context')
+        key = str(Path.home() / '.ssh/google_compute_engine')
     if (env.get('GITHUB_REF') != 'refs/heads/main' or env.get('GITHUB_REPOSITORY') != REPOSITORY or
             env.get('TEST_VM') != 'hermes-test-01' or env.get('PROJECT_ID') != 'streetsmart-hermes-poc' or
-            env.get('ZONE') != 'us-east1-b' or env.get('SSH_KEY') != '/tmp/hermes-test-deploy'):
+            env.get('ZONE') != 'us-east1-b' or env.get('SSH_KEY') != key):
         raise ValueError('Protected-main Test deployment required')
     commit = require_hex(env['GITHUB_SHA'], 40)
     payload = {'commit': commit, 'archive_sha256': require_hex(env['ARCHIVE_SHA256'], 64),
@@ -150,8 +157,10 @@ def transfer(env, runner=subprocess.run):
     # URL is stdin data, never an argument, shell fragment, environment, or log.
     command = ['gcloud', 'compute', 'ssh', 'hermes-test-01', '--project=streetsmart-hermes-poc',
                '--zone=us-east1-b', '--tunnel-through-iap', '--quiet',
-               '--ssh-key-file=/tmp/hermes-test-deploy', '--ssh-flag=-T',
+               '--ssh-key-file=' + key, '--ssh-flag=-T',
                '--command=python3 -c ' + shlex.quote(Path(__file__).read_text()) + ' --receive']
+    if cloud:
+        command[3:3] = ['--ssh-key-expire-after=1h', '--ssh-flag=-oBatchMode=yes']
     result = runner(command, input=json.dumps(payload), text=True, capture_output=True, timeout=150)
     if result.returncode or result.stdout.splitlines().count('TEST_ARTIFACT_TRANSFER_OK') != 1:
         raise RuntimeError('Remote artifact download or validation failed')
