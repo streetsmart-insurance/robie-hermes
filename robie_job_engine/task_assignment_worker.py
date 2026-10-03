@@ -137,6 +137,36 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _WorkerReassignPortAdapter:
+    """Bridge the worker's TaskReassigner to the call handler's port.
+
+    Worker protocol:  reassign(task_id, applicant_id, new_assignee,
+                               description="") -> verified assignee name (str)
+                      read_assignee(task_id, applicant_id, description="") -> str
+    Handler protocol: reassign_task(task_id, new_assignee, note) -> {"ok": ...}
+                      read_task_assignee(task_id) -> str | None (optional)
+    """
+
+    def __init__(self, reassigner: TaskReassigner):
+        self._reassigner = reassigner
+
+    def reassign_task(
+        self, task_id: str, new_assignee: str, note: str = ""
+    ) -> dict[str, Any]:
+        try:
+            verified = self._reassigner.reassign(
+                task_id, "", new_assignee, description=note)
+            return {"ok": True, "verified_assignee": verified}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)[:300]}
+
+    def read_task_assignee(self, task_id: str) -> str | None:
+        try:
+            return self._reassigner.read_assignee(task_id, "")
+        except Exception:  # noqa: BLE001
+            return None
+
+
 class TaskAssignmentWorker:
     """Processes tasks assigned to Roby, driving one Job Engine job each."""
 
@@ -147,12 +177,21 @@ class TaskAssignmentWorker:
         task_reassigner: TaskReassigner | None = None,
         reassign_enabled: bool = False,
         max_tasks_per_run: int = MAX_TASKS_PER_RUN,
+        phone_lookup: Any | None = None,
+        bland_client: Any | None = None,
+        call_dry_run: bool = True,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
         self.reassign_enabled = reassign_enabled
         self.max_tasks_per_run = max_tasks_per_run
         self.results: list[TaskResult] = []
+        # Robie Call handler ports (PR #746). When phone_lookup and
+        # bland_client are both wired, "callback" tasks route to the real
+        # call handler; otherwise they take the generic handoff path.
+        self.phone_lookup = phone_lookup
+        self.bland_client = bland_client
+        self.call_dry_run = call_dry_run
 
     # -- job lifecycle -------------------------------------------------
 
@@ -165,7 +204,7 @@ class TaskAssignmentWorker:
         job_id = job["id"]
         job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
         try:
-            action = self._do_work(job)
+            action = self._do_work(store, job)
         except NeedsHuman as e:
             logger.warning(f"Job {job_id} needs a human: {e}")
             return store.transition(
@@ -192,7 +231,7 @@ class TaskAssignmentWorker:
 
     # -- the work ------------------------------------------------------
 
-    def _do_work(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _do_work(self, store: Any, job: dict[str, Any]) -> dict[str, Any]:
         """Attempt the task. Returns the action checkpoint for the verifier."""
         payload = job.get("payload") or {}
         task = _task_from_payload(payload)
@@ -218,6 +257,12 @@ class TaskAssignmentWorker:
 
         category = self._categorize_task(task)
         target, target_field = reassign_target(task)
+
+        # Route callback tasks to the Robie Call handler (PR #746) when its
+        # ports are wired. The handler runs inside this same durable job —
+        # one job per EZLynx task — checkpointing under "robie-call:<id>".
+        if category == "callback" and self._call_handler_available():
+            return self._do_call_task(store, job, task, timestamp)
 
         if target is None:
             # No valid person to send this back to — say so on the task,
@@ -278,6 +323,90 @@ class TaskAssignmentWorker:
             },
             "reassigned": reassigned,
         }
+
+    def _call_handler_available(self) -> bool:
+        """True when the Robie Call handler and its required ports are wired."""
+        if self.phone_lookup is None or self.bland_client is None:
+            return False
+        try:
+            from . import robie_call_handler  # noqa: F401
+            return True
+        except ImportError:
+            logger.warning("robie_call_handler not importable; "
+                           "callback tasks take the generic handoff path")
+            return False
+
+    def _do_call_task(
+        self, store: Any, job: dict[str, Any], task: AssignedTask, timestamp: str
+    ) -> dict[str, Any]:
+        """Route a callback task through the Robie Call handler.
+
+        Runs inside the same durable job (idempotency key
+        "ezlynx-task:<task_id>"); the handler checkpoints under
+        "robie-call:<task_id>" via the real Job Engine adapters, so a
+        restart reconciles instead of redialing. Returns the action
+        checkpoint for the independent verifier.
+        """
+        from . import robie_call_handler as rch
+        from .robie_call_job_engine_adapters import build_robie_call_ports
+
+        payload = job.get("payload") or {}
+        task_dict: dict[str, Any] = {
+            "task_id": task.task_id,
+            "Task Subject": task.title,
+            "Task Description": task.description,
+            "Applicant ID": task.applicant_id,
+            "Applicant Name": payload.get("account_name") or "",
+            "Task Created By": task.created_by,
+            "Assigned To": payload.get("assigned_to") or "Robie AI",
+            "Task Due Date": task.due_date,
+        }
+        reassign_port = (
+            _WorkerReassignPortAdapter(self.reassigner)
+            if self.reassigner is not None else None
+        )
+        ports = build_robie_call_ports(
+            store,
+            phone_lookup=self.phone_lookup,
+            bland=self.bland_client,
+            discussion_client=self.client,
+            task_reassign=reassign_port,
+        )
+        config = rch.RobieCallConfig(dry_run=self.call_dry_run)
+        result = rch.handle_robie_call_task(task_dict, config, ports)
+
+        note = result.get("writeback") or {}
+        action: dict[str, Any] = {
+            "call_task": True,
+            "ok": result.get("ok"),
+            "error": result.get("error"),
+            "note": {
+                "discussion_id": note.get("discussion_id"),
+                "note_id": note.get("note_id"),
+                "text": "robie call outcome",
+            },
+            "reassigned": (
+                {"to": task.created_by,
+                 "verified_assignee": task.created_by}
+                if result.get("reassigned") else None
+            ),
+            "outcome_verified": result.get("outcome_verified"),
+            "outcome_successful": result.get("outcome_successful"),
+            "duplicate_suppressed": result.get("duplicate_suppressed", False),
+        }
+        if result.get("ok"):
+            self._record(task, "completed",
+                         f"Robie Call handled: {result.get('error') or 'done'}.",
+                         timestamp)
+        else:
+            self._record(task, "failed",
+                         f"Robie Call failed: {result.get('error')}.",
+                         timestamp)
+            raise NeedsHuman(
+                f"Task {task.task_id}: Robie Call handler failed: "
+                f"{result.get('error')} — a human must review."
+            )
+        return action
 
     def _categorize_task(self, task: AssignedTask) -> str:
         """Sort the request from its activity type and note text."""
