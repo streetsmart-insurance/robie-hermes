@@ -174,14 +174,20 @@ def render_answer_only(
     channel: str = "chat",
     client: Any = None,
 ) -> str:
-    """Plain reply: the answer, Details, and the job id. No EZLynx readback."""
+    """Plain reply: the answer only. Audit detail stays on the job checkpoint."""
     from .answer_only import strip_answer_verifier_noise
     from .email_guard import _strip_internal_reasoning
+    from .user_reply import format_user_reply
 
     job_id = str(job.get("id") or "")
     cached = store.get_checkpoint(job_id, "end_state_report") if job_id else None
-    if cached and str(cached.get("text") or "").strip() and cached.get("answer_only"):
-        return str(cached["text"])
+    if cached and cached.get("answer_only"):
+        shown = str(cached.get("user_text") or "").strip()
+        if shown:
+            return shown if shown.endswith("\n") else shown + "\n"
+        if str(cached.get("text") or "").strip():
+            cleaned = format_user_reply(str(cached["text"]))
+            return cleaned if cleaned.endswith("\n") else cleaned + "\n"
     payload = dict(job.get("payload") or {})
     ask = _ask_text(payload) or _fragment(str(worker_text or ""))
     answer = _strip_internal_reasoning(str(worker_text or ""))
@@ -213,28 +219,37 @@ def render_answer_only(
     else:
         decision = None
         jev_line = "Jev was not asked. The end-state report is off."
-    summary = answer or "Robie did not write an answer."
-    details = "\n".join(
+    summary = answer or "Answered."
+    from .user_reply import format_user_reply
+
+    user_text = format_user_reply(summary if summary.lower().startswith("answered") else f"Answered. {summary}")
+    if not user_text.endswith("\n"):
+        user_text += "\n"
+    audit = "\n".join(
         (
+            summary.strip(),
+            "",
+            "Details",
             jev_line,
             "No EZLynx destination check. This was a question.",
+            "",
+            status_format.short_job_ref(job_id),
         )
-    )
-    text = "\n".join(
-        (summary.strip(), "", "Details", details, "", status_format.short_job_ref(job_id))
-    ).strip() + "\n"
+    ).strip()
     if job_id:
         store.checkpoint(
             job_id,
             "end_state_report",
             {
-                "text": text,
+                "text": audit,
+                "user_text": user_text,
                 "answer_only": True,
                 "verdict": getattr(decision, "verdict", ""),
                 "channel": channel,
             },
         )
-    return text
+        logger.info("answer-only audit kept in the ledger job=%s", job_id)
+    return user_text
 
 
 def render_job_end_state(
@@ -737,6 +752,7 @@ def _from_jev(response: dict[str, Any], request_body: dict[str, Any]) -> EndStat
         "partially_completed",
         "blocked",
         "failed",
+        "needs_clarification",
     }:
         return EndStateDecision(
             verdict="unsure",
@@ -755,7 +771,10 @@ def _from_jev(response: dict[str, Any], request_body: dict[str, Any]) -> EndStat
     if choice_confidence is not None:
         parts.append(choice_confidence)
     confidence = _percent(min(parts))
-    if choice == "completed" and yes:
+    if choice == "needs_clarification" and yes:
+        verdict = "correct"
+        reason = "The worker asked for clarification instead of guessing."
+    elif choice == "completed" and yes:
         verdict = "correct"
         reason = "The end state matches what was asked."
     elif choice == "partially_completed":

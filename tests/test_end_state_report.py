@@ -81,6 +81,7 @@ class JevClientTests(unittest.TestCase):
     def test_correct_wrong_unsure_and_low_confidence_from_mocked_http(self):
         cases = [
             (_jev_body(0.95, "completed", 0.92), "correct", 92, False),
+            (_jev_body(0.95, "needs_clarification", 0.90), "correct", 90, False),
             (_jev_body(0.08, "failed", 0.90), "wrong", 90, True),
             (_jev_body(0.60, "partially_completed", 0.80), "unsure", 60, True),
             (_jev_body(0.95, "completed", 0.40), "correct", 40, True),
