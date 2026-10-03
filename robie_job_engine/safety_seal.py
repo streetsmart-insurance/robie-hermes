@@ -8,9 +8,11 @@ wrapper does before the agent's code. A later write compares the live
 objects to that snapshot and refuses the call if any of them changed.
 The snapshot is not the module global the agent assigns.
 
-The same child installs an audit hook. Agent code cannot remove an audit
-hook. A socket to the EZLynx API from that interpreter is refused, so a
-patched ``urlopen`` still cannot post the note.
+The same child installs an audit hook that refuses recognizable EZLynx
+hostnames during connection and resolution. This also stops ordinary direct
+HTTP clients before DNS yields a resolved IP. It does not attribute arbitrary
+IP addresses to domains, block requests relayed through a permitted proxy,
+or isolate native code or subprocesses; it is not a complete egress sandbox.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ def agent_interpreter() -> bool:
 
 
 def install_agent_seal() -> None:
-    """Freeze the checks and refuse EZLynx API sockets from this process.
+    """Freeze checks and refuse recognized EZLynx hostname audit events.
 
     Idempotent. Called once, before agent code runs. A second call does
     not take a new snapshot and does not add another hook.
@@ -136,11 +138,15 @@ def hard_block_for_write(text: str) -> str | None:
 
 def _host_of(address: object) -> str:
     if isinstance(address, tuple) and address:
-        return str(address[0] or "").strip().casefold().rstrip(".")
+        address = address[0]
+    if isinstance(address, bytes):
+        try:
+            address = address.decode("ascii")
+        except UnicodeDecodeError:
+            return ""
     if isinstance(address, str):
         return address.strip().casefold().rstrip(".")
-    text = str(getattr(address, "host", "") or "").strip().casefold().rstrip(".")
-    return text
+    return str(getattr(address, "host", "") or "").strip().casefold().rstrip(".")
 
 
 def _is_ezlynx_api_host(host: str) -> bool:
@@ -150,14 +156,22 @@ def _is_ezlynx_api_host(host: str) -> bool:
 
 
 def _audit_hook(event: str, args: tuple[object, ...]) -> None:
-    if not _STATE["installed"] or event != "socket.connect" or not args:
+    if not _STATE["installed"]:
         return
-    host = _host_of(args[0])
-    if not _is_ezlynx_api_host(host):
+    # CPython socket.connect and http.client.connect use (self, address/host,
+    # ...), while the resolver events start with host. Refuse named hosts
+    # before resolution; the subsequent connect may contain only an IP.
+    if event in {"socket.connect", "http.client.connect"}:
+        index = 1
+    elif event in {"socket.getaddrinfo", "socket.gethostbyname"}:
+        index = 0
+    else:
+        return
+    if len(args) <= index or not _is_ezlynx_api_host(_host_of(args[index])):
         return
     raise SafetySealError(
-        f"{TAMPERED}: EZLynx API connect from the agent interpreter is refused. "
-        "The write was not sent."
+        f"{TAMPERED}: EZLynx hostname connection or resolution from the agent "
+        "interpreter is refused. The write was not sent."
     )
 
 

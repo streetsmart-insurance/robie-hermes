@@ -128,12 +128,12 @@ else:
 if called["n"] != 0:
     raise SystemExit(5)
 try:
-    sys.audit("socket.connect", ("app.ezlynx.com", 443))
+    sys.audit("socket.connect", object(), ("app.ezlynx.com", 443))
 except SafetySealError:
     pass
 else:
     raise SystemExit(6)
-sys.audit("socket.connect", ("127.0.0.1", 9222))
+sys.audit("socket.connect", object(), ("127.0.0.1", 9222))
 raise SystemExit(0)
 """
         env = os.environ.copy()
