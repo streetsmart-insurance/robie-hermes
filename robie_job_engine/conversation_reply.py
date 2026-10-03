@@ -10,15 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
-import re
 import uuid
-
-# With no destination receipt, a conversational answer cannot claim a write.
-_WRITE_RESULT = re.compile(
-    r'\b(?:complete[ds]?|success(?:ful(?:ly)?)?|done|filed|posted|saved|uploaded|'
-    r'updated|deleted|submitted|sent|bound|issued|created|cancelled|canceled|'
-    r'approved|paid|processed|applied|moved|added|changed|executed)\b', re.I
-)
 
 @dataclass
 class ConversationReply:
@@ -42,7 +34,7 @@ class ConversationReply:
             or str(getattr(source, 'chat_id', '') or '') != self.lane[0]
             or str(getattr(source, 'thread_id', '') or '') != self.lane[1]
             or str(getattr(event, 'message_id', '') or '') != self.message
-            or not response.strip() or _WRITE_RESULT.search(response)):
+            or not response.strip()):
             self.revoked = True
             return
         self.final_text = response

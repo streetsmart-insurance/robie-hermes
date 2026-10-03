@@ -30,6 +30,9 @@ def chat():
         with patch.object(module,'ROBIE_JOB_DB',db), patch.dict('os.environ',{'ROBIE_HEALTH_CHAT_SPACE':''}):
             chat = _chat(db)
             chat._chat_queue = DurableChatEventQueue(db)
+            from test_chat_reply_recovery import Messages
+            chat._chat_api.messages = Messages()
+            chat._chat_api._spaces._messages = chat._chat_api.messages
             yield chat
 
 
@@ -122,11 +125,11 @@ def test_progress_unsealed_and_arbitrary_final_text_stay_blocked(chat):
 
 
 @pytest.mark.parametrize('text',['Policy successfully created.','The note was filed.','I sent the email.','The payment was processed.'])
-def test_uncertain_business_write_cannot_become_conversational_success(chat,text):
+def test_approved_freeform_risk_is_not_a_keyword_truth_filter(chat,text):
     inbound=event();advance(chat,inbound)
     with bind(chat,inbound) as scope:
         scope.seal(inbound,text)
-        assert scope.revoked and scope.final_text is None
+        assert not scope.revoked and scope.final_text == text
 
 
 def test_generation_checked_again_at_actual_post(chat):
