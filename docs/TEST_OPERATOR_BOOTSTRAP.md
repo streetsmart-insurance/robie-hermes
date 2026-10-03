@@ -1,12 +1,14 @@
 # Inspection-only bootstrap approval bundle
 
-Local review preparation only. No publication, issue/comment creation, GitHub
-settings changes, SSH registration, helper installation or runtime action has
-occurred. The local commit and hashes are supplied in the accompanying validation
-manifest; preserve reviewed baseline `4ccfa6763e585c5a51fb31c243fda83fa19a9a4f`.
-Runtime remains `42e872f4c86fc4b4e37f859fc390f0b7c832f373`, retained TGZ SHA256
+Disabled controller prepared for draft PR review. Merge, GitHub settings changes,
+SSH registration, helper installation and runtime actions require separate setup
+approval. The candidate commit and hashes are supplied in the accompanying
+validation record; preserve reviewed baseline `4ccfa6763e585c5a51fb31c243fda83fa19a9a4f`.
+The original approved runtime target is `42e872f4c86fc4b4e37f859fc390f0b7c832f373`, retained TGZ SHA256
 `876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064`.
 This bootstrap neither transfers nor installs that runtime package.
+This target is not a claim about the currently installed Test release. Reconcile
+current Test state and the active live-Chat operator before any runtime work.
 
 ## Concrete setup sequence
 

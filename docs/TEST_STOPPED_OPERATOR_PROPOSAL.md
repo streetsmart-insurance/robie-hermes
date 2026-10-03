@@ -1,6 +1,6 @@
 # Local Test stopped-operator proposal
 
-Review-only controller work. Not published, enabled, installed or live-tested.
+Draft-review controller work. Not enabled, installed or live-tested.
 Read with TEST_STOPPED_INSTALL.md and TEST_OPERATOR_INSPECT_PROPOSAL.md. The
 original approved runtime package is unchanged: commit
 `42e872f4c86fc4b4e37f859fc390f0b7c832f373`, TGZ SHA256
@@ -144,7 +144,7 @@ public access, runtime-SA expansion or credentials are proposed.
 
 ## Later stopped-operation setup (outside inspection bootstrap)
 
-The controller is not published. Its immutable local commit and helper hashes
+The controller remains disabled. Its immutable candidate commit and helper hashes
 are supplied in the handoff/validation record after local review (a document
 cannot contain its own future commit ID). Do not approve an unknown commit or
 a moving main. The proposed actions, once those identifiers are recorded:

@@ -1,6 +1,6 @@
 # Local proposal: bounded Test inspection trigger
 
-Status: REVIEW ONLY. Not published, enabled, installed, or live-tested. This describes
+Status: DRAFT REVIEW ONLY. Not enabled, installed, or live-tested. This describes
 the inspect-only component. The separate bounded hold/install proposal is
 `TEST_STOPPED_OPERATOR_PROPOSAL.md`; neither component is enabled. The concrete Mac-independent setup is documented in TEST_OPERATOR_BOOTSTRAP.md. No command here resumes
 services, masks units, changes browser/global driver, reads a job database, or
