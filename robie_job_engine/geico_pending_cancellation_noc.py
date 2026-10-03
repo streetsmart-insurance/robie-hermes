@@ -596,28 +596,24 @@ def _named_control_state(page: Any, name: str, roles: tuple[str, ...]) -> str:
 
 
 def ensure_pending_view(page: Any) -> None:
-    """Select Pending Cancellations. Filter chips do not need Client Alerts."""
+    """Select Pending Cancellations. Filter chips do not need Client Alerts.
+
+    The live /client-alerts page exposes the Pending Cancellations filter as
+    a toggle button whose accessible name carries a count suffix, e.g.
+    "Pending Cancellations (2)". _pending_chip_view/_click_pending_chip match
+    that suffix via regex. There is no exact "Client Alerts" link/button and
+    no exact "Pending Cancellations" control, so the old Client Alerts
+    fallback (which could only raise IntakeHold) is removed.
+    """
     assert_authenticated(page)
     if not _is_gateway_app_url(str(getattr(page, "url", "") or "")):
         raise IntakeHold("Expected exactly one Geico Gateway tab")
     if pending_view_selected(page):
         return
     chip = _pending_chip_view(page)
-    if chip in {"ambiguous", "error"}:
+    if chip in {"ambiguous", "error", "absent"}:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
-    if chip in {"unselected", "bare"}:
-        _click_pending_chip(page)
-        if not pending_view_selected(page):
-            raise IntakeHold("Pending Cancellations view did not become selected")
-        return
-    alerts = _named_control_state(page, "Client Alerts", ("link", "button"))
-    if alerts == "one":
-        click_named(page, "Client Alerts", roles=("link", "button"))
-        if pending_view_selected(page):
-            return
-    elif alerts in {"ambiguous", "error"}:
-        click_named(page, "Client Alerts", roles=("link", "button"))
-    click_named(page, "Pending Cancellations", roles=("option", "button", "link", "tab"))
+    _click_pending_chip(page)
     if not pending_view_selected(page):
         raise IntakeHold("Pending Cancellations view did not become selected")
 
