@@ -146,6 +146,17 @@ class NamedDiscussionNoteTests(unittest.TestCase):
         self.assertIsNone(
             requested_message_applicant({"text": "Buster Brown 26356199 and 88001122"})
         )
+        self.assertEqual(
+            requested_message_applicant(
+                {"text": "Create policy number TEST-HO-20260911-E01 on applicant 220250093"}
+            ),
+            "220250093",
+        )
+        self.assertIsNone(
+            requested_message_applicant(
+                {"text": "Create policy number TEST-HO-20260911-E01"}
+            )
+        )
         self.assertIsNone(person_name_in_text("Round 725 named discussion test"))
         self.assertEqual(person_name_in_text("Add a note for Buster Brown"), "Buster Brown")
         self.assertEqual(classify_request(MESSAGE).action_type, "ezlynx.discussion_note")

@@ -113,9 +113,11 @@ def requested_message_applicant(payload: dict) -> str | None:
         found.add(applicant)
     # One id the user typed, alone or after a name ("Buster Brown 26356199").
     # Digits that appear only inside a URL stay on the host check above.
-    # A second different id still fails closed. This does not widen the allowlist.
+    # Digits inside a policy number or other hyphenated token (TEST-HO-20260911-E01)
+    # are not an applicant. A second different id still fails closed.
+    # This does not widen the allowlist.
     prose = re.sub(r'https?://\S+', ' ', text)
-    for applicant in re.findall(r'(?<!\d)([1-9]\d{5,9})(?!\d)', prose):
+    for applicant in re.findall(r'(?<![\dA-Za-z-])([1-9]\d{5,9})(?![\dA-Za-z-])', prose):
         found.add(applicant)
     if len(found) != 1:
         return None
