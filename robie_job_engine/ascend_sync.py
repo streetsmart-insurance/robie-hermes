@@ -499,6 +499,9 @@ class AscendEZLynxSyncManager:
         self.qb = quickbooks_client or QuickBooksApiClient()
 
     def sync_once(self) -> Dict[str, Any]:
+        raise RuntimeError("ASCEND_SYNC_DISABLED: stage-only candidate; use preview_once explicitly; no scheduled delivery")
+
+    def preview_once(self) -> Dict[str, Any]:
         """Read and stage only. Live destinations deliberately not wired.
 
         Replays use injected ports in ascend_delivery_state. Never resume legacy
@@ -1271,22 +1274,7 @@ class AscendEZLynxSyncManager:
 
 
 def run_daemon(interval_seconds: int = 3600, db_path: Optional[str] = None) -> None:
-    """Run synchronization daemon on a recurring interval (default 1 hour)."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    logger.info("Starting Ascend to EZLynx Sync Daemon (Interval: %ds)", interval_seconds)
-
-    store = AscendSyncStore(db_path or DEFAULT_DB_PATH)
-    manager = AscendEZLynxSyncManager(store=store)
-
-    while True:
-        try:
-            logger.info("Executing scheduled Ascend-EZLynx sync cycle...")
-            manager.sync_once()
-        except Exception as exc:
-            logger.error("Daemon cycle error: %s", exc, exc_info=True)
-
-        logger.info("Sleeping for %d seconds...", interval_seconds)
-        time.sleep(interval_seconds)
+    raise RuntimeError("ASCEND_SYNC_DISABLED: daemon cannot run a stage-only candidate")
 
 
 def main() -> None:
@@ -1297,14 +1285,8 @@ def main() -> None:
     parser.add_argument("--db-path", type=str, default=str(DEFAULT_DB_PATH), help="Path to sqlite sync database")
     args = parser.parse_args()
 
-    if args.daemon:
-        run_daemon(interval_seconds=args.interval, db_path=args.db_path)
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        store = AscendSyncStore(args.db_path)
-        manager = AscendEZLynxSyncManager(store=store)
-        res = manager.sync_once()
-        print(json.dumps(res, indent=2))
+    # Stop before opening a store, matcher, secret client or destination adapter.
+    parser.exit(2, "ASCEND_SYNC_DISABLED: stage-only candidate is not an operational sync\n")
 
 
 if __name__ == "__main__":
