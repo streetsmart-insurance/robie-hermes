@@ -1549,7 +1549,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._allow_next_thinking_card(
                 getattr(getattr(event, "source", None), "chat_id", None)
             )
-            await self.handle_message(event)
+            await self._handle_conversation_only(event)
             return
         try:
             from robie_job_engine.playwright_observability import bind_current_playwright_job
@@ -1841,6 +1841,64 @@ class GoogleChatAdapter(BasePlatformAdapter):
             name=f"robie-turn-ceiling:{job_id}",
         )
         current["watchdog"] = watchdog
+
+    def set_message_handler(self, handler) -> None:
+        # Only the completed gateway callback, never model metadata/progress,
+        # may seal the exact final text for a no-job conversational turn.
+        async def finished(event):
+            from robie_job_engine.conversation_reply import current_reply
+            scope = current_reply()
+            try:
+                response = await handler(event)
+            except BaseException:
+                if scope is not None and scope.adapter is self:
+                    scope.revoked = True
+                raise
+            if scope is not None and scope.adapter is self:
+                scope.seal(event, response)
+            return response
+        super().set_message_handler(finished)
+
+    async def _handle_conversation_only(self, event: MessageEvent) -> None:
+        from robie_job_engine.chat_guard import chat_message_requires_job
+        from robie_job_engine.chat_turn_control import sender_is_allowed
+        from robie_job_engine.conversation_reply import bind
+        from robie_job_engine.turn_finalization import (
+            install_tool_call_text_guard, _agent_class,
+        )
+        source = getattr(event, "source", None)
+        raw = getattr(event, "raw_message", None) or {}
+        sender = raw.get("sender") or {}
+        actor = str(getattr(source, "user_id", "") or "")
+        space = str(getattr(source, "chat_id", "") or "")
+        message = str(getattr(event, "message_id", "") or "")
+        attachments = self._chat_job_attachment_kwargs(event)
+        # Trusted identity comes from the normalized transport, not display
+        # names or user-supplied parameters. Missing context stays fail closed.
+        if (not actor or actor != str(sender.get("email") or sender.get("name") or "")
+            or sender.get("type") != "HUMAN"
+            or not sender_is_allowed(actor)
+            or not re.fullmatch(r"spaces/[^/]+/messages/[^/]+", message)
+            or not message.startswith(space + "/messages/")
+            or raw.get("name") != message
+            or (getattr(source, "thread_id", None) and (
+                not re.fullmatch(r"spaces/[^/]+/threads/[^/]+", str(source.thread_id))
+                or not str(source.thread_id).startswith(space + "/threads/")
+                or (raw.get("thread") or {}).get("name") != source.thread_id))
+            or (not getattr(source, "thread_id", None)
+                and getattr(source, "chat_type", None) != "dm")
+            or not getattr(event, "_robie_conversation_generation", None)
+            or str(event.text or "").startswith("/")
+            or chat_message_requires_job(event.text,
+                expected_attachment_count=attachments["expected_attachment_count"])):
+            return
+        install_tool_call_text_guard()
+        cls = _agent_class()
+        if not cls or not getattr(getattr(cls, "_execute_tool_calls", None),
+                                   "_robie_conversation_tool_guard", False):
+            return
+        with bind(self, event):
+            await self.handle_message(event)
 
     async def _begin_fresh_chat_turn(self, event: MessageEvent) -> None:
         """Drop prior Q&A so this message is answered on its own."""
@@ -3283,6 +3341,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 _log_inbound_drop("message could not be read")
                 return
 
+            from robie_job_engine.conversation_reply import advance
+            advance(self, event)
+
             # A live clarify reply wakes its exact owner before any busy/defer
             # or generic resume path can start a second agent session.
             text = (event.text or "").strip()
@@ -3803,7 +3864,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 self._allow_next_thinking_card(
                     getattr(getattr(event, "source", None), "chat_id", None)
                 )
-                await self.handle_message(event)
+                if job_id:
+                    await self.handle_message(event)
+                else:
+                    await self._handle_conversation_only(event)
                 return
         # Test AND Production: operational bounded work goes through
         # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
@@ -5125,6 +5189,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
         If ``content`` exceeds MAX_MESSAGE_LENGTH, the first chunk patches
         the typing card (if any), subsequent chunks are new messages.
         """
+        from robie_job_engine.conversation_reply import current_reply
+        conversation = current_reply()
+        if conversation is not None:
+            if not conversation.permits(self, chat_id, content, reply_to, metadata):
+                return SendResult(success=False, error="conversation reply ownership refused")
+            body = {"text": content}
+            if conversation.lane[1]:
+                body["thread"] = {"name": conversation.lane[1]}
+            def still_owned():
+                if not conversation.current() or conversation.consumed:
+                    raise RuntimeError("conversation reply was superseded")
+            try:
+                result = await self._create_message(chat_id, body,
+                    request_id=conversation.request_id, before_request=still_owned)
+                if not result.success or not str(result.message_id or "").startswith(chat_id + "/messages/"):
+                    return SendResult(success=False, error="conversation reply receipt missing")
+                conversation.consumed = True
+                return result
+            except asyncio.CancelledError:
+                conversation.revoked = True
+                raise
+            except Exception:
+                return SendResult(success=False, error="conversation reply delivery failed")
         delivery_kind = str((metadata or {}).get("robie_delivery_kind") or "")
         job_id = str((metadata or {}).get("robie_job_id") or "").strip() or None
         if delivery_kind == "idle_stop":
@@ -6406,7 +6493,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _create_message(
         self, chat_id: str, body: Dict[str, Any], job_id: str | None = None,
-        *, request_id: str | None = None,
+        *, request_id: str | None = None, before_request=None,
     ) -> SendResult:
         """POST spaces/{space}/messages via REST, returning SendResult.
 
@@ -6443,6 +6530,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 kwargs["messageReplyOption"] = "REPLY_MESSAGE_OR_FAIL"
 
         def _do_create() -> Dict[str, Any]:
+            if before_request is not None:
+                before_request()
             return (
                 self._chat_api.spaces()
                 .messages()

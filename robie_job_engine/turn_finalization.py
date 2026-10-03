@@ -493,8 +493,11 @@ def install_tool_call_text_guard() -> None:
         return
 
     def emit(self: Any, assistant_msg: Any) -> None:
-        job_id = current_model_job_id()
         calls = assistant_msg.get("tool_calls") if isinstance(assistant_msg, dict) else None
+        if calls:
+            from .conversation_reply import refuse_conversation_tools
+            refuse_conversation_tools()
+        job_id = current_model_job_id()
         if job_id and calls:
             begin_tool_call_message(job_id)
             visible = ""
@@ -515,6 +518,8 @@ def install_tool_call_text_guard() -> None:
     if callable(original_exec):
 
         def execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+            from .conversation_reply import refuse_conversation_tools
+            refuse_conversation_tools()
             job_id = current_model_job_id()
             try:
                 owner, generation, owner_db = bound_model_context()
@@ -527,6 +532,7 @@ def install_tool_call_text_guard() -> None:
             finally:
                 end_tool_call_message(job_id)
 
+        execute._robie_conversation_tool_guard = True
         execute._robie_tool_text_guard = True  # type: ignore[attr-defined]
         cls._execute_tool_calls = execute
     _INSTALLED = True
