@@ -362,8 +362,8 @@ class AscendApiClient:
 
     def fetch_cancelation_returns(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch cancellation returns containing return premiums and cancellation docs."""
-        data = self.get("/v1/cancelation_returns", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/cancelation_returns", page_size)
 
     def fetch_billable(self, billable_id: str) -> Dict[str, Any]:
         """Fetch billable details (carrier, policy number, coverage, program ID)."""
@@ -379,23 +379,23 @@ class AscendApiClient:
 
     def fetch_invoices(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch invoices."""
-        data = self.get("/v1/invoices", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/invoices", page_size)
 
     def fetch_programs(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch programs."""
-        data = self.get("/v1/programs", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/programs", page_size)
 
     def fetch_loans(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch loans."""
-        data = self.get("/v1/loans", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/loans", page_size)
 
     def fetch_payouts(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch payouts (supplier remittances and agency commissions)."""
-        data = self.get("/v1/payouts", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/payouts", page_size)
 
     def fetch_program_billables(self, program_id: str) -> List[Dict[str, Any]]:
         """List billables for a program via GET /v1/billables?program_id=…
@@ -499,7 +499,33 @@ class AscendEZLynxSyncManager:
         self.qb = quickbooks_client or QuickBooksApiClient()
 
     def sync_once(self) -> Dict[str, Any]:
-        """Perform one full synchronization run of all Ascend event feeds."""
+        """Read and stage only. Live destinations deliberately not wired.
+
+        Replays use injected ports in ascend_delivery_state. Never resume legacy
+        writes from an existence-only checkpoint. No legacy ledger edits.
+        """
+        from .ascend_delivery_state import candidate_events, ReliableDelivery
+        events = candidate_events(self.api)
+        ledger = {}
+        delivery = ReliableDelivery(ledger)
+        reasons = {}
+        for event in events:
+            # Only reads through the existing matcher; no note/task methods.
+            if event['kind'] in ('cancellation', 'agreement_signed'):
+                app, _ = self.matcher.match_account(
+                    policy_number=event.get('policy_number'),
+                    insured_name=event.get('insured_name'))
+                event['applicant_id'] = app
+            reason = delivery.process(event)
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return {'mode': 'read_only_candidate', 'source_seen': len(events),
+                'delivered': 0, 'writes': 0, 'reasons': reasons,
+                'legacy_ledger_modified': False,
+                'live_destination_adapters': 'disabled_pending_Test_readback'}
+
+    def _legacy_sync_once_DISABLED(self) -> Dict[str, Any]:
+        raise RuntimeError("legacy orchestration disabled: no destination readback")
+        """Retained for review only; unreachable legacy implementation."""
         started_at = _now_iso()
         stats = {
             "started_at": started_at,
