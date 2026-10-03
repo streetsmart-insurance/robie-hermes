@@ -159,6 +159,10 @@ def fire_task(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, An
     validate_task_payload(payload)
     
     if dry_run:
+        # Validate the Zapier fallback is configured even in dry-run,
+        # so misconfiguration fails fast (test_missing_script_raises).
+        # Direct API is primary, but a broken fallback should not be silent.
+        resolve_zap_trigger()
         return {"ok": True, "dry_run": True, "method": "direct"}
     
     # Try direct API first
