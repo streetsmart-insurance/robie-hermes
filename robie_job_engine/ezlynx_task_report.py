@@ -39,6 +39,9 @@ class AssignedTask:
     status: str           # Task Status
     discussion_id: str    # Discussion ID (for write-back)
     last_modified: str    # Task Last Modified Date (for idempotency)
+    created_by: str = ""       # Task Created By (reassignment fallback 1)
+    assigned_producer: str = ""  # Assigned Producer (reassignment fallback 2)
+    csr: str = ""              # CSR (reassignment fallback 3)
 
 
 class TaskReportParseError(ValueError):
@@ -122,6 +125,11 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
             status=(row.get("Task Status") or "").strip(),
             discussion_id=(row.get("Discussion ID") or "").strip(),
             last_modified=(row.get("Task Last Modified Date") or "").strip(),
+            # Reassignment routing — optional columns, empty when absent.
+            # Never fail the parse because a routing column is missing.
+            created_by=(row.get("Task Created By") or "").strip(),
+            assigned_producer=(row.get("Assigned Producer") or "").strip(),
+            csr=(row.get("CSR") or "").strip(),
         ))
 
     return tasks
