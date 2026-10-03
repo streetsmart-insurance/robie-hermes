@@ -39,7 +39,8 @@ Safety invariants (repo contract):
 from __future__ import annotations
 
 import logging
-import time
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -53,8 +54,6 @@ logger = logging.getLogger(__name__)
 # unexpectedly large batch of Robie tasks arrives.
 MAX_TASKS_PER_RUN = 25
 
-NOTE_POST_ATTEMPTS = 3
-NOTE_RETRY_DELAYS = (2.0, 4.0)
 
 # (routing field, human label) in precedence order.
 REASSIGN_PRECEDENCE = (
@@ -77,7 +76,7 @@ class TaskReassigner(Protocol):
 
     def reassign(
         self, task_id: str, applicant_id: str, new_assignee: str,
-        description: str = "",
+        description: str = "", expected_assignee: str = "Robie AI",
     ) -> str:
         """Set the assignee; return the re-read verified assignee name."""
         ...
@@ -147,22 +146,37 @@ class _WorkerReassignPortAdapter:
                       read_task_assignee(task_id) -> str | None (optional)
     """
 
-    def __init__(self, reassigner: TaskReassigner):
+    def __init__(self, reassigner: TaskReassigner, task: AssignedTask):
         self._reassigner = reassigner
+        self._task = task
 
     def reassign_task(
         self, task_id: str, new_assignee: str, note: str = ""
     ) -> dict[str, Any]:
         try:
+            from .ezlynx_task_cdp import validate_identity
+            validate_identity(task_id, self._task.applicant_id)
+            if task_id != self._task.task_id:
+                raise ValueError("Foreign task identity; reassignment not sent")
             verified = self._reassigner.reassign(
-                task_id, "", new_assignee, description=note)
-            return {"ok": True, "verified_assignee": verified}
+                task_id, self._task.applicant_id, new_assignee,
+                description=self._task.description,
+                expected_assignee=self._task.assigned_to)
+            current = self.read_task_assignee(task_id)
+            if not isinstance(verified, str) or not current or current.casefold() != new_assignee.casefold():
+                raise ValueError("No destination proof for reassignment")
+            return {"ok": True, "sent": True, "verified_assignee": current}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)[:300]}
+            return {"ok": False, "sent": False, "error": str(exc)[:300]}
 
     def read_task_assignee(self, task_id: str) -> str | None:
         try:
-            return self._reassigner.read_assignee(task_id, "")
+            from .ezlynx_task_cdp import validate_identity
+            validate_identity(task_id, self._task.applicant_id)
+            if task_id != self._task.task_id:
+                return None
+            return self._reassigner.read_assignee(
+                task_id, self._task.applicant_id, description=self._task.description)
         except Exception:  # noqa: BLE001
             return None
 
@@ -235,11 +249,13 @@ class TaskAssignmentWorker:
         """Attempt the task. Returns the action checkpoint for the verifier."""
         payload = job.get("payload") or {}
         task = _task_from_payload(payload)
+        from .ezlynx_task_cdp import validate_identity
+        validate_identity(task.task_id, task.applicant_id)
         timestamp = utcnow_iso()
 
         if is_test_task(task):
             note_id = self._post_note_verified(
-                task.discussion_id,
+                store, job, task.discussion_id,
                 "Roby here — this looks like a test task, so I'm leaving it "
                 "alone. No action taken.",
             )
@@ -268,7 +284,7 @@ class TaskAssignmentWorker:
             # No valid person to send this back to — say so on the task,
             # then wait for a human on the SAME job.
             self._post_note_verified(
-                task.discussion_id,
+                store, job, task.discussion_id,
                 "Roby here — I read this task but couldn't complete it, and I "
                 "couldn't tell who to send it back to (no creator, producer, "
                 "or CSR listed). Flagging for the team.",
@@ -285,7 +301,7 @@ class TaskAssignmentWorker:
         if self.reassign_enabled and self.reassigner is not None:
             verified_assignee = self.reassigner.reassign(
                 task.task_id, task.applicant_id, target,
-                description=task.description,
+                description=task.description, expected_assignee=task.assigned_to,
             )
             reassigned = {"to": target, "verified_assignee": verified_assignee}
             note_body = (
@@ -301,7 +317,7 @@ class TaskAssignmentWorker:
                 "reassign it in EZLynx."
             )
 
-        note_id = self._post_note_verified(task.discussion_id, note_body)
+        note_id = self._post_note_verified(store, job, task.discussion_id, note_body)
 
         if reassigned is None:
             self._record(task, "awaiting_human", f"Reassignment gate off; flagged for reassign to {target}.", timestamp)
@@ -362,7 +378,7 @@ class TaskAssignmentWorker:
             "Task Due Date": task.due_date,
         }
         reassign_port = (
-            _WorkerReassignPortAdapter(self.reassigner)
+            _WorkerReassignPortAdapter(self.reassigner, task)
             if self.reassigner is not None else None
         )
         ports = build_robie_call_ports(
@@ -425,65 +441,56 @@ class TaskAssignmentWorker:
 
     # -- verified note posting (API only) -------------------------------
 
-    def _post_note_verified(self, discussion_id: str, body: str) -> str:
-        """Post one note and prove it landed via read-back.
+    def _post_note_verified(self, store: Any, job: dict[str, Any],
+                            discussion_id: str, body: str) -> str:
+        """Reserve once in the real JobStore, then reconcile by exact receipt ID.
 
-        Returns the confirmed note_id. Raises UnverifiedNoteError when the
-        read-back does not confirm the write — the note is NEVER reposted
-        automatically (a second post would duplicate it).
+        DiscussionApi has no idempotent POST contract. An intent without a
+        durable receipt is permanently uncertain, including after a crash.
+        Metadata changes and HTTP acceptance cannot authorize another send.
         """
-        if not discussion_id:
-            raise ValueError("No discussion ID — cannot post note")
-        if self.client is None:
-            raise ValueError("No discussion client — refusing to claim a note was posted")
-
-        from .ezlynx_discussions import discussion_note_snapshot
-
-        before = discussion_note_snapshot(self.client.get_discussion(discussion_id))
-
-        last_error: Exception | None = None
-        response: dict[str, Any] | None = None
-        for attempt in range(NOTE_POST_ATTEMPTS):
+        from .ezlynx_task_cdp import validate_identity
+        from .store import canonical_json, utc_now
+        payload = job.get("payload") or {}
+        validate_identity(str(payload.get("task_id") or ""),
+                          str(payload.get("applicant_id") or ""))
+        if not discussion_id or self.client is None:
+            raise ValueError("No discussion identity/client; note not sent")
+        identity = {"task_id": payload["task_id"], "applicant_id": payload["applicant_id"],
+                    "discussion_id": discussion_id,
+                    "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+        kind = "task-note-intent"
+        # INSERT is a durable compare-and-set, following the outbox contract.
+        # No time-based lease can allow a second POST of an uncertain note.
+        with store.transaction() as conn:
+            row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?",
+                               (job["id"], kind)).fetchone()
+            fresh = row is None
+            intent = {**identity, "state": "uncertain", "note_id": ""} if fresh else json.loads(row[0])
+            if any(intent.get(k) != v for k, v in identity.items()):
+                raise UnverifiedNoteError("Existing note intent differs; not sent")
+            if fresh:
+                conn.execute("INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES(?,?,?,?)",
+                             (job["id"], kind, canonical_json(intent), utc_now()))
+        if fresh:
+            # Verify the committed checkpoint before the external side effect.
+            if store.get_checkpoint(job["id"], kind) != intent:
+                raise UnverifiedNoteError("Note intent persistence failed; not sent")
             try:
                 response = self.client.append_note(discussion_id, body)
-                last_error = None
-                break
-            except Exception as e:  # noqa: BLE001 — bounded retry, then fail closed
-                last_error = e
-                logger.warning(
-                    f"Note post attempt {attempt + 1}/{NOTE_POST_ATTEMPTS} failed: {e}"
-                )
-                if attempt < NOTE_POST_ATTEMPTS - 1:
-                    time.sleep(NOTE_RETRY_DELAYS[attempt])
-        if last_error is not None or response is None:
-            raise UnverifiedNoteError(
-                f"Note post failed after {NOTE_POST_ATTEMPTS} attempts: {last_error}"
-            )
-
-        api_note_id = _extract_note_id(response)
-        after = discussion_note_snapshot(self.client.get_discussion(discussion_id))
-        latest = after.get("most_recent_note_id") or ""
-
-        from .ezlynx_discussions import _metadata_note_confirmation
-
-        if api_note_id and latest == api_note_id:
-            logger.info(f"Note {api_note_id} confirmed on discussion {discussion_id}")
-            return api_note_id
-        # Reviewed metadata confirmation: the discussion must have gained
-        # exactly one note, the latest id must have changed, and the title
-        # must be unchanged. A new latest id alone is not a receipt —
-        # another writer can produce the same metadata.
-        confirmed, reason = _metadata_note_confirmation(before, after)
-        if confirmed:
-            logger.info(
-                f"Note confirmed on discussion {discussion_id} via read-back "
-                f"(latest id {latest})"
-            )
-            return latest
-        raise UnverifiedNoteError(
-            f"Note post to discussion {discussion_id} could not be confirmed: "
-            f"{reason} Not reposting."
-        )
+            except Exception as exc:
+                raise UnverifiedNoteError("Note acceptance uncertain; not reposting") from exc
+            intent["note_id"] = _extract_note_id(response)
+            store.checkpoint(job["id"], kind, intent)
+        note_id = str(intent.get("note_id") or "")
+        if not note_id:
+            raise UnverifiedNoteError("No durable destination note ID; not reposting")
+        record = self.client.get_discussion(discussion_id)
+        if not _contains_note_id(record, note_id):
+            raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
+        intent["state"] = "confirmed"
+        store.checkpoint(job["id"], kind, intent)
+        return note_id
 
     def _record(self, task: AssignedTask, action: str, detail: str, timestamp: str) -> None:
         self.results.append(TaskResult(
@@ -493,6 +500,12 @@ class TaskAssignmentWorker:
             detail=detail,
             timestamp=timestamp,
         ))
+
+
+def _contains_note_id(record: dict[str, Any], note_id: str) -> bool:
+    from .ezlynx_discussions import discussion_note_snapshot, iter_discussion_notes, _note_id_of
+    return (discussion_note_snapshot(record).get("most_recent_note_id") == note_id
+            or any(_note_id_of(row) == note_id for row in iter_discussion_notes(record)))
 
 
 def _extract_note_id(response: dict[str, Any]) -> str:
@@ -577,7 +590,8 @@ class TaskIntakeVerifier:
         from .ezlynx_discussions import discussion_note_snapshot
 
         try:
-            snapshot = discussion_note_snapshot(self.client.get_discussion(discussion_id))
+            record = self.client.get_discussion(discussion_id)
+            snapshot = discussion_note_snapshot(record)
         except Exception as e:  # noqa: BLE001 — transient read failure retries
             return _unverified(
                 job, captured, discussion_id,
@@ -625,7 +639,7 @@ class TaskIntakeVerifier:
                     retryable=True,
                 )
 
-        if latest != note_id:
+        if not _contains_note_id(record, note_id):
             return _unverified(
                 job, captured, discussion_id, expected, observed,
                 error=f"latest note is {latest!r}, expected {note_id!r}",
