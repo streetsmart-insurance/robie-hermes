@@ -4,7 +4,8 @@
 Runs every 15 minutes (systemd timer). For each PENDING task older than 40
 minutes, pulls the EZLynx task report and checks the task actually exists.
 
-  1. Ingest newly 'delivered' phone-watchdog tasks from its DB.
+  1. Ingest phone-watchdog handoffs (delivered or sent_to_relay) from its DB.
+     sent_to_relay means the row should be verified; it is not EZLynx proof.
   2. Pull the latest task-report CSV from the report mailbox (Gmail).
   3. Match due PENDING tasks; resolve VERIFIED / MISSING / UNVERIFIED.
   4. Alert Carlo via Google Chat on MISSING or UNVERIFIED. Never Gmail.
@@ -152,7 +153,8 @@ def main() -> int:
 
     store = TaskVerificationStore(args.db or None)
 
-    # 1. Ingest phone-watchdog deliveries.
+    # 1. Ingest phone-watchdog handoffs (delivered or sent_to_relay).
+    #    sent_to_relay is queued for report verification, not treated as delivery.
     try:
         ingest_phone_watchdog(store)
     except Exception as exc:

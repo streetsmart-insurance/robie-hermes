@@ -828,10 +828,11 @@ def check_eod_drive_delivery() -> tuple[bool, str, dict]:
 def check_task_verifier_health() -> tuple[bool, str, dict]:
     """Is the task verifier keeping up? Any tasks stuck unverified?
 
-    The verifier runs every 15m and checks phone-watchdog 'delivered' tasks
-    against EZLynx. Tasks stuck PENDING/UNVERIFIED for 2h+ mean the verifier
-    is broken or EZLynx is unreachable — either way, callback tasks may be
-    silently missing.
+    The verifier runs every 15m and checks queued phone-watchdog tasks
+    (delivered or sent_to_relay handoffs) against a fresh EZLynx report.
+    sent_to_relay is not proof the task landed. Tasks stuck
+    PENDING/UNVERIFIED for 2h+ mean the verifier is broken or EZLynx is
+    unreachable — either way, callback tasks may be silently missing.
     """
     extra: dict = {}
     db_path = os.environ.get("ROBIE_TASK_VERIFY_DB", TASK_VERIFY_DB_DEFAULT)
