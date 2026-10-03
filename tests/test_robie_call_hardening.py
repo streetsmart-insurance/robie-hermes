@@ -305,13 +305,23 @@ class TestOutcomeVerification(unittest.TestCase):
         self.assertEqual(ports.task_reassign.calls, [])
         self.assertTrue(result["chat_alerted"])
 
-    def test_verification_opt_out_is_explicit(self):
+    def test_no_verification_opt_out_exists(self):
+        # The waiver is gone: there is no flag that lets a placement ack
+        # alone mark the task ok. Constructing with the old flag fails
+        # loudly instead of silently ignoring it.
+        with self.assertRaises(TypeError):
+            live_config(require_outcome_verification=False)  # type: ignore[call-arg]
+
+    def test_placement_ack_alone_never_marks_ok(self):
+        # Bland accepted the dial (success=True) but has no status API, so
+        # the outcome cannot be confirmed. The task must NOT be ok — an
+        # HTTP 200 is not proof the call happened.
         ports = make_ports(bland=BlandPortNoStatus())
-        result = handle_robie_call_task(
-            make_task(), live_config(require_outcome_verification=False), ports)
-        self.assertTrue(result["ok"])
+        result = handle_robie_call_task(make_task(), live_config(), ports)
+        self.assertFalse(result["ok"])
         self.assertFalse(result["outcome_verified"])
         self.assertFalse(result["outcome_verification_available"])
+        self.assertIn("could not be verified", result["error"])
 
     def test_no_status_api_fails_closed_by_default(self):
         ports = make_ports(bland=BlandPortNoStatus())

@@ -86,7 +86,8 @@ class FakeReassigner:
         self.calls: List[tuple] = []
         self.current = "Robie AI"
 
-    def reassign(self, task_id, applicant_id, new_assignee, description=""):
+    def reassign(self, task_id, applicant_id, new_assignee, description="",
+                 expected_assignee="Robie AI"):
         self.calls.append((task_id, new_assignee))
         self.current = new_assignee
         return new_assignee
@@ -97,10 +98,10 @@ class FakeReassigner:
 
 def make_task(**over) -> AssignedTask:
     kw = dict(
-        task_id="T-200",
+        task_id="63429200",
         title="Callback request",
         description="Call John Smith about his renewal documents",
-        applicant_id="A-200",
+        applicant_id="25486200",
         applicant_name="John Smith",
         assigned_to="Robie AI",
         due_date="2026-10-10",
@@ -145,7 +146,7 @@ def test_callback_routes_to_call_handler(clean_state):
     )
     assert worker._call_handler_available() is True
     job = {"id": "job-1", "payload": {
-        "task_id": "T-200", "applicant_id": "A-200",
+        "task_id": "63429200", "applicant_id": "25486200",
         "account_name": "John Smith", "assigned_to": "Robie AI",
         "title": "Callback request",
         "description": "Call John Smith about his renewal documents",
@@ -163,7 +164,7 @@ def test_callback_routes_to_call_handler(clean_state):
     # The handler checkpointed inside the Job Engine job (kind robie-call).
     assert "robie-call" in store.checkpoints
     # Reassignment went through the worker-protocol adapter.
-    assert reassigner.calls == [("T-200", "Jane Producer")]
+    assert reassigner.calls == [("63429200", "Jane Producer")]
 
 
 def test_callback_without_ports_takes_generic_path():
