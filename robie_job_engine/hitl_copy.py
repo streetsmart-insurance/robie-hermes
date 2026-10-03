@@ -20,6 +20,19 @@ from typing import Any
 CHANNEL_EMAIL = "email"
 CHANNEL_CHAT = "chat"
 
+# Plain-English descriptions of job phases for HITL emails.
+# Carlo 2026-10-02: the HITL email must say what actually broke.
+_PHASE_DESCRIPTIONS = {
+    "end_state_report": (
+        "I finished the work but my own quality check flagged the result "
+        "as not matching what was asked. I did not want to tell the requester "
+        "it was done when my check says otherwise."
+    ),
+    "coverage_fill": "I got stuck filling in coverage options on the carrier page.",
+    "ascend_create": "I got stuck creating the premium finance agreement in Ascend.",
+    "email_intake": "I got stuck reading the incoming email request.",
+}
+
 # Invisible / format chars that Gmail mobile can render as letter-spacing.
 _STRIP_CHARS = dict.fromkeys(
     map(
@@ -455,17 +468,32 @@ def human_hitl_notice(request: Any, gemini_response: Any = None) -> dict[str, st
             "chat": fail_closed_human_text(channel=CHANNEL_CHAT),
         }
 
+    # Carlo 2026-10-02: describe what actually broke in plain English.
+    # The old fallback said "Gemini answered, but I could not apply it"
+    # even when the problem had nothing to do with Gemini.
+    phase_desc = _PHASE_DESCRIPTIONS.get(phase, "")
+    ask_summary = str(getattr(request, "ask", "") or "").strip()
+    lines: list[str] = ["Hi Carlo, I need your help with this one."]
+    if ask_summary:
+        lines.append("The request was: " + ask_summary)
+    if phase_desc:
+        lines.append(phase_desc)
+    else:
+        lines.append("I got stuck at the " + (phase or "current") + " step.")
     gemini_line = _gemini_sentence(request, gemini_response)
-    lines: list[str] = ["I need a human to finish this step."]
     if gemini_line:
         lines.append(gemini_line)
-    elif getattr(request, "save_skipped", False):
-        lines.append("I skipped Save so I would not guess.")
-    else:
-        lines.append("I stopped so I would not guess the next click.")
-    ask_line = " with RETRY after the page is corrected, or tell me what to enter."
+    if error and error != phase:
+        err_short = error[:200].strip()
+        if err_short:
+            lines.append("What I saw: " + err_short)
+    lines.append("")
+    lines.append(
+        "Reply to this email and let me know how to proceed, "
+        "or reply RETRY if you have fixed the underlying issue."
+    )
     return {
         "subject": subject,
-        "body": "\n".join(lines + [reply_instruction(CHANNEL_EMAIL) + ask_line]),
-        "chat": "\n".join(lines + [reply_instruction(CHANNEL_CHAT) + ask_line]),
+        "body": "\n".join(lines),
+        "chat": "\n".join(lines),
     }

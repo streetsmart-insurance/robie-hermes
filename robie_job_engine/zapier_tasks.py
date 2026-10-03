@@ -1,4 +1,7 @@
-"""Fire EZLynx follow-up tasks through the agency's Zapier catch-hook Zap.
+"""Fire EZLynx follow-up tasks via direct Discussion API (TaskCreationNote).
+
+Primary path is the direct EZLynx Discussion API (no Zapier needed).
+Falls back to the Zapier catch-hook if the direct API is unavailable.
 
 The hook URL lives in the Secure Vault as ``custom.zapier-webhook``; this
 module never sees it.  Firing goes through the zapier skill's
@@ -143,15 +146,61 @@ def validate_task_payload(payload: dict[str, Any]) -> None:
 
 
 def fire_task(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
-    """POST the payload to the Zapier catch hook (or dry-run validate it).
+    """Create an EZLynx task via direct Discussion API, falling back to Zapier.
 
-    Returns the script's parsed result dict: {"ok": bool, ...}.  Raises
-    ValueError on a bad payload and RuntimeError when the script itself
-    cannot run.
+    Primary path: Direct TaskCreationNote via Discussion API (no Zapier).
+    Fallback: Zapier catch hook if direct API fails.
+    
+    Returns dict with {"ok": bool, "method": "direct"|"zapier", ...}.
+    Raises ValueError on a bad payload.
     """
     if isinstance(payload, dict) and payload.get("assignee"):
         payload["assignee"] = normalize_assignee(payload["assignee"])
     validate_task_payload(payload)
+    
+    if dry_run:
+        # Validate the Zapier fallback is configured even in dry-run,
+        # so misconfiguration fails fast (test_missing_script_raises).
+        # Direct API is primary, but a broken fallback should not be silent.
+        resolve_zap_trigger()
+        return {"ok": True, "dry_run": True, "method": "direct"}
+    
+    # Try direct API first
+    try:
+        return _fire_via_direct_api(payload)
+    except Exception as e:
+        # Fall back to Zapier
+        import logging
+        logging.getLogger(__name__).warning(
+            "Direct task API failed (%s), falling back to Zapier", e
+        )
+        return _fire_via_zapier(payload, dry_run=dry_run)
+
+
+def _fire_via_direct_api(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create task via direct EZLynx Discussion API TaskCreationNote."""
+    from .ezlynx_task_api import create_task
+    
+    # Map payload fields to direct API
+    # Payload has: applicant_id, task_title, assignee, source, due_date
+    # Direct API wants: applicant_id, title, assigned_user_name, due_date, etc.
+    result = create_task(
+        applicant_id=payload["applicant_id"],
+        title=payload["task_title"],
+        description=payload.get("task_description", ""),
+        assigned_user_name=payload.get("assignee"),
+        due_date=payload.get("due_date"),
+        due_time=payload.get("due_time"),  # Optional HH:MM
+        priority=payload.get("priority", "Medium"),
+    )
+    return {
+        "ok": True,
+        "method": "direct",
+        "task": result,
+    }
+
+
+def _fire_via_zapier(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
     script = resolve_zap_trigger()
     command = ["python3", script, "--payload", json.dumps(payload)]
     if dry_run:

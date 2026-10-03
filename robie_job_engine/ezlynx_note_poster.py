@@ -526,14 +526,12 @@ class EZLynxAgreementPoster:
             except Exception as e:
                 logger.warning("ezlynx_cli subprocess execution failed: %s", e)
 
-        # Fallback simulation or test return
-        return {
-            "status": "success",
-            "applicant_id": applicant_id,
-            "discussion_title": title,
-            "text": note_text,
-            "method": "direct_note",
-        }
+        # All posting methods failed — do NOT fake success.
+        # Raise so the caller knows the note was NOT filed.
+        raise RuntimeError(
+            f"Failed to post EZLynx note for applicant {applicant_id}: "
+            "all posting methods (DiscussionApi, EZLynxApiClient, ezlynx_cli) failed or unavailable"
+        )
 
     def create_task(
         self,

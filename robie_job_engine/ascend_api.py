@@ -389,6 +389,7 @@ class AscendApiClient:
         email: str | None = None,
         phone: str | None = None,
         address: dict[str, str] | None = None,
+        contact: dict[str, str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if business_name:
             existing = self.list_insureds(business_name=business_name)
@@ -419,24 +420,80 @@ class AscendApiClient:
             ):
                 if k in address:
                     payload[k] = address[k]
+        # Ascend requires a primary contact (insured_contacts) when creating a
+        # new insured. Contacts are separate records: find-or-create via
+        # /contacts (search by email first), then reference by id. Ascend
+        # marks the attached contact primary automatically.
+        if contact and (contact.get("first_name") or contact.get("last_name")):
+            contact_id = self.find_or_create_contact(contact)
+            payload["insured_contacts"] = [{"id": contact_id}]
         return self.create_insured(payload)
 
-    def list_users(self) -> list[dict[str, Any]]:
-        response = self.transport.request("GET", "/users")
-        data = response.get("data")
-        return data if isinstance(data, list) else []
+    def find_or_create_contact(self, contact: dict[str, Any]) -> str:
+        """Return the Ascend contact id for name/email/phone, creating it if needed."""
+        email = (contact.get("email") or "").strip()
+        if email:
+            response = self.transport.request("GET", "/contacts", query={"email": email})
+            data = response.get("data")
+            if isinstance(data, list) and data:
+                return str(data[0].get("id"))
+        body: dict[str, Any] = {
+            "first_name": contact.get("first_name", ""),
+            "last_name": contact.get("last_name", ""),
+        }
+        if email:
+            body["email"] = email
+        if contact.get("phone"):
+            body["phone"] = contact.get("phone")
+        response = self.transport.request("POST", "/contacts", json_body=body)
+        record = self._record(response)
+        return str(record.get("id"))
 
-    def resolve_user(self, name_or_email: str) -> str:
+    def list_users(self) -> list[dict[str, Any]]:
+        """Return every Ascend user, following pagination.
+
+        The /users endpoint pages (25 per page); a single-page fetch silently
+        misses users on later pages (e.g. Jake Ferrara was on page 2 of 39).
+        """
+        users: list[dict[str, Any]] = []
+        page: int | None = None
+        while True:
+            query = {"page": page} if page else None
+            response = self.transport.request("GET", "/users", query=query)
+            data = response.get("data")
+            if isinstance(data, list):
+                users.extend(data)
+            meta = response.get("meta") or {}
+            nxt = meta.get("next")
+            if not nxt:
+                break
+            try:
+                page = int(nxt)
+            except (TypeError, ValueError):
+                break
+        return users
+
+    def resolve_user(self, name_or_email: str) -> str | None:
+        """Resolve an Ascend user id by email or name.
+
+        Returns None when no user matches. Callers must fail closed on
+        None: a previous version silently substituted a hardcoded user id
+        (Robie AI's own), which misattributed producer/account-manager on
+        agreements requested by senders who are not Ascend users. Never
+        guess a user id.
+        """
         users = self.list_users()
         target = name_or_email.strip().lower()
+        if not target:
+            return None
         for u in users:
-            if u.get("email", "").lower() == target:
+            if str(u.get("email") or "").lower() == target:
                 return str(u.get("id"))
         for u in users:
             full_name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip().lower()
             if target in full_name or full_name in target:
                 return str(u.get("id"))
-        return "3b5cc5b8-3636-4342-bd3d-9da12d2f690e"
+        return None
 
     def find_program_by_policy(self, policy_number: str) -> dict[str, Any] | None:
         """Find active or purchased program containing the given policy number.
@@ -444,21 +501,39 @@ class AscendApiClient:
         Returns None only when the policy genuinely has no matching program.
         Transport, authentication, and API failures raise AscendApiError so a
         failed lookup is never mistaken for "no program found".
+
+        The /billables search endpoint is not trusted blindly: every returned
+        billable's actual policy_number AND billable_identifier are normalized
+        and compared. An unrelated billable (wrong policy) is skipped, never
+        returned as a false duplicate.
         """
         clean_policy = policy_number.strip().upper()
+
+        def _billable_matches(billable: dict[str, Any]) -> bool:
+            for field in ("policy_number", "billable_identifier"):
+                val = str(billable.get(field, "") or "").strip().upper()
+                if val and val == clean_policy:
+                    return True
+                # billable_identifier may have a suffix ("POL-123-MTC");
+                # match the base policy number too.
+                if val and val.startswith(clean_policy + "-"):
+                    return True
+            return False
+
         # 1. Search billables directly if possible
         resp = self.transport.request("GET", "/billables", query={"policy_number": clean_policy})
         items = resp.get("data", [])
-        if items:
-            first_billable = items[0]
-            prog_id = first_billable.get("program_id")
+        for billable in items:
+            if not _billable_matches(billable):
+                continue  # unrelated billable; do not trust the search index
+            prog_id = billable.get("program_id")
             if prog_id:
                 prog = self.get_program(prog_id)
                 return {
                     "program": prog,
-                    "billable": first_billable,
+                    "billable": billable,
                     "program_id": prog_id,
-                    "parent_billable_id": first_billable.get("id"),
+                    "parent_billable_id": billable.get("id"),
                 }
 
         # 2. Fallback: inspect recent programs
@@ -467,7 +542,7 @@ class AscendApiClient:
             pid = p.get("id")
             b_resp = self.transport.request("GET", f"/programs/{pid}/billables")
             for b in b_resp.get("data", []):
-                if str(b.get("policy_number", "")).strip().upper() == clean_policy:
+                if _billable_matches(b):
                     return {
                         "program": p,
                         "billable": b,
@@ -612,10 +687,13 @@ class AscendCreateProgramWorker:
                 billable_id, _ = client.create_billable(body)
                 billable_ids.append(billable_id)
         except AscendApiError as exc:
-            # The program already exists.  Persist its identity and proceed to
-            # verification instead of retrying and creating a duplicate.
+            # The program already exists but one or more billables failed.
+            # Fail closed: report failure with the orphaned program identity so
+            # a human can decide what to do. Never claim success for a program
+            # with missing billables, and never auto-retry (that would create
+            # a duplicate program).
             return WorkerResult(
-                True,
+                False,
                 ACTION_TYPE,
                 {
                     "resource_id": program_id,
@@ -630,6 +708,11 @@ class AscendCreateProgramWorker:
                     "partial_failure": str(exc),
                 },
                 retryable=False,
+                error=(
+                    f"Ascend billable creation failed after program {program_id} was created: {exc}. "
+                    f"Created {len(billable_ids)} of {len(plan['billables'])} billables. "
+                    "The agreement is NOT ready; do not send a checkout link."
+                ),
             )
 
         return WorkerResult(

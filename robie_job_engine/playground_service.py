@@ -39,6 +39,7 @@ from .playground_guardrails import (
     SIMPLE_EDIT,
     Decision,
     Proposal,
+    _is_reply_request,
     classify_playground_request,
     mentioned_client,
 )
@@ -140,6 +141,10 @@ def handle_playground_email(
 ) -> str | None:
     """Same guardrails for robie@. None lets the existing email path run."""
     if not email_guardrails_enabled():
+        return None
+    # Ascend/PFA requests bypass playground - they have their own workflow
+    _tl = text.lower()
+    if any(k in _tl for k in ["ascend", "finance agreement", "financing agreement", "payment agreement", "premium finance"]):
         return None
     conversation = f"email:{thread_id or message_id or 'inbox'}"
     replies = _dispatch(
@@ -409,6 +414,14 @@ def _start(
                 source=hit.citation,
                 job_id=job_id,
                 freshness=hit.freshness_note,
+            )
+        elif _is_reply_request(text.lower()):
+            # Simple reply request (2026-10-02): user just wants an
+            # acknowledgment, not a procedure lookup.
+            reply = sop_reply(
+                answer="Got it.",
+                source="",
+                job_id=job_id,
             )
         else:
             reply = sop_reply(answer="", source="", job_id=job_id)
