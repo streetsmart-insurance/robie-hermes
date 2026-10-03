@@ -130,7 +130,7 @@ class FakeReassigner:
         self.assignee = assignee
 
     def reassign(self, task_id: str, applicant_id: str, new_assignee: str,
-                 description: str = "") -> str:
+                 description: str = "", expected_assignee: str = "Robie AI") -> str:
         self.calls.append((task_id, applicant_id, new_assignee))
         self.last_description = description
         return new_assignee
@@ -339,40 +339,35 @@ def test_worker_test_task_left_alone(store):
     assert "leaving it alone" in client.posts[0][1].lower()
 
 
-def test_note_retry_then_success():
+def test_note_timeout_not_retried(store):
     client = FakeDiscussionClient(fail_times=2)
     worker = TaskAssignmentWorker(discussion_client=client)
-    note_id = worker._post_note_verified("849945654", "hello")
-    assert note_id == "note-123"
-    assert len(client.posts) == 3  # 2 failures + 1 success
+    job, _ = jobs_mod.ensure_task_job(store, make_task())
+    with pytest.raises(UnverifiedNoteError):
+        worker._post_note_verified(store, job, "849945654", "hello")
+    with pytest.raises(UnverifiedNoteError):
+        worker._post_note_verified(store, job, "849945654", "hello")
+    assert len(client.posts) == 1
 
 
-def test_note_confirmed_via_metadata_when_api_gives_no_id():
-    """API returns no note id, but read-back shows exactly one new note with
-    a changed latest id and unchanged title -> confirmed, returns latest."""
+def test_note_metadata_without_id_is_uncertain(store):
     client = FakeDiscussionClient(return_note_id=False)
     worker = TaskAssignmentWorker(discussion_client=client)
-    note_id = worker._post_note_verified("849945654", "hello")
-    assert note_id == "note-123"
+    job, _ = jobs_mod.ensure_task_job(store, make_task())
+    with pytest.raises(UnverifiedNoteError):
+        worker._post_note_verified(store, job, "849945654", "hello")
     assert len(client.posts) == 1
 
 
-def test_note_unverified_when_count_jumps():
-    """A concurrent writer (count +2) breaks the exactly-one check ->
-    unconfirmed, never reposted."""
-    client = FakeDiscussionClient(return_note_id=False, extra_notes=1)
+def test_note_unverified_never_reposts(store):
+    client = FakeDiscussionClient(confirm=False)
     worker = TaskAssignmentWorker(discussion_client=client)
+    job, _ = jobs_mod.ensure_task_job(store, make_task())
     with pytest.raises(UnverifiedNoteError):
-        worker._post_note_verified("849945654", "hello")
+        worker._post_note_verified(store, job, "849945654", "hello")
+    with pytest.raises(UnverifiedNoteError):
+        worker._post_note_verified(store, job, "849945654", "hello")
     assert len(client.posts) == 1
-
-
-def test_note_unverified_never_reposts():
-    client = FakeDiscussionClient(confirm=False)  # read-back never confirms
-    worker = TaskAssignmentWorker(discussion_client=client)
-    with pytest.raises(UnverifiedNoteError):
-        worker._post_note_verified("849945654", "hello")
-    assert len(client.posts) == 1  # exactly one post — never auto-reposted
 
 
 # ---------------------------------------------------------------- verifier
