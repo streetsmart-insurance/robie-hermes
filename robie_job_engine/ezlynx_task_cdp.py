@@ -16,11 +16,18 @@ Safety:
   reads the field, and cancels without saving.
 - A dead/expired EZLynx session raises immediately (fail-closed).
 
-The DOM flow below follows the manually verified path (2026-10-03):
-applicant Activity page -> Upcoming task list -> task row -> Edit Task
-dialog -> "Assign this task" combobox -> pick person -> Save ->
-reopen dialog -> confirm assignee. Selectors are defensive (multiple
-strategies) because EZLynx markup is not contractual.
+DOM FLOW (documented read-only on 2026-10-03 against the live test
+task 63429523; nothing was created, saved, or modified):
+applicant Activity page -> "Search Activities" textbox (type a snippet
+of the task description) -> "Search" button (magnifying glass) -> click
+the task row to expand it -> "Edit this task" button in the expanded
+row's icon toolbar -> right-side slide-in panel titled "Edit Task"
+(URL unchanged) -> under "Task Assignee", the combobox labeled
+"Assign this task" -> click it, type the new person's name, click the
+matching row in the suggestion listbox -> teal "Save" button
+(bottom-right) applies the change; "Cancel" closes immediately with no
+confirmation dialog. The combobox is type-to-search: pressing ArrowDown
+alone does NOT open the list; typing characters does.
 """
 
 from __future__ import annotations
@@ -93,33 +100,82 @@ def _assert_signed_in(page) -> None:
 def _goto_activity(page, applicant_id: str) -> None:
     page.goto(_activity_url(applicant_id), wait_until="domcontentloaded")
     _assert_signed_in(page)
-    # Let the task list render.
     page.wait_for_timeout(2500)
 
 
-def _find_task_row(page, task_id: str, description: str):
-    """Locate the task row in the Upcoming list. Returns a Locator."""
-    snippet = (description or "").strip()[:60]
-    candidates = []
+def _description_snippet(description: str) -> str:
+    """A search-box-sized snippet of the task description."""
+    text = (description or "").strip()
+    # The search box matches on words; take the first ~40 chars.
+    return text[:40].strip()
+
+
+def _search_and_open_edit(page, task_id: str, description: str) -> None:
+    """Search Activities, expand the task row, open the Edit Task panel."""
+    snippet = _description_snippet(description)
+
+    # 1. Type the description snippet into "Search Activities" and search.
+    search_box = page.get_by_label(re.compile(r"search activities", re.I)).first
+    try:
+        search_box.wait_for(state="visible", timeout=10_000)
+    except Exception:
+        raise ReassignError("Search Activities box not found on the activity page")
+    search_box.fill("")
     if snippet:
-        # Prefer a text match on the note snippet…
-        candidates.append(page.get_by_text(snippet, exact=False).first)
-    # …fall back to any row mentioning the task id.
-    candidates.append(page.get_by_text(str(task_id), exact=False).first)
-    for locator in candidates:
+        search_box.type(snippet, delay=30)
+    search_button = page.get_by_role("button", name=re.compile(r"search", re.I)).first
+    try:
+        search_button.wait_for(state="visible", timeout=8_000)
+        search_button.click()
+    except Exception:
+        # Fallback: Enter submits the search.
+        search_box.press("Enter")
+    page.wait_for_timeout(2000)
+
+    # 2. Click the task row (found by its description text) to expand it.
+    row = None
+    if snippet:
+        candidate = page.get_by_text(snippet, exact=False).first
         try:
-            locator.wait_for(state="visible", timeout=10_000)
-            return locator
+            candidate.wait_for(state="visible", timeout=10_000)
+            row = candidate
         except Exception:
-            continue
-    raise ReassignError(
-        f"Task {task_id} not found in the activity task list"
-    )
+            pass
+    if row is None:
+        # Fallback: any row mentioning the task id.
+        candidate = page.get_by_text(str(task_id), exact=False).first
+        try:
+            candidate.wait_for(state="visible", timeout=8_000)
+            row = candidate
+        except Exception:
+            raise ReassignError(
+                f"Task {task_id} not found in the activity task list"
+            )
+    row.click()
+    page.wait_for_timeout(1500)
+
+    # 3. Click "Edit this task" in the expanded row's icon toolbar.
+    edit_button = page.get_by_role("button", name=re.compile(r"edit this task", re.I)).first
+    try:
+        edit_button.wait_for(state="visible", timeout=10_000)
+        edit_button.click()
+    except Exception as e:
+        raise ReassignError(f"Edit this task button not found for task {task_id}: {e}")
+
+    # 4. The Edit Task panel slides in on the right; the URL does not change.
+    try:
+        page.get_by_role("heading", name=re.compile(r"edit task", re.I)).first.wait_for(
+            state="visible", timeout=10_000
+        )
+    except Exception:
+        raise ReassignError("Edit Task panel did not open")
 
 
 def _assignee_field(page):
-    """Locate the assignee combobox inside the Edit Task dialog."""
+    """Locate the assignee combobox inside the Edit Task panel."""
     strategies = [
+        # Documented accessible name.
+        lambda: page.get_by_label("Assign this task", exact=False),
         lambda: page.get_by_label(re.compile(r"assign this task", re.I)),
         lambda: page.get_by_label(re.compile(r"assigned to", re.I)),
         lambda: page.locator('[aria-label*="ssign this task" i]'),
@@ -155,24 +211,21 @@ def _read_assignee_value(field) -> str:
 
 
 def _set_assignee(page, field, new_assignee: str) -> None:
-    """Pick a person in the assignee combobox."""
+    """Pick a person in the type-to-search assignee combobox.
+
+    Documented: pressing ArrowDown alone does not open the suggestion
+    list; typing characters filters and opens it.
+    """
     field.click()
     page.wait_for_timeout(800)
-    # If it is a native select, choose directly.
-    try:
-        tag = field.evaluate("el => el.tagName.toLowerCase()")
-        if tag == "select":
-            field.select_option(label=new_assignee)
-            return
-    except Exception:
-        pass
-    # Otherwise treat it as a searchable combobox: type, then pick.
     try:
         field.fill("")
     except Exception:
-        field.click()
+        pass
     field.type(new_assignee, delay=40)
     page.wait_for_timeout(1500)
+    # The suggestion listbox opens beneath the field; each row shows a
+    # person icon plus the name. Click the matching row.
     option = page.get_by_role("option", name=new_assignee, exact=False).first
     try:
         option.wait_for(state="visible", timeout=10_000)
@@ -180,7 +233,6 @@ def _set_assignee(page, field, new_assignee: str) -> None:
         return
     except Exception:
         pass
-    # Last resort: exact-text option anywhere in the popup.
     popup_option = page.get_by_text(new_assignee, exact=True).first
     try:
         popup_option.wait_for(state="visible", timeout=8_000)
@@ -193,11 +245,21 @@ def _set_assignee(page, field, new_assignee: str) -> None:
 
 
 def _click_save(page) -> None:
-    for name in ("Save", "Update", "Apply"):
+    """Click the teal Save button (bottom-right). The change is not
+    applied until Save; document-first strategies."""
+    button = page.get_by_role("button", name="Save", exact=True).first
+    try:
+        button.wait_for(state="visible", timeout=10_000)
+        button.click()
+        page.wait_for_timeout(2000)
+        return
+    except Exception:
+        pass
+    for name in ("Update", "Apply"):
         try:
-            button = page.get_by_role("button", name=name, exact=True).first
-            button.wait_for(state="visible", timeout=6_000)
-            button.click()
+            fallback = page.get_by_role("button", name=name, exact=True).first
+            fallback.wait_for(state="visible", timeout=6_000)
+            fallback.click()
             page.wait_for_timeout(2000)
             return
         except Exception:
@@ -206,27 +268,33 @@ def _click_save(page) -> None:
 
 
 def _cancel_dialog(page) -> None:
-    for name in ("Cancel", "Close"):
-        try:
-            button = page.get_by_role("button", name=name, exact=True).first
-            button.wait_for(state="visible", timeout=4_000)
-            button.click()
-            return
-        except Exception:
-            continue
+    """Click Cancel (documented: closes immediately, no confirmation)."""
+    button = page.get_by_role("button", name="Cancel", exact=True).first
+    try:
+        button.wait_for(state="visible", timeout=6_000)
+        button.click()
+        return
+    except Exception:
+        pass
+    try:
+        page.get_by_role("button", name="Close", exact=True).first.click(timeout=4_000)
+        return
+    except Exception:
+        pass
     page.keyboard.press("Escape")
 
 
 class PlaywrightTaskReassigner:
     """TaskReassigner implemented against the EZLynx UI (gated)."""
 
-    def read_assignee(self, task_id: str, applicant_id: str) -> str:
-        """Read-only: current assignee name. Never saves."""
+    def read_assignee(
+        self, task_id: str, applicant_id: str, description: str = ""
+    ) -> str:
+        """Read-only: current assignee name. Opens the edit dialog, reads
+        the combobox, cancels without saving."""
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
-            row = _find_task_row(page, task_id, "")
-            row.click()
-            page.wait_for_timeout(1500)
+            _search_and_open_edit(page, task_id, description)
             field = _assignee_field(page)
             value = _read_assignee_value(field)
             _cancel_dialog(page)
@@ -234,7 +302,10 @@ class PlaywrightTaskReassigner:
                 raise ReassignError(f"Could not read assignee for task {task_id}")
             return value
 
-    def reassign(self, task_id: str, applicant_id: str, new_assignee: str) -> str:
+    def reassign(
+        self, task_id: str, applicant_id: str, new_assignee: str,
+        description: str = "",
+    ) -> str:
         """Set the assignee and prove it stuck. Returns the verified name."""
         if not reassign_enabled():
             raise ReassignError(
@@ -242,9 +313,7 @@ class PlaywrightTaskReassigner:
             )
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
-            row = _find_task_row(page, task_id, "")
-            row.click()
-            page.wait_for_timeout(1500)
+            _search_and_open_edit(page, task_id, description)
 
             field = _assignee_field(page)
             before = _read_assignee_value(field)
@@ -252,13 +321,11 @@ class PlaywrightTaskReassigner:
             _set_assignee(page, field, new_assignee)
             _click_save(page)
 
-            # Verify by re-reading: reopen the dialog fresh.
+            # Verify by re-reading: reload and walk the documented flow again.
             page.reload(wait_until="domcontentloaded")
             page.wait_for_timeout(2500)
             _assert_signed_in(page)
-            row = _find_task_row(page, task_id, "")
-            row.click()
-            page.wait_for_timeout(1500)
+            _search_and_open_edit(page, task_id, description)
             field = _assignee_field(page)
             verified = _read_assignee_value(field)
             _cancel_dialog(page)

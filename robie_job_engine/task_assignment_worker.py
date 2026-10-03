@@ -75,11 +75,16 @@ class UnverifiedNoteError(Exception):
 class TaskReassigner(Protocol):
     """Changes a task's assignee in EZLynx (browser/CDP form edit)."""
 
-    def reassign(self, task_id: str, applicant_id: str, new_assignee: str) -> str:
+    def reassign(
+        self, task_id: str, applicant_id: str, new_assignee: str,
+        description: str = "",
+    ) -> str:
         """Set the assignee; return the re-read verified assignee name."""
         ...
 
-    def read_assignee(self, task_id: str, applicant_id: str) -> str:
+    def read_assignee(
+        self, task_id: str, applicant_id: str, description: str = ""
+    ) -> str:
         """Read-only: the task's current assignee name."""
         ...
 
@@ -234,7 +239,8 @@ class TaskAssignmentWorker:
         reassigned: dict[str, Any] | None = None
         if self.reassign_enabled and self.reassigner is not None:
             verified_assignee = self.reassigner.reassign(
-                task.task_id, task.applicant_id, target
+                task.task_id, task.applicant_id, target,
+                description=task.description,
             )
             reassigned = {"to": target, "verified_assignee": verified_assignee}
             note_body = (
@@ -471,7 +477,10 @@ class TaskIntakeVerifier:
                     retryable=True,
                 )
             try:
-                current = self.reassigner.read_assignee(task_id, str(payload.get("applicant_id") or ""))
+                current = self.reassigner.read_assignee(
+                    task_id, str(payload.get("applicant_id") or ""),
+                    description=str(payload.get("description") or ""),
+                )
             except Exception as e:  # noqa: BLE001
                 return _unverified(
                     job, captured, discussion_id, expected,

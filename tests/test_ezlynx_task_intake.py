@@ -126,13 +126,18 @@ class FakeDiscussionClient:
 class FakeReassigner:
     def __init__(self, assignee: str = "Carlo Ferrara"):
         self.calls: list[tuple[str, str, str]] = []
+        self.read_calls: list[tuple[str, str, str]] = []
         self.assignee = assignee
 
-    def reassign(self, task_id: str, applicant_id: str, new_assignee: str) -> str:
+    def reassign(self, task_id: str, applicant_id: str, new_assignee: str,
+                 description: str = "") -> str:
         self.calls.append((task_id, applicant_id, new_assignee))
+        self.last_description = description
         return new_assignee
 
-    def read_assignee(self, task_id: str, applicant_id: str) -> str:
+    def read_assignee(self, task_id: str, applicant_id: str,
+                      description: str = "") -> str:
+        self.read_calls.append((task_id, applicant_id, description))
         return self.assignee
 
 
@@ -295,6 +300,8 @@ def test_worker_reassigns_gate_on(store):
 
     assert result["status"] == JobStatus.VERIFYING.value
     assert reassigner.calls == [("63429523", "25486692", "Carlo Ferrara")]
+    # The task description is passed through so the CDP flow can search for it.
+    assert reassigner.last_description == "Please call the client about their quote."
     assert len(client.posts) == 1
     assert "Carlo Ferrara" in client.posts[0][1]
     checkpoint = store.get_checkpoint(job["id"], "action")
