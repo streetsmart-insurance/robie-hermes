@@ -1,0 +1,97 @@
+name: Proposed Test operator inspection
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  OPERATOR_ENABLED: ${{ vars.ROBIE_TEST_OPERATOR_ENABLED }}
+  OPERATOR_ISSUE: ${{ vars.ROBIE_TEST_OPERATOR_ISSUE }}
+  OPERATOR_ACTOR_IDS: ${{ vars.ROBIE_TEST_OPERATOR_ACTOR_IDS }}
+
+jobs:
+  authorize:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'streetsmart-insurance/robie-hermes' &&
+      vars.ROBIE_TEST_OPERATOR_ENABLED == 'INSPECT_ONLY_V1' &&
+      !github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/robie-test ')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate fresh command and current actor permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+
+  inspect:
+    needs: authorize
+    if: needs.authorize.result == 'success' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: robie-hermes-test-deploy
+      cancel-in-progress: false
+    environment: Test-Operator-Inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Revalidate authorization and expiry after queue or environment wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_operator_request.py
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Require existing instance OS Login before temporary registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          value=$(gcloud compute instances describe hermes-test-01 \
+            --project=streetsmart-hermes-poc --zone=us-east1-b \
+            --format='value(metadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          test "${value^^}" = TRUE
+      - name: Register approved one-hour OS Login key
+        env:
+          OSLOGIN_SSH_KEY_TTL: 1h
+        run: bash scripts/ensure-gcloud-ssh-key.sh
+      - name: Invoke only the preinstalled inspection helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh hermes-test-01 \
+            --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            --ssh-key-file="${HOME}/.ssh/google_compute_engine" --ssh-key-expire-after=1h \
+            --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 \
+            --command='sudo -n /usr/bin/python3 -I -B /usr/local/libexec/robie-test-operator.py inspect' \
+            < "${RUNNER_TEMP}/operator-request.json" > "${RUNNER_TEMP}/operator-inspection.json"
+          python3 -c 'import hashlib,json,pathlib,sys; d=json.load(open(sys.argv[1])); assert d["host"] == "hermes-test-01" and d["hold_verified"] is False and d["installation_verified"] is False; assert d["helper_sha256"] == hashlib.sha256(pathlib.Path("scripts/test_operator_inspect.py").read_bytes()).hexdigest()' "${RUNNER_TEMP}/operator-inspection.json"
+          sha256sum scripts/test_operator_request.py scripts/test_operator_inspect.py > "${RUNNER_TEMP}/controller-files.sha256"
+          printf '%s\n' "${GITHUB_SHA}" > "${RUNNER_TEMP}/controller-commit.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-operator-inspection-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/operator-request.json
+            ${{ runner.temp }}/operator-inspection.json
+            ${{ runner.temp }}/controller-files.sha256
+            ${{ runner.temp }}/controller-commit.txt
+          if-no-files-found: error
