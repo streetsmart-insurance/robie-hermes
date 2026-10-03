@@ -567,11 +567,10 @@ class EZLynxAgreementPoster:
             logger.warning("Failed to invoke EZLynxApiClient.create_user_task: %s", exc)
 
         return {
-            "status": "success",
+            "status": "unverified",
+            "reason": "no authoritative task id or destination readback",
             "applicant_id": applicant_id,
             "task_title": title,
-            "assigned_user": assigned_user or "Account Manager",
-            "due_days_out": due_days_out,
         }
 
     def apply_account_label(
@@ -657,4 +656,3 @@ class EZLynxAgreementPoster:
             "policy_number": policy_number,
             "live_applied": False,
         }
-
