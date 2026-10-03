@@ -321,6 +321,15 @@ class JobEngine:
             and contract.recording_policy == "REQUIRED"
             and (self.enforce_recording_policy or self.recordings.enabled)
         )
+        question_only = False
+        try:
+            from .chat_guard import question_only_skips_recording
+
+            question_only = question_only_skips_recording(self.store, job, "")
+        except Exception:
+            question_only = False
+        if question_only:
+            recording_required = False
         recording_started = False
         recording_finalized = False
         if recording_required:
@@ -337,6 +346,10 @@ class JobEngine:
                 )
                 runs.terminate(run["id"], "FAILED")
                 return failed
+        elif question_only:
+            # A resume must not replace the question-only exemption with
+            # "not an executable Skill" and then start a recorder.
+            pass
         else:
             if job["action_type"] == "drive.skill_sync":
                 reason = (
@@ -558,6 +571,12 @@ class JobEngine:
                 except RunIsolationError:
                     pass
             if status_name in {"COMPLETE", "FAILED", "UNVERIFIED"}:
+                if self.recordings is not None:
+                    # Chat starts the recording outside this engine, so
+                    # recording_started is false and the audit used to read
+                    # a row still marked RECORDING. Stop it first. safe_stop
+                    # does not change the job status.
+                    self.recordings.safe_stop(job_id, status_name)
                 try:
                     from .playwright_observability import (
                         fail_closed_zero_playwright_rows,
@@ -588,6 +607,22 @@ class JobEngine:
                         status_name,
                         redact_exception(exc),
                     )
+
+    def _remember_hold_question(self, job_id: str, error: str | None) -> None:
+        """Park a missing page as a question the person can answer."""
+        from .browser_read import clarification_for_hold
+
+        question = clarification_for_hold(error)
+        if not question:
+            return
+        try:
+            self.store.checkpoint(
+                job_id,
+                "clarification",
+                {"question": question, "asked": True},
+            )
+        except Exception:
+            logger.exception("could not store clarification job=%s", job_id)
 
     def _perform(
         self,
@@ -721,6 +756,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,
@@ -935,6 +971,7 @@ class JobEngine:
 
                 payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
                 self.store.update_payload(job["id"], payload)
+            self._remember_hold_question(job["id"], result.error)
             return self.store.transition(
                 job["id"],
                 result.hold_status,

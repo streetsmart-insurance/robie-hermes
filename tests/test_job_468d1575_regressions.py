@@ -192,7 +192,7 @@ class Job468d1575WorkerContractTests(unittest.TestCase):
             self.assertEqual(job["status"], JobStatus.FAILED.value)
             self.assertNotEqual(job["status"], JobStatus.UNVERIFIED.value)
             self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
-            self.assertIn("FAILED", response)
+            self.assertIn("Failed.", response)
             self.assertIn("PLAYWRIGHT_SILENT", job["last_error"])
             self.assertIn("zero playwright_exec", response.casefold())
             self.assertNotIn("Filling Policy Shell", response)
@@ -515,7 +515,7 @@ class Job468d1575SecretHealthTests(unittest.TestCase):
                     conversation_id="spaces/s",
                 )
             response = guard_chat_response(db, job_id, JOB_468D1575_PROSE)
-            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Not verified.", response)
             self.assertIn("using ENABLED versions/1", response)
             self.assertIn("DESTROYED leftover", response)
             self.assertNotIn("password is destroyed", response.casefold())

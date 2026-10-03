@@ -1,16 +1,17 @@
-"""Plain-English Playground replies in the shared status format.
+"""Plain-English Playground replies.
 
-Summary first, then the Details block, then ``Ref: job <full id>`` last.
-Practice mode is a tag on the first line for a test client. A real client
-is not tagged once all-clients mode is actually on.
+One short outcome or one question. Job ids stay in the ledger.
+Practice mode is a prefix for a test client. A real client is not tagged
+once all-clients mode is actually on.
 """
 
 from __future__ import annotations
 
 from .playground_config import buster_brown_only_mode, confirm_timeout_minutes
+from .playground_execute import capability_menu
 from .playground_guardrails import Proposal
 from .playground_voice import line
-from .status_format import render_simple_status
+from .user_reply import format_user_reply
 
 
 def _remembered(memory_lines: list[str] | None) -> str:
@@ -26,44 +27,34 @@ def tag_practice(text: str, *, applicant_id: str = "", client_name: str = "") ->
         return body + ("\n" if body and not body.endswith("\n") else "")
     if body.startswith("Practice mode"):
         return body if body.endswith("\n") else body + "\n"
-    tagged = "Practice mode\n\n" + body
+    tagged = "Practice mode. " + body
     return tagged if tagged.endswith("\n") else tagged + "\n"
 
 
 def status_reply(
     *,
     headline: str,
-    what_happened: str,
-    anything_needed: str,
-    status_line: str,
+    what_happened: str = "",
+    anything_needed: str = "",
+    status_line: str = "",
     details: str = "",
     job_id: str | None = None,
     applicant_id: str = "",
     client_name: str = "",
 ) -> str:
+    """One plain sentence. Extra sections and the job id are not shown."""
+    del what_happened, anything_needed, status_line, details, job_id
+    sentence = format_user_reply(headline)
     return tag_practice(
-        render_simple_status(
-            headline=headline,
-            what_happened=what_happened,
-            anything_needed=anything_needed,
-            status_line=status_line,
-            details=details,
-            job_id=job_id,
-        ),
+        sentence,
         applicant_id=applicant_id,
         client_name=client_name,
     )
 
 
 def help_reply(*, job_id: str | None = None) -> str:
-    return status_reply(
-        headline="Here's what I can and can't do.",
-        what_happened="This is the Playground menu.",
-        anything_needed="Tell me the task in a sentence.",
-        status_line="Waiting for a task.",
-        details=line("help_menu"),
-        job_id=job_id,
-    )
+    del job_id
+    return tag_practice(capability_menu())
 
 
 def blocked_reply(
@@ -73,12 +64,9 @@ def blocked_reply(
     applicant_id: str = "",
     client_name: str = "",
 ) -> str:
+    sentence = str(reason or "").strip() or line("blocked_headline")
     return status_reply(
-        headline=line("blocked_headline"),
-        what_happened=reason,
-        anything_needed="A person has to do that. I won't.",
-        status_line="Blocked.",
-        details=reason,
+        headline=sentence,
         job_id=job_id,
         applicant_id=applicant_id,
         client_name=client_name,
@@ -86,18 +74,8 @@ def blocked_reply(
 
 
 def clarify_reply(*, question: str, job_id: str, memory_lines: list[str] | None = None) -> str:
-    details = "I didn't guess, and I didn't change anything."
-    remembered = _remembered(memory_lines)
-    if remembered:
-        details = details + "\n" + remembered
-    return status_reply(
-        headline=question,
-        what_happened="I need one detail before I can start.",
-        anything_needed=question,
-        status_line="Waiting for you.",
-        details=details,
-        job_id=job_id,
-    )
+    del memory_lines
+    return status_reply(headline=question, job_id=job_id)
 
 
 def confirmation_reply(
@@ -110,27 +88,18 @@ def confirmation_reply(
     old = proposal.old_value or "not on file"
     new = str(proposal.extra.get("display_new") or proposal.new_value or "(missing)")
     client = proposal.client or proposal.applicant_id or "that client"
-    lines = [
-        f"Client: {client}",
-        f"Field: {proposal.field}",
-        f"Old value: {old}",
-        f"New value: {new}",
-    ]
-    if proposal.subject:
-        lines.append(f"Subject: {proposal.subject}")
-    lines.append(
-        f"If I don't hear go or yes in this thread within {minutes} minutes, I'll cancel this."
-    )
+    subject = f" Subject {proposal.subject}." if proposal.subject else ""
+    if proposal.kind == "note":
+        new = f'note on {proposal.discussion_title}, exact text: "{proposal.body}"'
     remembered = _remembered(memory_lines)
-    if remembered:
-        lines.append(remembered)
-    details = "\n".join(lines)
+    memory = f" {remembered}" if remembered else ""
+    sentence = (
+        f"Nothing is changed yet: say go in this thread to change {client}'s "
+        f"{proposal.field} from {old} to {new}.{subject} "
+        f"If I don't hear go within {minutes} minutes, I'll cancel this.{memory}"
+    )
     return status_reply(
-        headline="On it. Here is exactly what I will change. Nothing is changed yet.",
-        what_happened=f"{client}: {proposal.field} would go from {old} to {new}.",
-        anything_needed="Reply go or yes in this thread.",
-        status_line="Waiting for you.",
-        details=details,
+        headline=" ".join(sentence.split()),
         job_id=job_id,
         applicant_id=proposal.applicant_id,
         client_name=proposal.client,
@@ -140,33 +109,25 @@ def confirmation_reply(
 def working_reply(proposal: Proposal, *, job_id: str) -> str:
     client = proposal.client or proposal.applicant_id or "that client"
     return status_reply(
-        headline="On it. Making that change now.",
-        what_happened=f"You said go. I'm changing {proposal.field} for {client}.",
-        anything_needed="No.",
-        status_line="Working.",
-        details=f"New value: {proposal.new_value}",
+        headline=f"On it: I'm changing {proposal.field} for {client}.",
         job_id=job_id,
         applicant_id=proposal.applicant_id,
         client_name=proposal.client,
     )
 
 
-def matched_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
+def matched_reply(
+    proposal: Proposal,
+    *,
+    observed: str,
+    job_id: str,
+    note: str = "",
+) -> str:
     client = proposal.client or proposal.applicant_id or "that client"
-    old = proposal.old_value or "not on file"
+    extra = f" {note.strip()}" if str(note or "").strip() else ""
     return status_reply(
-        headline=f"Done. {client}'s {proposal.field} now matches what you asked for.",
-        what_happened=f"It was {old}. EZLynx now shows {observed}.",
-        anything_needed="No.",
-        status_line="Confirmed.",
-        details="\n".join(
-            [
-                f"Client: {client}",
-                f"Field: {proposal.field}",
-                f"Before: {old}",
-                f"After: {observed}",
-                "Readback: matches.",
-            ]
+        headline=(
+            f"Done: {client}'s {proposal.field} now shows {observed}.{extra}"
         ),
         job_id=job_id,
         applicant_id=proposal.applicant_id,
@@ -175,17 +136,13 @@ def matched_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
 
 
 def mismatch_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
+    del observed
     client = proposal.client or proposal.applicant_id or "that client"
-    shown = observed or "nothing came back"
     return status_reply(
-        headline="I could not confirm that change. A person needs to look at it.",
-        what_happened=(
-            f"I expected {proposal.field} for {client} to be {proposal.new_value}. "
-            f"EZLynx shows {shown}."
+        headline=(
+            f"I could not confirm that change for {client}, I am not calling this a success, "
+            "and a person needs to look at it."
         ),
-        anything_needed="A person needs to check EZLynx.",
-        status_line="Not confirmed.",
-        details="I am not calling this a success.",
         job_id=job_id,
         applicant_id=proposal.applicant_id,
         client_name=proposal.client,
@@ -193,37 +150,22 @@ def mismatch_reply(proposal: Proposal, *, observed: str, job_id: str) -> str:
 
 
 def cancelled_reply(*, reason: str, job_id: str) -> str:
-    return status_reply(
-        headline=reason,
-        what_happened="Nothing was changed.",
-        anything_needed="Send it again if you still want it done.",
-        status_line="Cancelled.",
-        details=reason,
-        job_id=job_id,
-    )
+    return status_reply(headline=reason, job_id=job_id)
 
 
 def sop_reply(*, answer: str, source: str, job_id: str, freshness: str = "") -> str:
     if not answer:
         return status_reply(
             headline="I don't have that in the procedures I can read.",
-            what_happened="No loaded StreetSmart procedure matched that question.",
-            anything_needed="No.",
-            status_line="No matching procedure.",
-            details="I didn't guess.",
             job_id=job_id,
         )
     note = str(freshness or "").strip()
+    body = answer.rstrip()
     if note:
-        answer = f"{answer.rstrip()} {note}"
-    return status_reply(
-        headline=answer,
-        what_happened="This comes from a StreetSmart procedure, not a guess.",
-        anything_needed="No.",
-        status_line="Answered.",
-        details=f"Source: {source}" if source else "",
-        job_id=job_id,
-    )
+        body = f"{body} {note}"
+    if source:
+        body = f"{body} ({source})"
+    return status_reply(headline=body, job_id=job_id)
 
 
 def memory_saved_reply(
@@ -243,29 +185,19 @@ def memory_saved_reply(
         who = f"{client or 'that client'}, for the whole agency"
     else:
         who = "you"
-    happened = f"I saved this for {who}."
-    if tax_note:
-        happened = f"{happened} {tax_note}"
+    lead = line("memory_ssn_removed_headline") if tax_note else line("memory_saved_headline")
+    lead = lead.rstrip(".")
+    team_bit = f" for the {team} team" if scope == "team" and team else f" for {who}"
+    extra = f" {tax_note.strip()}" if tax_note else ""
     return status_reply(
-        headline=line("memory_ssn_removed_headline") if tax_note else line("memory_saved_headline"),
-        what_happened=happened,
-        anything_needed="No.",
-        status_line="Remembered.",
-        details=(
-            f"{fact}\n"
-            "This does not override a block or the write allowlist."
-        ),
+        headline=f"{lead}{team_bit}: {fact}.{extra}",
         job_id=job_id,
     )
 
 
 def memory_ssn_refused_reply(*, job_id: str) -> str:
     return status_reply(
-        headline=line("memory_ssn_headline"),
-        what_happened="Social Security numbers and ITINs can't be remembered.",
-        anything_needed="Leave the number out and send the rest again.",
-        status_line="Not stored.",
-        details="I did not save it, and I will not repeat the number.",
+        headline="Social Security numbers can't be remembered, and I did not save it.",
         job_id=job_id,
     )
 
@@ -273,10 +205,6 @@ def memory_ssn_refused_reply(*, job_id: str) -> str:
 def memory_refused_reply(*, job_id: str) -> str:
     return status_reply(
         headline=line("memory_refused_headline"),
-        what_happened="That looks like a password, token, or payment detail.",
-        anything_needed="Leave secrets out of chat and email.",
-        status_line="Not stored.",
-        details="I did not store it, and I will not repeat it.",
         job_id=job_id,
     )
 
@@ -284,60 +212,30 @@ def memory_refused_reply(*, job_id: str) -> str:
 def memory_forgotten_reply(*, facts: list[str], job_id: str) -> str:
     if not facts:
         return status_reply(
-            headline=line("memory_none_headline"),
-            what_happened="Nothing stored matched that.",
-            anything_needed="No.",
-            status_line="Nothing forgotten.",
-            details="I didn't guess, and I didn't change anything.",
+            headline="Nothing stored matched that.",
             job_id=job_id,
         )
+    shown = "; ".join(facts)
     return status_reply(
-        headline=line("memory_forgotten_headline"),
-        what_happened="I hid the matching notes. Past EZLynx changes stay in the change list.",
-        anything_needed="No.",
-        status_line="Forgotten.",
-        details="\n".join(facts),
+        headline=f"I forgot that: {shown}.",
         job_id=job_id,
     )
 
 
 def memory_list_reply(*, about: str, facts: list[str], job_id: str) -> str:
     if not facts:
-        return status_reply(
-            headline=line("memory_none_headline"),
-            what_happened="Nothing stored matched that." if about else "I don't have any notes yet.",
-            anything_needed="No.",
-            status_line="Nothing stored.",
-            details=about or "I didn't guess.",
-            job_id=job_id,
-        )
+        headline = "Nothing stored matched that." if about else "I don't have any notes yet."
+        return status_reply(headline=headline, job_id=job_id)
     base = line("memory_list_headline").rstrip(".")
-    headline = f"{base} about {about}." if about else f"{base}."
+    target = f" about {about}" if about else ""
+    shown = "; ".join(facts)
     return status_reply(
-        headline=headline,
-        what_happened="These are the notes I have. They do not change what I am allowed to do.",
-        anything_needed="No.",
-        status_line="Remembered.",
-        details="\n".join(facts),
+        headline=f"{base}{target}: {shown}.",
         job_id=job_id,
     )
 
 
 def lookup_reply(*, found: str, job_id: str) -> str:
     if not found:
-        return status_reply(
-            headline="I couldn't look that up.",
-            what_happened="EZLynx didn't return a value for that.",
-            anything_needed="No.",
-            status_line="Not found.",
-            details="I didn't guess.",
-            job_id=job_id,
-        )
-    return status_reply(
-        headline=found,
-        what_happened="This is what EZLynx returned.",
-        anything_needed="No.",
-        status_line="Looked up.",
-        details=found,
-        job_id=job_id,
-    )
+        return status_reply(headline="I couldn't look that up.", job_id=job_id)
+    return status_reply(headline=found, job_id=job_id)

@@ -323,6 +323,65 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
+        return job_ids
+
+    def fail_dead_running_jobs(
+        self,
+        *,
+        older_than_seconds: int = 600,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Fail RUNNING jobs that have no live lease and no fresh heartbeat.
+
+        A ``gateway_progress`` row newer than the cutoff means a worker is
+        still alive. Those jobs stay RUNNING.
+        """
+        if older_than_seconds < 1:
+            raise ValueError("dead-running timeout must be positive")
+        at = now or datetime.now(timezone.utc)
+        cutoff = (at - timedelta(seconds=older_than_seconds)).isoformat()
+        stamp = at.isoformat()
+        reason = (
+            "The job was still running with no live worker. "
+            f"It was stopped after {older_than_seconds} seconds."
+        )
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=?
+                     AND updated_at<=?
+                     AND NOT (
+                       lease_owner IS NOT NULL AND TRIM(lease_owner)!=''
+                       AND lease_expires_at IS NOT NULL AND lease_expires_at>?
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM checkpoints
+                       WHERE checkpoints.job_id=jobs.id
+                         AND checkpoints.kind='gateway_progress'
+                         AND checkpoints.created_at>?
+                     )""",
+                (JobStatus.RUNNING.value, cutoff, stamp, cutoff),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'dead_running', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason, "cutoff": cutoff}),
+                        stamp,
+                    ),
+                )
+        self._stop_capture(job_ids)
         return job_ids
 
     def fail_gateway_restart_orphans(
@@ -379,6 +438,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def retarget_unattempted(
@@ -603,7 +663,31 @@ class JobStore:
                     job_id,
                 ),
             )
-            return self.get_job(job_id, conn=conn)
+            job = self.get_job(job_id, conn=conn)
+        if status in TERMINAL_STATUSES:
+            self._stop_capture([job_id])
+            self._release_turn_lock(job_id)
+        return job
+
+    def _release_turn_lock(self, job_id: str) -> None:
+        """A terminal job does not keep the Chat turn lock."""
+        try:
+            from .chat_turn_control import release_finished_job_session
+
+            release_finished_job_session(self.path, job_id, stop_agent=False)
+        except Exception:
+            logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
+
+    def _stop_capture(self, job_ids: list[str]) -> None:
+        """A terminal job writes the browser_capture stop file."""
+        if not job_ids:
+            return
+        try:
+            from .recording import touch_browser_capture_stop_files
+        except Exception:
+            return
+        for job_id in job_ids:
+            touch_browser_capture_stop_files(self.path, job_id)
 
     def increment(self, job_id: str, field: str) -> int:
         if field not in {"attempt_count", "verification_count"}:

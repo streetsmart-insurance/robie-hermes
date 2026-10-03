@@ -13,14 +13,23 @@ GATEWAY_RUNTIME_DROPIN="/etc/systemd/system/robie-gateway.service.d/zz-robie-tes
 archive=""
 checksum=""
 commit=""
+install_policy_setup=true
+keep_stopped=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --archive) archive="$2"; shift 2 ;;
     --checksum) checksum="$2"; shift 2 ;;
     --commit) commit="$2"; shift 2 ;;
+    --skip-policy-setup) install_policy_setup=false; shift ;;
+    --keep-stopped) keep_stopped=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ "${keep_stopped}" == true && "${install_policy_setup}" != false ]]; then
+  echo '--keep-stopped requires --skip-policy-setup' >&2
+  exit 2
+fi
 
 [[ "${EUID}" -eq 0 ]] || { echo "deploy-test-release requires sudo" >&2; exit 2; }
 [[ "$(hostname -s)" == "${EXPECTED_HOST}" ]] || {
@@ -48,7 +57,7 @@ old_current="$(readlink -f "${OPT_ROOT}/current")"
 old_releases_current="$(readlink -f "${OPT_ROOT}/releases/current")"
 policy_skill_link="${OPT_ROOT}/.hermes/skills/ezlynx-policy-setup"
 old_policy_skill_target=""
-if [[ -e "${policy_skill_link}" || -L "${policy_skill_link}" ]]; then
+if [[ "${install_policy_setup}" == true ]] && [[ -e "${policy_skill_link}" || -L "${policy_skill_link}" ]]; then
   [[ -L "${policy_skill_link}" ]] || {
     echo "existing Test Policy Setup skill is not an atomic symlink; refuse deploy" >&2
     exit 2
@@ -95,6 +104,13 @@ PY
 release_parent="${OPT_ROOT}/releases/${short}"
 release_root="${release_parent}/robie-hermes-${short}"
 manifest="${release_root}/.release-sha256"
+stopped_snapshot="${release_parent}/stopped-install-before.json"
+if [[ "${keep_stopped}" == true ]]; then
+  # Read the digest-checked candidate guard without extracting/mutating Test.
+  # Masked units have no ExecStart after reload: use only the captured receipt.
+  gateway_python="$(tar -xOzf "${archive}" "robie-hermes-${short}/scripts/test_stopped_install.py" |
+    python3 - --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}" --preflight)"
+fi
 if [[ -d "${release_root}" ]]; then
   [[ -f "${manifest}" && "$(tr -d '[:space:]' <"${manifest}")" == "${archive_digest}" ]] || {
     echo "existing Test release does not match archive digest" >&2
@@ -120,13 +136,22 @@ fi
 # bootstrapping into Test. This still occurs before either pointer is changed
 # or the gateway is restarted, and Bash keeps the gate independent of mode
 # bits in historical archives.
+if [[ "${keep_stopped}" == true ]]; then
+  python3 "${release_root}/scripts/test_stopped_install.py" --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}"
+fi
 bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
 source "${release_root}/scripts/lib/test-release-rollback.sh"
 
 runtime_dropin_snapshot="${release_parent}/.pre-${short}-gateway-runtime.conf"
 runtime_dropin_state=absent
-if [[ -f "${GATEWAY_RUNTIME_DROPIN}" ]]; then
+if [[ "${keep_stopped}" == true ]]; then
+  runtime_dropin_state="$(python3 - "${stopped_snapshot}" <<'PY_STATE'
+import json, sys
+print(json.load(open(sys.argv[1]))['rollback']['runtime_dropin']['state'])
+PY_STATE
+)"
+elif [[ -f "${GATEWAY_RUNTIME_DROPIN}" ]]; then
   install -D -m 0600 "${GATEWAY_RUNTIME_DROPIN}" "${runtime_dropin_snapshot}"
   runtime_dropin_state=present
 fi
@@ -153,16 +178,20 @@ rollback_test() {
     "${OPT_ROOT}/current" \
     "${OPT_ROOT}/releases/current" \
     "${policy_skill_link}" \
-    "${GATEWAY_UNIT}"
+    "${GATEWAY_UNIT}" \
+    "${install_policy_setup}" \
+    "$([[ "${keep_stopped}" == true ]] && echo false || echo true)"
   [[ "${runtime_config_restored}" == true ]]
 }
 
-gateway_exec="$(systemctl show "${GATEWAY_UNIT}" -p ExecStart --value --no-pager)"
-gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
-[[ -x "${gateway_python}" ]] || {
-  echo "active Test gateway Python interpreter is unavailable" >&2
-  exit 2
-}
+if [[ "${keep_stopped}" != true ]]; then
+  gateway_exec="$(systemctl show "${GATEWAY_UNIT}" -p ExecStart --value --no-pager)"
+  gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
+  [[ -x "${gateway_python}" ]] || {
+    echo "active Test gateway Python interpreter is unavailable" >&2
+    exit 2
+  }
+fi
 runtime_requirements="${release_root}/${GATEWAY_RUNTIME_REQUIREMENTS}"
 runtime_root="${release_root}/${GATEWAY_RUNTIME_DIRNAME}"
 [[ -f "${runtime_requirements}" ]] || {
@@ -248,6 +277,9 @@ while datetime.now(timezone.utc).replace(microsecond=0) <= flipped:
     time.sleep(0.05)
 PY
 
+policy_skill_source=""
+policy_skill_digest=""
+if [[ "${install_policy_setup}" == true ]]; then
 # Install only the explicitly Test-only draft skill. The destination is an
 # atomic symlink into this immutable release, so rollback restores the exact
 # previous skill bytes. Production uses a different root and is never touched.
@@ -302,6 +334,8 @@ if ! atomic_pointer "${policy_skill_source}" "${policy_skill_link}"; then
 fi
 policy_skill_digest="$(sha256sum "${policy_skill_source}/SKILL.md" "${policy_skill_source}/references/profiles.json" | sha256sum | awk '{print $1}')"
 
+fi
+
 install_gateway_runtime_config() {
   install -d -m 0755 "$(dirname "${GATEWAY_RUNTIME_DROPIN}")" || return
   runtime_dropin_tmp="${GATEWAY_RUNTIME_DROPIN}.new-$$"
@@ -316,6 +350,17 @@ EOF
 if ! install_gateway_runtime_config; then
   rollback_test
   exit 2
+fi
+
+if [[ "${keep_stopped}" == true ]]; then
+  if ! python3 "${release_root}/scripts/test_stopped_install.py" \
+    --snapshot "${stopped_snapshot}" --sha256 "${archive_digest}" --verify; then
+    rollback_test
+    exit 2
+  fi
+  echo "TEST INSTALLED STOPPED commit=${commit} sha256=${archive_digest} rollback=${old_current} snapshot=${stopped_snapshot}"
+  echo 'NO LIVE PROOF OR QA CERTIFICATION. Explicit approved resume required; masks remain in place.'
+  exit 0
 fi
 
 if ! systemctl restart "${GATEWAY_UNIT}" || \
@@ -355,7 +400,7 @@ python3 - "${evidence_dir}/test-deploy-evidence.json" "${inventory}" \
   "${commit}" "${archive_digest}" "${release_root}" "${old_current}" \
   "${GATEWAY_UNIT}" "${after}" "${proof}" "${policy_skill_link}" \
   "${policy_skill_source}" "${policy_skill_digest}" "${old_policy_skill_target}" \
-  "${runtime_root}" "${runtime_digest}" "${GATEWAY_RUNTIME_DROPIN}" <<'PY'
+  "${runtime_root}" "${runtime_digest}" "${GATEWAY_RUNTIME_DROPIN}" "${install_policy_setup}" <<'PY'
 import json
 import pathlib
 import sys
@@ -370,6 +415,7 @@ payload = {
     "gateway_unit": sys.argv[7],
     "gateway_active_enter": sys.argv[8],
     "proof_path": sys.argv[9],
+    "official_install_proof": json.loads(pathlib.Path(sys.argv[9]).read_text(encoding="utf-8")),
     "test_skill": {
         "name": "ezlynx-policy-setup",
         "version": "0.2.0-test",
@@ -401,7 +447,10 @@ payload = {
     "test_job_inventory": json.loads(sys.argv[2]),
     "verified_at": datetime.now(timezone.utc).isoformat(),
     "production_touched": False,
+    "policy_setup_changed": sys.argv[17] == "true",
 }
+if not payload["policy_setup_changed"]:
+    payload["test_skill"] = {"changed": False, "reason": "Chat-only release preserves existing policy setup"}
 path = pathlib.Path(sys.argv[1])
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(json.dumps(payload, sort_keys=True))

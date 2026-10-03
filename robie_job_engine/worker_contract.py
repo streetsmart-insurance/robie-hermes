@@ -238,12 +238,11 @@ def classify_chat_close_without_checkpoint(
             reason="persisted last_error without destination claim",
         )
     if _playground_informational_close(action=action, action_type=action_type):
-        # Same ledger status as today (nothing was checked, so not COMPLETE).
-        # The Chat renderer turns this reason into a normal answer.
+        # No write was attempted. Close as answered, not UNVERIFIED.
         return ChatCloseDecision(
-            status="UNVERIFIED",
-            error="no structured destination action checkpoint",
-            reason="playground informational answer",
+            status="COMPLETE",
+            error="",
+            reason="answered question",
         )
     return ChatCloseDecision(
         status="UNVERIFIED",
