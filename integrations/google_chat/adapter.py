@@ -3385,24 +3385,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if result not in {"absent", "new_intent"}:
                     return
 
-            # Plain explanations/status never inherit the active-space Job or
-            # enter a business worker. Clarification replies above keep their owner.
-            from robie_job_engine.conversation_policy import classify, OPERATIONAL
-            if classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL:
-                await self._handle_conversation_only(event)
-                return
-
             # Short-circuit /setup-files before the agent dispatch.
             queue = None
             context = None
             interaction = {}
-            source_space = envelope.get("space") or msg.get("space") or {}
-            source_space_type = str(
-                source_space.get("type") or source_space.get("spaceType") or ""
-            ).upper()
             if (
                 event.source is not None
-                and source_space_type in {"DIRECT_MESSAGE", "DM"}
                 and not text.casefold().startswith(("/approve", "/deny"))
             ):
                 queue = await asyncio.to_thread(self._durable_chat_queue)
@@ -3410,12 +3398,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     queue.active_conversation_job, event.source.chat_id
                 )
                 interaction = dict((context or {}).get("interaction_state") or {})
+                if interaction.get("awaiting") == "human_input":
+                    from robie_job_engine.conversation_policy import pending_input_owned, pending_reply_is_conversation
+                    if not await asyncio.to_thread(pending_input_owned, ROBIE_JOB_DB, event,
+                            context, environment=route):
+                        _log_inbound_drop("pending human input owner mismatch")
+                        return
+                    if pending_reply_is_conversation(text):
+                        # A status/explanation request does not answer the saved
+                        # field or detach its still-pending Job correlation.
+                        await self._handle_conversation_only(event)
+                        return
                 if (
                     interaction.get("awaiting") == "human_input"
                     and classify_human_reply(text, interaction) == "NEW_INTENT"
                 ):
                     # Preserve the old Job and queue row as diagnostic history,
-                    # but remove the active DM correlation before routing the
+                    # but remove the active owned correlation before routing the
                     # new request. It can no longer consume this message as a
                     # missing-field reply.
                     await asyncio.to_thread(
@@ -3423,6 +3422,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     )
                     context = None
                     interaction = {}
+            # Owned pending values must reach the durable resume handler. They
+            # are not ordinary conversational turns (e.g. a requested year).
+            from robie_job_engine.conversation_policy import classify, OPERATIONAL
+            if (interaction.get("awaiting") != "human_input"
+                and classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL):
+                await self._handle_conversation_only(event)
+                return
             admin_response = await asyncio.to_thread(
                 handle_admin_command,
                 ROBIE_JOB_DB,
@@ -3597,6 +3603,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             text,
                         )
                         return
+
+            if classify(text, attachments=self._chat_job_attachment_kwargs(event)["expected_attachment_count"]) != OPERATIONAL:
+                await self._handle_conversation_only(event)
+                return
 
             if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
                 queue = await asyncio.to_thread(self._durable_chat_queue)

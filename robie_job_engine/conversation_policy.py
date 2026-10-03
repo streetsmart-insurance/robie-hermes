@@ -32,6 +32,11 @@ _ACTION = r'(?:send|email|upload|move|delete|apply|create|write|update|edit|subm
 _REQUEST = re.compile(r'^(?:please\s+)?(?:' + _ACTION + r'\b|(?:can|could|would|will) you\s+' + _ACTION + r'\b)', re.I)
 _ADDITIONAL = re.compile(r'(?:[.;!?\n]|\b(?:and|then|also)\b)\s*(?:please\s+)?(?:' + _ACTION + r'\b|(?:can|could|would|will) you\s+' + _ACTION + r'\b)', re.I)
 _STATUS = re.compile(r'\b(?:status|progress|job reference)\b|^(?:what happened|what did you do|what are you working on|where did we leave off|how is it going|how are we doing|(?:can you )?give me a rundown|can you tell me what was done|did you|have you|has (?:it|the)|is (?:it|the job|this|that) (?:done|complete|finished))\b', re.I)
+# Outcome questions about a particular object are status requests, even without
+# the literal word status. This is input routing, not a filter on model prose.
+_OUTCOME_QUESTION = re.compile(
+    r'^(?:is|are|was|were|has|have|(?:can|could|would) you(?: tell me)? (?:if|whether))\b.*\b(?:renewed|uploaded|complete[ds]?|finished|done|sent|emailed|filed|saved|updated|submitted|processed|cancelled|canceled|bound|issued|paid|approved|created|deleted|verified)\b', re.I)
+_RESULT_QUESTION = re.compile(r'^(?:what|when|how)\b(?=.*\b(?:result|outcome|completion)\b)(?=.*\b(?:my|our|this|that|the)\b)', re.I)
 _INFO = re.compile(r'^(?:explain|describe|tell me about|what (?:is|are|does|do)|why|how (?:to|do|does|can|should)|when|where|who|is|are)\b', re.I)
 _JOB_ID = re.compile(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', re.I)
 
@@ -52,7 +57,8 @@ def classify(text: str, *, attachments: int = 0) -> str:
         or re.match(r'^how (?:to|do i|can i|should i)\b', text, re.I)):
         return INFORMATIONAL
     status_text = re.sub(r'^(?:explain|describe)\s+', '', text, flags=re.I)
-    if _STATUS.search(status_text) or _JOB_ID.search(text):
+    if (_STATUS.search(status_text) or _OUTCOME_QUESTION.search(status_text)
+        or _RESULT_QUESTION.search(status_text) or _JOB_ID.search(text)):
         return STATUS
     if text.casefold().strip(' .!?') in {'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'}:
         return INFORMATIONAL
@@ -63,6 +69,18 @@ def classify(text: str, *, attachments: int = 0) -> str:
     if not chat_message_requires_job(text):
         return INFORMATIONAL
     return CLARIFY
+
+
+def pending_reply_is_conversation(text: str) -> bool:
+    """Questions/status/mixed actions cannot become a missing-field value.
+
+    Short data, yes/no, and retry are left to the existing typed HITL classifier.
+    This function grants no resume authority; owner/context checks happen first.
+    """
+    text = str(text or '').strip()
+    lane = classify(text)
+    return lane == STATUS or bool(_ADDITIONAL.search(text)) or bool(
+        lane == INFORMATIONAL and _INFO.search(text))
 
 
 def informational_answer(response: str) -> str:
@@ -117,6 +135,19 @@ def status_answer(db_path, event, *, environment: str | None) -> str:
             from .models import JobStatus
             from .store import canonical_json
             status = JobStatus(job['status'])
+            # The same pure completion checks used by JobEngine/JobStore; no
+            # transition or verifier authority is manufactured by this reader.
+            from .complete_guard import (
+                complete_is_prohibited, postcondition_mismatch, evidence_is_stale,
+                destination_identity_missing, intended_destination_identity,
+            )
+            from .ezlynx_api_only_writes import note_or_document_write_missing_api_id
+            action_row = conn.execute("SELECT created_at,data_json FROM checkpoints WHERE job_id=? AND kind='action'", (job['id'],)).fetchone()
+            action = json.loads(action_row['data_json']) if action_row else None
+            payload = json.loads(job['payload_json'])
+            perform = conn.execute("SELECT created_at FROM attempts WHERE job_id=? AND phase='perform' ORDER BY id DESC LIMIT 1", (job['id'],)).fetchone()
+            floors = [perform['created_at'] if perform else None, action_row['created_at'] if action_row else None]
+            stored_floor = max((item for item in floors if item), default=job['created_at'])
             evidence = conn.execute('SELECT * FROM verification_evidence WHERE job_id=?', (job['id'],)).fetchall()
             def valid_receipt(row):
                 expected, observed = json.loads(row['expected_json']), json.loads(row['observed_json'])
@@ -125,7 +156,15 @@ def status_answer(db_path, event, *, environment: str | None) -> str:
                     'captured_at': row['captured_at'], 'locator': row['locator']})
                 return (row['verified'] == 1 and row['authoritative'] == 1 and row['source']
                     and row['method'] and row['locator'] and row['captured_at'] and expected and observed
-                    and hashlib.sha256(body.encode()).hexdigest() == row['evidence_sha256'])
+                    and hashlib.sha256(body.encode()).hexdigest() == row['evidence_sha256']
+                    and not complete_is_prohibited(observed)
+                    and not postcondition_mismatch(expected, observed)
+                    and not evidence_is_stale(captured_at=row['captured_at'], not_before=job['created_at'],
+                        stored_at=row['created_at'], stored_not_before=stored_floor)
+                    and not destination_identity_missing(locator=row['locator'], expected=expected,
+                        observed=observed, intended=intended_destination_identity(action=action, payload=payload), job_id=job['id'])
+                    and not note_or_document_write_missing_api_id(expected=expected, observed=observed,
+                        action=action, payload=payload))
             verified = bool(evidence) and all(valid_receipt(row) for row in evidence)
             if status == JobStatus.COMPLETE:
                 line = (f'Recorded complete with {len(evidence)} verified authoritative destination receipt(s).'
@@ -135,3 +174,38 @@ def status_answer(db_path, event, *, environment: str | None) -> str:
             return f'Job-record lookup (stored evidence; no new live check)\nJob {job["id"]}\n{line}'
     except Exception:
         return NO_STATUS
+
+
+def pending_input_owned(db_path, event, context, *, environment: str | None) -> bool:
+    """Gate the existing durable resume before it can bind/edit another Job.
+
+    Main-DM replies may use that DM's unique active correlation; an explicit
+    side/group thread must match the stored Job thread. Missing owner fails closed.
+    """
+    source = event.source
+    raw = getattr(event, 'raw_message', None) or {}
+    sender = raw.get('sender') or {}
+    actor = str(source.user_id or '')
+    from .chat_turn_control import sender_is_allowed
+    if (not actor or sender.get('type') != 'HUMAN'
+        or actor != str(sender.get('email') or sender.get('name') or '')
+        or not sender_is_allowed(actor) or not environment or not context):
+        return False
+    try:
+        with sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('BEGIN')
+            ident = context['job_id']
+            job = conn.execute('SELECT payload_json FROM jobs WHERE id=?', (ident,)).fetchone()
+            row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind='chat_request_owner'", (ident,)).fetchone()
+            owner = json.loads(row['data_json']) if row else {}
+            payload = json.loads(job['payload_json']) if job else {}
+            row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind='chat_thread'", (ident,)).fetchone()
+            stored = (json.loads(row['data_json']).get('thread_name') if row else None) or payload.get('thread_id') or payload.get('thread_name')
+            thread = str(source.thread_id or '')
+            return bool(owner.get('actor') == actor and owner.get('environment') == environment
+                and payload.get('conversation_id') == source.chat_id
+                and context.get('conversation_id') == source.chat_id
+                and (thread == stored if thread else getattr(source, 'chat_type', None) == 'dm'))
+    except Exception:
+        return False

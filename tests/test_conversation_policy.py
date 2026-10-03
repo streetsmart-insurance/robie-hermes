@@ -87,9 +87,11 @@ def owned_job(chat, actor=ACTOR, thread=THREAD, environment='test', space=SPACE)
 
 
 def add_receipt(store,job,*,verified=True,authoritative=True):
+    from robie_job_engine.store import utc_now
+    store.checkpoint(job['id'],'action',{'destination':{'locator':'fake://notes/1'}})
     store.add_evidence(job['id'],verified,VerificationEvidence(
         'independent_readback','synthetic-destination',{'note_id':'1'},{'note_id':'1'},
-        authoritative,'2026-10-03T16:00:00Z','fake://notes/1'))
+        authoritative,utc_now(),'fake://notes/1'))
 
 
 def complete(store,job):
