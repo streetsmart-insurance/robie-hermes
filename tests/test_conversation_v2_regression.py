@@ -104,8 +104,9 @@ def test_question_while_pending_preserves_bind_and_never_becomes_field_value(cha
     assert queue.active_conversation_job(SPACE)['job_id']==job['id']
     assert chat._chat_api.messages.calls
 
+@pytest.mark.parametrize('chat_type',['private','group'])
 @pytest.mark.parametrize('foreign',['actor','thread','environment','missing_owner','bot'])
-def test_pending_input_cannot_resume_or_rebind_foreign_owner(chat,foreign):
+def test_pending_input_cannot_resume_or_rebind_foreign_owner(chat,foreign,chat_type):
     store,job,queue=parked(chat)
     inbound=event(text='2019')
     if foreign=='actor':inbound=event(text='2019',actor='foreign@streetsmart.insurance')
@@ -114,6 +115,7 @@ def test_pending_input_cannot_resume_or_rebind_foreign_owner(chat,foreign):
     elif foreign=='missing_owner':
         with store.connect() as conn:conn.execute("DELETE FROM checkpoints WHERE kind='chat_request_owner'")
     else:inbound.raw_message['sender']['type']='BOT'
+    inbound.source.chat_type=chat_type
     assert dispatch_pending(chat,queue,inbound)==0
     assert store.get_job(job['id'])['status']=='AWAITING_HUMAN_INPUT'
     assert queue.active_conversation_job(SPACE)['job_id']==job['id']
@@ -198,3 +200,15 @@ def test_group_thread_pending_reply_requires_exact_owner_and_resumes(chat):
     async def worker(_event,ident,*_):resumed.append(ident)
     assert dispatch_pending(chat,queue,inbound,worker=worker)==1
     assert resumed==[job['id']]
+
+
+def test_unthreaded_group_pending_reply_refuses_resume_or_rebind(chat):
+    store,job,queue=parked(chat)
+    inbound=event(text='2019');inbound.source.chat_type='group';inbound.source.thread_id=None
+    assert dispatch_pending(chat,queue,inbound)==0
+    assert store.get_job(job['id'])['status']=='AWAITING_HUMAN_INPUT'
+    assert not store.get_job(job['id'])['payload'].get('human_input_values')
+    assert queue.active_conversation_job(SPACE)['job_id']==job['id']
+    assert store.get_checkpoint(job['id'],'chat_thread')['thread_name']==THREAD
+    assert not chat._chat_api.messages.calls
+    with store.connect() as conn:assert conn.execute('SELECT count(*) FROM jobs').fetchone()[0]==1
