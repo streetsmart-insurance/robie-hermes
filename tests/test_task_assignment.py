@@ -7,12 +7,12 @@ from unittest.mock import MagicMock
 import sys
 sys.path.insert(0, '/tmp')
 
-from ezlynx_task_report import (
+from robie_job_engine.ezlynx_task_report import (
     parse_task_report,
     TaskReportParseError,
     EXPECTED_HEADERS,
 )
-from task_assignment_worker import TaskAssignmentWorker
+from robie_job_engine.task_assignment_worker import TaskAssignmentWorker
 
 
 SAMPLE_CSV = """Task ID,Task Title,Task Description,Applicant ID,Applicant Name,Assigned To,Due Date,Priority,Created Date,Status
@@ -62,7 +62,7 @@ class TestParseTaskReport(unittest.TestCase):
 class TestTaskAssignmentWorker(unittest.TestCase):
     def test_categorize_callback(self):
         worker = TaskAssignmentWorker(discussion_client=None)
-        from ezlynx_task_report import AssignedTask
+        from robie_job_engine.ezlynx_task_report import AssignedTask
         task = AssignedTask(
             task_id="T1", title="Call back client",
             description="Please phone the client",
@@ -74,7 +74,7 @@ class TestTaskAssignmentWorker(unittest.TestCase):
 
     def test_categorize_unknown(self):
         worker = TaskAssignmentWorker(discussion_client=None)
-        from ezlynx_task_report import AssignedTask
+        from robie_job_engine.ezlynx_task_report import AssignedTask
         task = AssignedTask(
             task_id="T2", title="Do something vague",
             description="Handle this somehow",
