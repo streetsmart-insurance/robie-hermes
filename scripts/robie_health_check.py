@@ -70,9 +70,66 @@ STUCK_LEASE_SECONDS = 3600
 # /tmp usage percent that triggers a warning.
 TMP_WARN_PCT = 85
 
+# Used only when no release tree and no environment override are visible.
+# The Production cron copy at /opt/streetsmart-hermes/scripts/ still resolves
+# to this path through the releases/current directory beside that prefix.
+_PROD_RELEASE_FALLBACK = "/opt/streetsmart-hermes/releases/current"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _contains_job_engine(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, "robie_job_engine"))
+
+
+def release_import_root(script_file: str | None = None) -> str:
+    """Directory to prepend before importing ``robie_job_engine``.
+
+    The health check ships inside the release it should import:
+
+    * ``ROBIE_CANONICAL_JOB_ENGINE_ROOT`` wins when the systemd unit sets it.
+    * Otherwise the parent of this file's ``scripts/`` directory, when that
+      directory contains the package (the release tree, Test or Production).
+    * Otherwise ``<prefix>/releases/current`` when this file is the cron copy
+      at ``<prefix>/scripts/``. On Production that prefix is
+      ``/opt/streetsmart-hermes``, so the import root stays the historical path.
+    * Otherwise the first ``PYTHONPATH`` entry that contains the package.
+      The Test gateway drop-in lists ``.gateway-runtime`` ahead of the release;
+      the runtime directory is skipped.
+    * Otherwise the historical Production pointer, so a cron run that cannot
+      see a release tree still imports what it imports today.
+    """
+    override = os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT", "").strip()
+    if override:
+        return override
+
+    script = os.path.abspath(script_file or __file__)
+    scripts_dir = os.path.dirname(script)
+    shipped = os.path.dirname(scripts_dir)
+    if _contains_job_engine(shipped):
+        return shipped
+
+    cron_release = os.path.join(shipped, "releases", "current")
+    if _contains_job_engine(cron_release):
+        return cron_release
+
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        entry = entry.strip()
+        if not entry:
+            continue
+        candidate = entry if os.path.isabs(entry) else os.path.abspath(entry)
+        if _contains_job_engine(candidate):
+            return candidate
+
+    return _PROD_RELEASE_FALLBACK
+
+
+def _prepend_release_import() -> str:
+    root = release_import_root()
+    sys.path.insert(0, root)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +164,8 @@ def check_code_version() -> tuple[bool, str, dict]:
     try:
         # NOTE 2026-09-27: was "releases/current/robie-main2" which does not
         # exist — the import always failed. The package lives directly under
-        # releases/current.
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        # the release root this script shipped in.
+        link = _prepend_release_import()
         from robie_job_engine.ezlynx_policy_setup import CODE_VERSION
         extra["loaded_version"] = CODE_VERSION
     except Exception as exc:
@@ -116,7 +173,6 @@ def check_code_version() -> tuple[bool, str, dict]:
 
     # Compare against the deployed release symlink target (no network needed).
     try:
-        link = "/opt/streetsmart-hermes/releases/current"
         target = os.readlink(link) if os.path.islink(link) else ""
         extra["release_target"] = target
         # The release dir is usually named with the commit, e.g. .../68954cc3...
@@ -468,7 +524,7 @@ def check_ezlynx_auth() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.ezlynx_api import load_ezlynx_api_config, EzlynxApiClient
 
         try:
@@ -651,7 +707,7 @@ def check_login_secret_states() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.login_secret_health import inspect_login_secrets
 
         report = inspect_login_secrets()
@@ -977,7 +1033,7 @@ def check_chat_intake() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.production_preflight import check_chat_intake as _preflight_check
 
         result = _preflight_check()
