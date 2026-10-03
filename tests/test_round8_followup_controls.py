@@ -249,7 +249,12 @@ class WaitingJobTests(unittest.TestCase):
                 conversation_id="spaces/room",
                 inbound_thread_id=THREAD,
             )
-            self.assertEqual(in_thread, waiting)
+            # Explicit new intent remains a new request even in the old thread.
+            self.assertNotEqual(in_thread, waiting)
+            self.assertEqual(store.get_job(waiting)["status"], JobStatus.NEEDS_CLARIFICATION.value)
+            duplicate = open_chat_job(db, "m-in-thread", "please write an essay about roofs",
+                                      conversation_id="spaces/room", inbound_thread_id=THREAD)
+            self.assertEqual(duplicate, in_thread)
 
     def test_only_a_fresh_plausible_reply_binds_without_a_thread(self):
         with durable_temporary_directory() as tmp:

@@ -1112,6 +1112,16 @@ def _running_under_test() -> bool:
     return "pytest" in command or "unittest" in command
 
 
+def write_client_name(job: dict[str, Any]) -> str | None:
+    text = _original_ask(job)
+    match = re.search(
+        r"\b(?:for|about|named)\s+([a-z][a-z']+\s+[a-z][a-z']+)", text, re.I
+    )
+    if not match or match.group(1).split()[0].casefold() in {"the", "this", "that", "a", "an", "my", "our"}:
+        return None
+    return match.group(1)
+
+
 def prepare_named_write_client(
     store: Any,
     job_id: str,
@@ -1126,7 +1136,7 @@ def prepare_named_write_client(
     from .live_turn_guard import person_named_in_job
 
     job = store.get_job(job_id)
-    name = person_named_in_job(job) or ""
+    name = person_named_in_job(job) or write_client_name(job) or ""
     if not name:
         return None
     note = _search_note(store, job_id)
@@ -1156,7 +1166,7 @@ def prepare_named_write_client(
     _drop_untrusted_binding(store, job)
     runner = searcher or _SEARCHER_OVERRIDE
     if runner is None and _running_under_test():
-        return None
+        return "I could not resolve that client from an authorized EZLynx search."
     if runner is None:
         runner = default_searcher
     try:
@@ -1243,7 +1253,7 @@ def prepare_named_client_lookup(
     if not job_is_person_lookup(job):
         return None
     note = _search_note(store, job_id)
-    if note.get("resolved"):
+    if note.get("resolved") and note.get("source") != "needs_id":
         if str(note.get("source") or "") in {"several", "linked"}:
             return _consume_client_choice(store, job_id)
         return str(note.get("user_line") or "").strip() or None

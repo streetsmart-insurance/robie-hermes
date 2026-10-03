@@ -1041,12 +1041,20 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     """
     import os as _os
 
+    from .turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
     kwargs = dict(kwargs or {})
     args = dict(args or {})
     from .live_turn_guard import acting_job_id
 
-    job_id = acting_job_id(dict(kwargs))
-    db_path = str(kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
+    # The bound model turn wins. Otherwise use the acting job, which a
+    # card click sets and which does not prefer a leftover environment id
+    # over that resume.
+    job_id = str(owner or acting_job_id(dict(kwargs)) or "").strip()
+    db_path = str(
+        owner_db or kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or ""
+    ).strip()
     if not job_id or not db_path:
         return NO_ACTIVE_JOB_WRITE
     from .store import JobStore
@@ -1076,7 +1084,25 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         return blocked
     if not is_ezlynx_write_job(job):
         return None
+    from .client_name_lookup import trusted_applicant_ids, write_client_name
     from .live_turn_guard import person_named_in_job, refuse_untrusted_applicant
+
+    from .live_turn_guard import refuse_tab_applicant
+
+    applicant = str(args.get("applicant_id") or "").strip()
+    tab_refusal = refuse_tab_applicant(store, job, applicant)
+    if tab_refusal:
+        return tab_refusal
+    if (
+        (person_named_in_job(job) or write_client_name(job))
+        and applicant
+        and applicant not in trusted_applicant_ids(store, job)
+    ):
+        return (
+            "EZLYNX_APPLICANT_UNTRUSTED: resolve this job's applicant from its "
+            f"request or an authorized name search; never use fixture id {applicant}. "
+            "Do not ask the user for an applicant id."
+        )
 
     if person_named_in_job(job):
         from .client_name_lookup import prepare_named_write_client
@@ -1085,12 +1111,6 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         if held:
             return held
         job = store.get_job(job_id)
-    from .live_turn_guard import refuse_tab_applicant
-
-    applicant = str(args.get("applicant_id") or "")
-    tab_refusal = refuse_tab_applicant(store, job, applicant)
-    if tab_refusal:
-        return tab_refusal
     if plan_is_locked(store, job_id):
         untrusted = refuse_untrusted_applicant(store, job, applicant)
         if untrusted:

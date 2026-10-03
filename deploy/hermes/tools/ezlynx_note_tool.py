@@ -321,8 +321,11 @@ def _remember_note_tool_failure(kwargs: dict, message: str) -> None:
 def _remember_discussion_note(kwargs: dict, report: dict) -> None:
     import os
 
+    from robie_job_engine.turn_finalization import current_model_job_id
+
     job_id = str(
         (kwargs or {}).get("job_id")
+        or current_model_job_id()
         or os.environ.get("ROBIE_JOB_ID")
         or os.environ.get("JOB_ID")
         or ""
@@ -386,6 +389,13 @@ def _remember_discussion_note(kwargs: dict, report: dict) -> None:
 
 
 def ezlynx_discussion_note_handler(args: dict, **kwargs):
+    from robie_job_engine.turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
+    if owner:
+        # The write and its receipt belong to the same immutable turn, even
+        # after another Chat request changes the process-level job variables.
+        kwargs = {**kwargs, "job_id": owner, "db_path": owner_db}
     from robie_job_engine.chat_turn_control import refuse_current_tool_call
 
     stopped = refuse_current_tool_call(kwargs)

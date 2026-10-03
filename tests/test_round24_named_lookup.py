@@ -592,3 +592,21 @@ class SearchBoxTests(unittest.TestCase):
             self.assertEqual(box.fills, ["buster brown"])
             self.assertEqual(len(started), 1)
             self.assertIsNot(started[0], loop_thread)
+
+    def test_default_named_lookup_never_attaches_shared_browser(self):
+        # A name does not authorize this path to acquire or use CDP.
+        # A failed lookup does not ask for an applicant id.
+        sync_api = types.ModuleType("playwright.sync_api")
+        def forbidden():
+            raise AssertionError("shared browser must not be touched")
+        sync_api.sync_playwright = forbidden
+        with durable_temporary_directory() as tmp:
+            store = JobStore(str(Path(tmp) / "jobs.db"))
+            job_id = _job(store, applicant_id=DOCS_ID)
+            async def prepare():
+                return prepare_named_client_lookup(store, job_id)
+            with patch.dict(sys.modules, {"playwright.sync_api": sync_api}):
+                line = asyncio.run(prepare())
+            self.assertEqual(line, "I couldn't look that up; a CSR should take a look.")
+            self.assertNotIn(DOCS_ID, store.get_job(job_id)["payload"].values())
+            self.assertEqual(store.get_checkpoint(job_id, "client_name_search")["source"], "error")

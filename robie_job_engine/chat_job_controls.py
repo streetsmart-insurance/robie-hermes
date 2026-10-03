@@ -448,16 +448,24 @@ def consume_note_repost_allowance(store: Any, job_id: str) -> bool:
     """Allow one post after an explicit yes. The next call is blocked again."""
     if not job_id or store is None:
         return False
+    import json
+
+    from .store import canonical_json, utc_now
+
     try:
-        row = store.get_checkpoint(job_id, "note_repost_confirmed") or {}
-    except Exception:
-        return False
-    if not row or row.get("used"):
-        return False
-    used = dict(row)
-    used["used"] = True
-    try:
-        store.checkpoint(job_id, "note_repost_confirmed", used)
+        with store.transaction() as conn:
+            saved = conn.execute(
+                "SELECT data_json FROM checkpoints WHERE job_id=? AND kind='note_repost_confirmed'",
+                (job_id,),
+            ).fetchone()
+            row = json.loads(saved[0]) if saved else {}
+            if not row or row.get("used"):
+                return False
+            row["used"] = True
+            conn.execute(
+                "UPDATE checkpoints SET data_json=?,created_at=? WHERE job_id=? AND kind='note_repost_confirmed'",
+                (canonical_json(row), utc_now(), job_id),
+            )
     except Exception:
         return False
     return True
@@ -557,6 +565,10 @@ def should_bind_waiting_reply(
     if not job or str(job.get("status") or "") != JobStatus.NEEDS_CLARIFICATION.value:
         return False
     if hard_block_reply(text):
+        return False
+    from .hitl import classify_human_reply
+
+    if text.strip() and classify_human_reply(text, {}) == "NEW_INTENT":
         return False
     from .chat_thread import read_job_chat_thread, thread_resource_name
 

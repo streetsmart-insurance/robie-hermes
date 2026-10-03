@@ -39,6 +39,7 @@ from robie_job_engine.ezlynx_session import (
     PlaywrightEzlynxSession,
     SessionState,
 )
+
 from robie_job_engine.models import JobStatus
 from robie_job_engine.recording import RecordingManager
 from robie_job_engine.store import JobStore

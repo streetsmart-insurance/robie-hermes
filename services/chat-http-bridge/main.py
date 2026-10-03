@@ -546,12 +546,22 @@ def _message_body(event: dict[str, Any]) -> str:
 
 
 def _message_requests_test_env(event: dict[str, Any]) -> bool:
-    """True when the sender marked this message for the Test gateway."""
-    text = _message_body(event).lstrip()
-    if text.startswith(TEST_MESSAGE_MARKER):
-        return True
-    first = text.split(None, 1)[0] if text else ""
-    return first.casefold() in {"robie-test:", "[[robie-test]]"}
+    """True when the sender marked this message for the Test gateway.
+
+    A leading @mention is not part of the marker. Message parameters
+    cannot select Test.
+    """
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    for key in ("argumentText", "text"):
+        text = re.sub(
+            r"^(?:(?:<users/[^>]+>|@robie)\s*)+",
+            "",
+            str(message.get(key) or "").lstrip(),
+            flags=re.I,
+        )
+        if re.match(r"^(?:\[\[robie-test\]\]|robie-test:)(?=\s|$)", text, flags=re.I):
+            return True
+    return False
 
 
 def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str]:

@@ -49,6 +49,7 @@ from typing import Any, Callable
 from urllib import error, parse, request
 from urllib.parse import urlparse
 
+from .discussion_note_ledger import with_serialized_ledger
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 GRANT_TYPE = "vendor_data_access"
@@ -470,6 +471,9 @@ class DiscussionApiClient:
         # Last step before HTTP. A patched allowlist or readback check
         # raises here, and the driver lease is read again.
         assert_write_checks_intact()
+        from .chat_write_boundary import assert_chat_write_allowed
+
+        assert_chat_write_allowed()
         driver_gate_for_write()
         _refuse_hard_blocked_job()
         return self._request_json(
@@ -795,6 +799,86 @@ def select_discussion_for_note(
         )
     if len(rows) == 1:
         return rows[0]
+    hint_raw = str(title_hint or "").strip().lower()
+    from .turn_finalization import bound_model_context
+
+    owner, generation, owner_db = bound_model_context()
+    if owner and hint_raw:
+        import re
+
+        from .store import JobStore
+
+        store = JobStore(owner_db)
+        job = store.get_job(owner)
+        payload = job.get("payload") or {}
+        reply = store.get_checkpoint(owner, "clarification_reply") or {}
+        texts = [str(payload.get(key) or "") for key in ("request_text", "original_text")]
+        clarification = (
+            str(reply.get("text") or "") if reply.get("generation") == generation else ""
+        )
+
+        def selected(text: str, *, answer: bool = False) -> bool:
+            normalized = " ".join(text.casefold().replace("’", "'").split())
+            if answer and normalized.strip(" .!\"'") == hint_raw:
+                return True
+            outer = re.sub(
+                r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`|(?<!\w)\'[^\'\n]*\'(?!\w)',
+                " ",
+                normalized,
+            )
+            if any(token in outer for token in ('"', "“", "”", "`")):
+                return False
+            if re.search(
+                r"\b(?:not|never|avoid|except|don't|dont|instead|unsure|uncertain)\b"
+                r"|\bask me\b|\bwhich discussion\b",
+                outer,
+            ):
+                return False
+            outer = re.split(
+                r"\b(?:with text|note text|note body|saying|that says)\b",
+                outer,
+                maxsplit=1,
+            )[0].strip()
+            title = (
+                r"(?:the\s+)?(?:discussion\s+)?"
+                + re.escape(hint_raw)
+                + r"(?:\s+discussion)?\s*(?:[.!;]|$)"
+            )
+            return bool(
+                re.search(
+                    r"(?:^|[.!;])\s*(?:please\s+)?(?:use|select|choose)\s+" + title,
+                    outer,
+                )
+                or re.search(
+                    r"(?:^|[.!;])\s*(?:please\s+)?(?:add|file|post|append|put|write|record)\b"
+                    r"[^.!;?]*\b(?:in|to)\s+" + title,
+                    outer,
+                )
+            )
+
+        authorized = (
+            selected(clarification, answer=True)
+            if clarification
+            else any(selected(text) for text in texts)
+        )
+        if not authorized:
+            raise DiscussionSelectionError(
+                AMBIGUOUS_DISCUSSIONS,
+                "discussion title was not selected by the requester; refusing to guess",
+                matches=recent_discussion_titles(rows),
+            )
+        exact = [
+            row
+            for row in rows
+            if discussion_title_of(row).strip().casefold() == hint_raw
+        ]
+        if len(exact) != 1:
+            raise DiscussionSelectionError(
+                AMBIGUOUS_DISCUSSIONS,
+                "requester selection must identify exactly one full discussion title",
+                matches=recent_discussion_titles(rows),
+            )
+        return exact[0]
     hint = authorized_discussion_hint(title_hint).lower()
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
@@ -979,6 +1063,7 @@ def _metadata_note_confirmation(
     )
 
 
+@with_serialized_ledger
 def file_note_to_existing_discussion(
     client: DiscussionApiClient,
     applicant_id: str,
@@ -997,21 +1082,20 @@ def file_note_to_existing_discussion(
     existing discussion can be chosen the result is ``status="pending"`` and
     nothing is written. A discussion is never created and nothing is deleted.
 
-    Confirmation reads the discussion before the post, once after it, and
-    once more a moment later. The note is filed when a second signal says
-    it is ours (its text, or a returned note id that is the new latest
-    id). Live EZLynx has neither. A stable count is the confirmation that
-    API can give: exactly one new note, a new latest id, the same title,
-    and a second read that still shows that same count and id. That latest
-    id is the note id, the ledger row is confirmed, and a same-day repeat
-    asks before it posts again. A count that jumped, an unchanged latest
-    id, a changed title, or a second read that moved stays sent,
-    unconfirmed. The post is never repeated automatically.
+    Confirmation reads the discussion before the post and once after it.
+    The note is filed only when a second signal says it is ours: matching
+    note text, or a returned note id that is the new latest id. A higher
+    count or a new latest id by itself is not a receipt, because another
+    writer can produce the same metadata. That post is held, the ledger
+    row stays sent and unconfirmed, and a repeat asks before it posts
+    again. A count that jumped, an unchanged latest id, a changed title,
+    or a later read that moved stays unconfirmed too. The post is never
+    repeated automatically.
 
     A local ledger remembers accepted notes so a rerun does not post them
     again. A send that cannot be confirmed is stored as sent, unconfirmed
-    and blocks a repost until a person says yes or the 24-hour question
-    window passes. If that ledger write fails, nothing is posted.
+    and keeps blocking a repost until a person says yes. If that ledger
+    write fails, nothing is posted.
 
     A job that is not RUNNING does not reach the API. The check is the
     status on the job row at this moment, not the status from when the
@@ -1022,6 +1106,9 @@ def file_note_to_existing_discussion(
     ``note_id`` and a human-readable ``reason``.
     """
     applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+    from .chat_write_boundary import assert_chat_applicant
+
+    assert_chat_applicant(applicant)
     text = reject_phone_numbers(note_body).strip()
     if not text:
         raise DiscussionApiError(None, "note body is required")
@@ -1188,7 +1275,7 @@ def file_note_to_existing_discussion(
             "note_id": None,
             "matches": list(getattr(exc, "matches", []) or []),
         }
-    except Exception:
+    except DiscussionApiError:
         try:
             undo_unconfirmed_note(
                 applicant,
@@ -1200,6 +1287,10 @@ def file_note_to_existing_discussion(
             )
         except DiscussionNoteLedgerError:
             pass
+        raise
+    except Exception:
+        # A timeout does not prove the server rejected the POST.
+        # Keep the unconfirmed row so a retry cannot post it twice.
         raise
     try:
         after_record = getter(discussion_id)
@@ -1227,30 +1318,9 @@ def file_note_to_existing_discussion(
             )
         identity = _new_note_identity(after_record, after, text, created)
         if identity is None:
-            returned = _note_id_of(created) if isinstance(created, dict) else ""
-            if not returned and not _payload_has_note_bodies(after_record):
-                stable_id = _stable_count_reread(getter, discussion_id, after)
-                if stable_id:
-                    _remember_posted_note(
-                        applicant,
-                        discussion_id,
-                        text,
-                        document_id=doc_id,
-                        note_id=stable_id,
-                        ledger_path=ledger_path,
-                        source="discussion_count",
-                    )
-                    return _note_result(
-                        "filed",
-                        reason=reason,
-                        applicant=applicant,
-                        discussion_id=discussion_id,
-                        title=title,
-                        note_id=stable_id,
-                        read_back=True,
-                        verified_by="discussion",
-                        response=created,
-                    )
+            # A higher count, or a new most-recent id with no note text and
+            # no returned id, is not a receipt. Hold it so it is not posted
+            # again as if it were confirmed.
             if _payload_has_note_bodies(after_record) and not _posted_text_matches(
                 after_record, text
             ):

@@ -619,6 +619,17 @@ def _release_adapter_job(
                 chat_ids.append(str(chat_id))
     keys: list[str] = []
     for chat_id in chat_ids:
+        # Runner keys can collapse multiple thread turns to one shared DM
+        # session. Never release or unblock that session while another job
+        # still owns a running turn in the space.
+        if isinstance(turns, dict) and any(
+            isinstance(key, tuple) and key and str(key[0]) == chat_id
+            and isinstance(record, dict)
+            and str(record.get("job_id") or "") != job_id
+            and _turn_record_running(record)
+            for key, record in turns.items()
+        ):
+            continue
         for key in _iter_live_session_keys(adapter):
             matched = any(
                 _key_matches_stop(key, chat_id, thread) for thread in threads
@@ -816,18 +827,15 @@ def _key_matches_stop(key: str, chat_id: str, thread_id: str) -> bool:
     """True when this session key is the stopped job's thread.
 
     The stored thread is ``spaces/<id>/threads/<tail>``. The Hermes key
-    often carries only that tail, so a full-string match is not enough.
+    often carries only that tail. A tail of ``job`` must not match
+    ``job-other``.
     """
     if _key_matches_chat(key, chat_id, thread_id):
         return True
-    text = str(key or "")
-    if not text or (chat_id and chat_id not in text):
+    if not chat_id or chat_id not in str(key) or not thread_id:
         return False
-    thread = str(thread_id or "")
-    if thread and thread in text:
-        return True
-    tail = thread.rstrip("/").split("/")[-1]
-    return bool(tail) and tail in text
+    tail = str(thread_id).rstrip("/").split("/")[-1]
+    return str(key).endswith("/threads/" + tail) or str(key).endswith(":" + tail)
 
 
 def _key_matches_chat(key: str, chat_id: str, thread_id: str) -> bool:
@@ -966,22 +974,45 @@ def stop_session_keys(
         if chat_id and chat_id not in str(key):
             continue
         if space_wide:
-            matched.append(key)
+            # A top-level /stop still names this job's thread. A similar
+            # tail (job vs job-other) is a different session.
+            if threads and any(
+                _key_matches_stop(key, chat_id, thread) for thread in threads
+            ):
+                matched.append(key)
+            elif not threads:
+                matched.append(key)
             continue
         if threads:
             if any(_key_matches_stop(key, chat_id, thread) for thread in threads):
                 matched.append(key)
         elif _key_is_running(adapter, key):
             matched.append(key)
+    matched = [
+        key
+        for key in matched
+        if _session_owned_for_stop(adapter, key, job_id, store, chat_id)
+    ]
     agent_keys = [key for key in matched if str(key).startswith("agent:")]
     if agent_keys:
         resolved = agent_keys[0]
     elif matched:
         resolved = matched[0]
     else:
-        resolved, _ignored = resolve_running_session_key(adapter, event)
+        resolved = (
+            derived
+            if (
+                (not threads or any(
+                    _key_matches_stop(derived, chat_id, thread) for thread in threads
+                ))
+                and _session_owned_for_stop(
+                    adapter, derived, job_id, store, chat_id
+                )
+            )
+            else ""
+        )
     keys: list[str] = []
-    for key in (resolved, derived, *matched):
+    for key in (resolved, *matched):
         if key and key not in keys:
             keys.append(key)
     return resolved, derived, keys
@@ -1173,10 +1204,15 @@ def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
     it resumes. ``ROBIE_JOB_ID`` left behind by a previous job is not used.
     """
     from .live_turn_guard import job_id_for_stop_check
+    from .turn_finalization import bound_model_context
 
-    job_id = job_id_for_stop_check(kwargs)
+    owner, _generation, owner_db = bound_model_context()
+    job_id = str(owner or job_id_for_stop_check(kwargs) or "").strip()
     db_path = str(
-        (kwargs or {}).get("db_path") or os.environ.get("ROBIE_JOB_DB") or ""
+        owner_db
+        or (kwargs or {}).get("db_path")
+        or os.environ.get("ROBIE_JOB_DB")
+        or ""
     ).strip()
     store = None
     if job_id and db_path:
@@ -1186,7 +1222,23 @@ def refuse_current_tool_call(kwargs: dict | None = None) -> str | None:
             store = JobStore(db_path)
         except Exception:
             store = None
-    return agent_output_blocked(job_id, store)
+    stopped = agent_output_blocked(job_id, store)
+    if stopped:
+        return stopped
+    if job_id and store is not None:
+        try:
+            from .models import TERMINAL_STATUSES, JobStatus
+
+            job = store.get_job(job_id)
+            if not job or JobStatus(job["status"]) in TERMINAL_STATUSES:
+                return "JOB_TOOL_REFUSED: no active job; job already finished or is unavailable."
+            if owner:
+                state = store.get_checkpoint(owner, "model_generation") or {}
+                if not state.get("running") or state.get("generation") != _generation:
+                    return "JOB_TOOL_REFUSED: generation is no longer running."
+        except Exception:
+            return "JOB_TOOL_REFUSED: job state could not be read."
+    return None
 
 
 _GATEWAY_STATUS_NOTICE = re.compile(
@@ -1732,10 +1784,18 @@ async def terminate_gateway_agent(
     for key in _iter_live_session_keys(adapter):
         if _key_matches_chat(key, chat_id, _thread_id) and key not in keys:
             keys.append(key)
+    keys = [
+        key
+        for key in keys
+        if _session_owned_for_stop(adapter, key, job_id, store, chat_id)
+    ]
+    if not keys:
+        return
     tasks = _tasks_for_keys(adapter, keys)
-    captured = _capture_session_task(adapter, event, resolved)
-    if captured is not None and captured not in tasks:
-        tasks.append(captured)
+    for key in keys:
+        stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+        if stamp and len(stamp) > 3 and stamp[3] is not None and stamp[3] not in tasks:
+            tasks.append(stamp[3])
     agent = _running_agent_for_key(adapter, resolved)
     _hard_stop_agent(agent)
     # The clarify/question wait lives on a worker thread. Cancel the
@@ -1773,6 +1833,12 @@ async def terminate_gateway_agent(
             except Exception:
                 result = None
             await _await_interrupt(result)
+    # An awaited interrupt may have yielded to a new owner. Do not clear
+    # that replacement's lease, task, transcript or runner state.
+    if not _session_owned_for_stop(
+        adapter, resolved, job_id, store, chat_id, allow_released=True
+    ):
+        return
     cancel = getattr(adapter, "cancel_session_processing", None)
     if callable(cancel):
         try:
@@ -1780,6 +1846,10 @@ async def terminate_gateway_agent(
             await _await_interrupt(result)
         except Exception:
             pass
+    if not _session_owned_for_stop(
+        adapter, resolved, job_id, store, chat_id, allow_released=True
+    ):
+        return
     if runner is not None:
         drop = getattr(runner, "_drop_turn_slot", None)
         if callable(drop):
@@ -1811,7 +1881,14 @@ async def terminate_gateway_agent(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
-    _close_session_history(adapter, keys, chat_id=chat_id, thread_id=_thread_id)
+    keys = [
+        key
+        for key in keys
+        if _session_owned_for_stop(
+            adapter, key, job_id, store, chat_id, allow_released=True
+        )
+    ]
+    _close_session_history(adapter, keys)
     for key in keys:
         _release_session_guard(adapter, key)
 
@@ -1828,6 +1905,8 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
     job = store.get_job(job_id)
     status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
+        if status == JobStatus.CANCELLED:
+            _deactivate_cancelled_links(store, job_id)
         return ALREADY_FINISHED_REPLY
     reply = stop_reply_line(job_id)
     store.transition(
@@ -1842,6 +1921,12 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
         "cancelled",
         {"by": "/stop", "reason": "Cancelled."},
     )
+    _deactivate_cancelled_links(store, job_id)
+    return reply
+
+
+def _deactivate_cancelled_links(store: Any, job_id: str) -> None:
+    """Drop conversation links for a cancelled job. Once, and never fatal."""
     try:
         from .chat_queue import DurableChatEventQueue
 
@@ -1850,4 +1935,50 @@ def fail_cancelled_chat_job(store: Any, job_id: str) -> str:
         )
     except Exception:
         pass
-    return reply
+
+
+def remember_session_owner(adapter: Any, event: Any, job_id: str, generation: str, task: Any = None) -> None:
+    """Record the actual live object, so a later turn cannot inherit stop authority."""
+    chat, thread = _event_chat_thread(event)
+    owners = getattr(adapter, "_robie_session_owners", None)
+    if owners is None:
+        owners = adapter._robie_session_owners = {}
+    exact = session_key_from_adapter(adapter, event)
+    keys = [exact] if _running_agent_for_key(adapter, exact) is not None else [
+        key for key in _iter_live_session_keys(adapter)
+        if _running_agent_for_key(adapter, key) is not None
+        and _key_matches_stop(key, chat, thread)
+    ]
+    # Never stamp every matching DM/thread agent as this turn's owner.
+    # Legacy key discovery is safe only when there is a single candidate.
+    if len(keys) == 1:
+        key = keys[0]
+        owners[key] = (str(job_id), str(generation), _running_agent_for_key(adapter, key), task)
+
+
+def _session_owned_for_stop(adapter: Any, key: str, job_id: str | None,
+                            store: Any, chat: str, *, allow_released: bool = False) -> bool:
+    if not job_id:
+        return False
+    # A shared DM session may already belong to the next job. Check even
+    # legacy turns that predate durable generation/session stamps.
+    for turn_key, record in (getattr(adapter, "_gateway_turns", {}) or {}).items():
+        if (isinstance(turn_key, tuple) and len(turn_key) > 1
+                and turn_key[0] == chat and _turn_record_running(record)
+                and str(record.get("job_id")) != str(job_id)
+                and (not turn_key[1] or _key_matches_stop(key, chat, str(turn_key[1])))):
+            return False
+    active = (getattr(adapter, "_active_chat_job", {}) or {}).get(chat)
+    if active and str(active) != str(job_id) and _key_matches_chat(key, chat, ""):
+        return False
+    try:
+        state = store.get_checkpoint(job_id, "model_generation") if store is not None else None
+    except Exception:
+        return False
+    stamp = (getattr(adapter, "_robie_session_owners", {}) or {}).get(key)
+    if state or stamp:
+        return bool(state and stamp and stamp[0] == str(job_id)
+                    and stamp[1] == state.get("generation")
+                    and (stamp[2] is _running_agent_for_key(adapter, key)
+                         or (allow_released and _running_agent_for_key(adapter, key) is None)))
+    return True  # Legacy, exact local session with no conflicting turn.

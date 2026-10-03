@@ -3,8 +3,30 @@ name: Deploy immutable release to Test
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Deploy Test, or certify retained bytes after independent Test QA
+        required: true
+        default: deploy
+        type: choice
+        options: [deploy, install-stopped, certify]
+      test_run_id:
+        description: For certify, the successful Test deployment run
+        required: false
+        type: string
+      test_artifact_id:
+        description: For certify, its installed-test-release artifact ID
+        required: false
+        type: string
+      release_sha256:
+        description: For certify, the exact installed TGZ digest
+        required: false
+        type: string
+      qa_evidence:
+        description: For certify, independent Test QA JSON for this exact main commit
+        required: false
+        type: string
       confirmation:
-        description: Type DEPLOY_TO_HERMES_TEST_01
+        description: Type DEPLOY_TO_HERMES_TEST_01, INSTALL_TEST_KEPT_STOPPED or CERTIFY_TEST_PACKAGE
         required: true
         type: string
 
@@ -19,7 +41,10 @@ concurrency:
 
 jobs:
   deploy-test:
-    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      ((inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01') ||
+       (inputs.operation == 'install-stopped' && inputs.confirmation == 'INSTALL_TEST_KEPT_STOPPED'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -34,7 +59,7 @@ jobs:
 
       - name: Re-run verification gate
         run: |
-          python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "pypdf>=5,<7"
+          python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "pypdf>=5,<7" "PyYAML>=6.0,<7"
           PYTHONPATH=. python -m robie_job_engine.regression_battery --ci
           PYTHONPATH=. python -m pytest -q \
             tests/test_ringcentral_workbooks.py \
@@ -58,6 +83,8 @@ jobs:
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
+          PYTHONPATH=.:tests python -m pytest -q tests/test_chat_review_concurrency.py tests/test_durable_turn_generations.py tests/test_chat_reply_recovery.py tests/test_reply_and_go_guards.py tests/test_discussion_note_readback.py
+          PYTHONPATH=. python -m pytest -q tests/test_release_promotion.py tests/test_production_deploy_workflow.py tests/test_chat_release_scope.py tests/test_test_deploy_workflow.py tests/test_test_stopped_install.py
 
       - name: Build immutable artifact
         id: release
@@ -135,13 +162,60 @@ jobs:
           python scripts/transfer-test-artifact.py
 
       - name: Install and independently verify Test
+        env:
+          INSTALL_OPERATION: ${{ inputs.operation }}
         run: |
+          set -euo pipefail
+          extra=()
+          case "${INSTALL_OPERATION}" in
+            deploy) ;;
+            install-stopped) extra=(--keep-stopped) ;;
+            *) exit 2 ;;
+          esac
           archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive }}')"
           checksum="${archive}.sha256"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --ssh-key-file="${SSH_KEY}" \
-            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}'"
+            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}' --skip-policy-setup ${extra[*]}"
+
+      - name: Retain stopped bytes without live certification
+        if: inputs.operation == 'install-stopped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stopped-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/test-transfer/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Retain installed Test package for independent QA
+        if: inputs.operation == 'deploy'
+        env:
+          ARCHIVE: ${{ steps.release.outputs.archive }}
+          RELEASE_DIGEST: ${{ steps.release.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/verified-test-package"
+          mkdir -p "${bundle}"
+          cp "${ARCHIVE}" "${ARCHIVE}.sha256" "${bundle}/"
+          short="${GITHUB_SHA:0:12}"
+          for name in test-deploy-evidence.json; do
+            gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --ssh-key-file="${SSH_KEY}" \
+              "${TEST_VM}:/opt/streetsmart-hermes-test/deployments/${short}/${name}" "${bundle}/${name}"
+          done
+          PYTHONPATH=. python -m robie_job_engine.release_promotion verify-installed \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}"
+
+      - name: Retain exact installed bytes; this does not authorize promotion
+        if: inputs.operation == 'deploy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/verified-test-package/*
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Publish immutable Test evidence
         if: always()
@@ -153,5 +227,53 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Artifact SHA-256: \`${{ steps.release.outputs.sha256 }}\`"
             echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Operation: ${{ inputs.operation }} (install-stopped is NOT live or certified)"
             echo "- Production deployment: \`false\`"
           } >>"${GITHUB_STEP_SUMMARY}"
+
+  certify-test:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'certify' && inputs.confirmation == 'CERTIFY_TEST_PACKAGE'
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate retained Test bytes and independent reviewer evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_RUN_ID: ${{ inputs.test_run_id }}
+          TEST_ARTIFACT_ID: ${{ inputs.test_artifact_id }}
+          RELEASE_DIGEST: ${{ inputs.release_sha256 }}
+          QA_EVIDENCE: ${{ inputs.qa_evidence }}
+          REVIEWER: ${{ github.actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/verified-test-package"
+          PYTHONPATH=. python -m robie_job_engine.release_promotion download-installed \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}" \
+            --run-id "${TEST_RUN_ID}" --artifact-id "${TEST_ARTIFACT_ID}"
+          python - <<'PYQA'
+          import json, os, pathlib
+          from robie_job_engine.release_promotion import bind_qa_to_install
+          qa = json.loads(os.environ["QA_EVIDENCE"])
+          # Bind independent evidence to the actual verified download above.
+          # QA reviewer must be the authenticated workflow actor.
+          qa = bind_qa_to_install(qa, os.environ["TEST_RUN_ID"],
+                                  os.environ["TEST_ARTIFACT_ID"], os.environ["REVIEWER"])
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "verified-test-package/test-qa-evidence.json"
+          target.write_text(json.dumps(qa, sort_keys=True) + "\n", encoding="utf-8")
+          PYQA
+          PYTHONPATH=. python -m robie_job_engine.release_promotion verify \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}"
+      - name: Retain exact Test-verified package without redeploying or rebuilding
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/verified-test-package/*
+          retention-days: 30
+          if-no-files-found: error
