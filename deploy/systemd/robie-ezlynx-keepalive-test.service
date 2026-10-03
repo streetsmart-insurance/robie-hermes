@@ -11,11 +11,14 @@ Group=streetsmart-hermes-test
 Environment=HOME=/opt/streetsmart-hermes-test
 WorkingDirectory=/opt/streetsmart-hermes-test/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes-test/current
+Environment=ROBIE_ENV=TEST
 Environment=ROBIE_PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222
 Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
 Environment=ROBIE_EZLYNX_DRIVER_HOLDER=TEST
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes-test/robie-job-engine/data/ezlynx-session.lock
 ExecCondition=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
-ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ssrobie_keepalive --json
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_keepalive --json
 Nice=10
 NoNewPrivileges=true
 PrivateTmp=true
