@@ -15,6 +15,7 @@ class Delivery:
     staged: bool = False
     delivered: bool = False
     attempted: bool = False
+    attempted_components: list = field(default_factory=list)
     destination_ids: dict = field(default_factory=dict)
     reason: str = 'source_seen'
 
@@ -51,7 +52,7 @@ class DurableLedger(MutableMapping):
 
 class Destination(Protocol):
     def find_by_key(self, key: str) -> dict: ...
-    def send(self, event: dict, key: str) -> dict: ...
+    def send_component(self, event: dict, key: str, component: str) -> dict: ...
     def readback(self, ids: dict) -> dict: ...
 
 REQUIRED = {'cancellation': ('note_id', 'task_id'),
@@ -59,91 +60,90 @@ REQUIRED = {'cancellation': ('note_id', 'task_id'),
             'accounting_issue': ('task_id',),
             'commission_payout': ('deposit_id',)}
 
-def verified(event, receipt, port):
+PAYOUT_BINDING = ('realm_id', 'account_id', 'payee_id', 'amount_cents', 'currency')
+
+def valid_binding(event):
+    if event['kind'] == 'commission_payout':
+        return all(event.get(k) is not None and event.get(k) != '' for k in PAYOUT_BINDING)
+    return bool(event.get('applicant_id'))
+
+def verified_components(event, receipt, port):
+    if not valid_binding(event): return {}
     ids = receipt.get('ids', {})
     needed = REQUIRED.get(event['kind'], ())
-    if not needed or not all(ids.get(k) for k in needed):
-        return None
-    read = port.readback(ids)
-    # Readback must bind every ID to this source key and intended applicant.
+    read = port.readback({k:v for k,v in ids.items() if k in needed})
+    good = {}
     for k in needed:
+        if not ids.get(k): continue
         obj = read.get(k) or {}
-        if (str(obj.get('id')) != str(ids[k]) or
-            obj.get('source_key') != event['key'] or
-            obj.get('applicant_id') != event.get('applicant_id')):
-            return None
-    return {k: str(ids[k]) for k in needed}
+        if str(obj.get('id')) != str(ids[k]) or obj.get('source_key') != event['key']: continue
+        binding = PAYOUT_BINDING if event['kind']=='commission_payout' else ('applicant_id',)
+        if not all(obj.get(f)==event.get(f) for f in binding): continue
+        good[k] = str(ids[k])
+    return good
 
 class ReliableDelivery:
     def __init__(self, ledger, destination=None):
         self.ledger = ledger
         self.destination = destination
-
     def process(self, event):
         try:
             return self._process(event)
         finally:
-            key = event['key']
-            if key in self.ledger:
-                self.ledger[key] = self.ledger[key]
-
+            key=event['key']
+            if key in self.ledger: self.ledger[key]=self.ledger[key]
     def _process(self, event):
-        key = event['key']
-        state = self.ledger.setdefault(key, Delivery())
-        if state.delivered:
-            return 'delivered_skip'
-        kind = event['kind']
-        if kind == 'supplier_payout':
-            state.reason = 'supplier_accounting_disabled'
-            return state.reason
-        if kind not in REQUIRED:
-            state.reason = 'unsupported_type_status'
-            return state.reason
-        if kind in ('cancellation', 'agreement_signed') and not event.get('applicant_id'):
-            state.reason = 'unmatched_retryable'
-            return state.reason
-        # Legacy FLAGGED/task/unknown attempts may have landed despite no receipt.
-        if event.get('legacy_uncertain'):
-            state.attempted = True
-        state.matched = True
-        state.staged = True
+        key=event['key'];state=self.ledger.setdefault(key,Delivery());kind=event['kind']
+        if kind=='supplier_payout': state.reason='supplier_accounting_disabled';return state.reason
+        if kind not in REQUIRED: state.reason='unsupported_type_status';return state.reason
+        if kind in ('cancellation','agreement_signed') and not event.get('applicant_id'):
+            state.reason='unmatched_retryable';return state.reason
+        state.matched=True;state.staged=True
         if self.destination is None:
-            state.reason = 'staged_no_live_destination'
-            return state.reason
-        port = self.destination
+            state.reason='staged_no_live_destination';return state.reason
+        # No attribute on a port can waive durable storage.
+        if not isinstance(self.ledger,DurableLedger):
+            state.reason='durable_storage_required';return state.reason
+        if not valid_binding(event):
+            state.reason='destination_binding_required';return state.reason
+        port=self.destination;needed=REQUIRED[kind]
         try:
-            existing = port.find_by_key(key)
-            if existing:
-                ids = verified(event, existing, port)
-                if ids:
-                    state.delivered = True
-                    state.destination_ids = ids
-                    state.reason = 'delivered_readback'
-                    return state.reason
-                state.reason = 'existing_destination_unverified'
-                state.attempted = True
-                return state.reason
-            if state.attempted:
-                state.reason = 'attempt_uncertain_recovery_only'
-                return state.reason
-            # Persist before sending. No write retry after timeout/unknown receipt.
-            state.attempted = True
-            self.ledger[key] = state
-            if not isinstance(self.ledger, DurableLedger) and not getattr(port, 'synthetic', False):
-                state.reason = 'durable_storage_required'
-                return state.reason
-            receipt = port.send(event, key)
-            ids = verified(event, receipt, port)
-            if not ids:
-                state.reason = 'destination_unverified'
-                return state.reason
-            state.delivered = True
-            state.destination_ids = ids
-            state.reason = 'delivered_readback'
+            existing=port.find_by_key(key) or {}
+            good=verified_components(event,existing,port)
+            state.destination_ids=good
+            if len(good)==len(needed):
+                state.delivered=True;state.reason='delivered_readback';return state.reason
+            state.delivered=False
+            # Only an authoritative, complete query scoped to source key and
+            # destination binding can certify a component absent. A found note
+            # does not establish that a missing task never landed.
+            absent=existing.get('authoritative_absent',[])
+            bound=existing.get('binding',{})
+            fields=PAYOUT_BINDING if kind=='commission_payout' else ('applicant_id',)
+            query_bound=(existing.get('source_key')==key and all(bound.get(f)==event.get(f) for f in fields))
+            for component in needed:
+                if component in good: continue
+                if component in (existing.get('ids') or {}):
+                    state.reason='existing_destination_unverified';return state.reason
+                if (event.get('legacy_uncertain') or (state.attempted and not state.attempted_components)):
+                    state.reason='attempt_uncertain_recovery_only';return state.reason
+                if component in state.attempted_components:
+                    state.reason='attempt_uncertain_recovery_only';return state.reason
+                if not query_bound or component not in absent:
+                    state.reason='component_absence_unverified';return state.reason
+                state.attempted_components.append(component);state.attempted=True
+                self.ledger[key]=state # commit before each component send
+                receipt=port.send_component(event,key,component)
+                current=verified_components(event,receipt,port)
+                if component not in current:
+                    state.reason='destination_unverified';return state.reason
+                good.update(current);state.destination_ids=dict(good)
+                self.ledger[key]=state
+            state.delivered=len(good)==len(needed)
+            state.reason='delivered_readback' if state.delivered else 'partial_delivery'
             return state.reason
         except Exception as exc:
-            state.reason = 'destination_error_' + type(exc).__name__
-            return state.reason
+            state.reason='destination_error_'+type(exc).__name__;return state.reason
 
 
 def paginate(get_page, path, page_size=50, max_pages=100):
