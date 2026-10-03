@@ -153,11 +153,13 @@ class _WorkerReassignPortAdapter:
     def reassign_task(
         self, task_id: str, new_assignee: str, note: str = ""
     ) -> dict[str, Any]:
+        attempted = False
         try:
             from .ezlynx_task_cdp import validate_identity
             validate_identity(task_id, self._task.applicant_id)
             if task_id != self._task.task_id:
                 raise ValueError("Foreign task identity; reassignment not sent")
+            attempted = True
             verified = self._reassigner.reassign(
                 task_id, self._task.applicant_id, new_assignee,
                 description=self._task.description,
@@ -167,7 +169,10 @@ class _WorkerReassignPortAdapter:
                 raise ValueError("No destination proof for reassignment")
             return {"ok": True, "sent": True, "verified_assignee": current}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "sent": False, "error": str(exc)[:300]}
+            return {"ok": False, "sent": None if attempted else False,
+                    "delivered": False,
+                    "delivery_status": "unverified" if attempted else "not_sent",
+                    "error": str(exc)[:300]}
 
     def read_task_assignee(self, task_id: str) -> str | None:
         try:
@@ -605,7 +610,7 @@ class TaskIntakeVerifier:
         latest = str(snapshot.get("most_recent_note_id") or "")
         expected: dict[str, Any] = {"note_id": note_id, "discussion_id": discussion_id}
         observed: dict[str, Any] = {
-            "note_id": latest,
+            "note_id": note_id if _contains_note_id(record, note_id) else latest,
             "discussion_id": discussion_id,
         }
 

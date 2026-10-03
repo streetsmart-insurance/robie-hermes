@@ -69,6 +69,8 @@ def test_relay_200_without_destination_proof_is_not_delivered():
     port.read_assignee.return_value = "Robie AI"
     result = _WorkerReassignPortAdapter(port, make_task()).reassign_task("63429523", "Carlo Ferrara")
     assert result["ok"] is False
+    assert result["sent"] is None
+    assert result["delivery_status"] == "unverified"
 
 
 class Locator:
