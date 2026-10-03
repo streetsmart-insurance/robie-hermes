@@ -29,7 +29,7 @@ import verification_workers as vw
 REPORTS = ["4247", "4246", "4372", "4359"]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--csv-dir", required=True,
                     help="directory holding report_<id>_<date>.csv files")
@@ -39,7 +39,7 @@ def main() -> int:
                     help="directory for digest + run logs")
     ap.add_argument("--mode", default="dry_run", choices=["dry_run", "live"])
     ap.add_argument("--date", default=date.today().isoformat())
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     day = date.fromisoformat(args.date)
     os.makedirs(args.out, exist_ok=True)
@@ -78,6 +78,10 @@ def main() -> int:
             "done": sum(1 for a in r.actions if a.status == "done"),
             "pending": sum(1 for a in r.actions if a.status == "pending"),
             "errors": r.errors,
+            "status_counts": {
+                status: sum(1 for a in r.actions if a.status == status)
+                for status in {a.status for a in r.actions}
+            },
         } for r in runs], f, indent=2)
     print(f"summary written to {summary_path}")
     return 0
