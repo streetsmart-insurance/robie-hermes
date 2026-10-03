@@ -104,7 +104,7 @@ def test_question_while_pending_preserves_bind_and_never_becomes_field_value(cha
     assert queue.active_conversation_job(SPACE)['job_id']==job['id']
     assert chat._chat_api.messages.calls
 
-@pytest.mark.parametrize('chat_type',['private','group'])
+@pytest.mark.parametrize('chat_type',['dm','group'])
 @pytest.mark.parametrize('foreign',['actor','thread','environment','missing_owner','bot'])
 def test_pending_input_cannot_resume_or_rebind_foreign_owner(chat,foreign,chat_type):
     store,job,queue=parked(chat)
