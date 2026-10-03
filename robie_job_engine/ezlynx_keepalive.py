@@ -1,9 +1,20 @@
 """Lease-gated EZLynx keepalive for Production and Test.
 
 One implementation, two host profiles (``ROBIE_ENV=PRODUCTION`` or ``TEST``).
-The timer lightly reloads the existing EZLynx tab so an idle SSRobie session
-does not expire. It never logs in, never closes tabs, and never posts to
-Chat. A logged-out browser is logged and left for a human (Moe) to re-auth.
+Each tick refreshes the SSRobie server session: a credentialed no-store GET of
+the dashboard from a tab already on ``https://app.ezlynx.com``, or a
+same-origin document navigation onto that dashboard when the tab is
+elsewhere. A CDP ``/json/list`` read does not slide the idle timer, and
+``page.reload`` can be served from cache, so neither is the refresh.
+
+Prod EZLynx signed out twice on 2026-10-03 ET after light use. The hourly
+preflight (tab read only) saw the login page at 13:00, 14:00, 15:00, and
+17:00, and a live tab at 12:00 and 16:00. Each drop was inside a ~60 minute
+idle window. The timer is 15 minutes (1 minute accuracy). One skipped tick
+still leaves about 32 minutes of idle, inside that window.
+
+The tick never logs in, never closes tabs, and never posts to Chat. A
+logged-out browser is logged and left for a human (Moe) to re-auth.
 
 The run is skipped unless this VM's driver gate is ALLOWED, and skipped when
 a Job holds the browser, a lease, or the local session lock.
@@ -20,6 +31,7 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .ezlynx_driver_gate import DriverDecision, check_driver_gate
 from .ezlynx_session import (
@@ -40,6 +52,13 @@ from .session_preflight import (
 )
 
 DASHBOARD_URL = "https://app.ezlynx.com/web/dashboard"
+SESSION_REFRESH_URL = DASHBOARD_URL
+EZLYNX_APP_ORIGIN = "https://app.ezlynx.com"
+# Prod dropped inside ~60 idle minutes on 2026-10-03. Stay at or under 20,
+# and keep one missed tick plus timer accuracy inside that window.
+KEEPALIVE_INTERVAL_MINUTES = 15
+TIMER_ACCURACY_MINUTES = 1
+OBSERVED_IDLE_SIGNOUT_MINUTES = 60
 ROOTS = {
     "PRODUCTION": "/opt/streetsmart-hermes",
     "TEST": "/opt/streetsmart-hermes-test",
@@ -62,6 +81,267 @@ LOGGED_OUT_HINT = (
     "EZLynx session is logged out. Keepalive did not log in and did not "
     "close tabs. Re-login is a deliberate human/Moe step."
 )
+
+# In-page GET. credentials:include sends the EZLynx session cookie;
+# cache:no-store stops the browser from answering without a server hit.
+SAME_ORIGIN_GET = """async (url) => {
+  const response = await fetch(url, {
+    method: "GET",
+    credentials: "include",
+    cache: "no-store",
+    redirect: "follow",
+  });
+  return { status: response.status, url: response.url };
+}"""
+
+
+def worst_idle_gap_minutes(
+    interval_minutes: int = KEEPALIVE_INTERVAL_MINUTES,
+    accuracy_minutes: int = TIMER_ACCURACY_MINUTES,
+) -> int:
+    """Idle minutes if one tick is skipped and both firings wait out accuracy.
+
+    systemd schedules the next tick ``OnUnitActiveSec`` after the previous
+    activation, and ``AccuracySec`` may delay it. Skipping one tick (a busy
+    lease, or a missed firing) leaves two intervals plus accuracy on each.
+    """
+    return (int(interval_minutes) + int(accuracy_minutes)) * 2
+
+
+def _is_login_url(url: str) -> bool:
+    folded = (url or "").casefold()
+    return "/auth/account/login" in folded or "/auth/account/logout" in folded
+
+
+def _is_app_origin(url: str) -> bool:
+    parts = urlsplit(url or "")
+    origin = urlsplit(EZLYNX_APP_ORIGIN)
+    return (
+        parts.scheme.casefold() == origin.scheme.casefold()
+        and parts.netloc.casefold() == origin.netloc.casefold()
+    )
+
+
+def _http_status(value: object) -> int | None:
+    try:
+        status = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if status < 0:
+        return None
+    return status
+
+
+def plan_session_refresh(
+    page_url: str,
+    refresh_url: str = SESSION_REFRESH_URL,
+) -> dict[str, Any]:
+    """Pick a read that reaches EZLynx, not a CDP tab-list check.
+
+    A page already on ``https://app.ezlynx.com`` gets an in-page GET so the
+    visible tab stays put and the session cookie is sent. Any other tab
+    (``about:blank``, another site) is navigated to the dashboard: a fetch
+    from a foreign origin would be cross-origin and may not send the cookie.
+    A login URL is left alone.
+    """
+    if _is_login_url(page_url):
+        return {
+            "method": "none",
+            "reason": "already_logged_out",
+            "refresh_url": "",
+            "credentials": "",
+            "cache": "",
+        }
+    if _is_app_origin(page_url):
+        return {
+            "method": "same-origin-get",
+            "reason": "credentialed_xhr",
+            "refresh_url": refresh_url,
+            "credentials": "include",
+            "cache": "no-store",
+        }
+    return {
+        "method": "same-origin-navigation",
+        "reason": "document_navigation",
+        "refresh_url": refresh_url,
+        "credentials": "include",
+        "cache": "no-store",
+    }
+
+
+def interpret_session_refresh(
+    plan: dict[str, Any],
+    *,
+    status: int | None,
+    final_url: str,
+    error: str = "",
+) -> dict[str, Any]:
+    """Turn a GET result into a keepalive verdict. Never a login."""
+    method = str(plan.get("method") or "none")
+    report: dict[str, Any] = {
+        "ok": False,
+        "reason": "",
+        "refresh_method": method,
+        "refresh_url": str(plan.get("refresh_url") or ""),
+        "refresh_status": status,
+        "final_url": final_url,
+        "logged_out": False,
+        "interactive": False,
+        "closed_tabs": 0,
+        "created_page": False,
+        "logged_in": False,
+    }
+    if method == "none":
+        report["reason"] = "already_logged_out"
+        report["logged_out"] = True
+        return report
+    if error:
+        report["reason"] = error
+        return report
+    if _is_login_url(final_url):
+        report["reason"] = "logged_out"
+        report["logged_out"] = True
+        return report
+    if status is not None and status >= 400:
+        report["reason"] = f"http_{status}"
+        return report
+    if (
+        status is not None
+        and 200 <= status < 300
+        and "/web/" in (final_url or "").casefold()
+    ):
+        report["ok"] = True
+        report["reason"] = "session_refreshed"
+        return report
+    report["reason"] = "unconfirmed"
+    return report
+
+
+def _refresh_report(**extra: Any) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "ok": False,
+        "reason": "",
+        "refresh_method": "",
+        "refresh_url": "",
+        "refresh_status": None,
+        "final_url": "",
+        "logged_out": False,
+        "interactive": False,
+        "closed_tabs": 0,
+        "created_page": False,
+        "logged_in": False,
+    }
+    report.update(extra)
+    return report
+
+
+def _navigate_and_classify(
+    page: Any,
+    plan: dict[str, Any],
+    *,
+    attempts: int,
+    delay_seconds: float,
+    sleeper: Callable[[float], None] | None,
+) -> dict[str, Any]:
+    """Document GET of the dashboard. Read-only: no form fill, no new tab."""
+    refresh_url = str(plan.get("refresh_url") or SESSION_REFRESH_URL)
+    status: int | None = None
+    try:
+        response = page.goto(refresh_url, wait_until="domcontentloaded", timeout=20_000)
+        status = _http_status(getattr(response, "status", None))
+    except Exception as exc:  # noqa: BLE001 — caller records the tick, no traceback
+        return _refresh_report(
+            reason=f"{type(exc).__name__}: {exc}",
+            refresh_method="same-origin-navigation",
+            refresh_url=refresh_url,
+            final_url=str(getattr(page, "url", "") or ""),
+        )
+    state = wait_for_settled_session(
+        lambda: read_playwright_snapshot(page),
+        attempts=attempts,
+        delay_seconds=delay_seconds,
+        sleeper=sleeper,
+    )
+    final_url = str(getattr(page, "url", "") or "")
+    logged_out = state is SessionState.LOGIN_REQUIRED or _is_login_url(final_url)
+    interactive = state is SessionState.INTERACTIVE_AUTH_REQUIRED
+    ok = state is SessionState.SIGNED_IN and not logged_out and not interactive
+    if logged_out:
+        reason = "logged_out"
+    elif interactive:
+        reason = "interactive_auth"
+    elif ok:
+        reason = "session_refreshed"
+    else:
+        reason = "unconfirmed"
+    return _refresh_report(
+        ok=ok,
+        reason=reason,
+        refresh_method="same-origin-navigation",
+        refresh_url=refresh_url,
+        refresh_status=status,
+        final_url=final_url,
+        logged_out=logged_out and not interactive,
+        interactive=interactive,
+        state=state.value,
+    )
+
+
+def apply_session_refresh(
+    page: Any,
+    *,
+    refresh_url: str = SESSION_REFRESH_URL,
+    attempts: int = NAVIGATION_SETTLE_ATTEMPTS,
+    delay_seconds: float = NAVIGATION_SETTLE_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    """Refresh one existing page. Does not create, close, or log in."""
+    current = str(getattr(page, "url", "") or "")
+    plan = plan_session_refresh(current, refresh_url)
+    if plan["method"] == "none":
+        return _refresh_report(
+            reason="already_logged_out",
+            refresh_method="none",
+            final_url=current,
+            logged_out=True,
+        )
+    if plan["method"] == "same-origin-get":
+        fetched: Any = None
+        get_error = ""
+        try:
+            fetched = page.evaluate(SAME_ORIGIN_GET, plan["refresh_url"])
+        except Exception as exc:  # noqa: BLE001
+            get_error = f"{type(exc).__name__}: {exc}"
+        if not get_error:
+            if not isinstance(fetched, dict):
+                get_error = "fetch_result_unusable"
+            else:
+                interpreted = interpret_session_refresh(
+                    plan,
+                    status=_http_status(fetched.get("status")),
+                    final_url=str(fetched.get("url") or ""),
+                )
+                if interpreted["ok"] or interpreted["logged_out"]:
+                    return interpreted
+                get_error = str(interpreted.get("reason") or "unconfirmed")
+        navigated = _navigate_and_classify(
+            page,
+            {**plan, "method": "same-origin-navigation"},
+            attempts=attempts,
+            delay_seconds=delay_seconds,
+            sleeper=sleeper,
+        )
+        navigated["fallback_from"] = "same-origin-get"
+        if not navigated.get("ok") and not navigated.get("logged_out"):
+            navigated["get_error"] = get_error
+        return navigated
+    return _navigate_and_classify(
+        page,
+        plan,
+        attempts=attempts,
+        delay_seconds=delay_seconds,
+        sleeper=sleeper,
+    )
 
 
 def normalize_profile(name: str | None = None) -> str:
@@ -206,10 +486,11 @@ def touch_existing_page(
     delay_seconds: float = NAVIGATION_SETTLE_DELAY_SECONDS,
     sleeper: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
-    """Reload or open the dashboard on a tab that already exists.
+    """Refresh the server session on a tab that already exists.
 
     Does not create a tab, does not close a tab, and does not type credentials.
-    Disconnects CDP when finished; Chrome keeps the page.
+    Disconnects CDP when finished; Chrome keeps the page. The CDP tab list is
+    only used to find the page — the refresh is ``apply_session_refresh``.
     """
     from playwright.sync_api import sync_playwright
 
@@ -218,54 +499,18 @@ def touch_existing_page(
         browser = playwright.chromium.connect_over_cdp(cdp_url, timeout=15_000)
         pages = [page for context in browser.contexts for page in context.pages]
         if not pages:
-            return {
-                "ok": False,
-                "reason": "no_page",
-                "logged_out": False,
-                "closed_tabs": 0,
-                "created_page": False,
-            }
+            return _refresh_report(reason="no_page")
         ezlynx_pages = [page for page in pages if "ezlynx.com" in str(page.url or "").casefold()]
         page = (ezlynx_pages or pages)[0]
-        current = str(page.url or "")
-        folded = current.casefold()
-        if "/auth/account/login" in folded or "/auth/account/logout" in folded:
-            return {
-                "ok": False,
-                "reason": "already_logged_out",
-                "final_url": current,
-                "logged_out": True,
-                "closed_tabs": 0,
-                "created_page": False,
-            }
-        if "/web/" in folded:
-            page.reload(wait_until="domcontentloaded", timeout=20_000)
-        else:
-            page.goto(dashboard_url, wait_until="domcontentloaded", timeout=20_000)
-        state = wait_for_settled_session(
-            lambda: read_playwright_snapshot(page),
+        return apply_session_refresh(
+            page,
+            refresh_url=dashboard_url,
             attempts=attempts,
             delay_seconds=delay_seconds,
             sleeper=sleeper,
         )
-        final_url = str(page.url or "")
-        return {
-            "ok": state is SessionState.SIGNED_IN,
-            "final_url": final_url,
-            "state": state.value,
-            "logged_out": state is SessionState.LOGIN_REQUIRED,
-            "interactive": state is SessionState.INTERACTIVE_AUTH_REQUIRED,
-            "closed_tabs": 0,
-            "created_page": False,
-        }
     except Exception as exc:  # noqa: BLE001 — a timer tick must not traceback
-        return {
-            "ok": False,
-            "reason": f"{type(exc).__name__}: {exc}",
-            "logged_out": False,
-            "closed_tabs": 0,
-            "created_page": False,
-        }
+        return _refresh_report(reason=f"{type(exc).__name__}: {exc}")
     finally:
         try:
             playwright.stop()
