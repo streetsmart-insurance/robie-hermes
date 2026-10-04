@@ -601,7 +601,7 @@ def test_in_run_dedupe_collapses_same_event_without_a_second_note_read(no_zap_fi
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )
     summary = driver.run_driver(ctx)
@@ -624,6 +624,49 @@ def test_in_run_dedupe_collapses_same_event_without_a_second_note_read(no_zap_fi
     assert ctx.source.marked == []
 
 
+def test_in_run_dedupe_collapses_identical_rendered_notes_without_dates(no_zap_fire):
+    subject = "Payment failed for Shoreline Builders LLC"
+    first = make_notice(
+        subject=subject,
+        body=(
+            "Hi Mike,\n"
+            "We couldn't process your payment of $152.03 this morning.\n"
+            "Policy ID GL-112233\n"
+            "Customer Shoreline Builders LLC\n"
+        ),
+        message_id="pay-1",
+    )
+    second = make_notice(
+        subject=subject,
+        body=(
+            "Hello from accounting.\n"
+            "The payment failed. See the amount on the next line.\n"
+            "payment of $152.03\n"
+            "Policy ID GL-112233\n"
+            "Customer Shoreline Builders LLC\n"
+            "Please call the office when you can.\n"
+        ),
+        message_id="pay-2",
+        mailbox="mike@streetsmart.insurance",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[first, second],
+        policy_rows={"GL-112233": [policy_row(number="GL-112233")]},
+        discussion_rows=[{"discussionId": "d-gl", "title": "GL-112233"}],
+        ascend_client=FakeAscendClient(program={"status": "past_due"}),
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["would_file_count"] == 1
+    assert summary["duplicate_in_run"] == 1
+    assert [item["reason"] for item in summary["results"]] == ["ok", "duplicate_in_run"]
+    note = summary["results"][0]["detail"]["note_text"]
+    assert "payment failed: $152.03" in note
+    assert note.endswith("Robie was here")
+    assert summary["duplicate_in_run_notices"][0]["gmail_message_id"] == "pay-2"
+    assert len(discussion_client._urlopen.discussion_detail_gets()) == 1
+    assert discussion_client._urlopen.posts_to("/notes") == []
+
+
 def test_in_run_dedupe_keeps_a_different_due_date(no_zap_fire):
     first = _intent_notice(_INTENT_BODY, message_id="m1")
     other = _intent_notice(
@@ -638,7 +681,7 @@ def test_in_run_dedupe_keeps_a_different_due_date(no_zap_fire):
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )
     summary = driver.run_driver(ctx)
@@ -656,7 +699,7 @@ def test_existing_note_duplicate_is_not_filed(no_zap_fire):
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
         discussion_detail={
             "discussionId": "d-noc",
             "notes": [{"noteId": "n-already", "body": signed}],
@@ -901,18 +944,27 @@ def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
     rows = [
         {
             "discussionId": "d-old",
-            "title": "Premium finance",
+            "title": "Premium finance 09/23/2026",
             "updatedAt": "2026-02-01T00:00:00Z",
         },
         {
             "discussionId": "d-new",
-            "title": "Ascend NOC",
+            "title": "Ascend NOC 09/23/2026",
             "updatedAt": "2026-08-01T00:00:00Z",
+        },
+        {
+            "discussionId": "d-undated",
+            "title": "Ascend NOC",
+            "updatedAt": "2026-12-01T00:00:00Z",
         },
         {"discussionId": "d-other", "title": "Certificates", "applicantId": "999"},
     ]
     ctx, _ = make_ctx(
-        notices=[make_notice()],
+        notices=[
+            make_notice(
+                body=CANCELLATION_BODY + "The loan has been canceled effective 09/23/2026.\n"
+            )
+        ],
         policy_rows={"HO-998877": [policy_row()]},
         discussion_rows=rows,
     )
@@ -920,8 +972,104 @@ def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
     result = summary["results"][0]
     assert result["status"] == "dry_run"
     assert result["detail"]["discussion_id"] == "d-new"
-    assert result["detail"]["discussion_title"] == "Ascend NOC"
-    assert summary["would_file"][0]["discussion_title"] == "Ascend NOC"
+    assert result["detail"]["discussion_title"] == "Ascend NOC 09/23/2026"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend NOC 09/23/2026"
+
+
+def test_fallback_keeps_220111302_when_title_cancel_date_matches(no_zap_fire, monkeypatch):
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({"220111302"}),
+    )
+    notice = make_notice(
+        subject=(
+            "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
+            "Policy(s) at risk for cancellation"
+        ),
+        body=(
+            "Your loan payment of $525.30 was due on 09/21/2026. "
+            "Failure to pay will result in the cancelation of your coverage on 10/14/2026.\n"
+            "Policy ID DSLA97258206-00\n"
+            "Effective date 08/21/2026\n"
+        ),
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={
+            "DSLA97258206-00": [
+                {"policyNumber": "DSLA97258206", "accountId": "220111302"}
+            ]
+        },
+        discussion_rows=[
+            {
+                "discussionId": "d-wrong",
+                "title": "Ascend Past Due Date: 09/06/2026",
+                "updatedAt": "2026-12-01T00:00:00Z",
+            },
+            {
+                "discussionId": "d-plain",
+                "title": "Premium finance",
+                "updatedAt": "2026-11-01T00:00:00Z",
+            },
+            {
+                "discussionId": "d-match",
+                "title": "Ascend cancel date 10/14/2026",
+                "updatedAt": "2026-08-01T00:00:00Z",
+            },
+        ],
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["applicant_id"] == "220111302"
+    assert result["detail"]["discussion_id"] == "d-match"
+    assert result["detail"]["discussion_title"] == "Ascend cancel date 10/14/2026"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend cancel date 10/14/2026"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_fallback_refuses_175448994_when_title_date_does_not_match(no_zap_fire):
+    notice = make_notice(
+        subject=(
+            "The coverage policy for Fixture Insured has been canceled due to non-payment"
+        ),
+        body=(
+            "Fixture Insured canceled for non-payment and the loan has been "
+            "canceled effective 09/23/2026.\n"
+            "Policy ID CPS6534227\n"
+            "Effective date 01/06/2026\n"
+            "Insured: Fixture Insured\n"
+        ),
+    )
+    title = "Ascend Past Due Date: 09/06/2026"
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={
+            "CPS6534227": [{"policyNumber": "CPS6534227", "accountId": "175448994"}]
+        },
+        discussion_rows=[
+            {
+                "discussionId": "d-past",
+                "title": title,
+                "updatedAt": "2026-12-01T00:00:00Z",
+            },
+            {
+                "discussionId": "d-plain",
+                "title": "Premium finance",
+                "updatedAt": "2026-11-01T00:00:00Z",
+            },
+        ],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert "Past Due Date: 09/06/2026" in title
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no matching discussion"
+    assert result["detail"]["needs_human_review"] is True
+    assert result["detail"]["applicant_id"] == "175448994"
+    assert summary["would_file"] == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
 
 
 def test_other_applicants_rows_do_not_win_the_policy_title(no_zap_fire):
@@ -934,19 +1082,23 @@ def test_other_applicants_rows_do_not_win_the_policy_title(no_zap_fire):
         },
         {
             "discussionId": "d-ours",
-            "title": "Ascend",
+            "title": "Ascend 09/23/2026",
             "applicantId": ALLOWED_APPLICANT,
             "updatedAt": "2026-01-01T00:00:00Z",
         },
     ]
     ctx, _ = make_ctx(
-        notices=[make_notice()],
+        notices=[
+            make_notice(
+                body=CANCELLATION_BODY + "The loan has been canceled effective 09/23/2026.\n"
+            )
+        ],
         policy_rows={"HO-998877": [policy_row()]},
         discussion_rows=rows,
     )
     summary = driver.run_driver(ctx)
     assert summary["results"][0]["detail"]["discussion_id"] == "d-ours"
-    assert summary["would_file"][0]["discussion_title"] == "Ascend"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend 09/23/2026"
 
 
 def test_discussion_base_url_is_host_only():
@@ -1410,7 +1562,8 @@ def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire):
         ),
         body=(
             "Please see the attached Notice of Intent to Cancel document. "
-            "Failure to pay will result in the cancelation of your coverage.\n"
+            "Your loan payment of $525.30 was due on 09/21/2026. "
+            "Failure to pay will result in the cancelation of your coverage on 10/14/2026.\n"
             "Policy ID ABC123-00\nEffective date 01/01/2026\n"
         ),
     )
@@ -1421,7 +1574,7 @@ def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire):
         },
         discussion_rows=[
             {"discussionId": "d-can", "title": "Service-Cancellation"},
-            {"discussionId": "d-noc", "title": "Ascend NOC"},
+            {"discussionId": "d-noc", "title": "Ascend NOC 10/14/2026"},
         ],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )

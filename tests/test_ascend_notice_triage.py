@@ -105,6 +105,30 @@ def test_extract_policy_numbers_deduped():
     assert triage.extract_policy_numbers(body) == ["MXL0446256", "MGL0200092"]
 
 
+def test_insured_name_line_does_not_add_a_period():
+    assert triage.insured_name_line("Shoreline Builders LLC") == "Shoreline Builders LLC"
+    assert triage.insured_name_line("Shoreline Builders LLC.") == "Shoreline Builders LLC."
+    assert triage.insured_name_line("Acme Transport Inc") == "Acme Transport Inc"
+    assert triage.insured_name_line("Acme Transport Inc.") == "Acme Transport Inc."
+    assert triage.build_staff_note(
+        triage.LATE_PAYMENT,
+        "Past due payment for Shoreline Builders LLC.",
+        "Past-due payment of $10.00 which was due on 09/11/2026.\nPolicy ID ABC12345\n",
+        ["ABC12345"],
+        "Shoreline Builders LLC.",
+    ).endswith("Shoreline Builders LLC.")
+    note = triage.build_staff_note(
+        triage.LATE_PAYMENT,
+        "Past due payment for Acme Transport Inc",
+        "Past-due payment of $10.00 which was due on 09/11/2026.\nPolicy ID ABC12345\n",
+        ["ABC12345"],
+        "Acme Transport Inc",
+    )
+    assert note.endswith("Acme Transport Inc")
+    assert not note.endswith("Acme Transport Inc.")
+    assert "Robie was here" not in note
+
+
 def test_extract_insured_name_from_subject():
     assert (
         triage.extract_insured_name("Past due payment for Shoreline Builders LLC", "")
@@ -209,7 +233,7 @@ def test_triage_late_payment_resolves_by_uuid():
     assert result["note_text"] == (
         "LATE PAYMENT notice from Ascend. "
         "Policy MXL0446256 is past due: $3,528.22 was due 09/11/2026.\n"
-        "Shoreline Builders LLC."
+        "Shoreline Builders LLC"
     )
     assert "past_due" not in result["note_text"]
     assert "Email subject:" not in result["note_text"]

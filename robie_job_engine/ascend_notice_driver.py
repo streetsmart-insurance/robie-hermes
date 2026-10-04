@@ -141,6 +141,11 @@ _TERM_SUFFIX_RE = re.compile(r"-\d{1,2}$")
 _LOB_SUFFIX_RE = re.compile(r"\s+[A-Z]{2,4}\s*$")
 
 _NOTICE_DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
+_PAST_DUE_DATE_RE = re.compile(
+    r"past[- ]due date\s*:?\s*(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_TITLE_DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
 _EFFECTIVE_DATE_PREFIX_RE = re.compile(r"effective\s*date\s*$", re.IGNORECASE)
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
@@ -802,12 +807,29 @@ def normalize_notice_body(body: str) -> str:
     return " ".join(cleaned.casefold().split())
 
 
+def notice_event_dates(subject: str, body: str) -> frozenset[str]:
+    """Cancel, due, and past-due dates in a notice. Policy effective dates stay out."""
+    text = f"{subject or ''}\n{body or ''}"
+    found: set[str] = set()
+    for value in (
+        triage.cancel_effective_date(text),
+        triage._due_on_date(text),
+        triage._future_cancel_date(text),
+    ):
+        if value:
+            found.add(value)
+    for match in _PAST_DUE_DATE_RE.finditer(text):
+        found.add(match.group(1))
+    return frozenset(found)
+
+
 def notice_event_key(
     *,
     applicant_id: str,
     policy_number: str,
     notice_type: str,
     body: str,
+    note_text: str = "",
 ) -> dict[str, Any]:
     """Identity for collapsing repeated notices inside one driver run."""
     return {
@@ -816,6 +838,8 @@ def notice_event_key(
         "notice_type": str(notice_type or "").strip(),
         "dates": tuple(sorted(due_or_cancel_dates(body))),
         "body": normalize_notice_body(body),
+        "note_text": str(note_text or "").strip(),
+        "discussion_id": "",
     }
 
 
@@ -825,9 +849,22 @@ def same_notice_event(kept: dict[str, Any], candidate: dict[str, Any]) -> bool:
     Same applicant, policy, and notice type, plus the same due/cancel
     date or the same normalized body. A date match requires both sides
     to have extracted a date, so two undated different bodies stay apart.
+    The same rendered note on one discussion for one applicant is also
+    one event, even when the emails have no dates.
     """
     if str(kept.get("applicant_id") or "") != str(candidate.get("applicant_id") or ""):
         return False
+    kept_discussion = str(kept.get("discussion_id") or "")
+    candidate_discussion = str(candidate.get("discussion_id") or "")
+    kept_note = str(kept.get("note_text") or "")
+    candidate_note = str(candidate.get("note_text") or "")
+    if (
+        kept_discussion
+        and kept_discussion == candidate_discussion
+        and kept_note
+        and kept_note == candidate_note
+    ):
+        return True
     if str(kept.get("policy") or "") != str(candidate.get("policy") or ""):
         return False
     if str(kept.get("notice_type") or "") != str(candidate.get("notice_type") or ""):
@@ -928,15 +965,36 @@ def _discussion_recency(row: dict[str, Any]) -> tuple[int, float, str]:
     return (0, 0.0, discussion_id)
 
 
+def _title_dates(title: str) -> set[str]:
+    return set(_TITLE_DATE_RE.findall(str(title or "")))
+
+
+def _finance_title_matches_notice(title: str, event_dates: frozenset[str]) -> bool:
+    """An Ascend or premium-finance fallback needs a matching notice date.
+
+    The date in the title has to be the notice's cancel date, due date, or
+    past-due date. An undated finance title does not qualify.
+    """
+    if not _title_is_finance(title):
+        return False
+    if not event_dates:
+        return False
+    return bool(_title_dates(title) & set(event_dates))
+
+
 def select_notice_discussion(
-    rows: list[dict[str, Any]] | None, policy_number: str
+    rows: list[dict[str, Any]] | None,
+    policy_number: str,
+    *,
+    event_dates: frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """Pick one existing titled discussion. Never an untitled card.
 
     Prefer a title that contains the normalized policy number (a trailing
     `` APD``-style suffix already removed). Several policy matches: the most
-    recently updated one. Otherwise the newest titled discussion whose title
-    mentions Ascend or premium finance. Nothing else qualifies.
+    recently updated one. Otherwise the newest titled Ascend or
+    premium-finance discussion whose title contains a cancel, due, or
+    past-due date from the notice. Nothing else qualifies.
     """
     titled = [
         row
@@ -950,14 +1008,17 @@ def select_notice_discussion(
         for row in titled
         if _title_has_policy(discussions.discussion_title_of(row), policy_number)
     ]
-    pool = policy_hits or [
+    if policy_hits:
+        return max(policy_hits, key=_discussion_recency)
+    dates = event_dates or frozenset()
+    finance_hits = [
         row
         for row in titled
-        if _title_is_finance(discussions.discussion_title_of(row))
+        if _finance_title_matches_notice(discussions.discussion_title_of(row), dates)
     ]
-    if not pool:
+    if not finance_hits:
         return None
-    return max(pool, key=_discussion_recency)
+    return max(finance_hits, key=_discussion_recency)
 
 
 def _read_existing_note(
@@ -1206,6 +1267,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         policy_number=resolution.policy_number,
         notice_type=notice_type,
         body=notice.body,
+        note_text=note_text,
     )
     if any(same_notice_event(kept, event) for kept in ctx.seen_notice_events):
         result.reason = "duplicate_in_run"
@@ -1214,8 +1276,9 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     ctx.seen_notice_events.append(event)
 
     # One GET of this applicant's discussions. The query is the same
-    # by-applicant?applicantId= call the other readers use. Selection is
-    # local: policy number in the title, else Ascend or premium finance.
+    # by-applicant?applicantId= call the other readers use. A policy title
+    # wins. An Ascend or premium-finance title wins only when it carries a
+    # cancel, due, or past-due date from this notice.
     try:
         listed = ctx.discussion_client.get_discussions(resolution.applicant_id)
     except Exception as exc:  # noqa: BLE001 - fail closed, do not write
@@ -1224,6 +1287,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     chosen = select_notice_discussion(
         discussions_for_applicant(listed, resolution.applicant_id),
         resolution.policy_number,
+        event_dates=notice_event_dates(notice.subject, notice.body),
     )
     if chosen is None:
         result.reason = "no matching discussion"
@@ -1232,6 +1296,16 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     chosen_id = discussions.discussion_id_of(chosen)
     result.detail["discussion_id"] = chosen_id
     result.detail["discussion_title"] = discussions.discussion_title_of(chosen)
+    event["discussion_id"] = chosen_id
+    # Same rendered note, same applicant, same discussion: one filing.
+    # Undated emails with different bodies still collapse here.
+    if any(
+        kept is not event and same_notice_event(kept, event)
+        for kept in ctx.seen_notice_events
+    ):
+        result.reason = "duplicate_in_run"
+        result.detail["duplicate_in_run"] = True
+        return result
 
     # Existing-note check is a read, including when write scope will refuse.
     # A matching note is not filed again. A failed read does not invent a match.

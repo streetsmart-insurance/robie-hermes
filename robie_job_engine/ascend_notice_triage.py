@@ -525,6 +525,15 @@ def _notice_detail(
     return "A person needs to read this message."
 
 
+def insured_name_line(name: str | None) -> str:
+    """The insured on its own line, with no period added.
+
+    A name that already ends in ``LLC.`` or ``Inc.`` keeps that one period.
+    A name that does not end in a period stays that way.
+    """
+    return str(name or "").strip()
+
+
 def build_staff_note(
     notice_type: str,
     subject: str,
@@ -550,7 +559,7 @@ def build_staff_note(
     insured = str(insured_name or "").strip()
     # A list mail names several insureds. One name on the next line would be wrong.
     if insured and notice_type != POTENTIAL_POLICIES:
-        lines.append(f"{insured}.")
+        lines.append(insured_name_line(insured))
     return "\n".join(lines)
 
 
