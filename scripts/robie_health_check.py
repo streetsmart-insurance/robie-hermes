@@ -37,6 +37,13 @@ Secret values are never logged — names and statuses only.
 Usage (on hermes-poc-01):
   python3 robie_health_check.py [--status-dir /tmp/robie-health] [--no-chat]
 
+Test (hermes-test-01) uses the same script with a Test profile. Prod-only
+phone, EOD, 4359, and Chat-intake probes are skipped. Test units and paths
+are checked instead. Unset ROBIE_ENV stays the Production list.
+
+  ROBIE_ENV=TEST python3 robie_health_check.py --no-chat
+  python3 robie_health_check.py --profile TEST --no-chat
+
 Cron (hourly, quiet on success):
   0 * * * * /usr/bin/python3 /opt/streetsmart-hermes/scripts/robie_health_check.py >> /var/log/robie-health.log 2>&1
 """
@@ -70,9 +77,113 @@ STUCK_LEASE_SECONDS = 3600
 # /tmp usage percent that triggers a warning.
 TMP_WARN_PCT = 85
 
+# Used only when no release tree and no environment override are visible.
+# The Production cron copy at /opt/streetsmart-hermes/scripts/ still resolves
+# to this path through the releases/current directory beside that prefix.
+_PROD_RELEASE_FALLBACK = "/opt/streetsmart-hermes/releases/current"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _contains_job_engine(path: str) -> bool:
+    return os.path.isdir(os.path.join(path, "robie_job_engine"))
+
+
+def release_import_root(script_file: str | None = None) -> str:
+    """Directory to prepend before importing ``robie_job_engine``.
+
+    The health check ships inside the release it should import:
+
+    * ``ROBIE_CANONICAL_JOB_ENGINE_ROOT`` wins when the systemd unit sets it.
+    * Otherwise the parent of this file's ``scripts/`` directory, when that
+      directory contains the package (the release tree, Test or Production).
+    * Otherwise ``<prefix>/releases/current`` when this file is the cron copy
+      at ``<prefix>/scripts/``. On Production that prefix is
+      ``/opt/streetsmart-hermes``, so the import root stays the historical path.
+    * Otherwise the first ``PYTHONPATH`` entry that contains the package.
+      The Test gateway drop-in lists ``.gateway-runtime`` ahead of the release;
+      the runtime directory is skipped.
+    * Otherwise the historical Production pointer, so a cron run that cannot
+      see a release tree still imports what it imports today.
+    """
+    override = os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT", "").strip()
+    if override:
+        return override
+
+    script = os.path.abspath(script_file or __file__)
+    scripts_dir = os.path.dirname(script)
+    shipped = os.path.dirname(scripts_dir)
+    if _contains_job_engine(shipped):
+        return shipped
+
+    cron_release = os.path.join(shipped, "releases", "current")
+    if _contains_job_engine(cron_release):
+        return cron_release
+
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        entry = entry.strip()
+        if not entry:
+            continue
+        candidate = entry if os.path.isabs(entry) else os.path.abspath(entry)
+        if _contains_job_engine(candidate):
+            return candidate
+
+    return _PROD_RELEASE_FALLBACK
+
+
+def _prepend_release_import() -> str:
+    root = release_import_root()
+    sys.path.insert(0, root)
+    return root
+
+
+# Test profile roots. Production checks keep the historical paths above.
+TEST_ROOT = "/opt/streetsmart-hermes-test"
+TEST_RELEASE_ROOT = TEST_ROOT + "/releases/current"
+TEST_JOBS_DB = TEST_ROOT + "/robie-job-engine/data/jobs.db"
+TEST_GATEWAY_UNIT = "robie-gateway.service"
+TEST_BROWSER_UNIT = "robie-ezlynx-browser-test.service"
+TEST_KEEPALIVE_TIMER = "robie-ezlynx-keepalive-test.timer"
+TEST_KEEPALIVE_SERVICE = "robie-ezlynx-keepalive-test.service"
+TEST_ERROR_SCAN_SERVICES = (
+    "robie-gateway.service",
+    "robie-ezlynx-browser-test.service",
+    "robie-ezlynx-keepalive-test.service",
+)
+
+
+# Set for the duration of execute() so probes see --profile even when
+# ROBIE_ENV is unset. None means "follow the environment".
+_REQUESTED_PROFILE: str | None = None
+
+
+def resolve_health_profile(explicit: str | None = None) -> str:
+    """PRODUCTION unless --profile or ROBIE_ENV selects TEST.
+
+    An unset environment stays Production so the existing cron is unchanged.
+    """
+    if explicit:
+        token = explicit
+    elif _REQUESTED_PROFILE:
+        token = _REQUESTED_PROFILE
+    else:
+        token = os.environ.get("ROBIE_ENV", "")
+    if str(token or "").strip().upper() == "TEST":
+        return "TEST"
+    return "PRODUCTION"
+
+
+def _code_version_import_root() -> str:
+    """Production uses the script's release. Test prefers the Test pointer."""
+    if (
+        resolve_health_profile() == "TEST"
+        and _contains_job_engine(TEST_RELEASE_ROOT)
+    ):
+        sys.path.insert(0, TEST_RELEASE_ROOT)
+        return TEST_RELEASE_ROOT
+    return _prepend_release_import()
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +218,8 @@ def check_code_version() -> tuple[bool, str, dict]:
     try:
         # NOTE 2026-09-27: was "releases/current/robie-main2" which does not
         # exist — the import always failed. The package lives directly under
-        # releases/current.
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        # the release root this script shipped in.
+        link = _code_version_import_root()
         from robie_job_engine.ezlynx_policy_setup import CODE_VERSION
         extra["loaded_version"] = CODE_VERSION
     except Exception as exc:
@@ -116,7 +227,6 @@ def check_code_version() -> tuple[bool, str, dict]:
 
     # Compare against the deployed release symlink target (no network needed).
     try:
-        link = "/opt/streetsmart-hermes/releases/current"
         target = os.readlink(link) if os.path.islink(link) else ""
         extra["release_target"] = target
         # The release dir is usually named with the commit, e.g. .../68954cc3...
@@ -468,7 +578,7 @@ def check_ezlynx_auth() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.ezlynx_api import load_ezlynx_api_config, EzlynxApiClient
 
         try:
@@ -651,7 +761,7 @@ def check_login_secret_states() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.login_secret_health import inspect_login_secrets
 
         report = inspect_login_secrets()
@@ -977,7 +1087,7 @@ def check_chat_intake() -> tuple[bool, str, dict]:
     """
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        _prepend_release_import()
         from robie_job_engine.production_preflight import check_chat_intake as _preflight_check
 
         result = _preflight_check()
@@ -1142,6 +1252,163 @@ def check_duplicate_guard() -> tuple[bool, str, dict]:
         return False, f"probe errored: {type(exc).__name__}: {exc}", extra
 
 
+def _systemctl_value(command: str, unit: str) -> str:
+    try:
+        out = subprocess.run(
+            ["systemctl", command, unit],
+            capture_output=True, text=True, timeout=10,
+        )
+        return (out.stdout or "").strip() or "unknown"
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
+
+
+def _require_active_unit(unit: str) -> tuple[bool, str, dict]:
+    state = _systemctl_value("is-active", unit)
+    extra = {"unit": unit, "state": state}
+    if state == "active":
+        return True, f"{unit} active", extra
+    return False, f"{unit} is {state}", extra
+
+
+def check_test_gateway() -> tuple[bool, str, dict]:
+    """Is the Test gateway unit the deploy workflow actually restarts active?"""
+    return _require_active_unit(TEST_GATEWAY_UNIT)
+
+
+def check_test_ezlynx_browser() -> tuple[bool, str, dict]:
+    """Is the Test EZLynx Chrome unit active?"""
+    return _require_active_unit(TEST_BROWSER_UNIT)
+
+
+def check_test_keepalive() -> tuple[bool, str, dict]:
+    """Is the Test keepalive timer scheduled, and the oneshot not failed?"""
+    timer_state = _systemctl_value("is-active", TEST_KEEPALIVE_TIMER)
+    service_state = _systemctl_value("is-failed", TEST_KEEPALIVE_SERVICE)
+    extra = {"timer": timer_state, "service": service_state}
+    problems: list[str] = []
+    if timer_state != "active":
+        problems.append(f"{TEST_KEEPALIVE_TIMER} is {timer_state}")
+    if service_state in {"failed", "not-found"} or service_state.startswith("error:"):
+        problems.append(f"{TEST_KEEPALIVE_SERVICE} is {service_state}")
+    if problems:
+        return False, "; ".join(problems), extra
+    return True, f"{TEST_KEEPALIVE_TIMER} active", extra
+
+
+def check_test_paths() -> tuple[bool, str, dict]:
+    """Do the Test release pointer and jobs database exist?"""
+    current = os.path.join(TEST_ROOT, "current")
+    required = [TEST_ROOT, TEST_RELEASE_ROOT, TEST_JOBS_DB]
+    missing = [path for path in required if not os.path.exists(path)]
+    extra: dict = {"missing": missing, "current": current}
+    if missing:
+        return False, "missing Test path(s): " + ", ".join(missing), extra
+    if os.path.islink(current) and os.path.islink(TEST_RELEASE_ROOT):
+        if os.path.realpath(current) != os.path.realpath(TEST_RELEASE_ROOT):
+            return False, "Test current and releases/current point at different trees", extra
+    return True, "Test root, release pointer, and jobs.db present", extra
+
+
+def check_test_service_errors() -> tuple[bool, str, dict]:
+    """Failure signatures in Test gateway, browser, and keepalive journals."""
+    extra: dict = {}
+    problems: list[str] = []
+    for svc in TEST_ERROR_SCAN_SERVICES:
+        log = _journal_since(svc, "1 hour ago")
+        if not log:
+            extra[svc] = "no journal output"
+            continue
+        hits: dict[str, int] = {}
+        for pat in ERROR_PATTERNS:
+            count = log.count(pat)
+            if count:
+                hits[pat] = count
+        extra[svc] = hits if hits else "clean"
+        if hits:
+            problems.append(f"{svc}: {', '.join(f'{pat}×{count}' for pat, count in hits.items())}")
+    if problems:
+        return False, "; ".join(problems), extra
+    return True, "no failure signatures in Test units", extra
+
+
+def check_test_stuck_job_leases() -> tuple[bool, str, dict]:
+    """A Test job still RUNNING / leased after an hour is a fault."""
+    extra: dict = {"db": TEST_JOBS_DB}
+    if not os.path.isfile(TEST_JOBS_DB):
+        return False, f"Test jobs.db missing: {TEST_JOBS_DB}", extra
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{TEST_JOBS_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(
+                """SELECT id, status, updated_at FROM jobs
+                   WHERE status IN ('RUNNING', 'VERIFYING', 'AWAITING_HUMAN_INPUT')"""
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return False, f"Test jobs.db unreadable: {type(exc).__name__}", extra
+    now = datetime.now(timezone.utc)
+    stuck: list[str] = []
+    for job_id, status, updated_at in rows:
+        stamp = None
+        if updated_at:
+            try:
+                stamp = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+            except ValueError:
+                stamp = None
+        if stamp is not None and stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        age = None if stamp is None else (now - stamp).total_seconds()
+        if age is None or age > STUCK_LEASE_SECONDS:
+            stuck.append(f"{job_id}:{status}")
+    extra["stuck"] = stuck
+    if stuck:
+        return False, f"{len(stuck)} Test job(s) holding the browser for over an hour", extra
+    return True, "no stuck Test job leases", extra
+
+
+# Probes that look at Production phone, EOD, 4359, and Chat units/files.
+# A Test run skips these. Shared probes (disk, code version, EZLynx auth
+# skip, duplicate guard) stay.
+PROD_ONLY_CHECK_NAMES = frozenset({
+    "worker_alive",
+    "env_vars",
+    "hitl_dry_run",
+    "gmail_sa_key",
+    "ringcentral_auth",
+    "sweep_freshness",
+    "service_errors",
+    "phone_gmail_keys",
+    "applicant_ingest_freshness",
+    "eod_drive_delivery",
+    "task_verifier_health",
+    "tuesday_4359_proof",
+    "chat_intake",
+})
+
+TEST_CHECKS = [
+    ("test_gateway", check_test_gateway),
+    ("test_ezlynx_browser", check_test_ezlynx_browser),
+    ("test_keepalive", check_test_keepalive),
+    ("test_paths", check_test_paths),
+    ("test_service_errors", check_test_service_errors),
+    ("test_stuck_job_leases", check_test_stuck_job_leases),
+]
+
+
+def checks_for_profile(profile: str | None = None) -> list[tuple]:
+    """Production returns CHECKS unchanged. TEST drops Prod-only probes."""
+    chosen = resolve_health_profile(profile)
+    if chosen != "TEST":
+        return list(CHECKS)
+    selected = [(name, fn) for name, fn in CHECKS if name not in PROD_ONLY_CHECK_NAMES]
+    selected.extend(TEST_CHECKS)
+    return selected
+
+
 CHECKS = [
     ("worker_alive", check_worker_alive),
     ("code_version", check_code_version),
@@ -1170,11 +1437,14 @@ CHECKS = [
 # Chat alert (failure only) + daily digest (explicit all-green)
 # ---------------------------------------------------------------------------
 
-def send_chat_alert(failures: list[dict]) -> bool:
+def send_chat_alert(failures: list[dict], profile: str = "PRODUCTION") -> bool:
     webhook = os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
     if not webhook:
         return False
-    lines = ["🚨 *ROBIE health check FAILED*"]
+    title = "🚨 *ROBIE health check FAILED*"
+    if profile == "TEST":
+        title = "🚨 *ROBIE Test health check FAILED*"
+    lines = [title]
     for f in failures:
         lines.append(f"• *{f['name']}*: {f['detail']}")
     lines.append(f"_{_now_iso()}_")
@@ -1235,20 +1505,19 @@ def send_daily_digest(results: list[dict]) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="ROBIE hourly health check")
-    ap.add_argument("--status-dir", default="/tmp/robie-health",
-                    help="where to write status.json")
-    ap.add_argument("--no-chat", action="store_true",
-                    help="never send Chat alerts (status file only)")
-    ap.add_argument("--daily-digest", action="store_true",
-                    help="post the morning all-green/failure digest to Chat "
-                         "(intended for a daily ~07:00 ET timer; Dusty's lane)")
-    args = ap.parse_args()
-
+def execute(
+    *,
+    profile: str,
+    status_dir: str,
+    no_chat: bool,
+    daily_digest: bool,
+) -> int:
+    global _REQUESTED_PROFILE
+    previous_profile = _REQUESTED_PROFILE
+    _REQUESTED_PROFILE = profile
     results: list[dict] = []
     try:
-        for name, fn in CHECKS:
+        for name, fn in checks_for_profile(profile):
             try:
                 ok, detail, extra = fn()
             except Exception as exc:  # a check must never kill the run
@@ -1260,19 +1529,22 @@ def main() -> int:
     except Exception as exc:
         print(f"health check framework error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        _REQUESTED_PROFILE = previous_profile
 
     failures = [r for r in results if not r["ok"]]
     healthy = not failures
 
     status = {
         "at": _now_iso(),
+        "profile": profile,
         "healthy": healthy,
         "failure_count": len(failures),
         "checks": results,
     }
     try:
-        os.makedirs(args.status_dir, exist_ok=True)
-        with open(os.path.join(args.status_dir, "status.json"), "w") as f:
+        os.makedirs(status_dir, exist_ok=True)
+        with open(os.path.join(status_dir, "status.json"), "w") as f:
             json.dump(status, f, indent=2)
     except Exception as exc:
         print(f"could not write status file: {exc}", file=sys.stderr)
@@ -1282,15 +1554,36 @@ def main() -> int:
         mark = "OK  " if r["ok"] else "FAIL"
         print(f"[{mark}] {r['name']}: {r['detail']}", flush=True)
 
-    if failures and not args.no_chat:
-        sent = send_chat_alert(failures)
+    if failures and not no_chat:
+        sent = send_chat_alert(failures, profile=profile)
         print(f"chat alert sent: {sent}", flush=True)
 
-    if args.daily_digest and not args.no_chat:
+    if daily_digest and not no_chat:
         digest_sent = send_daily_digest(results)
         print(f"daily digest sent: {digest_sent}", flush=True)
 
     return 0 if healthy else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="ROBIE hourly health check")
+    ap.add_argument("--status-dir", default="/tmp/robie-health",
+                    help="where to write status.json")
+    ap.add_argument("--no-chat", action="store_true",
+                    help="never send Chat alerts (status file only)")
+    ap.add_argument("--daily-digest", action="store_true",
+                    help="post the morning all-green/failure digest to Chat "
+                         "(intended for a daily ~07:00 ET timer; Dusty's lane)")
+    ap.add_argument("--profile", choices=["PRODUCTION", "TEST"], default=None,
+                    help="check profile; default follows ROBIE_ENV, else PRODUCTION")
+    args = ap.parse_args()
+    profile = resolve_health_profile(args.profile)
+    return execute(
+        profile=profile,
+        status_dir=args.status_dir,
+        no_chat=args.no_chat,
+        daily_digest=args.daily_digest,
+    )
 
 
 if __name__ == "__main__":
