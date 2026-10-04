@@ -30,8 +30,12 @@ Safety (non-negotiable):
   Informational mail is ``ignored``, not a human-review skip.
 - Write-scope eligibility is checked before filing. Dry-run reports
   matches blocked only by that allowlist as
-  ``would_file_if_write_scope_allowed``, with applicant ids. The allowlist
-  itself is unchanged.
+  ``would_file_if_write_scope_allowed``, with applicant ids. This driver's
+  own unit and workflow set ``ROBIE_EZLYNX_WRITE_SCOPE=all`` (honored with
+  ``ROBIE_PLAYGROUND=1``). The compiled default in ``ezlynx_write_scope``
+  stays the test account. The guard has no per-action switch, so this
+  driver refuses every write that is not a note on an existing titled
+  discussion.
 - Cancellations are notes only. The driver does not list or apply the
   Ascend NOC label. That label sends client email and text, and Robie
   does not send those. The result says ``label_skipped_by_policy``.
@@ -155,7 +159,17 @@ def _truthy(value: Any) -> bool:
 
 
 class MailboxAllowlistError(ValueError):
-    """A requested mailbox is outside the Ascend driver allowlist."""
+    """Raised when a mailbox is outside the hard staff allowlist."""
+
+
+class NonNoteWriteRefused(RuntimeError):
+    """Raised when this driver is asked for any write other than a note.
+
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is applicant-wide. The write-scope
+    guard has no per-action switch, so the driver refuses document
+    uploads, discussion creates, labels, policy writes, bind, and delete
+    itself.
+    """
 
 
 def parse_mailbox_list(raw: str) -> list[str]:
@@ -1061,6 +1075,28 @@ def _prepare_dry_run_note(
     }
 
 
+def authorize_notice_write(
+    action: str, *, discussion_id: str = "", discussion_title: str = ""
+) -> None:
+    """Allow one note on an existing titled discussion. Refuse every other write.
+
+    The EZLynx write-scope guard decides which applicant may be written. It
+    does not accept an action. This check is the driver's own limit.
+    """
+    name = str(action or "").strip()
+    if name != "discussion_note":
+        raise NonNoteWriteRefused(f"non_note_write_refused: {name or 'missing'}")
+    if not str(discussion_id or "").strip():
+        raise NonNoteWriteRefused(
+            "non_note_write_refused: discussion_note requires an existing discussion"
+        )
+    title = str(discussion_title or "").strip()
+    if not title or title.casefold() == "untitled":
+        raise NonNoteWriteRefused(
+            "non_note_write_refused: discussion_note requires a titled discussion"
+        )
+
+
 def _write_scope_refusal_reason(applicant_id: str) -> str:
     """Empty when the applicant may be written. Does not take the driver lease.
 
@@ -1234,6 +1270,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # The shared EZLynx seat is gated before a live note and again before
     # a live Zapier post. Dry-run does not call driver_gate_for_write.
     try:
+        authorize_notice_write(
+            "discussion_note",
+            discussion_id=chosen_id,
+            discussion_title=str(result.detail.get("discussion_title") or ""),
+        )
         if ctx.dry_run:
             filed = _prepare_dry_run_note(
                 ctx.discussion_client,
@@ -1257,6 +1298,9 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 discussion_id=chosen_id,
                 dry_run=False,
             )
+    except NonNoteWriteRefused as exc:
+        result.reason = str(exc)
+        return result
     except EzlynxWriteScopeError as exc:
         result.reason = f"write_scope_refused: {exc}"
         return result

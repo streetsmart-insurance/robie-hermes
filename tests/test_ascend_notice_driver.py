@@ -1544,6 +1544,71 @@ def test_workflow_sets_delegation_sa_and_prod_ascend_secret():
     trigger = workflow.get(True) or workflow.get("on") or {}
     assert "schedule" not in trigger
     assert "workflow_dispatch" in trigger
+    assert "# schedule:" in text
     assert "ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com" in text
     assert "secrets/ascend-prod-api-key/versions/latest" in text
     assert "secrets/ascend-api-key/versions/latest" not in text
+    assert "ROBIE_EZLYNX_WRITE_SCOPE=all" in text
+    assert "ROBIE_PLAYGROUND=1" in text
+
+
+def test_write_scope_all_is_only_on_the_ascend_notice_unit():
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "deploy/systemd/robie-ascend-notice-driver.service").read_text(encoding="utf-8")
+    drop_in = (
+        root / "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf"
+    ).read_text(encoding="utf-8")
+    assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in unit
+    assert "Environment=ROBIE_PLAYGROUND=1" in unit
+    assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in drop_in
+    assert "Environment=ROBIE_PLAYGROUND=1" in drop_in
+    assert "\n[Install]\n" not in unit
+    assert not (root / "deploy/systemd/robie-ascend-notice-driver.timer").exists()
+    scope_line = "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all"
+    hits = []
+    for folder in (root / "deploy/systemd", root / "systemd"):
+        for path in folder.rglob("*"):
+            if not path.is_file():
+                continue
+            if scope_line in path.read_text(encoding="utf-8"):
+                hits.append(path.relative_to(root).as_posix())
+    assert sorted(hits) == [
+        "deploy/systemd/robie-ascend-notice-driver.service",
+        "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf",
+    ]
+    example = (root / "deploy/systemd/robie-playground.env.example").read_text(encoding="utf-8")
+    assert "\nROBIE_EZLYNX_WRITE_SCOPE=\n" in example
+    workflow_hits = []
+    for path in (root / ".github/workflows").glob("*.yml"):
+        if "ROBIE_EZLYNX_WRITE_SCOPE=all" in path.read_text(encoding="utf-8"):
+            workflow_hits.append(path.name)
+    assert workflow_hits == ["ascend-notice-driver.yml"]
+    scope_source = (root / "robie_job_engine/ezlynx_write_scope.py").read_text(encoding="utf-8")
+    assert 'os.environ["ROBIE_EZLYNX_WRITE_SCOPE"]' not in scope_source
+    assert "os.environ.setdefault" not in scope_source
+
+
+def test_driver_refuses_non_note_writes():
+    allowed = dict(discussion_id="d1", discussion_title="HO-998877")
+    driver.authorize_notice_write("discussion_note", **allowed)
+    for action in (
+        "document_upload",
+        "discussion_create",
+        "label_apply",
+        "policy_create",
+        "policy_change",
+        "bind",
+        "delete",
+        "",
+    ):
+        with pytest.raises(driver.NonNoteWriteRefused, match="non_note_write_refused"):
+            driver.authorize_notice_write(action, **allowed)
+    with pytest.raises(driver.NonNoteWriteRefused, match="existing discussion"):
+        driver.authorize_notice_write(
+            "discussion_note", discussion_id="", discussion_title="HO-998877"
+        )
+    for title in ("", "Untitled", "untitled"):
+        with pytest.raises(driver.NonNoteWriteRefused, match="titled discussion"):
+            driver.authorize_notice_write(
+                "discussion_note", discussion_id="d1", discussion_title=title
+            )
