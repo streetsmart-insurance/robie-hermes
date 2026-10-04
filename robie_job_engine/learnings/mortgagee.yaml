@@ -1,0 +1,32 @@
+# Mortgagee-verification worker learnings
+# Each entry: id (mg-NNN), rule, learned (YYYY-MM-DD), source.
+# Append new learnings at the end. Keep rules to one or two sentences.
+learnings:
+  - id: mg-001
+    rule: "Only mortgagee-billed policies belong in this process. If the bill-to is the insured or the agency, it does not belong here."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: mg-002
+    rule: "Per policy: read the current declaration, check the carrier/lender website for mortgagee and billing, read all EZLynx notes with author and date, retain evidence."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: mg-003
+    rule: "Every mortgagee item served to Carlo carries its expiration/renewal date. No exceptions."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: mg-004
+    rule: "MyCoverageInfo is the proven lender route: servicinginsurance@mycoverageinfo.com and mortgagefamily@mycoverageinfo.com plus fax. Check it before inventing a new channel."
+    learned: "2026-10-04"
+    source: "Gurzakovic history (2024-11)"
+  - id: mg-005
+    rule: "Direct system reads beat worker summaries. Carlo: 'I don't need you one layer removed from the system. I need you in the system.' Verify against the carrier/lender portal, never the tracker alone."
+    learned: "2026-10-04"
+    source: "Carlo correction"
+  - id: mg-006
+    rule: "A claim without supporting document or portal evidence is UNVERIFIED. Never say 'verified' unless you can name the specific check that would fail if it weren't true."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: mg-007
+    rule: "The declaration page mortgagee list is authoritative for who must be billed - e.g. Gurzakovic dec page 7: PHH Mortgage Services as first mortgagee plus Unlock Partnership Solutions as additional interest."
+    learned: "2026-10-04"
+    source: "Gurzakovic direct review"

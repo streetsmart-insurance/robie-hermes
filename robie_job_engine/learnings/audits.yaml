@@ -1,0 +1,32 @@
+# Audit-verification worker learnings
+# Each entry: id (au-NNN), rule, learned (YYYY-MM-DD), source.
+# Append new learnings at the end. Keep rules to one or two sentences.
+learnings:
+  - id: au-001
+    rule: "Coordination posture: keep audits moving between carrier, vendor, and client. Do not over-investigate - the point of the exercise is to get the audit coordinated."
+    learned: "2026-10-04"
+    source: "Carlo framing"
+  - id: au-002
+    rule: "Only mark an audit complete with final papers received, reconciled, and filed. A policy leaving the daily audit report with closure unconfirmed stays open."
+    learned: "2026-10-04"
+    source: "Audit worker SOP"
+  - id: au-003
+    rule: "LK Home Improvement (AmTrust PWC1276037): stand down on collections per Carlo. The prior-term balance is parked - no action."
+    learned: "2026-10-04"
+    source: "Carlo decision"
+  - id: au-004
+    rule: "King Quiroz (TARNJ1055774): fully with Sandy - she is negotiating the balance with AmTrust. Do not take over, do not upload on her behalf."
+    learned: "2026-10-04"
+    source: "Carlo decision"
+  - id: au-005
+    rule: "MLG Mechanical: call National Risk Managers (973-710-0888) about prior-term PWC1218214 to find out what is outstanding. This is an item-specific override of the audit worker's no-voice-calls rule."
+    learned: "2026-10-04"
+    source: "Carlo decision"
+  - id: au-006
+    rule: "Junk Moor LLC: the client SMS is on hold until Carlo confirms he understands the item. Do not send without his final OK on number and draft."
+    learned: "2026-10-04"
+    source: "Carlo decision"
+  - id: au-007
+    rule: "Every audit item served to Carlo carries its expiration/renewal date. No exceptions."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
