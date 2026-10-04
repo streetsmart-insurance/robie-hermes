@@ -63,6 +63,15 @@ REASSIGN_PRECEDENCE = (
 )
 
 
+# EZLynx activity label (lowercased) -> worker route. "Robie Call"
+# labeled discussion notes start the Bland call workflow via the Robie
+# Call handler. Additional labels get their entries here as their
+# scripts are defined — an unmapped label is not a trigger.
+LABEL_WORKFLOWS: dict[str, str] = {
+    "robie call": "callback",
+}
+
+
 class NeedsHuman(Exception):
     """The worker needs a human answer before this job can proceed."""
 
@@ -255,7 +264,13 @@ class TaskAssignmentWorker:
         payload = job.get("payload") or {}
         task = _task_from_payload(payload)
         from .ezlynx_task_cdp import validate_identity
-        validate_identity(task.task_id, task.applicant_id)
+        from .ezlynx_task_report import is_note_task_id
+        if is_note_task_id(task.task_id):
+            # Labeled-note job: there is no task row, so the stable
+            # identity is the discussion, not a task ID.
+            validate_identity(task.discussion_id, task.applicant_id)
+        else:
+            validate_identity(task.task_id, task.applicant_id)
         timestamp = utcnow_iso()
 
         if is_test_task(task):
@@ -430,7 +445,15 @@ class TaskAssignmentWorker:
         return action
 
     def _categorize_task(self, task: AssignedTask) -> str:
-        """Sort the request from its activity type and note text."""
+        """Sort the request from its activity label, then type and note text.
+
+        A mapped EZLynx activity label always wins: "Robie Call" labeled
+        notes start the Bland call workflow regardless of wording.
+        """
+        for label in (task.labels or "").split(","):
+            route = LABEL_WORKFLOWS.get(label.strip().lower())
+            if route:
+                return route
         text = f"{task.title} {task.description}".lower()
         if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
             return "callback"
@@ -546,6 +569,7 @@ def _task_from_payload(payload: dict[str, Any]) -> AssignedTask:
         created_by=str(payload.get("task_created_by") or ""),
         assigned_producer=str(payload.get("assigned_producer") or ""),
         csr=str(payload.get("csr") or ""),
+        labels=str(payload.get("labels") or ""),
     )
 
 
