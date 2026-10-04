@@ -1238,6 +1238,26 @@ def test_live_mode_leaves_failed_email_unread(no_zap_fire):
     assert ctx.source.marked == ["m1"]  # the failed one stays unread
 
 
+def test_live_mode_task_not_created_leaves_email_unread(monkeypatch):
+    def failed_fire(payload, *, dry_run=False):
+        return {"ok": False, "method": "direct_api", "error": "not confirmed"}
+
+    monkeypatch.setattr(driver.zapier_tasks, "fire_task", failed_fire)
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["done"] == 0
+    result = summary["results"][0]
+    assert result["status"] != "done"
+    assert result["reason"].startswith("task_not_created")
+    assert ctx.source.marked == []
+
+
+
+
 def test_label_apply_error_is_never_reached_for_a_cancellation(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],

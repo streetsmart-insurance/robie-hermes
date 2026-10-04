@@ -1,0 +1,27 @@
+[Unit]
+Description=ROBIE Test Ascend notice review queue (read-only Gmail, propose-only)
+After=network-online.target
+Wants=network-online.target
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+UMask=0077
+Environment=HOME=/opt/streetsmart-hermes-test
+WorkingDirectory=/opt/streetsmart-hermes-test/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes-test/current
+Environment=ROBIE_ENV=TEST
+Environment=ROBIE_ASCEND_NOTICE_REVIEW_STATE_DIR=/opt/streetsmart-hermes-test/ascend-notice-review
+# Mailboxes, start date, delegation service account email and the enable
+# flag (ROBIE_ASCEND_NOTICE_REVIEW=1). Names only; no secret values.
+EnvironmentFile=/etc/streetsmart-hermes-test/robie-ascend-notice-review.env
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ascend_notice_review_runner --json
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes-test/ascend-notice-review
+TimeoutStartSec=10min

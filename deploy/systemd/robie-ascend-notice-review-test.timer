@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ROBIE Test Ascend notice review queue every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+AccuracySec=1min
+Unit=robie-ascend-notice-review-test.service
+
+[Install]
+WantedBy=timers.target

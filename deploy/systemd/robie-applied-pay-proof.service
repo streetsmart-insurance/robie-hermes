@@ -1,0 +1,34 @@
+[Unit]
+Description=ROBIE Applied Pay Wells proof job (daily full reconciliation, review-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=TEST
+# captured (default): ingest operator-supplied captured Wells guest pages.
+# live: the job refuses to run until Carlo's read-only Wells access lands.
+Environment=WELLS_ACCESS_MODE=captured
+EnvironmentFile=-/etc/streetsmart-hermes/robie-applied-pay.env
+# Counts-only run log. The health check reads this file; it does not read
+# the journal. The job writes its report JSON to the out dir (mode 0644).
+Environment=APPLIED_PAY_PROOF_STATE_DIR=/var/lib/robie-applied-pay-proof
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0755 /var/lib/robie-applied-pay-proof
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0755 /var/lib/robie-applied-pay-proof/captures
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m applied_pay.wells_proof_job --capture-dir /var/lib/robie-applied-pay-proof/captures --payouts /var/lib/robie-applied-pay-proof/payouts.json --state /var/lib/robie-applied-pay-proof/state.json --out /opt/streetsmart-hermes/applied-pay/reports/proof-daily.json
+# Review-only by construction: the job performs no bank actions, QBO posts,
+# EZLynx writes, or transfers. Every bank-side claim is labeled UNVERIFIED
+# until WELLS_ACCESS_MODE=live is provisioned. The timer is
+# robie-applied-pay-proof.timer. The installer leaves it stopped unless
+# --enable-timer is passed.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/robie-applied-pay-proof /opt/streetsmart-hermes/applied-pay/reports
+TimeoutStartSec=20min

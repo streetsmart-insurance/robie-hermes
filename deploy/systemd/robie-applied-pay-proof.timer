@@ -1,0 +1,12 @@
+[Unit]
+Description=ROBIE Applied Pay Wells proof job, daily full reconciliation
+Documentation=file:/opt/streetsmart-hermes/current/docs/WELLS_PROOF_JOB_TEST.md
+
+[Timer]
+OnCalendar=*-*-* 06:30:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=robie-applied-pay-proof.service
+
+[Install]
+WantedBy=timers.target
