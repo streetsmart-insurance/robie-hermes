@@ -23,8 +23,10 @@ script is the sole driver of this action type.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 from .ezlynx_task_report import AssignedTask
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
@@ -84,6 +86,54 @@ def job_payload_for_task(
     }
 
 
+def _fingerprint(*, title: Any, description: Any, applicant_id: Any, discussion_id: Any,
+                 created_by: Any, assigned_producer: Any, csr: Any, activity_labels: Any) -> str:
+    """What the request IS: its wording, target client and routing, not its timestamps."""
+    parts = [" ".join(str(part or "").split()) for part in (
+        title, description, applicant_id, discussion_id, created_by,
+        assigned_producer, csr, activity_labels)]
+    return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
+
+
+def request_fingerprint(task: AssignedTask) -> str:
+    return _fingerprint(
+        title=task.title, description=task.description, applicant_id=task.applicant_id,
+        discussion_id=task.discussion_id, created_by=task.created_by,
+        assigned_producer=task.assigned_producer, csr=task.csr,
+        activity_labels=task.activity_labels)
+
+
+def _payload_fingerprint(payload: dict[str, Any]) -> str:
+    return _fingerprint(
+        title=payload.get("title"), description=payload.get("description"),
+        applicant_id=payload.get("applicant_id"), discussion_id=payload.get("discussion_id"),
+        created_by=payload.get("task_created_by"), assigned_producer=payload.get("assigned_producer"),
+        csr=payload.get("csr"), activity_labels=payload.get("activity_labels"))
+
+
+def _as_time(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_newer(new: str, old: str) -> bool:
+    """True only when this report row was modified AFTER the version already held.
+
+    An equal or older Last Modified is a repeat delivery or a stale snapshot,
+    never a new request.
+    """
+    new_time, old_time = _as_time(new), _as_time(old)
+    if new_time is not None and old_time is not None:
+        return new_time > old_time
+    return str(new or "") > str(old or "")
+
+
 def _find_by_idempotency_key(store: Any, key: str) -> dict[str, Any] | None:
     """Look up a job by its idempotency key. None when absent."""
     with store.connect() as conn:
@@ -95,12 +145,59 @@ def _find_by_idempotency_key(store: Any, key: str) -> dict[str, Any] | None:
     return store.get_job(str(row["id"]))
 
 
+def _received_time(value: Any) -> datetime | None:
+    """When a report was received: Gmail's millisecond epoch, or an ISO time."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return _as_time(text)
+
+
+def _return_proven(
+    store: Any, job: dict[str, Any], payload: dict[str, Any], task: AssignedTask,
+    report_received_at: Any, confirm_returned: Callable[[AssignedTask], bool] | None,
+) -> bool:
+    """Evidence that a task Robie handed back is really back with Robie.
+
+    A newer Last Modified is not enough, and neither is a report row: a delayed
+    report can still list the task under Robie. Both must hold: the report arrived
+    AFTER the handback was applied, and a live read of the task shows Robie as its
+    owner right now. Without a way to read it, nothing is proven.
+    """
+    if confirm_returned is None:
+        return False
+    from .task_assignment_worker import REASSIGN_KIND_PREFIX
+
+    round_no = int(payload.get("round") or 0)
+    intent = store.get_checkpoint(job["id"], f"{REASSIGN_KIND_PREFIX}{round_no}") or {}
+    applied = _as_time(str(intent.get("applied_at") or ""))
+    received = _received_time(report_received_at)
+    if applied is None or received is None or received <= applied:
+        logger.info(f"Task {task.task_id}: report does not post-date the handback; no new round")
+        return False
+    try:
+        if confirm_returned(task):
+            return True
+    except Exception as exc:  # noqa: BLE001 — unreadable means unproven
+        logger.warning(f"Task {task.task_id}: live return check failed: {exc}")
+        return False
+    logger.info(f"Task {task.task_id}: live read does not show Robie as owner; no new round")
+    return False
+
+
 def ensure_task_job(
     store: Any,
     task: AssignedTask,
     *,
     report_message_id: str = "",
     report_digest: str = "",
+    report_received_at: Any = None,
+    confirm_returned: Callable[[AssignedTask], bool] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Return the durable job for this task, creating it if needed.
 
@@ -127,15 +224,41 @@ def ensure_task_job(
 
     job = existing
     existing_payload = job.get("payload") or {}
-    if existing_payload.get("last_modified") == task.last_modified:
-        # Same version of the task — nothing to do. Restarts and repeat
-        # deliveries land here and duplicate no work.
+    if not _is_newer(task.last_modified, str(existing_payload.get("last_modified") or "")):
+        # Same or OLDER version of the task: a repeat delivery or a stale
+        # snapshot. Restarts and repeat deliveries duplicate no work, and an
+        # old snapshot never rewinds or reopens anything.
         return job, False
+
+    # A newer Last Modified is not by itself a new request: Robie's own note
+    # or Save changes it too. Only a changed request (wording, client, routing)
+    # or a task a human handed back to Robie again counts.
+    prior_status = JobStatus(job["status"])
+    handed_back = prior_status in TERMINAL_STATUSES and bool(
+        (store.get_checkpoint(job["id"], "action") or {}).get("reassigned"))
+    if handed_back and not _return_proven(
+            store, job, existing_payload, task, report_received_at, confirm_returned):
+        # Robie handed this task back. Without evidence it came back, the row is a
+        # lagging or stale snapshot: leave the finished job exactly as it is.
+        return job, False
+    if _payload_fingerprint(existing_payload) == request_fingerprint(task) and not handed_back:
+        store.update_payload(job["id"], {**existing_payload, "last_modified": task.last_modified})
+        return store.get_job(job["id"]), False
 
     # The task changed in EZLynx since this job was created. Refresh the
     # payload on the SAME job — never a second job for one task ID.
+    #
+    # A "round" separates a genuinely new request from a retry. It advances
+    # only when Robie already handed the task back and it has since returned
+    # to Robie; note and reassignment intents are keyed by round, so the new
+    # round gets its own note while retries inside a round never repeat one.
+    status = prior_status
+    round_no = int(existing_payload.get("round") or 0)
+    if handed_back:
+        round_no += 1
+    if round_no:
+        payload["round"] = round_no
     store.update_payload(job["id"], payload)
-    status = JobStatus(job["status"])
     if status in TERMINAL_STATUSES:
         job = store.transition(job["id"], JobStatus.PENDING)
         logger.info(
