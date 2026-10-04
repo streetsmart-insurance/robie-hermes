@@ -1,0 +1,25 @@
+[Unit]
+Description=ROBIE Applied Pay Wells proof job (quick mode for the hourly desk sweep)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=TEST
+Environment=WELLS_ACCESS_MODE=captured
+EnvironmentFile=-/etc/streetsmart-hermes/robie-applied-pay.env
+Environment=APPLIED_PAY_PROOF_STATE_DIR=/var/lib/robie-applied-pay-proof
+# --quick: skip captures already ingested (state.json records artifact hashes).
+# Called by the hourly desk sweep; safe to run any time, still review-only.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m applied_pay.wells_proof_job --capture-dir /var/lib/robie-applied-pay-proof/captures --payouts /var/lib/robie-applied-pay-proof/payouts.json --state /var/lib/robie-applied-pay-proof/state.json --out /opt/streetsmart-hermes/applied-pay/reports/proof-quick.json --quick
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/robie-applied-pay-proof /opt/streetsmart-hermes/applied-pay/reports
+TimeoutStartSec=10min
