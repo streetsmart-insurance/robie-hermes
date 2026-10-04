@@ -283,19 +283,20 @@ class TestPhoneMismatch(unittest.TestCase):
         self.assertIsNone(_instruction_phone_mismatch(
             "Call about renewal", "+17326688161"))
 
-    def test_ezlynx_wins_but_mismatch_flagged_in_note(self):
+    def test_task_provided_number_wins(self):
+        # Free-form directive: a number in the task text overrides the
+        # number on file. Roby dials the task's number, on the applicant's
+        # account.
         task = make_task(**{
             "Task Description": "Call John at 555-999-8888 about his renewal.",
         })
         ports = make_ports()
         result = handle_robie_call_task(task, live_config(), ports)
         self.assertTrue(result["ok"])
-        # Dialed the EZLynx number, not the task's number.
-        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
+        # Dialed the task's number, not the EZLynx number on file.
+        self.assertEqual(ports.bland.calls[0]["phone"], "+15559998888")
+        # The dialed number never appears in the note (API rejects digits).
         body = ports.discussion_client.appended[0]["body"]
-        self.assertIn("different phone number", body)
-        self.assertIn("number on file", body)
-        # The wrong number never appears in the note (API rejects digits).
         self.assertNotIn("555-999-8888", body)
         self.assertNotIn("5559998888", body)
 
