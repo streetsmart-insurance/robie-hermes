@@ -5,8 +5,12 @@ All external I/O is faked. No real Bland calls, no real EZLynx writes.
 
 import os
 import unittest
+from datetime import datetime
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
+
+from robie_job_engine.ezlynx_driver_gate import DriverDecision
 
 from robie_job_engine import robie_call_handler as rch
 from robie_job_engine.robie_call_handler import (
@@ -19,6 +23,23 @@ from robie_job_engine.robie_call_handler import (
 
 
 TEST_APPLICANT = "220250093"  # repo write-allowlist test applicant
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+_LEASE_PATCH = None
+
+
+def setUpModule():
+    """Unit tests must not read the live EZLynx driver lease."""
+    global _LEASE_PATCH
+    _LEASE_PATCH = patch(
+        "robie_job_engine.ezlynx_driver_gate.require_driver_in",
+        return_value=DriverDecision(True, "TEST", "unit test; lease not read"),
+    )
+    _LEASE_PATCH.start()
+
+
+def tearDownModule():
+    if _LEASE_PATCH is not None:
+        _LEASE_PATCH.stop()
 
 
 def make_task(**overrides: Any) -> Dict[str, Any]:
@@ -29,6 +50,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
+        "Assigned Producer": "Jane Producer",
     }
     task.update(overrides)
     return task
@@ -147,7 +169,7 @@ def make_ports(**overrides: Any) -> RobieCallPorts:
 
 
 def live_config(**overrides: Any) -> RobieCallConfig:
-    kw: Dict[str, Any] = {"dry_run": False}
+    kw: Dict[str, Any] = {"dry_run": False, "now": IN_WINDOW}
     kw.update(overrides)
     return RobieCallConfig(**kw)
 
@@ -306,7 +328,8 @@ class TestBlandCall(unittest.TestCase):
         handle_robie_call_task(make_task(), live_config(), ports)
         task_text = ports.bland.calls[0]["task_text"]
         self.assertIn("AI assistant", task_text)
-        self.assertIn("Jake", task_text)
+        self.assertIn("on behalf of Jane Producer", task_text)
+        self.assertNotIn("Jake", task_text)
         self.assertIn("StreetSmart Insurance", task_text)
         self.assertIn("Please call John about his renewal", task_text)
 
@@ -343,10 +366,13 @@ class TestBlandCall(unittest.TestCase):
 
     def test_dry_run_default_places_no_call(self):
         ports = make_ports()
-        result = handle_robie_call_task(make_task(), RobieCallConfig(), ports)
+        result = handle_robie_call_task(
+            make_task(), RobieCallConfig(now=IN_WINDOW), ports)
         self.assertTrue(result["ok"])
         self.assertEqual(ports.bland.calls, [])
         self.assertTrue(result["call"]["dry_run"])
+        self.assertEqual(ports.discussion_client.appended, [])
+        self.assertNotIn("lost track", str(result))
 
 
 class TestWriteback(unittest.TestCase):
@@ -497,13 +523,315 @@ class TestBlandPayloadSpec(unittest.TestCase):
         self.assertNotIn("voicemail_message", p)
         self.assertEqual(p["voice"], "29158307-9893-4149-8a75-bc9ce313d64e")
         self.assertEqual(p["from"], "+17322986745")
-        self.assertEqual(p["transfer_phone_number"], "+17324622360")
+        self.assertNotIn("transfer_phone_number", p)
         self.assertFalse(p["record"])
 
     def test_attempt2_leaves_message(self):
         p = bland_payload_spec("+17326688161", "task", "first", "slow message", 2)
         self.assertEqual(p["voicemail_action"], "leave_message")
         self.assertEqual(p["voicemail_message"], "slow message")
+
+
+class _MemCheckpoint:
+    def __init__(self):
+        self.store: Dict[str, Dict[str, Any]] = {}
+
+    def get_checkpoint(self, key: str) -> Dict[str, Any]:
+        return dict(self.store.get(key, {}))
+
+    def set_checkpoint(self, key: str, value: Dict[str, Any]) -> None:
+        self.store[key] = dict(value)
+
+
+class TestCallRequestRound(unittest.TestCase):
+    """Regressions from the Test round of main 80a36b0 (PR #758)."""
+
+    def setUp(self):
+        rch._reset_module_state_for_tests()
+        os.environ.pop(rch.KILL_SWITCH_ENV, None)
+        os.environ.pop(rch.CALL_WINDOW_START_ENV, None)
+        os.environ.pop(rch.CALL_WINDOW_END_ENV, None)
+        os.environ.pop(rch.CALL_WINDOW_TZ_ENV, None)
+
+    def test_policy_number_is_not_dialed(self):
+        task = make_task(**{
+            "Account Name": "John Smith",
+            "Task Description": "Call John Smith about policy 7685786571",
+        })
+        ports = make_ports()
+        result = handle_robie_call_task(task, live_config(), ports)
+        self.assertTrue(result["ok"])
+        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
+        self.assertNotEqual(ports.bland.calls[0]["phone"], "+17685786571")
+
+    def test_policy_claim_quote_and_pol_context_never_dial(self):
+        samples = (
+            "Call John Smith about policy number 7685786571",
+            "Call John Smith about pol 7685786571",
+            "Call John Smith about claim 7685786571",
+            "Call John Smith about quote 7685786571",
+            "Call John Smith about policy 768-578-6571",
+        )
+        for index, description in enumerate(samples):
+            rch._reset_module_state_for_tests()
+            task = make_task(**{
+                "Task ID": f"TASK-POL-{index}",
+                "Account Name": "John Smith",
+                "Task Description": description,
+            })
+            ports = make_ports()
+            result = handle_robie_call_task(task, live_config(), ports)
+            self.assertTrue(result["ok"], description)
+            self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161", description)
+
+    def test_clear_phone_wording_or_format_is_dialed(self):
+        cases = (
+            ("Call John Smith at phone 7325550142", "+17325550142"),
+            ("Call the cell 7325550142 about the renewal", "+17325550142"),
+            ("Call John Smith at 7325550142", "+17325550142"),
+            ("Call Progressive at 1-800-776-4737 about the surcharge", "+18007764737"),
+            ("Call John at 555-999-8888 about renewal", "+15559998888"),
+        )
+        for index, (description, expected) in enumerate(cases):
+            rch._reset_module_state_for_tests()
+            task = make_task(**{
+                "Task ID": f"TASK-PH-{index}",
+                "Account Name": "John Smith",
+                "Task Description": description,
+            })
+            ports = make_ports()
+            result = handle_robie_call_task(task, live_config(), ports)
+            self.assertTrue(result["ok"], description)
+            self.assertEqual(ports.bland.calls[0]["phone"], expected, description)
+
+    def test_known_policy_shape_is_ignored(self):
+        task = make_task(**{
+            "Account Name": "John Smith",
+            "Task Description": "Call John Smith about 123456789 and policy WC5-33S-B276B9-026",
+        })
+        ports = make_ports()
+        result = handle_robie_call_task(task, live_config(), ports)
+        self.assertTrue(result["ok"])
+        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
+
+    def test_ambiguous_number_asks_instead_of_dialing(self):
+        task = make_task(**{
+            "Account Name": "John Smith",
+            "Task Description": "Call John Smith about 7685786571",
+        })
+        ports = make_ports()
+        result = handle_robie_call_task(task, live_config(), ports)
+        self.assertFalse(result["ok"])
+        self.assertEqual(ports.bland.calls, [])
+        body = ports.discussion_client.appended[0]["body"]
+        self.assertIn("phone", body.lower())
+        self.assertNotIn("7685786571", body)
+        self.assertNotIn("lost track", body)
+        import re
+        self.assertIsNone(re.search(r"\d{6,}", body))
+
+    def test_no_transfer_lookup_takes_a_message(self):
+        import inspect
+        self.assertNotIn("17324622360", inspect.getsource(rch))
+        self.assertFalse(hasattr(rch, "TRANSFER_NUMBER"))
+        ports = make_ports()
+        handle_robie_call_task(make_task(), live_config(), ports)
+        text = ports.bland.calls[0]["task_text"]
+        self.assertIn("do not transfer", text)
+        self.assertIn("Take a message", text)
+        self.assertIn("732-462-8343", text)
+        self.assertNotIn("17324622360", text)
+        self.assertIsNone(ports.bland.calls[0]["metadata"]["transfer_to"])
+
+    def test_resolved_transfer_number_is_offered(self):
+        class Lookup:
+            def get_transfer_number(self, name):
+                return "+15559876543" if name == "Jane Producer" else None
+
+        ports = make_ports(transfer_lookup=Lookup())
+        handle_robie_call_task(make_task(), live_config(), ports)
+        text = ports.bland.calls[0]["task_text"]
+        self.assertIn("transfer the call", text)
+        self.assertIn("Jane Producer", text)
+        self.assertIn("+15559876543", text)
+        self.assertEqual(ports.bland.calls[0]["metadata"]["transfer_to"], "Jane Producer")
+        self.assertNotIn("17324622360", text)
+
+    def test_dry_run_writes_nothing_and_not_a_lost_outcome(self):
+        ports = make_ports()
+        result = handle_robie_call_task(
+            make_task(), RobieCallConfig(now=IN_WINDOW), ports)
+        self.assertTrue(RobieCallConfig().dry_run)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["writeback"]["status"], "dry_run")
+        self.assertEqual(result["writeback"]["reason"], "dry run: nothing written")
+        self.assertIsNone(result["writeback"]["note_id"])
+        self.assertEqual(ports.discussion_client.appended, [])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertNotIn("lost track", str(result))
+        labeled = rch._format_outcome_note(
+            "John Test", "Please call John about his renewal.",
+            {"success": True, "dry_run": True, "call_ids": [], "attempts": []},
+            "skipped", producer_name="Jane Producer",
+        )
+        self.assertIn("DRY RUN", labeled)
+        self.assertNotIn("lost track", labeled)
+
+    def test_note_names_who_was_called_and_the_assigned_producer(self):
+        task = make_task(**{
+            "Account Name": "Mary Smith",
+            "Assigned Producer": "Jane Producer",
+            "Task Created By": "Jake",
+            "Task Description": (
+                "Call Progressive at 1-800-776-4737 about Mary Smith's "
+                "policy surcharge."
+            ),
+        })
+        ports = make_ports()
+        result = handle_robie_call_task(task, live_config(), ports)
+        self.assertTrue(result["ok"])
+        self.assertEqual(ports.bland.calls[0]["phone"], "+18007764737")
+        text = ports.bland.calls[0]["task_text"]
+        self.assertIn("on behalf of Jane Producer", text)
+        self.assertIn("calling Progressive", text)
+        self.assertNotIn("on behalf of Jake", text)
+        body = ports.discussion_client.appended[0]["body"]
+        self.assertIn("Called Progressive on behalf of Jane Producer", body)
+        self.assertIn("Spoke with someone at Progressive", body)
+        self.assertNotIn("Called Mary Smith", body)
+        self.assertNotIn("Jake", body)
+        self.assertNotIn("800", body)
+
+    def test_missing_assigned_producer_asks_instead_of_dialing(self):
+        task = make_task(**{"Assigned Producer": ""})
+        ports = make_ports()
+        result = handle_robie_call_task(task, live_config(), ports)
+        self.assertFalse(result["ok"])
+        self.assertEqual(ports.bland.calls, [])
+        body = ports.discussion_client.appended[0]["body"]
+        self.assertIn("assigned producer", body.lower())
+        self.assertNotIn("Jake", body)
+
+    def test_outside_calling_window_never_dials(self):
+        blocked = (
+            datetime(2026, 10, 7, 8, 30, tzinfo=ZoneInfo("America/New_York")),
+            datetime(2026, 10, 7, 18, 0, tzinfo=ZoneInfo("America/New_York")),
+            datetime(2026, 10, 4, 11, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
+        for moment in blocked:
+            rch._reset_module_state_for_tests()
+            ports = make_ports()
+            result = handle_robie_call_task(
+                make_task(**{"Task ID": "TASK-H"}),
+                live_config(now=moment), ports)
+            self.assertFalse(result["ok"], moment.isoformat())
+            self.assertTrue(result["queued_for_calling_window"], moment.isoformat())
+            self.assertEqual(ports.bland.calls, [], moment.isoformat())
+
+        rch._reset_module_state_for_tests()
+        opening = datetime(2026, 10, 7, 9, 0, tzinfo=ZoneInfo("America/New_York"))
+        ports = make_ports()
+        result = handle_robie_call_task(make_task(), live_config(now=opening), ports)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(ports.bland.calls), 1)
+        self.assertNotIn("queued_for_calling_window", result)
+
+    def test_live_outside_window_queues_one_note(self):
+        evening = datetime(2026, 10, 7, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+        ports = make_ports(job_checkpoint=_MemCheckpoint())
+        first = handle_robie_call_task(make_task(), live_config(now=evening), ports)
+        second = handle_robie_call_task(make_task(), live_config(now=evening), ports)
+        self.assertTrue(first["queued_for_calling_window"])
+        self.assertTrue(second["queued_for_calling_window"])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertEqual(len(ports.discussion_client.appended), 1)
+        body = ports.discussion_client.appended[0]["body"]
+        self.assertIn("queued", body.lower())
+        self.assertIn("did not dial", body.lower())
+        self.assertNotIn("lost track", body)
+        self.assertFalse(first.get("duplicate_suppressed"))
+        self.assertFalse(second.get("duplicate_suppressed"))
+
+    def test_dry_run_outside_window_writes_nothing(self):
+        evening = datetime(2026, 10, 7, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+        ports = make_ports()
+        result = handle_robie_call_task(
+            make_task(), RobieCallConfig(dry_run=True, now=evening), ports)
+        self.assertTrue(result["queued_for_calling_window"])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertEqual(ports.discussion_client.appended, [])
+        self.assertEqual(result["writeback"]["reason"],
+                         "outside calling window; nothing written")
+        self.assertNotIn("lost track", str(result))
+
+    def test_calling_window_is_configurable(self):
+        with patch.dict(os.environ, {
+            rch.CALL_WINDOW_START_ENV: "10",
+            rch.CALL_WINDOW_END_ENV: "11",
+            rch.CALL_WINDOW_TZ_ENV: "America/New_York",
+        }):
+            inside = datetime(2026, 10, 7, 10, 30, tzinfo=ZoneInfo("America/New_York"))
+            ports = make_ports()
+            result = handle_robie_call_task(
+                make_task(), RobieCallConfig(dry_run=False, now=inside), ports)
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(ports.bland.calls), 1)
+
+            rch._reset_module_state_for_tests()
+            closed = datetime(2026, 10, 7, 11, 0, tzinfo=ZoneInfo("America/New_York"))
+            ports = make_ports()
+            result = handle_robie_call_task(
+                make_task(**{"Task ID": "TASK-W"}),
+                RobieCallConfig(dry_run=False, now=closed), ports)
+            self.assertTrue(result["queued_for_calling_window"])
+            self.assertEqual(ports.bland.calls, [])
+
+            # An explicit config window wins over the env override.
+            rch._reset_module_state_for_tests()
+            early = datetime(2026, 10, 7, 9, 30, tzinfo=ZoneInfo("America/New_York"))
+            ports = make_ports()
+            result = handle_robie_call_task(
+                make_task(**{
+                    "Task ID": "TASK-C",
+                    "Task Description": "Call about the audit documents.",
+                }),
+                RobieCallConfig(
+                    dry_run=False, now=early,
+                    calling_window_start_hour=9, calling_window_end_hour=18,
+                ), ports)
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(ports.bland.calls), 1)
+
+    def test_unusable_calling_window_does_not_dial(self):
+        ports = make_ports()
+        result = handle_robie_call_task(
+            make_task(),
+            live_config(calling_window_tz="Not/AZone"),
+            ports)
+        self.assertTrue(result["queued_for_calling_window"])
+        self.assertEqual(ports.bland.calls, [])
+        rch._reset_module_state_for_tests()
+        ports = make_ports()
+        result = handle_robie_call_task(
+            make_task(**{"Task ID": "TASK-BAD"}),
+            live_config(calling_window_start_hour=18, calling_window_end_hour=9),
+            ports)
+        self.assertTrue(result["queued_for_calling_window"])
+        self.assertEqual(ports.bland.calls, [])
+
+    def test_note_write_does_not_read_the_driver_lease(self):
+        with patch.dict(os.environ, {
+            "ROBIE_EZLYNX_DRIVER_GATE_REQUIRED": "1",
+            "ROBIE_EZLYNX_DRIVER_HOLDER": "TEST",
+        }):
+            with patch(
+                "robie_job_engine.ezlynx_driver_gate.read_metadata",
+                side_effect=AssertionError("driver lease must not be read"),
+            ):
+                ports = make_ports()
+                result = handle_robie_call_task(make_task(), live_config(), ports)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(ports.discussion_client.appended), 1)
 
 
 if __name__ == "__main__":

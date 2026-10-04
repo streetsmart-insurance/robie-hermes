@@ -42,6 +42,7 @@ class AssignedTask:
     created_by: str = ""       # Task Created By (reassignment fallback 1)
     assigned_producer: str = ""  # Assigned Producer (reassignment fallback 2)
     csr: str = ""              # CSR (reassignment fallback 3)
+    activity_labels: str = ""  # Activity Labels (Robie Call / workflow labels)
 
 
 class TaskReportParseError(ValueError):
@@ -130,6 +131,7 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
             created_by=(row.get("Task Created By") or "").strip(),
             assigned_producer=(row.get("Assigned Producer") or "").strip(),
             csr=(row.get("CSR") or "").strip(),
+            activity_labels=(row.get("Activity Labels") or "").strip(),
         ))
 
     return tasks

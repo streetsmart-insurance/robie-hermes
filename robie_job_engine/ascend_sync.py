@@ -21,6 +21,7 @@ Correlates events with EZLynx accounts and policies, applying:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -246,7 +247,51 @@ class AscendSyncStore:
                     last_error TEXT,
                     total_synced INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS ascend_sync_retry_notes (
+                    event_id TEXT NOT NULL,
+                    note_key TEXT NOT NULL,
+                    note_id TEXT NOT NULL DEFAULT '',
+                    body_sha256 TEXT NOT NULL,
+                    posted_at TEXT NOT NULL,
+                    PRIMARY KEY (event_id, note_key)
+                );
                 """
+            )
+
+    def get_retry_note(self, event_id: str, note_key: str) -> Optional[sqlite3.Row]:
+        """The discussion note already posted for an event that is still pending."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT note_id, body_sha256, posted_at
+                FROM ascend_sync_retry_notes
+                WHERE event_id = ? AND note_key = ?
+                """,
+                (event_id, note_key),
+            ).fetchone()
+
+    def record_retry_note(
+        self,
+        event_id: str,
+        note_key: str,
+        note_id: str,
+        body_sha256: str,
+    ) -> None:
+        """Remember a discussion note so a later poll does not post it again."""
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ascend_sync_retry_notes
+                (event_id, note_key, note_id, body_sha256, posted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(event_id, note_key) DO UPDATE SET
+                    note_id=excluded.note_id,
+                    body_sha256=excluded.body_sha256,
+                    posted_at=excluded.posted_at
+                """,
+                (event_id, note_key, note_id, body_sha256, now),
             )
 
     def is_event_processed(self, event_id: str) -> bool:
@@ -545,6 +590,67 @@ class AscendEZLynxSyncManager:
             "• The event was not marked done and will be retried."
         )
 
+    def _post_discussion_note_once(
+        self,
+        *,
+        event_id: str,
+        note_key: str,
+        applicant_id: str,
+        title: str,
+        note_text: str,
+        policy_number: Optional[str] = None,
+        line_of_business: Optional[str] = None,
+        carrier_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Post the event's discussion note at most once across poll retries.
+
+        A failed task create leaves the event pending. The next poll must
+        not file the same note again. The posted note id (or the body hash
+        when the poster returns no id) is stored in the retry table.
+        """
+        digest = hashlib.sha256(note_text.encode("utf-8")).hexdigest()
+        existing = self.store.get_retry_note(str(event_id), note_key)
+        if existing is not None:
+            same_body = str(existing["body_sha256"] or "") == digest
+            prior_id = str(existing["note_id"] or "")
+            if prior_id or same_body:
+                logger.info(
+                    "discussion note already posted for %s %s (note_id %s); not re-posting",
+                    note_key, event_id, prior_id or "n/a",
+                )
+                return {
+                    "status": "filed",
+                    "note_id": prior_id,
+                    "duplicate_suppressed": True,
+                }
+        post_kwargs: Dict[str, Any] = {
+            "applicant_id": applicant_id,
+            "title": title,
+            "note_text": note_text,
+        }
+        if policy_number is not None:
+            post_kwargs["policy_number"] = policy_number
+        if line_of_business is not None:
+            post_kwargs["line_of_business"] = line_of_business
+        if carrier_name is not None:
+            post_kwargs["carrier_name"] = carrier_name
+        result = self.poster.post_custom_note(**post_kwargs)
+        if not isinstance(result, dict):
+            return {"status": "error", "reason": "note post returned no result"}
+        status = str(result.get("status") or "").strip().lower()
+        note_id = ""
+        for key in ("note_id", "noteId", "ezlynx_note_id", "id", "Id"):
+            value = result.get(key)
+            if value:
+                note_id = str(value).strip()
+                break
+        posted = bool(note_id) or status in {"filed", "success", "posted"}
+        if status in {"error", "failed", "pending", "held"}:
+            posted = False
+        if posted:
+            self.store.record_retry_note(str(event_id), note_key, note_id, digest)
+        return result
+
     def sync_once(self) -> Dict[str, Any]:
         """Perform one full synchronization run of all Ascend event feeds."""
         self._task_failures = []
@@ -694,8 +800,10 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                # 1. Post discussion note
-                self.poster.post_custom_note(
+                # 1. Post discussion note (once across task-create retries)
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="cancellation",
                     applicant_id=applicant_id,
                     title=f"🚨 Cancellation Notice - {event.carrier_name} - Policy #{event.policy_number}",
                     note_text=note_text,
@@ -916,7 +1024,9 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                self.poster.post_custom_note(
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="agreement_signed",
                     applicant_id=applicant_id,
                     title=f"🎉 Agreement Signed & Checked Out - {carrier_name} - {policy_num}",
                     note_text=note_text,
@@ -1036,7 +1146,9 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                self.poster.post_custom_note(
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="reinstatement_paid",
                     applicant_id=applicant_id,
                     title=f"✅ Reinstatement Paid - {policy_num} - {amount_paid_text}",
                     note_text=note_text,
