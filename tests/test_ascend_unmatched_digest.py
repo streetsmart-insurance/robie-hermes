@@ -2296,6 +2296,7 @@ class _FlakyNotePost:
             "absent",
             "unavailable",
             "landed_unreadable",
+            "landed_timeout",
             "unreadable_before_post",
             "no_count",
             "nested_count",
@@ -2324,6 +2325,9 @@ class _FlakyNotePost:
             self.posted_body = json.loads(data.decode("utf-8")).get("body") or ""
             if self.failures_left:
                 self.failures_left -= 1
+                if self.mode == "landed_timeout":
+                    # The note is stored. The client only sees the timeout.
+                    raise TimeoutError("The read operation timed out")
                 raise urlerror.HTTPError(
                     url, 500, "Server Error", {}, io.BytesIO(b"down")
                 )
@@ -2348,8 +2352,9 @@ class _FlakyNotePost:
             raise urlerror.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"missing"))
         if self.mode == "unreadable_before_post":
             raise urlerror.HTTPError(url, 503, "Unavailable", {}, io.BytesIO(b"down"))
-        if self.mode == "landed_unreadable" and self.posted_body:
-            # The POST already returned HTTP 500. Later reads cannot see bodies.
+        if self.mode in {"landed_unreadable", "landed_timeout"} and self.posted_body:
+            # The POST already failed after the note was stored. Later reads
+            # cannot see bodies.
             raise urlerror.HTTPError(url, 503, "Unavailable", {}, io.BytesIO(b"down"))
         other = {"noteId": "n-page", "body": "A different note that is not this bill."}
         if self.mode == "landed":
@@ -2519,6 +2524,53 @@ def test_a_landed_post_that_returns_500_keeps_the_warning_when_with_notes_stays_
     parked = store.list_unmatched()[0]
     assert len(poster.posts_to("/notes")) == 1
     assert int(parked["file_attempts"] or 0) == 0
+    assert parked["file_failure"] == digest.MAYBE_NOTE_LINE
+    body = _digest_body(store, monkeypatch, NOW + timedelta(minutes=30))
+    assert digest.MAYBE_NOTE_LINE in body
+    assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+    assert "will file this on the next Ascend run" not in body
+    assert "The note was not filed." not in body
+
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
+    retried = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(retried["file_attempts"] or 0) == 0
+    assert int(retried["transient_retry_used"] or 0) == 1
+    assert retried["file_failure"] == digest.MAYBE_NOTE_LINE
+    body = _digest_body(store, monkeypatch, NOW + timedelta(hours=2, minutes=30))
+    assert digest.MAYBE_NOTE_LINE in body
+    assert "will file this on the next Ascend run" not in body
+    assert "The note was not filed." not in body
+
+    for step in range(1, 6):
+        when = NOW + timedelta(hours=2, minutes=15 * step)
+        _poll_ready(store, ctx, when)
+        row = store.list_unmatched()[0]
+        assert len(poster.posts_to("/notes")) == 1
+        assert int(row["file_attempts"] or 0) == step
+        assert row["file_failure"] == digest.MAYBE_NOTE_LINE
+        body = _digest_body(store, monkeypatch, when + timedelta(minutes=30))
+        assert "will file this on the next Ascend run" not in body
+        assert "The note was not filed." not in body
+        if step < 5:
+            assert digest.MAYBE_NOTE_LINE in body
+            assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+        else:
+            assert digest.MAYBE_NOTE_LIMIT_LINE in body
+            assert digest.MAYBE_NOTE_LINE not in body
+            assert "couldn't file it" not in body
+            assert "please file by hand" not in body
+
+
+def test_a_landed_post_that_times_out_keeps_the_warning_when_with_notes_stays_down(
+    tmp_path, monkeypatch
+):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "landed_timeout")
+    _poll_ready(store, ctx, NOW)
+    parked = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(parked["file_attempts"] or 0) == 0
+    assert str(parked.get("transient_hold_until") or "").strip()
     assert parked["file_failure"] == digest.MAYBE_NOTE_LINE
     body = _digest_body(store, monkeypatch, NOW + timedelta(minutes=30))
     assert digest.MAYBE_NOTE_LINE in body

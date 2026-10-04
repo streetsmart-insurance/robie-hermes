@@ -1451,15 +1451,18 @@ def _record_ready_miss(
 
 
 def _is_transient_failure(reason: str) -> bool:
-    """True for an EZLynx 5xx or a timeout, not for a wrong policy number.
+    """True for an EZLynx 5xx, a timeout, or a dropped connection.
 
-    ``discussion_error`` counts only when the text also names an HTTP 5xx
-    or a timeout. A short outage must not use up the five filing attempts.
+    The discussion client reports a timeout or a network drop as
+    ``transport failed``, and that text does not always contain the word
+    timeout. ``discussion_error`` counts only when the text also names an
+    HTTP 5xx, a timeout, or a transport failure. A short outage must not
+    use up the five filing attempts.
     """
     text = str(reason or "").lower()
     if not text:
         return False
-    if "timeout" in text or "timed out" in text:
+    if "timeout" in text or "timed out" in text or "transport failed" in text:
         return True
     return re.search(r"http\s*5\d\d", text) is not None
 

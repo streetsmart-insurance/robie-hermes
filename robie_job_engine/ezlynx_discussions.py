@@ -71,6 +71,21 @@ _PHONE_LIKE = re.compile(
 )
 
 
+def _transport_timed_out(exc: BaseException) -> bool:
+    """True when a urlopen failure is a timeout, including one wrapped by URLError."""
+    seen: list[BaseException] = [exc]
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        seen.append(reason)
+    for item in seen:
+        if isinstance(item, TimeoutError):
+            return True
+        text = f"{type(item).__name__} {item}".lower()
+        if "timeout" in text or "timed out" in text:
+            return True
+    return False
+
+
 class DiscussionApiError(RuntimeError):
     """Transport, authentication, or API failure. Messages never carry secrets."""
 
@@ -451,7 +466,13 @@ class DiscussionApiClient:
                 exc.code, f"Discussion API {method} failed: HTTP {exc.code} {detail}"
             ) from exc
         except (error.URLError, TimeoutError, OSError) as exc:
-            raise DiscussionApiError(None, f"Discussion API {method} transport failed") from exc
+            # A timeout or a dropped connection can land after the server
+            # stored the note. Keep "transport failed", and say "timed out"
+            # when the error is a timeout, so the ready-row pause can see both.
+            detail = "transport failed"
+            if _transport_timed_out(exc):
+                detail = "transport failed: timed out"
+            raise DiscussionApiError(None, f"Discussion API {method} {detail}") from exc
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
