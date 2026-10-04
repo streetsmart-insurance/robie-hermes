@@ -1,0 +1,11 @@
+{
+  "family": "msa",
+  "from": "no-reply@useascend.com",
+  "subject": "Updates to Your Ascend Master Services Agreement",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (280b)",
+    "  text/html (6400b)"
+  ],
+  "text_plain": "Hello,\r\n\r\nUpdates to Your Ascend Master Services Agreement are ready to review.\r\n\r\nNo policy is attached to this message.\r\n\r\nPowered by Ascend"
+}

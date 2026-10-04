@@ -1207,6 +1207,7 @@ def file_note_to_existing_discussion(
     document_id: str | None = None,
     ledger_path: Any = None,
     allow_repost: bool = False,
+    discussion_id: str | None = None,
 ) -> dict[str, Any]:
     """Append ``note_body`` to the applicant's existing discussion.
 
@@ -1249,18 +1250,37 @@ def file_note_to_existing_discussion(
         raise DiscussionApiError(None, "note body is required")
 
     discussions = client.get_discussions(applicant)
-    try:
-        record = select_discussion_for_note(discussions, title_hint=title_hint)
-    except DiscussionSelectionError as exc:
-        return {
-            "status": "pending",
-            "reason_code": exc.code,
-            "reason": str(exc),
-            "applicant_id": applicant,
-            "discussion_id": None,
-            "note_id": None,
-            "matches": list(getattr(exc, "matches", []) or []),
-        }
+    pinned = str(discussion_id or "").strip()
+    if pinned:
+        titled = [
+            row
+            for row in discussions
+            if isinstance(row, dict) and not is_untitled_discussion(row)
+        ]
+        matched = [row for row in titled if discussion_id_of(row) == pinned]
+        if len(matched) != 1:
+            return {
+                "status": "pending",
+                "reason_code": "no matching discussion",
+                "reason": "no matching discussion",
+                "applicant_id": applicant,
+                "discussion_id": None,
+                "note_id": None,
+            }
+        record = matched[0]
+    else:
+        try:
+            record = select_discussion_for_note(discussions, title_hint=title_hint)
+        except DiscussionSelectionError as exc:
+            return {
+                "status": "pending",
+                "reason_code": exc.code,
+                "reason": str(exc),
+                "applicant_id": applicant,
+                "discussion_id": None,
+                "note_id": None,
+                "matches": list(getattr(exc, "matches", []) or []),
+            }
     discussion_id = discussion_id_of(record)
     if not discussion_id:
         return {

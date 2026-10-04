@@ -1,0 +1,13 @@
+{
+  "family": "return_premium_received",
+  "from": "accounting@useascend.com",
+  "subject": "Return premium received for Fixture Insured B LLC",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (724b)",
+    "    text/html (25510b)",
+    "  application/pdf (83625b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "Hi StreetSmart Insurance Agency,\r\n\r\nAscend has received a return premium of $4,791.86 from Johnson & Johnson due to a cancelation on the following policy:\r\n\r\nInsuredFixture Insured A LLCPolicyExcess Liability (Johnson & Johnson)Policy IDEZXS602697\r\n\r\nThese funds will be applied toward the loan associated with this policy.\r\n\r\nIf you haven't already sent unearned commission for this policy, please do so now.\r\n\r\nSend unearned commission ( https://dashboard.useascend.com/programs/3d1caff4-c28a-49b9-a7d9-b3370c985f21?endorsement_request_id=7562d6cc-c080-4e74-a7b8-31e4fca5034b )\r\n\r\nThanks,\r\nThe Ascend Team\r\n\r\nPlease don't hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nPowered by AscendAscend"
+}

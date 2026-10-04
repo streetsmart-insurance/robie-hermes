@@ -105,11 +105,56 @@ def test_extract_policy_numbers_deduped():
     assert triage.extract_policy_numbers(body) == ["MXL0446256", "MGL0200092"]
 
 
+def test_insured_name_line_does_not_add_a_period():
+    assert triage.insured_name_line("Shoreline Builders LLC") == "Shoreline Builders LLC"
+    assert triage.insured_name_line("Shoreline Builders LLC.") == "Shoreline Builders LLC."
+    assert triage.insured_name_line("Acme Transport Inc") == "Acme Transport Inc"
+    assert triage.insured_name_line("Acme Transport Inc.") == "Acme Transport Inc."
+    assert triage.build_staff_note(
+        triage.LATE_PAYMENT,
+        "Past due payment for Shoreline Builders LLC.",
+        "Past-due payment of $10.00 which was due on 09/11/2026.\nPolicy ID ABC12345\n",
+        ["ABC12345"],
+        "Shoreline Builders LLC.",
+    ).endswith("Shoreline Builders LLC.")
+    note = triage.build_staff_note(
+        triage.LATE_PAYMENT,
+        "Past due payment for Acme Transport Inc",
+        "Past-due payment of $10.00 which was due on 09/11/2026.\nPolicy ID ABC12345\n",
+        ["ABC12345"],
+        "Acme Transport Inc",
+    )
+    assert note.endswith("Acme Transport Inc")
+    assert not note.endswith("Acme Transport Inc.")
+    assert "Robie was here" not in note
+
+
 def test_extract_insured_name_from_subject():
     assert (
         triage.extract_insured_name("Past due payment for Shoreline Builders LLC", "")
         == "Shoreline Builders LLC"
     )
+
+
+def test_format_money_amount_under_over_and_cents():
+    # Under $1,000, including the leading-zero bug "$0,241.00".
+    assert triage.format_money_amount("0,241.00") == "$241.00"
+    assert triage.format_money_amount("$0,241.00") == "$241.00"
+    assert triage.format_money_amount("241.00") == "$241.00"
+    assert triage.format_money_amount("$83.62") == "$83.62"
+    # Over $1,000 keeps the thousands separator.
+    assert triage.format_money_amount("3,528.22") == "$3,528.22"
+    assert triage.format_money_amount("1000.50") == "$1,000.50"
+    assert triage.format_money_amount("$8,155.52") == "$8,155.52"
+    # Cents stay two digits.
+    assert triage.format_money_amount("12.50") == "$12.50"
+    assert triage.format_money_amount("1,234.56") == "$1,234.56"
+    assert triage.format_money_amount("241") == "$241.00"
+    assert triage._first_money("past-due payment of $0,241.00, due on 10/01/2026") == (
+        "$241.00"
+    )
+    assert triage.format_money_amount("") is None
+    assert triage.format_money_amount("not-money") is None
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +230,16 @@ def test_triage_late_payment_resolves_by_uuid():
     assert result["lookup_method"] == "program_uuid_from_email"
     assert result["needs_human_review"] is False
     assert result["recommendation"]["ezlynx_workflow"] == "Ascend NOC"
-    assert "past_due" in result["note_text"]
-    assert "$3,528.22" in result["note_text"]
+    assert result["note_text"] == (
+        "LATE PAYMENT notice from Ascend. "
+        "Policy MXL0446256 is past due: $3,528.22 was due 09/11/2026.\n"
+        "Shoreline Builders LLC"
+    )
+    assert "past_due" not in result["note_text"]
+    assert "Email subject:" not in result["note_text"]
+    assert "Ascend program" not in result["note_text"]
+    assert SAMPLE_UUID not in result["note_text"]
+    assert result["program_uuid"] == SAMPLE_UUID
 
 
 def test_triage_api_failure_flags_human_review():
@@ -235,6 +288,11 @@ def test_triage_cancellation_recommends_human_check():
     result = triage.triage_notice(client, subject, body)
     assert result["notice_type"] == triage.CANCELLATION
     assert result["recommendation"]["ezlynx_workflow"] == "Service-Cancellation"
+    assert result["recommendation"]["ezlynx_label"] is None
+    assert result["note_text"].startswith(
+        "NON-PAY CANCELLATION notice from Ascend. The policy was canceled on 06/22/2026."
+    )
+    assert "Email subject:" not in result["note_text"]
     assert result["needs_human_review"] is False  # program resolved; action still advisory
 
 
