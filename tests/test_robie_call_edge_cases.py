@@ -13,8 +13,12 @@ Covers Carlo's "extremely reliable" requirements:
 """
 import os
 import unittest
+from datetime import datetime
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
+
+from robie_job_engine.ezlynx_driver_gate import DriverDecision
 
 from robie_job_engine import robie_call_handler as rch
 from robie_job_engine.robie_call_handler import (
@@ -30,6 +34,23 @@ from robie_job_engine.robie_call_handler import (
 
 
 TEST_APPLICANT = "220250093"
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+_LEASE_PATCH = None
+
+
+def setUpModule():
+    """Unit tests must not read the live EZLynx driver lease."""
+    global _LEASE_PATCH
+    _LEASE_PATCH = patch(
+        "robie_job_engine.ezlynx_driver_gate.require_driver_in",
+        return_value=DriverDecision(True, "TEST", "unit test; lease not read"),
+    )
+    _LEASE_PATCH.start()
+
+
+def tearDownModule():
+    if _LEASE_PATCH is not None:
+        _LEASE_PATCH.stop()
 
 
 def make_task(**overrides: Any) -> Dict[str, Any]:
@@ -40,6 +61,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
+        "Assigned Producer": "Jane Producer",
     }
     task.update(overrides)
     return task
@@ -155,7 +177,7 @@ def make_ports(**overrides):
 
 
 def live_config(**overrides):
-    kw = {"dry_run": False}
+    kw = {"dry_run": False, "now": IN_WINDOW}
     kw.update(overrides)
     return RobieCallConfig(**kw)
 
