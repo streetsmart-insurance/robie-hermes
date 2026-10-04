@@ -247,8 +247,9 @@ class CoverageFillSetupTests(unittest.TestCase):
 
             self.assertFalse(result.success)
             error = result.error or ""
-            self.assertIn("could not open Coverages", error)
-            self.assertIn("cannot read the coverage fields", error)
+            self.assertIn("cannot open Coverages", error)
+            self.assertIn("live_nav=[]", error.replace(" ", ""))
+            self.assertNotIn("name=<live nav coverage text>", error)
             self.assertNotIn("still need Coverage", error)
             self.assertNotIn(NO_LABELS, error)
             self.assertTrue(result.hitl_posted)

@@ -142,6 +142,8 @@ def is_coverage_fill_miss(text: str) -> bool:
         or "still on the formentry location" in folded
         or "i am on the address tab" in folded
         or "cannot read the coverage fields" in folded
+        or "cannot find coverages on this page" in folded
+        or "no coverages name on the live formentry nav" in folded
     )
 
 

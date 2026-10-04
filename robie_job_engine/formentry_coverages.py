@@ -88,20 +88,27 @@ COVERAGES_NAV_ROLES = ("link", "tab", "button")
 LIST_LIVE_NAV_JS = r"""
 () => {
   const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
-    const els = Array.from(document.querySelectorAll(
-    '[role="tab"], [role="link"], a, button, [role="button"], '
-    + '.nav-link, .nav-item, .k-link, .k-item, li'
-  ));
-  const out = [];
+  const pushFrom = (els, out, seen) => {
+    for (const el of els) {
+      const t = norm(el.getAttribute("aria-label") || el.innerText);
+      if (!t || t.length > 48) continue;
+      const key = t.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(t);
+    }
+  };
   const seen = new Set();
-  for (const el of els) {
-    const t = norm(el.getAttribute("aria-label") || el.innerText);
-    if (!t || t.length > 48) continue;
-    const key = t.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(t);
-  }
+  const out = [];
+  // Prefer real section nav (tabs / nav-link / k-link) so table <li>
+  // rows cannot crowd Coverages off the 40-item cap.
+  pushFrom(document.querySelectorAll(
+    '[role="tab"], .nav-link, .k-link, a.nav-item, [role="link"]'
+  ), out, seen);
+  pushFrom(document.querySelectorAll(
+    'a, button, [role="button"], .nav-item, .k-item'
+  ), out, seen);
+  pushFrom(document.querySelectorAll('li'), out, seen);
   return out.slice(0, 40);
 }
 """
@@ -498,6 +505,18 @@ async def alist_live_coverage_labels(page: Any) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+PLACEHOLDER_NAV_LOCATOR = "name=<live nav coverage text>"
+
+
+def real_locators_tried(tried: list[str] | None) -> list[str]:
+    """Drop the placeholder constant. Checkpoint must name a live click."""
+    return [
+        str(item)
+        for item in (tried or [])
+        if PLACEHOLDER_NAV_LOCATOR not in str(item)
+    ]
+
+
 @dataclass
 class CoveragesTabResult:
     live_labels: list[str]
@@ -505,6 +524,7 @@ class CoveragesTabResult:
     still_on_location: bool
     clicked: list[str] = field(default_factory=list)
     locators_tried: list[str] = field(default_factory=list)
+    live_nav: list[str] = field(default_factory=list)
     gemini_asked: bool = False
 
 
@@ -579,25 +599,28 @@ async def aensure_coverages_tab(
     tried: list[str] = []
     gemini_asked = False
     live = await alist_live_coverage_labels(page)
+    nav = await alist_live_nav_labels(page)
     if _coverages_tab_proven(live):
         return CoveragesTabResult(
             live_labels=live,
             on_coverages=True,
             still_on_location=False,
+            live_nav=nav,
         )
 
-    nav = await alist_live_nav_labels(page)
     # Empty labels are not Coverages. Do not skip the live-nav click.
     # Live miss 712eccd0 returned still_on_location=False for live==[]
     # when nav had no coverage name, then fill-miss asked for A–F.
+    # Live miss ed4d84d9 logged the placeholder locator because tried was
+    # empty and we fell back to COVERAGES_LIVE_NAV_CLICK.
 
     name, asked = pick_live_coverage_nav(nav, gemini_client=gemini_client)
     gemini_asked = gemini_asked or asked
     if name:
         used = await aclick_unique_named(page, name)
+        tried.append(used or f'get_by_role("link", name="{name}", exact=True)')
         if used:
             clicked.append(name)
-            tried.append(used)
             await _await_section_settle(page)
             live = await alist_live_coverage_labels(page)
             if _coverages_tab_proven(live):
@@ -606,7 +629,8 @@ async def aensure_coverages_tab(
                     on_coverages=True,
                     still_on_location=False,
                     clicked=clicked,
-                    locators_tried=tried,
+                    locators_tried=real_locators_tried(tried),
+                    live_nav=nav,
                     gemini_asked=gemini_asked,
                 )
 
@@ -617,9 +641,11 @@ async def aensure_coverages_tab(
     gemini_asked = gemini_asked or asked
     if retry_name:
         used = await aclick_unique_named(page, retry_name)
+        tried.append(
+            used or f'get_by_role("link", name="{retry_name}", exact=True)'
+        )
         if used:
             clicked.append(retry_name)
-            tried.append(used)
             await _await_section_settle(page)
             live = await alist_live_coverage_labels(page)
             if _coverages_tab_proven(live):
@@ -628,7 +654,8 @@ async def aensure_coverages_tab(
                     on_coverages=True,
                     still_on_location=False,
                     clicked=clicked,
-                    locators_tried=tried,
+                    locators_tried=real_locators_tried(tried),
+                    live_nav=nav,
                     gemini_asked=gemini_asked,
                 )
 
@@ -639,7 +666,8 @@ async def aensure_coverages_tab(
         on_coverages=proven,
         still_on_location=coverages_fields_unreadable(live),
         clicked=clicked,
-        locators_tried=tried or [COVERAGES_LIVE_NAV_CLICK],
+        locators_tried=real_locators_tried(tried),
+        live_nav=nav,
         gemini_asked=gemini_asked,
     )
 

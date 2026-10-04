@@ -622,20 +622,41 @@ def coverages_tab_stuck_error(
     *,
     live_labels: list[str],
     locators_tried: list[str],
+    live_nav: list[str] | None = None,
 ) -> str:
-    """Location tab / empty labels. Do not claim A–F amounts were missing."""
+    """Location tab / empty labels. Do not claim A–F amounts were missing.
+
+    Persist the live nav texts that were actually read. Never log the
+    placeholder ``name=<live nav coverage text>`` (live miss ed4d84d9).
+    """
+    from .formentry_coverages import (
+        live_nav_coverage_name,
+        real_locators_tried,
+    )
+
+    nav = list(live_nav or [])
+    tried = real_locators_tried(locators_tried)
+    suffix = (
+        f"live_nav={nav}. "
+        f"locators_tried={tried}. "
+        f"live_labels={live_labels}."
+    )
+    if not live_nav_coverage_name(nav):
+        return (
+            "PLAYWRIGHT_BLOCKED: I see no Coverages name on the live FormEntry "
+            "nav and cannot open Coverages. "
+            + suffix
+        )
     if not live_labels:
         return (
             "PLAYWRIGHT_BLOCKED: I cannot read the coverage fields yet; "
             "could not open Coverages. "
-            f"locators_tried={locators_tried}. "
-            f"live_labels={live_labels}."
+            + suffix
         )
     return (
         "PLAYWRIGHT_BLOCKED: still on the FormEntry Location/Address tab; "
         "could not open Coverages. "
-        f"locators_tried={locators_tried}. "
-        f"live_labels={live_labels}."
+        + suffix
     )
 
 
@@ -1329,11 +1350,13 @@ class EzlynxPolicySetupPage:
             )
             live_labels = list(tab.live_labels)
             evidence["live_coverage_labels"] = live_labels
+            evidence["live_nav"] = list(tab.live_nav)
             evidence["coverages_tab"] = {
                 "on_coverages": tab.on_coverages,
                 "still_on_location": tab.still_on_location,
                 "clicked": list(tab.clicked),
                 "locators_tried": list(tab.locators_tried),
+                "live_nav": list(tab.live_nav),
                 "gemini_asked": tab.gemini_asked,
             }
             if (
@@ -1346,12 +1369,14 @@ class EzlynxPolicySetupPage:
                     "error": coverages_tab_stuck_error(
                         live_labels=live_labels,
                         locators_tried=list(tab.locators_tried),
+                        live_nav=list(tab.live_nav),
                     ),
                     "coverage_fill": {
                         "filled_count": 0,
                         "not_found": [],
                         "labels": {},
                         "live_labels_seen": live_labels,
+                        "live_nav": list(tab.live_nav),
                     },
                     "formentry_found": True,
                     "policy_id": str(policy_id or ""),
@@ -1390,6 +1415,7 @@ class EzlynxPolicySetupPage:
             )
             fill_report.setdefault("live_labels_seen", list(live_labels))
             fill_report.setdefault("looked_for", list(values))
+            fill_report.setdefault("live_nav", list(tab.live_nav))
             evidence["coverage_fill"] = fill_report
         except Exception as exc:  # noqa: BLE001 - report, don't raise
             return PolicySetupResult(
@@ -1414,6 +1440,7 @@ class EzlynxPolicySetupPage:
                     "error": coverages_tab_stuck_error(
                         live_labels=live_labels,
                         locators_tried=list(tab.locators_tried),
+                        live_nav=list(tab.live_nav),
                     ),
                     "coverage_fill": fill_report,
                     "formentry_found": True,
@@ -1476,6 +1503,7 @@ class EzlynxPolicySetupPage:
                             coverages_tab_stuck_error(
                                 live_labels=live_labels,
                                 locators_tried=list(tab.locators_tried),
+                                live_nav=list(tab.live_nav),
                             )
                         )
                     values = map_letter_amounts_to_live_labels(
@@ -1486,6 +1514,7 @@ class EzlynxPolicySetupPage:
                     )
                     fill_report.setdefault("live_labels_seen", list(live_labels))
                     fill_report.setdefault("looked_for", list(values))
+                    fill_report.setdefault("live_nav", list(tab.live_nav))
                     evidence["coverage_fill"] = fill_report
                 except Exception as exc:  # noqa: BLE001
                     fill_report = {
@@ -1518,6 +1547,7 @@ class EzlynxPolicySetupPage:
                     miss_error = coverages_tab_stuck_error(
                         live_labels=live_labels,
                         locators_tried=list(getattr(tab, "locators_tried", [])),
+                        live_nav=list(getattr(tab, "live_nav", [])),
                     )
                 else:
                     miss_error = coverage_fill_miss_error(
