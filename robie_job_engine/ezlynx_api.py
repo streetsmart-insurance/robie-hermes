@@ -735,6 +735,59 @@ class EzlynxApiClient:
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
 
+    def search_applicants_by_name_and_email(self, name: str, email: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured name and email.
+
+        Both values are required. The caller accepts the page only when it
+        is complete and every row matches both fields on exactly one
+        applicant. A page that ignores the filters fails that check.
+        """
+        applicant_name = str(name or "").strip()
+        applicant_email = str(email or "").strip()
+        if not applicant_name or "@" not in applicant_email:
+            raise EzlynxApiError(None, "insured name and email are required")
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode({"ApplicantName": applicant_name, "Email": applicant_email})
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
+    def _search_policy_api(self, query: dict[str, str]) -> dict[str, Any]:
+        """Read-only GET /PolicyApi/policy/v1/search. ``data`` stays None."""
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode(query)
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
+    def search_applicants_by_name(self, name: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured name."""
+        applicant_name = str(name or "").strip()
+        if not applicant_name:
+            raise EzlynxApiError(None, "insured name is required")
+        return self._search_policy_api({"ApplicantName": applicant_name})
+
+    def search_applicants_by_email(self, email: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured email."""
+        applicant_email = str(email or "").strip()
+        if "@" not in applicant_email:
+            raise EzlynxApiError(None, "insured email is required")
+        return self._search_policy_api({"Email": applicant_email})
+
+    def search_applicants_by_phone(self, phone: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured phone."""
+        applicant_phone = str(phone or "").strip()
+        digits = "".join(ch for ch in applicant_phone if ch.isdigit())
+        if len(digits) < 10:
+            raise EzlynxApiError(None, "insured phone is required")
+        return self._search_policy_api({"PhoneNumber": applicant_phone})
+
     def create_policy(
         self,
         *,

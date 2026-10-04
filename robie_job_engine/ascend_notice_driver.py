@@ -72,11 +72,11 @@ Safety (non-negotiable):
 
 Known wiring gaps (documented, not silently worked around):
 
-- Insured-name -> applicant lookup: no reliable API helper exists in the
-  repo (PolicyApi has no applicant search; the legacy matcher in
-  ``ascend_sync.py`` imports a client from outside this repo). When an email
-  has no policy number, the driver fails closed with
-  ``applicant_unresolved`` instead of guessing.
+- Applicant lookup tries the billable policy number, then a normalized
+  insured name, then email, then phone. A match is one unique applicant.
+  An ambiguous policy result does not fall through. Zero policy hits may.
+  An incomplete search is retried once. Still-unmatched notices are one
+  ask list for a person; they are not filed and they are not guessed.
 - CSR login username: PolicyApi rows carry no CSR field. A CSR is
   required only for cancellation (the Zapier task). It comes from the
   Ascend program producer (account_manager only when the producer is
@@ -724,45 +724,240 @@ def _rows_matching_policy(rows: list[dict[str, Any]], policy_number: str) -> lis
     ]
 
 
-def resolve_applicant(
-    ezlynx_client: Any,
-    policy_numbers: list[str],
-    insured_name: str | None,
-) -> tuple[ApplicantResolution | None, str]:
-    """Resolve ``applicant_id`` from PolicyApi rows. Fail closed.
+_IDENTITY_NAME_KEYS = (
+    "ApplicantName",
+    "applicantName",
+    "BusinessName",
+    "businessName",
+    "InsuredName",
+    "insuredName",
+    "NamedInsured",
+    "Name",
+    "name",
+)
+_IDENTITY_EMAIL_KEYS = (
+    "Email",
+    "email",
+    "BusinessEmail",
+    "businessEmail",
+    "InsuredEmail",
+    "insuredEmail",
+)
+_NOTICE_EMAIL_RE = re.compile(r"(?im)^Email\s+(\S+@\S+)\s*$")
+_NOTICE_PHONE_RE = re.compile(r"(?im)^Phone\s+([+0-9().\-\s]{7,20})\s*$")
+_IDENTITY_PHONE_KEYS = (
+    "PhoneNumber",
+    "phoneNumber",
+    "Phone",
+    "phone",
+    "BusinessPhone",
+    "businessPhone",
+    "MobilePhone",
+    "mobilePhone",
+)
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(?:incorporated|limited|company|corporation|llc|inc|corp|ltd|co)\b",
+    re.IGNORECASE,
+)
 
-    Compare policy numbers normalized (uppercase, spaces removed). An
-    EZLynx row may also drop one trailing LOB code (`` APD``, 2-4 uppercase
-    letters). When that misses, strip a trailing term suffix (``-00`` /
-    ``-01`` / ``-1``) on both the notice and the row. Accept only when
-    exactly one row matches and it carries ``accountId`` (or
-    ``ApplicantId``). Otherwise ``applicant_unresolved`` and the candidate
-    count.
 
-    PolicyApi rows have no CSR field. This function does not return one.
-    Insured-name lookup is not attempted.
+def notice_insured_email(body: str) -> str:
+    """The ``Email`` line on an API-synthesized notice. Empty otherwise."""
+    match = _NOTICE_EMAIL_RE.search(str(body or ""))
+    if not match:
+        return ""
+    return match.group(1).strip().strip("<>")
+
+
+def notice_insured_phone(body: str) -> str:
+    """The ``Phone`` line on an API-synthesized notice. Empty otherwise.
+
+    Real past-due mail has no such line. The note text never includes it:
+    discussion notes refuse dialable numbers.
     """
-    del insured_name  # name lookup is intentionally unwired
-    numbers = [str(item or "").strip() for item in policy_numbers if str(item or "").strip()]
-    if not numbers:
+    match = _NOTICE_PHONE_RE.search(str(body or ""))
+    if not match:
+        return ""
+    return " ".join(match.group(1).split())
+
+
+def _phone_digits(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[1:]
+    return digits
+
+
+def insured_name_cores(value: str) -> set[str]:
+    """Comparable name cores: case, punctuation, legal suffix, and DBA.
+
+    ``Fixture Hauling, LLC`` and ``Fixture Hauling`` share a core.
+    ``Smith & Sons`` matches ``Smith and Sons``. A DBA splits into cores
+    so either side can match.
+    """
+    text = str(value or "").casefold().replace("&", " and ")
+    text = re.sub(r"d\s*/\s*b\s*/\s*a\.?", " dba ", text)
+    text = re.sub(r"(?<=[a-z])\.(?=[a-z])", "", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    cores: set[str] = set()
+    for part in re.split(r"\bdbas?\b", text):
+        cleaned = " ".join(_LEGAL_SUFFIX_RE.sub(" ", part).split())
+        if cleaned:
+            cores.add(cleaned)
+    return cores
+
+
+def insured_names_match(left: str, right: str) -> bool:
+    left_cores = insured_name_cores(left)
+    right_cores = insured_name_cores(right)
+    return bool(left_cores and right_cores and (left_cores & right_cores))
+
+
+def _page_total(search_result: Any) -> int | None:
+    containers = [search_result]
+    if isinstance(search_result, dict):
+        containers.append(search_result.get("data"))
+    for container in containers:
+        if not isinstance(container, dict) or container.get("totalSize") in (None, ""):
+            continue
+        try:
+            return int(container["totalSize"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _page_is_incomplete(search_result: Any) -> bool:
+    total = _page_total(search_result)
+    if total is None:
+        return False
+    return total != len(_policy_rows(search_result))
+
+
+def _search_retry(call: Callable[[], Any]) -> Any:
+    """Run a PolicyApi search. An incomplete page is tried once more."""
+    result = call()
+    if _page_is_incomplete(result):
+        result = call()
+    return result
+
+
+def _unique_identity(
+    result: Any,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    via: str,
+    label: str,
+) -> tuple[ApplicantResolution | None, str]:
+    """One applicant, and every returned row must be that applicant."""
+    rows = _policy_rows(result)
+    if not rows:
         return None, "applicant_unresolved: 0 candidate rows"
-    last_count = 0
+    matched = [row for row in rows if predicate(row)]
+    if len(matched) != len(rows):
+        return None, f"applicant_unresolved: {label} search ambiguous"
+    ids: list[str] = []
+    for row in matched:
+        account_id = _first_present(row, _APPLICANT_ID_KEYS)
+        if account_id:
+            ids.append(account_id)
+    unique = list(dict.fromkeys(ids))
+    if len(unique) != 1:
+        count = len(unique) if unique else 0
+        return None, f"applicant_unresolved: {count} candidate rows"
+    return (
+        ApplicantResolution(
+            applicant_id=unique[0],
+            csr_username="",
+            via=via,
+            policy_number="",
+        ),
+        "",
+    )
+
+
+def _best_unresolved(reasons: list[str]) -> str:
+    for reason in reasons:
+        if "incomplete" in reason or "ambiguous" in reason:
+            return reason
+    for reason in reasons:
+        if "candidate" in reason and "0 candidate" not in reason:
+            return reason
+    for reason in reasons:
+        if reason:
+            return reason
+    return "applicant_unresolved: 0 candidate rows"
+
+
+def _resolve_by_name_and_email(
+    ezlynx_client: Any,
+    insured_name: str | None,
+    insured_email: str | None,
+) -> tuple[ApplicantResolution | None, str]:
+    """Unique name-and-email match. Name alone is never enough.
+
+    Accept only when the search page is complete and every returned row
+    matches both the insured name and the email, and those rows share one
+    applicant id. An unfiltered page, a partial page, or two applicants
+    is no match.
+    """
+    name = str(insured_name or "").strip()
+    email = str(insured_email or "").strip()
+    if not insured_name_cores(name) or "@" not in email:
+        return None, "applicant_unresolved: 0 candidate rows"
+    search = getattr(ezlynx_client, "search_applicants_by_name_and_email", None)
+    if search is None:
+        return None, "applicant_unresolved: 0 candidate rows"
+    try:
+        result = _search_retry(lambda: search(name, email))
+    except Exception as exc:  # noqa: BLE001 - fail closed, keep the class
+        return None, f"applicant_unresolved: name and email search failed: {type(exc).__name__}"
+    if _page_is_incomplete(result):
+        return None, "applicant_unresolved: name and email search incomplete"
+
+    def _both(row: dict[str, Any]) -> bool:
+        row_email = _first_present(row, _IDENTITY_EMAIL_KEYS).casefold()
+        return insured_names_match(name, _first_present(row, _IDENTITY_NAME_KEYS)) and row_email == email.casefold()
+
+    return _unique_identity(result, _both, via="name_and_email", label="name and email")
+
+
+def _resolve_by_policy_numbers(
+    ezlynx_client: Any, numbers: list[str]
+) -> tuple[ApplicantResolution | None, str, bool]:
+    """Policy numbers first. Ambiguous results do not fall through.
+
+    Returns ``(resolution, reason, fall_through)``. ``fall_through`` is
+    true only when every number produced zero rows or stayed incomplete
+    after one retry. Several rows, or applicant ids that disagree, stop
+    the cascade.
+    """
+    found: list[tuple[str, str]] = []
     for number in numbers:
         try:
-            result = ezlynx_client.search_policy_by_number(number)
+            result = _search_retry(
+                lambda number=number: ezlynx_client.search_policy_by_number(number)
+            )
         except Exception as exc:  # noqa: BLE001 - fail closed, keep the class
-            return None, f"policy_search_failed: {type(exc).__name__}"
-        matched = _rows_matching_policy(_policy_rows(result), number)
-        last_count = len(matched)
-        if last_count == 0:
+            return None, f"policy_search_failed: {type(exc).__name__}", False
+        if _page_is_incomplete(result):
             continue
-        if last_count != 1:
-            return None, f"applicant_unresolved: {last_count} candidate rows"
+        matched = _rows_matching_policy(_policy_rows(result), number)
+        if len(matched) == 0:
+            continue
+        if len(matched) != 1:
+            return None, f"applicant_unresolved: {len(matched)} candidate rows", False
         account_id = _first_present(matched[0], _APPLICANT_ID_KEYS)
         if not account_id:
             return None, (
-                f"applicant_unresolved: {last_count} candidate row lacks accountId"
-            )
+                f"applicant_unresolved: {len(matched)} candidate row lacks accountId"
+            ), False
+        found.append((account_id, number))
+    unique = {account_id for account_id, _number in found}
+    if len(unique) > 1:
+        return None, f"applicant_unresolved: {len(unique)} candidate rows", False
+    if len(unique) == 1:
+        account_id, number = found[0]
         return (
             ApplicantResolution(
                 applicant_id=account_id,
@@ -771,8 +966,114 @@ def resolve_applicant(
                 policy_number=number,
             ),
             "",
+            False,
         )
-    return None, f"applicant_unresolved: {last_count} candidate rows"
+    return None, "applicant_unresolved: 0 candidate rows", True
+
+
+def _resolve_named_search(
+    ezlynx_client: Any,
+    method_name: str,
+    argument: str,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    via: str,
+    label: str,
+) -> tuple[ApplicantResolution | None, str]:
+    search = getattr(ezlynx_client, method_name, None)
+    if search is None:
+        return None, "applicant_unresolved: 0 candidate rows"
+    try:
+        result = _search_retry(lambda: search(argument))
+    except Exception as exc:  # noqa: BLE001 - this step misses; the cascade continues
+        return None, f"applicant_unresolved: {label} search failed: {type(exc).__name__}"
+    if _page_is_incomplete(result):
+        return None, f"applicant_unresolved: {label} search incomplete"
+    return _unique_identity(result, predicate, via=via, label=label)
+
+
+def resolve_applicant(
+    ezlynx_client: Any,
+    policy_numbers: list[str],
+    insured_name: str | None,
+    insured_email: str | None = None,
+    insured_phone: str | None = None,
+) -> tuple[ApplicantResolution | None, str]:
+    """Resolve ``applicant_id`` from PolicyApi rows. Never guess.
+
+    Policy numbers come first. Compare them normalized (uppercase, spaces
+    removed). An EZLynx row may also drop one trailing LOB code (`` APD``,
+    2-4 uppercase letters). When that misses, strip a trailing term suffix
+    (``-00`` / ``-01`` / ``-1``) on both the notice and the row. Accept
+    only when exactly one row matches and it carries ``accountId`` (or
+    ``ApplicantId``). Several policy numbers must agree on that one
+    applicant. An ambiguous policy result does not fall through.
+
+    Zero policy hits, or a page that is still incomplete after one retry,
+    continue to the insured name (normalized: legal suffix, punctuation,
+    ``&`` versus ``and``, DBA), then email, then phone. Each of those needs
+    one unique applicant and a complete page whose every row matches.
+    Name plus email together remains a last step for callers that only
+    implement that search.
+
+    PolicyApi rows have no CSR field. This function does not return one.
+    """
+    numbers = [str(item or "").strip() for item in policy_numbers if str(item or "").strip()]
+    if numbers:
+        resolution, reason, fall_through = _resolve_by_policy_numbers(ezlynx_client, numbers)
+        if resolution is not None or not fall_through:
+            return resolution, reason
+    reasons: list[str] = []
+    name = str(insured_name or "").strip()
+    email = str(insured_email or "").strip()
+    phone = str(insured_phone or "").strip()
+    steps: list[Callable[[], tuple[ApplicantResolution | None, str]]] = []
+    if insured_name_cores(name):
+        steps.append(
+            lambda: _resolve_named_search(
+                ezlynx_client,
+                "search_applicants_by_name",
+                name,
+                lambda row: insured_names_match(name, _first_present(row, _IDENTITY_NAME_KEYS)),
+                via="insured_name",
+                label="name",
+            )
+        )
+    if "@" in email:
+        steps.append(
+            lambda: _resolve_named_search(
+                ezlynx_client,
+                "search_applicants_by_email",
+                email,
+                lambda row: _first_present(row, _IDENTITY_EMAIL_KEYS).casefold() == email.casefold(),
+                via="email",
+                label="email",
+            )
+        )
+    if len(_phone_digits(phone)) >= 10:
+        wanted = _phone_digits(phone)
+        steps.append(
+            lambda: _resolve_named_search(
+                ezlynx_client,
+                "search_applicants_by_phone",
+                phone,
+                lambda row, wanted=wanted: any(
+                    _phone_digits(str(row.get(key) or "")) == wanted
+                    for key in _IDENTITY_PHONE_KEYS
+                ),
+                via="phone",
+                label="phone",
+            )
+        )
+    if insured_name_cores(name) and "@" in email:
+        steps.append(lambda: _resolve_by_name_and_email(ezlynx_client, name, email))
+    for step in steps:
+        resolution, reason = step()
+        if resolution is not None:
+            return resolution, ""
+        if reason:
+            reasons.append(reason)
+    return None, _best_unresolved(reasons)
 
 
 def _person_record(value: Any) -> dict[str, Any] | None:
@@ -1536,6 +1837,25 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = "unknown_notice_type"
         return result
 
+    # The lease gate runs before the API-store lookup. A held lease refuses
+    # the notice even when the live store already has this key, and a missing
+    # store must not hide the refusal. Dry-run does not call the gate.
+    if not ctx.dry_run:
+        gate_reason = _driver_gate_refusal()
+        if gate_reason:
+            result.reason = gate_reason
+            return result
+
+    # Skip only when the live store has this key filed. A missing, empty,
+    # or unreadable store means email files. The poller's own api: notice
+    # is the writer and does not consult this hook.
+    covered_key = _api_source_already_filed(notice, notice_type, program_uuid)
+    if covered_key:
+        result.reason = "api_already_filed"
+        result.detail["event_key"] = covered_key
+        result.detail["duplicate_source"] = "ascend_api"
+        return result
+
     category = category_for(notice_type)
     canonical = category_title(category)
     if category:
@@ -1551,9 +1871,12 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             ctx.ezlynx_client,
             [str(p) for p in (triaged.get("policy_numbers") or [])],
             triaged.get("insured_name"),
+            notice_insured_email(notice.body),
+            notice_insured_phone(notice.body),
         )
         if resolution is None:
             result.reason = reason
+            result.detail["needs_human_review"] = True
             return result
     needs_csr_task = notice_type == triage.CANCELLATION or (
         notice_type == triage.INTENT_TO_CANCEL and intent_to_cancel_csr_task_enabled()
@@ -1974,6 +2297,53 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 # ---------------------------------------------------------------------------
 # Run + CLI
 # ---------------------------------------------------------------------------
+
+
+def _driver_gate_refusal() -> str:
+    """Empty when this host may write. Otherwise the lease refusal reason."""
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+    from .safety_seal import driver_gate_for_write
+
+    try:
+        driver_gate_for_write()
+    except EzlynxDriverGateRefused as exc:
+        return f"driver_gate_refused: {exc}"
+    return ""
+
+
+def _api_source_already_filed(
+    notice: EmailNotice, notice_type: str, program_uuid: str
+) -> str:
+    """Live event key when that filing already happened. Empty means file.
+
+    A missing, empty, or unreadable live store is empty. Email is the only
+    source until the API poller is live, so the driver files the notice.
+    A message id of ``api:<event key>`` is the poller's own synthetic
+    notice. That path is the writer; its dedupe is the event-key store.
+    """
+    if str(notice.message_id or "").startswith("api:"):
+        return ""
+    program_id = str(program_uuid or "").strip()
+    if not program_id and notice_type != triage.LATE_PAYMENT:
+        return ""
+    try:
+        from .ascend_api_notice_source import email_covered_by_api
+
+        found = email_covered_by_api(
+            program_id=program_id,
+            notice_type=notice_type,
+            subject=notice.subject,
+            body=notice.body,
+            internal_date=notice.internal_date,
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad store must not block the email
+        logger.warning(
+            "ascend api dedupe lookup failed (%s); filing %s",
+            type(exc).__name__,
+            notice.message_id,
+        )
+        return ""
+    return str(found or "")
 
 
 def _reason_prefix(reason: str) -> str:
