@@ -176,6 +176,9 @@ _HANDED_BACK = (
     "Robie matched this but couldn't file it — please file by hand."
 )
 MAYBE_NOTE_LINE = "Robie may have already added this note, please check by hand."
+MAYBE_NOTE_LIMIT_LINE = (
+    "Robie may have already added this note, please check EZLynx before adding it."
+)
 # A poll older than this is not evidence that notes are on.
 POLL_FRESHNESS = timedelta(hours=2)
 _POLICY_ID_LINE = re.compile(r"(?i)^policy id\s+\S+")
@@ -751,11 +754,15 @@ def item_line(item: dict[str, Any]) -> str:
         parts.append(phrase)
     if str(item.get("reason") or "") == CATCHUP_REVIEW:
         return ", ".join(parts) + ". " + _REASON_WORDS[CATCHUP_REVIEW]
+    # A note that may already be in EZLynx is not described as waiting to file,
+    # and it is not handed back as a blank "please file by hand."
+    if str(item.get("file_failure") or "").strip() == MAYBE_NOTE_LINE:
+        if int(item.get("file_attempts") or 0) >= FILE_ATTEMPT_LIMIT:
+            return ", ".join(parts) + ". " + MAYBE_NOTE_LIMIT_LINE
+        return ", ".join(parts) + ". " + MAYBE_NOTE_LINE
     if int(item.get("file_attempts") or 0) >= FILE_ATTEMPT_LIMIT:
         reason = str(item.get("file_failure") or "").strip() or "The note was not filed."
         return ", ".join(parts) + ". " + _HANDED_BACK + " " + reason
-    if str(item.get("file_failure") or "").strip() == MAYBE_NOTE_LINE:
-        return ", ".join(parts) + ". " + MAYBE_NOTE_LINE
     if item.get("ready_to_file") or str(item.get("ready_at") or "").strip():
         state = str(item.get("notes_state") or "")
         if not state:

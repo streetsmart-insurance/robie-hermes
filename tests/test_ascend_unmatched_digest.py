@@ -2126,8 +2126,9 @@ def test_the_unconfirmed_guard_after_a_timeout_does_not_spend_an_attempt(tmp_pat
     assert handed["resolved_at"] in (None, "")
     monkeypatch.delenv(source.LIVE_ENV, raising=False)
     mailed = digest.run_digest(stores=[store], now=NOW + timedelta(hours=4), live=False, refresh=False)
-    assert "couldn't file it" in mailed["body"]
-    assert "please file by hand" in mailed["body"]
+    assert digest.MAYBE_NOTE_LIMIT_LINE in mailed["body"]
+    assert "will file this on the next Ascend run" not in mailed["body"]
+    assert "The note was not filed." not in mailed["body"]
 
 
 def test_the_free_retry_is_spent_even_when_the_refusal_is_ordinary(tmp_path, monkeypatch):
@@ -2195,6 +2196,91 @@ def test_the_free_retry_is_spent_even_when_the_refusal_is_ordinary(tmp_path, mon
     again = store.list_unmatched()[0]
     assert int(again["file_attempts"] or 0) == 1
     assert not str(again.get("transient_hold_until") or "").strip()
+
+
+def test_the_maybe_note_warning_stays_on_the_email_through_five_attempts(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key="ready-1",
+            event_type="late_payment",
+            program_id=HELPERS._pid(1),
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=("HO-998877",),
+            insured_name="Fixture Hauling LLC",
+            subject="Past due payment for Fixture Hauling LLC",
+            body="Policy ID HO-998877\nCustomer Fixture Hauling LLC\n",
+            program={"id": HELPERS._pid(1)},
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+    store.mark_ready_to_file("ready-1", "2026-10-05T14:00:00Z")
+
+    def _down(_ctx, item):
+        return {
+            "event_key": item.event_key,
+            "status": "skipped",
+            "reason": "discussion_error: Discussion API POST failed: HTTP 500",
+        }
+
+    def _guard(_ctx, item):
+        return {
+            "event_key": item.event_key,
+            "status": "skipped",
+            "reason": "note_not_filed: None: I couldn't confirm that note was added.",
+            "detail": {"maybe_note": True},
+        }
+
+    def _email_body():
+        monkeypatch.delenv(source.LIVE_ENV, raising=False)
+        mailed = digest.run_digest(
+            stores=[store], now=NOW + timedelta(hours=4), live=False, refresh=False
+        )
+        monkeypatch.setenv(source.LIVE_ENV, "1")
+        return mailed["body"]
+
+    monkeypatch.setattr(source, "_file_through_driver", _down)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    monkeypatch.setattr(source, "_file_through_driver", _guard)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(hours=2),
+    )
+    parked = store.list_unmatched()[0]
+    assert int(parked["file_attempts"] or 0) == 0
+    assert parked["file_failure"] == digest.MAYBE_NOTE_LINE
+
+    for step in range(1, 6):
+        source.run_once(
+            client=HELPERS.FeedClient(_empty_feeds()),
+            store=store,
+            driver_ctx=HELPERS.driver_ctx(),
+            now=NOW + timedelta(hours=2, minutes=15 * step),
+        )
+        row = store.list_unmatched()[0]
+        assert int(row["file_attempts"] or 0) == step
+        assert row["file_failure"] == digest.MAYBE_NOTE_LINE
+        body = _email_body()
+        assert "will file this on the next Ascend run" not in body
+        assert "The note was not filed." not in body
+        if step < 5:
+            assert digest.MAYBE_NOTE_LINE in body
+            assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+        else:
+            assert digest.MAYBE_NOTE_LIMIT_LINE in body
+            assert digest.MAYBE_NOTE_LINE not in body
+            assert "couldn't file it" not in body
+            assert "please file by hand" not in body
 
 
 class _FlakyNotePost:

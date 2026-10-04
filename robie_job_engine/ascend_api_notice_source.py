@@ -1425,15 +1425,24 @@ def _record_ready_miss(
     transient = _is_transient_failure(text)
     used = _retry_was_used(row)
     held = _hold_is_set(row)
+    # The unconfirmed-note guard, or a row already carrying that warning,
+    # keeps the warning. A later refusal must not replace it with
+    # "The note was not filed."
+    keep_maybe = (
+        maybe_note
+        or "couldn't confirm that note was added" in text.lower()
+        or str(row.get("file_failure") or "").strip() == MAYBE_NOTE_LINE
+    )
     if free_retry or (not used and held):
         store.mark_transient_retry_used(event_key)
-        if maybe_note:
+        if keep_maybe:
             store.note_file_failure(event_key, MAYBE_NOTE_LINE)
         return
     if not used and not held and transient:
         _hold_transient(store, event_key, seen_at)
         return
-    store.note_ready_attempt(event_key, seen_at, plain_file_failure(text))
+    stored = MAYBE_NOTE_LINE if keep_maybe else plain_file_failure(text)
+    store.note_ready_attempt(event_key, seen_at, stored)
 
 
 def _is_transient_failure(reason: str) -> bool:
