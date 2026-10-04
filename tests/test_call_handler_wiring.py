@@ -96,12 +96,19 @@ class FakeReassigner:
         return self.current
 
 
+class OwnsDiscussion:
+    """Proves D-200 belongs to the applicant (the worker refuses writes otherwise)."""
+
+    def get_discussion_ids(self, applicant_id):
+        return ["D-200"]
+
+
 def make_task(**over) -> AssignedTask:
     kw = dict(
         task_id="63429200",
         title="Callback request",
         description="Call John Smith about his renewal documents",
-        applicant_id="25486200",
+        applicant_id="220250093",
         applicant_name="John Smith",
         assigned_to="Robie AI",
         due_date="2026-10-10",
@@ -137,7 +144,7 @@ def test_callback_routes_to_call_handler(clean_state):
     bland = FakeBland()
     reassigner = FakeReassigner()
     worker = TaskAssignmentWorker(
-        discussion_client=object(),
+        discussion_client=OwnsDiscussion(),
         task_reassigner=reassigner,
         reassign_enabled=True,
         phone_lookup=FakePhone(),
@@ -146,7 +153,7 @@ def test_callback_routes_to_call_handler(clean_state):
     )
     assert worker._call_handler_available() is True
     job = {"id": "job-1", "payload": {
-        "task_id": "63429200", "applicant_id": "25486200",
+        "task_id": "63429200", "applicant_id": "220250093",
         "account_name": "John Smith", "assigned_to": "Robie AI",
         "title": "Callback request",
         "description": "Call John Smith about his renewal documents",

@@ -19,7 +19,16 @@ report's 7-day note filter can hide older open tasks — never cancel
 or work a task the fresh report does not show).
 
 HITL resume: `intake.py --resume <task-id>` resumes the SAME job that
-is waiting on a human (JobStore.resume), never a new job.
+is waiting on a human (JobStore.resume), never a new job. A person's answer
+rides with it: `--assign-to NAME` picks who gets the task back, and
+`--note-id ID` adopts a note a human confirmed in EZLynx after an uncertain
+post. A resumed job is worked on the next pass even when its report delivery
+was already processed.
+
+A job left RUNNING by a crash (older than STALE_RUNNING_MINUTES) is returned
+to PENDING at the start of a pass. That is safe because every external effect
+is reserved before it is sent and reconciled by reading the destination, never
+repeated blindly.
 """
 
 from __future__ import annotations
@@ -28,19 +37,30 @@ import argparse
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .ezlynx_task_cdp import PlaywrightTaskReassigner, ReassignError, reassign_enabled
 from .ezlynx_task_inbox import TaskInboxError, fetch_latest_task_report
-from .ezlynx_task_jobs import ACTION_TYPE, ensure_task_job, task_idempotency_key
+from .ezlynx_task_jobs import (
+    ACTION_TYPE,
+    _find_by_idempotency_key,
+    ensure_task_job,
+    task_idempotency_key,
+)
 from .ezlynx_task_report import AssignedTask
-from .models import JobStatus
+from .ezlynx_task_intake_health import _parse_ts
+from .models import WAITING_STATUSES, JobStatus
 from .store import JobStore
 from .task_assignment_worker import (
+    HUMAN_ANSWER_KIND,
+    LEGACY_NOTE_KIND,
     MAX_TASKS_PER_RUN,
+    NOTE_KIND_PREFIX,
+    ROBIE_NAME,
     TaskAssignmentWorker,
     TaskIntakeVerifier,
 )
@@ -138,10 +158,121 @@ def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
     return JobEngine(store, {}, {ACTION_TYPE: verifier})
 
 
+STALE_RUNNING_MINUTES = 45
+
+
+class _ClientUnavailable(Exception):
+    """The EZLynx discussion client could not be built (fail-closed)."""
+
+
+def recover_stale_running(
+    store: JobStore, *, now: datetime | None = None,
+    stale_minutes: int = STALE_RUNNING_MINUTES,
+) -> list[str]:
+    """Return task jobs a crash left RUNNING to PENDING so they are worked again.
+
+    The worker reserves each external effect durably before sending it and
+    reads the destination to reconcile, so re-running a recovered job cannot
+    repeat a note or a Save. A job that is merely slow is left alone.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=stale_minutes)
+    recovered: list[str] = []
+    for job in store.list_jobs_by_status({JobStatus.RUNNING}):
+        if job.get("action_type") != ACTION_TYPE:
+            continue
+        updated = _parse_ts(job.get("updated_at"))
+        if updated is not None and updated > cutoff:
+            continue
+        try:
+            store.transition(
+                job["id"], JobStatus.PENDING, expected={JobStatus.RUNNING},
+                error=f"recovered after being RUNNING more than {stale_minutes} min "
+                      "(worker crash); effects reconcile by reading EZLynx",
+                release_lease=True,
+            )
+        except RuntimeError:
+            continue  # another pass already moved it
+        recovered.append(job["id"])
+    return recovered
+
+
+def _build_worker_and_engine(store: JobStore):
+    try:
+        discussion_client = _build_discussion_client()
+    except Exception as e:  # noqa: BLE001
+        raise _ClientUnavailable(str(e)) from e
+
+    reassigner: Any = None
+    if reassign_enabled():
+        reassigner = PlaywrightTaskReassigner()
+        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
+    else:
+        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
+
+    worker = TaskAssignmentWorker(
+        discussion_client=discussion_client,
+        task_reassigner=reassigner,
+        reassign_enabled=reassign_enabled(),
+    )
+    verifier = TaskIntakeVerifier(
+        discussion_client=discussion_client, task_reassigner=reassigner, store=store
+    )
+    return worker, _build_engine(store, verifier)
+
+
+def _work_and_verify(store: JobStore, jobs: list[dict[str, Any]], in_report: set[str]):
+    """Work PENDING jobs for tasks in THIS report, then verify VERIFYING jobs.
+
+    Verification covers every task-intake job awaiting it, not only those in
+    this report: a task that was handed back leaves Robie's report, and its
+    verification must still finish.
+    """
+    worker, engine = _build_worker_and_engine(store)
+
+    for job in jobs:
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        if task_id not in in_report:
+            continue
+        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
+            continue
+        try:
+            worker.process_job(store, store.get_job(job["id"]))
+        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
+            logger.error(f"process_job raised for {task_id}: {e}")
+
+    for row in store.list_jobs_by_status({JobStatus.VERIFYING}):
+        if row.get("action_type") != ACTION_TYPE:
+            continue
+        try:
+            fresh = store.get_job(row["id"])
+            action = store.get_checkpoint(fresh["id"], "action") or {}
+            engine._verify(fresh, action)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"verify raised for {row['id']}: {e}")
+    return worker
+
+
+def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str, Any]]:
+    """Jobs for tasks in the report that a human resumed (PENDING) after its delivery ran."""
+    found = []
+    for task in tasks:
+        job = _find_by_idempotency_key(store, task_idempotency_key(task.task_id))
+        if job is not None and JobStatus(job["status"]) == JobStatus.PENDING:
+            found.append(job)
+    return found
+
+
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     """Run one intake pass. Returns 0 healthy, 2 on failure (health check alerts)."""
     store = JobStore(db_path or default_db_path())
     _ensure_intake_table(store)
+
+    if not dry_run:
+        recovered = recover_stale_running(store)
+        if recovered:
+            logger.warning(f"Recovered {len(recovered)} stale RUNNING job(s): {recovered}")
 
     # 1. Gmail -> latest delivery.
     from . import report_email_source
@@ -157,11 +288,29 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         logger.info("No delivery yet — quiet.")
         return 0
 
+    tasks = list(report.tasks)
+
     if _already_processed(store, report.message_id):
-        logger.info(f"Delivery {report.message_id} already processed — quiet.")
+        # The delivery already ran, but a human may since have resumed a job
+        # (or a verification may still be owed). Work only that, quietly.
+        resumed = _resumable_jobs(store, tasks)
+        owed = [r for r in store.list_jobs_by_status({JobStatus.VERIFYING})
+                if r.get("action_type") == ACTION_TYPE]
+        if not resumed and not owed:
+            logger.info(f"Delivery {report.message_id} already processed — quiet.")
+            return 0
+        if dry_run:
+            logger.info(f"[DRY-RUN] {len(resumed)} resumed job(s), {len(owed)} awaiting verification.")
+            return 0
+        logger.info(f"Delivery {report.message_id} already processed; "
+                    f"working {len(resumed)} resumed job(s), verifying {len(owed)}.")
+        try:
+            _work_and_verify(store, resumed, {t.task_id for t in tasks})
+        except _ClientUnavailable as e:
+            logger.error(f"Discussion client unavailable: {e}")
+            return 2
         return 0
 
-    tasks = list(report.tasks)
     logger.info(f"Delivery {report.message_id}: {len(tasks)} Robie AI tasks")
 
     # 2. Blast-radius cap.
@@ -181,6 +330,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     # 3. One durable job per task ID.
     jobs_created = 0
     jobs: list[dict[str, Any]] = []
+    failures: list[str] = []
     for task in tasks:
         try:
             job, created = ensure_task_job(
@@ -192,15 +342,16 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                 jobs_created += 1
         except Exception as e:  # noqa: BLE001 — one bad task must not kill the batch
             logger.error(f"ensure_task_job failed for {task.task_id}: {e}")
+            failures.append(f"{task.task_id}: {type(e).__name__}")
 
     if dry_run:
         logger.info(f"[DRY-RUN] {len(jobs)} jobs ensured ({jobs_created} new); no work performed.")
         return 0
 
-    # 4. Build clients.
+    # 4-6. Work PENDING jobs for tasks in THIS report only, then verify.
     try:
-        discussion_client = _build_discussion_client()
-    except Exception as e:  # noqa: BLE001
+        worker = _work_and_verify(store, jobs, {t.task_id for t in tasks})
+    except _ClientUnavailable as e:
         logger.error(f"Discussion client unavailable: {e}")
         _record_run(
             store, message_id=report.message_id, digest=report.digest,
@@ -209,65 +360,50 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         )
         return 2
 
-    reassigner: Any = None
-    if reassign_enabled():
-        reassigner = PlaywrightTaskReassigner()
-        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
-    else:
-        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
-
-    worker = TaskAssignmentWorker(
-        discussion_client=discussion_client,
-        task_reassigner=reassigner,
-        reassign_enabled=reassign_enabled(),
-    )
-    verifier = TaskIntakeVerifier(
-        discussion_client=discussion_client, task_reassigner=reassigner
-    )
-    engine = _build_engine(store, verifier)
-
-    # 5. Work PENDING jobs for tasks in THIS report only.
-    in_report = {t.task_id for t in tasks}
-    for job in jobs:
-        payload = job.get("payload") or {}
-        task_id = str(payload.get("task_id") or "")
-        if task_id not in in_report:
-            continue
-        if JobStatus(job["status"]) != JobStatus.PENDING:
-            continue
-        try:
-            worker.process_job(store, job)
-        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
-            logger.error(f"process_job raised for {task_id}: {e}")
-
-    # 6. Independently verify VERIFYING jobs (fresh EZLynx read-back).
-    for job in jobs:
-        fresh = store.get_job(job["id"])
-        if JobStatus(fresh["status"]) != JobStatus.VERIFYING:
-            continue
-        try:
-            action = store.get_checkpoint(fresh["id"], "action") or {}
-            engine._verify(fresh, action)
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"verify raised for {fresh['id']}: {e}")
-
-    # 7. Record the run.
+    # 7. Record the run. A task that could not get a job is NOT a healthy run.
+    status = "partial" if failures else "ok"
     _record_run(
         store, message_id=report.message_id, digest=report.digest,
         filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-        status="ok",
+        status=status,
+        error=("no durable job for: " + "; ".join(failures))[:500] if failures else "",
     )
     actions = {}
     for r in worker.results:
         actions[r.action] = actions.get(r.action, 0) + 1
     logger.info(f"Intake pass done: {actions}")
-    return 0
+    return 2 if failures else 0
 
 
-def resume_task(task_id: str, *, db_path: str | None = None) -> int:
-    """Resume the SAME job waiting on a human for this task ID."""
-    from .ezlynx_task_jobs import _find_by_idempotency_key
+def _adopt_note_id(store: JobStore, job_id: str, note_id: str) -> str | None:
+    """Record a human-confirmed note ID on the newest unconfirmed note intent."""
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT kind, data_json FROM checkpoints WHERE job_id=? AND (kind=? OR kind LIKE ?) "
+            "ORDER BY created_at DESC",
+            (job_id, LEGACY_NOTE_KIND, NOTE_KIND_PREFIX + "%"),
+        ).fetchall()
+    import json
 
+    for kind, data_json in rows:
+        data = json.loads(data_json)
+        if data.get("state") != "confirmed" and not str(data.get("note_id") or ""):
+            data["note_id"] = note_id
+            store.checkpoint(job_id, kind, data)
+            return kind
+    return None
+
+
+def resume_task(
+    task_id: str, *, db_path: str | None = None,
+    assign_to: str | None = None, note_id: str | None = None,
+) -> int:
+    """Resume the SAME job waiting on a human for this task ID.
+
+    `assign_to` records who should get the task back (the human's answer).
+    `note_id` adopts a note the human confirmed in EZLynx after an uncertain
+    post, so it is verified by read-back instead of being posted again.
+    """
     store = JobStore(db_path or default_db_path())
     job = _find_by_idempotency_key(store, task_idempotency_key(task_id))
     if job is None:
@@ -275,6 +411,26 @@ def resume_task(task_id: str, *, db_path: str | None = None) -> int:
         return 1
     status = JobStatus(job["status"])
     print(f"Task {task_id}: job {job['id']} is {status.value}")
+    if assign_to is not None:
+        name = " ".join(str(assign_to).split())
+        if not name or len(name) > 80 or name.casefold() == ROBIE_NAME.casefold():
+            print("--assign-to must be a person other than Robie AI (1-80 characters)")
+            return 1
+        if status not in WAITING_STATUSES:
+            print("An answer can only be recorded on a job that is waiting on a person")
+            return 1
+        store.checkpoint(job["id"], HUMAN_ANSWER_KIND,
+                         {"assign_to": name, "recorded_at": utcnow_iso()})
+        print(f"Recorded: return the task to {name}")
+    if note_id is not None:
+        clean = str(note_id).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", clean):
+            print("--note-id must be the EZLynx note ID (letters, digits, - or _)")
+            return 1
+        if _adopt_note_id(store, job["id"], clean) is None:
+            print("No unconfirmed note on this job to resolve")
+            return 1
+        print(f"Recorded: the note is {clean}; it will be confirmed by read-back")
     resumed = store.resume(job["id"])
     print(f"Resumed to {resumed['status']}")
     return 0
@@ -286,12 +442,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Ingest only; no EZLynx writes")
     parser.add_argument("--resume", metavar="TASK_ID", default=None,
                         help="Resume the waiting job for one task ID")
+    parser.add_argument("--assign-to", metavar="NAME", default=None,
+                        help="With --resume: the person who should get the task back")
+    parser.add_argument("--note-id", metavar="ID", default=None,
+                        help="With --resume: adopt this EZLynx note ID after an uncertain post")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.resume:
-        return resume_task(args.resume, db_path=args.db)
+        return resume_task(args.resume, db_path=args.db,
+                           assign_to=args.assign_to, note_id=args.note_id)
     try:
         return run_intake(db_path=args.db, dry_run=args.dry_run)
     except Exception as e:  # noqa: BLE001 — top-level fail-closed

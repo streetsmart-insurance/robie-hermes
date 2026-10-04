@@ -301,8 +301,9 @@ def _work(store, worker, task):
     return worker.process_job(store, job)
 
 
-def _verify(store, job_id, disc, owners, **kwargs):
-    verifier = TaskIntakeVerifier(discussion_client=disc, task_reassigner=owners, **kwargs)
+def _verify(store, job_id, disc, owners, verifier_store=None):
+    verifier = TaskIntakeVerifier(discussion_client=disc, task_reassigner=owners,
+                                  store=verifier_store)
     action = store.get_checkpoint(job_id, "action") or {}
     intake._build_engine(store, verifier)._verify(store.get_job(job_id), action)
     return store.get_job(job_id)
@@ -486,7 +487,7 @@ def test_resume_with_answer_uses_the_chosen_owner(store):
     second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
     assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
     assert owners.calls == ["Mike Sosa"]
-    done = _verify(store, first["id"], disc, owners, store=store)
+    done = _verify(store, first["id"], disc, owners, verifier_store=store)
     assert done["status"] == JobStatus.COMPLETE.value
 
 

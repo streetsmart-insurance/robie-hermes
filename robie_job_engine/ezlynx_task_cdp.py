@@ -40,6 +40,10 @@ class ReassignError(Exception):
     """The assignee could not be changed or verified."""
 
 
+class AssigneeUnresolvedError(ReassignError):
+    """The target person is missing or ambiguous in the picker; nothing was saved."""
+
+
 def reassign_enabled() -> bool:
     return os.environ.get(REASSIGN_GATE_ENV, "").strip() == "1"
 
@@ -171,7 +175,10 @@ def _set_assignee(page, field, new_assignee: str) -> None:
     field.type(new_assignee, delay=40)
     # The suggestion listbox opens beneath the field; each row shows a
     # person icon plus the name. Click the matching row.
-    option = _unique(page.get_by_role("option", name=new_assignee, exact=True), "assignee option")
+    try:
+        option = _unique(page.get_by_role("option", name=new_assignee, exact=True), "assignee option")
+    except ReassignError as exc:
+        raise AssigneeUnresolvedError(str(exc)) from exc
     option.click()
 
 
@@ -212,6 +219,9 @@ class PlaywrightTaskReassigner:
                 f"Reassignment gate is off ({REASSIGN_GATE_ENV}=1 required)"
             )
         validate_identity(task_id, applicant_id)
+        from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
+
+        require_allowed_ezlynx_write_applicant(applicant_id)
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
             panel = _search_and_open_edit(page, task_id, applicant_id)

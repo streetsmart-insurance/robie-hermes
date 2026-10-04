@@ -125,8 +125,18 @@ def ensure_task_job(
 
     # The task changed in EZLynx since this job was created. Refresh the
     # payload on the SAME job — never a second job for one task ID.
-    store.update_payload(job["id"], payload)
+    #
+    # A "round" separates a genuinely new request from a retry. It advances
+    # only when Robie already handed the task back and it has since returned
+    # to Robie; note and reassignment intents are keyed by round, so the new
+    # round gets its own note while retries inside a round never repeat one.
     status = JobStatus(job["status"])
+    round_no = int(existing_payload.get("round") or 0)
+    if status in TERMINAL_STATUSES and (store.get_checkpoint(job["id"], "action") or {}).get("reassigned"):
+        round_no += 1
+    if round_no:
+        payload["round"] = round_no
+    store.update_payload(job["id"], payload)
     if status in TERMINAL_STATUSES:
         job = store.transition(job["id"], JobStatus.PENDING)
         logger.info(
