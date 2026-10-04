@@ -32,7 +32,12 @@ Exact client and no repeats:
   discussions (`_assert_write_target`). The verifier repeats the check.
 - Notes are reserved per (round, purpose) before the POST; a reassignment is
   reserved before the Save and reconciled by READING the assignee after a
-  crash or unknown outcome. Nothing is repeated on a guess.
+  crash or unknown outcome. Nothing is repeated on a guess: an unknown Save is
+  never replayed because the task still shows Robie (the UI Save is not an
+  atomic compare-and-set); one more needs an explicit human authorization.
+- A worker holds a lease on its job, renewed before every external effect, and
+  every move it makes is fenced by that lease. A human's answer, and a note a
+  human adopts, are bound to their own round and exact content.
 - Return owner: Task Created By -> Assigned Producer -> CSR (or the person a
   human chose on resume); never Robie itself. The verifier recomputes it.
 
@@ -54,6 +59,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -83,7 +89,17 @@ REASSIGN_PRECEDENCE = (
 LEGACY_NOTE_KIND = "task-note-intent"
 NOTE_KIND_PREFIX = "task-note-intent:"
 REASSIGN_KIND_PREFIX = "task-reassign-intent:"
-HUMAN_ANSWER_KIND = "human-answer"
+HUMAN_ANSWER_PREFIX = "human-answer:"
+LEASE_SECONDS = 900
+
+
+def human_answer_kind(round_no: int) -> str:
+    """A human's answer belongs to one round of one task; a later round asks again."""
+    return f"{HUMAN_ANSWER_PREFIX}{round_no}"
+
+
+def job_round(job: dict[str, Any]) -> int:
+    return int((job.get("payload") or {}).get("round") or 0)
 
 ROBIE_NAME = "Robie AI"
 FIELD_LABELS = dict(REASSIGN_PRECEDENCE) | {"human_choice": "the person you chose"}
@@ -103,6 +119,53 @@ class CallHeld(Exception):
 
 class UnverifiedNoteError(Exception):
     """A note post could not be confirmed via read-back."""
+
+
+class LeaseLost(Exception):
+    """This worker no longer holds the job's lease; it must stop and change nothing."""
+
+
+class _Lease:
+    """One worker's lease on one Job, renewed before every external effect.
+
+    The store's own lease is the fence: another worker can only take the Job
+    after this lease lapses and is recovered, and every transition made here
+    is applied only while this worker still owns it. EZLynx cannot check a
+    token, so the lease margin (LEASE_SECONDS, renewed before each effect) plus
+    the durable intents bound the residual risk; they do not remove it.
+    Stores without lease support (some test doubles) run unfenced.
+    """
+
+    def __init__(self, store: Any, job_id: str):
+        self.store = store
+        self.job_id = job_id
+        self.supported = hasattr(store, "claim") and hasattr(store, "renew_lease")
+        self.token = f"task-intake:{os.getpid()}:{uuid.uuid4().hex}" if self.supported else None
+
+    def acquire(self) -> bool:
+        if not self.supported:
+            return True
+        return self.store.claim(self.job_id, self.token, lease_seconds=LEASE_SECONDS) is not None
+
+    def fence(self) -> None:
+        if not self.supported:
+            return
+        try:
+            self.store.renew_lease(self.job_id, self.token, lease_seconds=LEASE_SECONDS)
+        except RuntimeError as exc:
+            raise LeaseLost(str(exc)) from exc
+
+    def kw(self) -> dict[str, Any]:
+        return {"lease_owner": self.token} if self.supported else {}
+
+    def release(self) -> None:
+        if not self.supported:
+            return
+        with self.store.transaction() as conn:
+            conn.execute(
+                "UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL WHERE id=? AND lease_owner=?",
+                (self.job_id, self.token),
+            )
 
 
 class TaskReassigner(Protocol):
@@ -290,6 +353,8 @@ class TaskAssignmentWorker:
         self.opt_out_store = opt_out_store
         self.opt_in_store = opt_in_store
         self.call_dedupe = call_dedupe
+        self._lease: _Lease | None = None
+        self._last_note_kind = LEGACY_NOTE_KIND
 
     # -- job lifecycle -------------------------------------------------
 
@@ -298,64 +363,74 @@ class TaskAssignmentWorker:
 
         Returns the job row after the terminal transition of this phase.
         COMPLETE is never set here — only the independent verifier may.
+
+        The job's lease is taken first and every move is fenced by it, so a
+        worker that lost its lease (and was replaced) changes nothing.
         """
         job_id = job["id"]
-        job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        lease = _Lease(store, job_id)
+        if not lease.acquire():
+            logger.info("Job %s is leased by another worker; not starting", job_id)
+            return store.get_job(job_id)
+        try:
+            job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING}, **lease.kw())
+        except Exception:
+            lease.release()
+            raise
+        self._lease = lease
+        try:
+            return self._run_claimed_job(store, job, lease)
+        except LeaseLost as e:
+            logger.warning("Job %s: lease lost, stopping without changes: %s", job_id, e)
+            return store.get_job(job_id)
+        finally:
+            self._lease = None
+
+    def _move(self, store: Any, lease: _Lease, job_id: str, status: JobStatus, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return store.transition(job_id, status, expected={JobStatus.RUNNING},
+                                    release_lease=True, **lease.kw(), **kwargs)
+        except RuntimeError as exc:
+            if "lease" in str(exc):
+                raise LeaseLost(str(exc)) from exc
+            raise
+
+    def _run_claimed_job(self, store: Any, job: dict[str, Any], lease: _Lease) -> dict[str, Any]:
+        job_id = job["id"]
         try:
             action = self._do_work(store, job)
         except CallQueued as e:
             logger.info("Job %s queued until the calling window: %s", job_id, e)
-            return store.transition(
-                job_id,
-                JobStatus.PENDING,
-                expected={JobStatus.RUNNING},
-                error=str(e)[:500],
-                release_lease=True,
-            )
+            return self._move(store, lease, job_id, JobStatus.PENDING, error=str(e)[:500])
         except CallHeld as e:
             logger.info("Job %s not dialed; left pending: %s", job_id, e)
-            return store.transition(
-                job_id,
-                JobStatus.PENDING,
-                expected={JobStatus.RUNNING},
-                error=str(e)[:500],
-                release_lease=True,
-            )
+            return self._move(store, lease, job_id, JobStatus.PENDING, error=str(e)[:500])
         except NeedsHuman as e:
             logger.warning(f"Job {job_id} needs a human: {e}")
-            return store.transition(
-                job_id,
-                JobStatus.AWAITING_HUMAN_INPUT,
-                expected={JobStatus.RUNNING},
-                error=str(e)[:500],
-                resume_status=JobStatus.PENDING,
-                release_lease=True,
-            )
+            return self._move(store, lease, job_id, JobStatus.AWAITING_HUMAN_INPUT,
+                              error=str(e)[:500], resume_status=JobStatus.PENDING)
         except UnverifiedNoteError as e:
             logger.warning(f"Job {job_id} has an unconfirmed note: {e}")
-            return store.transition(
-                job_id,
-                JobStatus.AWAITING_HUMAN_INPUT,
-                expected={JobStatus.RUNNING},
+            return self._move(
+                store, lease, job_id, JobStatus.AWAITING_HUMAN_INPUT,
                 error=(f"Note state is uncertain and will not be reposted: {e}. "
                        "Check the discussion in EZLynx, then resume with --note-id "
                        "if the note is there."),
-                resume_status=JobStatus.PENDING,
-                release_lease=True,
-            )
+                resume_status=JobStatus.PENDING)
+        except LeaseLost:
+            raise
         except Exception as e:  # noqa: BLE001 — fail-closed with the error on the job
             logger.error(f"Job {job_id} failed: {e}")
-            return store.transition(
-                job_id,
-                JobStatus.FAILED,
-                expected={JobStatus.RUNNING},
-                error=f"{type(e).__name__}: {e}"[:500],
-                release_lease=True,
-            )
+            return self._move(store, lease, job_id, JobStatus.FAILED,
+                              error=f"{type(e).__name__}: {e}"[:500])
+        lease.fence()
         store.checkpoint(job_id, "action", action)
-        return store.transition(
-            job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING}, release_lease=True
-        )
+        return self._move(store, lease, job_id, JobStatus.VERIFYING)
+
+    def _fence(self) -> None:
+        """Renew this worker's lease immediately before an external effect."""
+        if self._lease is not None:
+            self._lease.fence()
 
     # -- the work ------------------------------------------------------
 
@@ -371,21 +446,17 @@ class TaskAssignmentWorker:
         timestamp = utcnow_iso()
 
         if is_test_task(task):
-            note_id = self._post_note_verified(
+            note = self._note_record(
                 store, job, task.discussion_id,
                 "Roby here — this looks like a test task, so I'm leaving it "
                 "alone. No action taken.",
-                purpose="test-ack",
+                purpose="test-ack", text="test-task acknowledgment",
             )
             self._record(task, "completed", "Test task; note posted, no action taken.", timestamp)
             return {
                 "test_task": True,
                 "category": "test",
-                "note": {
-                    "discussion_id": task.discussion_id,
-                    "note_id": note_id,
-                    "text": "test-task acknowledgment",
-                },
+                "note": note,
                 "reassigned": None,
             }
 
@@ -397,7 +468,7 @@ class TaskAssignmentWorker:
         if category == "callback" and self._call_handler_available():
             return self._do_call_task(store, job, task, timestamp)
 
-        answer = store.get_checkpoint(job["id"], HUMAN_ANSWER_KIND) or {}
+        answer = self._human_answer(store, job, task)
         candidates = reassign_candidates(
             task, human_choice=str(answer.get("assign_to") or "").strip() or None
         )
@@ -435,13 +506,13 @@ class TaskAssignmentWorker:
                 f"reassign to {target} in EZLynx."
             )
 
-        reassigned = self._reassign_with_reconciliation(store, job, task, candidates)
-        note_id = self._post_note_verified(
+        reassigned = self._reassign_with_reconciliation(store, job, task, candidates, answer)
+        note = self._note_record(
             store, job, task.discussion_id,
             f"Roby here — I read this request ({category}) but I can't "
             f"complete it myself, so I've sent it back to "
             f"{reassigned['verified_assignee']} ({FIELD_LABELS[reassigned['field']]}).",
-            purpose="handoff",
+            purpose="handoff", text="handoff to " + reassigned["verified_assignee"],
         )
         self._record(task, "completed", f"Reassigned to {reassigned['verified_assignee']}; note posted.", timestamp)
         return {
@@ -449,13 +520,19 @@ class TaskAssignmentWorker:
             "category": category,
             "reassign_target": reassigned["to"],
             "reassign_field": reassigned["field"],
-            "note": {
-                "discussion_id": task.discussion_id,
-                "note_id": note_id,
-                "text": "handoff to " + reassigned["verified_assignee"],
-            },
+            "note": note,
             "reassigned": reassigned,
         }
+
+    def _human_answer(self, store: Any, job: dict[str, Any], task: AssignedTask) -> dict[str, Any]:
+        """The human's answer for THIS round of THIS task; anything else is ignored."""
+        round_no = job_round(job)
+        data = store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
+        if data and (str(data.get("task_id")) != task.task_id
+                     or str(data.get("applicant_id")) != task.applicant_id
+                     or int(data.get("round", -1)) != round_no):
+            return {}
+        return data
 
     # -- exact client ------------------------------------------------------
 
@@ -503,28 +580,31 @@ class TaskAssignmentWorker:
 
     def _reassign_with_reconciliation(
         self, store: Any, job: dict[str, Any], task: AssignedTask,
-        candidates: list[tuple[str, str]],
+        candidates: list[tuple[str, str]], answer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Hand the task to the first return owner EZLynx can select.
 
         An intent is committed before any Save. After a crash or an unknown
         outcome the assignee is READ, never assumed: already the target means
-        it landed; still Robie means it did not (the Save is compare-and-set
-        on the current assignee, so repeating it cannot double-apply); anyone
-        else pauses the job for a human.
+        it landed. Anything else is NOT proof the Save did not happen or will
+        not still land (the UI Save is not an atomic compare-and-set), so Robie
+        never repeats it on its own: the job pauses, and one more Save needs an
+        explicit human authorization (--allow-retry-save) that is good for that
+        one attempt only.
         """
         from .ezlynx_task_cdp import AssigneeUnresolvedError
 
-        round_no = int((job.get("payload") or {}).get("round") or 0)
-        kind = f"{REASSIGN_KIND_PREFIX}{round_no}"
+        answer = answer or {}
+        kind = f"{REASSIGN_KIND_PREFIX}{job_round(job)}"
         expected = (task.assigned_to or ROBIE_NAME).strip() or ROBIE_NAME
         intent = store.get_checkpoint(job["id"], kind) or {}
         skipped = [str(name) for name in intent.get("skipped") or []]
+        attempt = int(intent.get("attempt") or 0)
 
         def save(state: str, target: str, **extra: Any) -> None:
             data = {"task_id": task.task_id, "applicant_id": task.applicant_id,
                     "expected_assignee": expected, "target": target, "state": state,
-                    "skipped": list(skipped), **extra}
+                    "attempt": attempt, "skipped": list(skipped), **extra}
             store.checkpoint(job["id"], kind, data)
             if store.get_checkpoint(job["id"], kind) != data:
                 raise UnverifiedNoteError("Reassignment intent not durable; nothing sent")
@@ -532,6 +612,11 @@ class TaskAssignmentWorker:
         def result(name: str, field: str, verified: str) -> dict[str, Any]:
             return {"to": name, "field": field, "verified_assignee": verified,
                     "skipped_unresolved": list(skipped)}
+
+        def retry_authorized(name: str) -> bool:
+            grant = answer.get("retry_save") or {}
+            return (str(grant.get("target") or "").casefold() == name.casefold()
+                    and int(grant.get("after_attempt", -1)) == attempt)
 
         for name, field in candidates:
             if name.casefold() in {item.casefold() for item in skipped}:
@@ -549,12 +634,22 @@ class TaskAssignmentWorker:
                 if current.casefold() == name.casefold():
                     save("applied", name, verified_assignee=current)
                     return result(name, field, current)
+                if not retry_authorized(name):
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: an earlier reassignment to {name} has an unknown "
+                        f"result and the task now shows {current or 'unknown'!r}. I will not repeat "
+                        "the Save on my own, because it may still land. Check EZLynx; if the task is "
+                        f"still with {expected} and you want me to try once more, resume with "
+                        "--allow-retry-save."
+                    )
                 if current.casefold() != expected.casefold():
                     raise NeedsHuman(
                         f"Task {task.task_id}: the assignee is {current!r}, not {expected!r} "
                         f"or {name!r}; nothing was sent. A human must look at the task."
                     )
+            attempt += 1
             save("attempting", name)
+            self._fence()
             try:
                 verified = self.reassigner.reassign(
                     task.task_id, task.applicant_id, name,
@@ -576,7 +671,7 @@ class TaskAssignmentWorker:
                 raise NeedsHuman(
                     f"Task {task.task_id}: the reassignment to {name} could not be "
                     f"confirmed ({type(exc).__name__}); the task shows {current or 'unknown'!r}. "
-                    "Check EZLynx, then resume this job."
+                    "Robie will not repeat the Save on its own. Check EZLynx, then resume this job."
                 ) from exc
             if str(verified).strip().casefold() != name.casefold():
                 save("uncertain", name, error=f"reassigner reported {str(verified)!r}")
@@ -733,6 +828,10 @@ class TaskAssignmentWorker:
         Metadata changes and HTTP acceptance cannot authorize another send.
         The reservation is per (round, purpose): a resume or a new round may
         write a different note, but never the same one twice.
+
+        A note a human adopted after an uncertain post (--note-id) is accepted
+        only when the discussion shows that exact ID once, with exactly the text
+        Robie meant to write; otherwise it stays unconfirmed.
         """
         from .ezlynx_task_cdp import validate_identity
         from .store import canonical_json, utc_now
@@ -741,16 +840,20 @@ class TaskAssignmentWorker:
                           str(payload.get("applicant_id") or ""))
         if not discussion_id or self.client is None:
             raise ValueError("No discussion identity/client; note not sent")
-        identity = {"task_id": payload["task_id"], "applicant_id": payload["applicant_id"],
-                    "discussion_id": discussion_id,
-                    "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
-        kind = f"{NOTE_KIND_PREFIX}{int(payload.get('round') or 0)}:{purpose}"
+        round_no = job_round(job)
+        base = {"task_id": payload["task_id"], "applicant_id": payload["applicant_id"],
+                "discussion_id": discussion_id,
+                "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+        identity = {**base, "purpose": purpose, "round": round_no}
+        kind = f"{NOTE_KIND_PREFIX}{round_no}:{purpose}"
         legacy = store.get_checkpoint(job["id"], LEGACY_NOTE_KIND)
         if legacy is not None:
-            if all(legacy.get(k) == v for k, v in identity.items()):
-                kind = LEGACY_NOTE_KIND  # continue an intent written before per-purpose kinds
+            if all(legacy.get(k) == v for k, v in base.items()):
+                kind, identity = LEGACY_NOTE_KIND, base  # continue an intent written before per-purpose kinds
             elif legacy.get("state") != "confirmed":
                 raise UnverifiedNoteError("Earlier note intent is unresolved; not sent")
+        self._last_note_kind = kind
+        self._fence()
         # INSERT is a durable compare-and-set, following the outbox contract.
         # No time-based lease can allow a second POST of an uncertain note.
         with store.transaction() as conn:
@@ -779,9 +882,41 @@ class TaskAssignmentWorker:
         record = self.client.get_discussion(discussion_id)
         if not _contains_note_id(record, note_id):
             raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
+        if intent.get("adopted") and intent.get("state") != "confirmed":
+            self._assert_adopted_note(intent, payload, discussion_id, body, record, note_id)
         intent["state"] = "confirmed"
         store.checkpoint(job["id"], kind, intent)
         return note_id
+
+    @staticmethod
+    def _assert_adopted_note(intent: dict[str, Any], payload: dict[str, Any], discussion_id: str,
+                             body: str, record: Any, note_id: str) -> None:
+        adoption = intent.get("adoption") or {}
+        if (str(adoption.get("note_id")) != note_id
+                or str(adoption.get("applicant_id")) != str(payload.get("applicant_id"))
+                or str(adoption.get("discussion_id")) != str(discussion_id)):
+            raise UnverifiedNoteError("Adopted note is not bound to this applicant and discussion")
+        text = _note_text_for_id(record, note_id)
+        if text is None:
+            raise UnverifiedNoteError("Adopted note's text cannot be read, so it cannot be "
+                                      "confirmed as the note Robie meant to write")
+        if _norm_text(text) != _norm_text(body):
+            raise UnverifiedNoteError("Adopted note does not match the note Robie meant to write")
+
+    def _note_record(self, store: Any, job: dict[str, Any], discussion_id: str, body: str,
+                     *, purpose: str, text: str) -> dict[str, Any]:
+        """Post (or reconcile) one note and describe it for the verifier."""
+        note_id = self._post_note_verified(store, job, discussion_id, body, purpose=purpose)
+        intent = store.get_checkpoint(job["id"], self._last_note_kind) or {}
+        return {
+            "discussion_id": discussion_id,
+            "note_id": note_id,
+            "text": text,
+            "purpose": purpose,
+            "round": job_round(job),
+            "body_norm_sha256": hashlib.sha256(_norm_text(body).encode()).hexdigest(),
+            "adopted": bool(intent.get("adopted")),
+        }
 
     def _record(self, task: AssignedTask, action: str, detail: str, timestamp: str) -> None:
         self.results.append(TaskResult(
@@ -791,6 +926,27 @@ class TaskAssignmentWorker:
             detail=detail,
             timestamp=timestamp,
         ))
+
+
+_NOTE_TEXT_KEYS = ("body", "Body", "text", "Text", "noteText", "NoteText", "note", "Note", "content", "Content")
+
+
+def _norm_text(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _note_text_for_id(record: Any, note_id: str) -> str | None:
+    """The text of the ONE note with this ID, or None if it is not shown exactly once with text."""
+    from .ezlynx_discussions import iter_discussion_notes, _note_id_of
+
+    rows = [row for row in iter_discussion_notes(record) if _note_id_of(row) == note_id]
+    if len(rows) != 1:
+        return None
+    for key in _NOTE_TEXT_KEYS:
+        value = rows[0].get(key) if isinstance(rows[0], dict) else None
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def _contains_note_id(record: dict[str, Any], note_id: str) -> bool:
@@ -875,7 +1031,12 @@ class TaskIntakeVerifier:
         if str(action.get("reassign_field") or "") == "human_choice":
             if self.store is None:
                 return None
-            answer = self.store.get_checkpoint(job["id"], HUMAN_ANSWER_KIND) or {}
+            round_no = job_round(job)
+            answer = self.store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
+            if (str(answer.get("task_id")) != task.task_id
+                    or str(answer.get("applicant_id")) != task.applicant_id
+                    or int(answer.get("round", -1)) != round_no):
+                return f"no human answer is recorded for round {round_no} of this task"
             chosen = str(answer.get("assign_to") or "").strip()
             if chosen.casefold() != target.casefold():
                 return f"return owner {target!r} is not the person a human chose ({chosen!r})"
@@ -964,6 +1125,16 @@ class TaskIntakeVerifier:
                 error=f"discussion read-back failed: {e}",
                 retryable=True,
             )
+
+        if (action.get("note") or {}).get("adopted"):
+            text = _note_text_for_id(record, note_id)
+            want = str((action.get("note") or {}).get("body_norm_sha256") or "")
+            if text is None or hashlib.sha256(_norm_text(text).encode()).hexdigest() != want:
+                return _unverified(
+                    job, captured, discussion_id,
+                    {"note_id": note_id, "discussion_id": discussion_id}, {},
+                    error="the adopted note's text does not match the note Robie meant to write",
+                )
 
         latest = str(snapshot.get("most_recent_note_id") or "")
         expected: dict[str, Any] = {"note_id": note_id, "discussion_id": discussion_id}

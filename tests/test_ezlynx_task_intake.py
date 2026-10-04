@@ -229,7 +229,9 @@ def test_ensure_task_job_reopens_terminal_on_change(store):
     with store.connect() as conn:
         conn.execute("UPDATE jobs SET status=? WHERE id=?", (JobStatus.COMPLETE.value, job["id"]))
 
-    changed = make_task(last_modified="2026-10-03T11:00:00")
+    # A changed REQUEST (new wording, newer Last Modified) reopens the same job. A bare
+    # Last Modified bump does not: Robie's own note or Save moves it too.
+    changed = make_task(last_modified="2026-10-03T11:00:00", description="Also please email the client.")
     job2, created = jobs_mod.ensure_task_job(store, changed)
     assert created is False
     assert job2["id"] == job["id"]

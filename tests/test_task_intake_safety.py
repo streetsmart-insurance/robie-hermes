@@ -403,14 +403,15 @@ def test_second_request_after_handback_gets_its_own_note(store, second_ask):
     assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
 
 
-def test_test_task_note_not_reposted_when_report_version_changes(store):
+def test_test_task_note_not_reposted_when_the_request_changes_but_the_note_is_the_same(store):
     disc, owners = Discussions(), Owners()
     worker = _worker(disc, owners)
     task = make_task(description="Test task for Roby - please ignore")
     job = _work(store, worker, task)
     assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
-    job2, _ = ensure_task_job(store, make_task(description=task.description,
+    job2, _ = ensure_task_job(store, make_task(description="Test task for Robie - please ignore again",
                                                last_modified="2026-10-04T09:00:00"))
+    assert job2["status"] == JobStatus.PENDING.value  # the request changed, so it is reopened
     after = worker.process_job(store, job2)
     assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
     assert len(disc.posts) == 1 and owners.calls == []
