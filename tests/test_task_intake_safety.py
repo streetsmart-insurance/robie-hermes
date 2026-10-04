@@ -249,15 +249,22 @@ class Discussions:
         self.latest = "note-000"
         self.notes = []
         self.texts = {}
+        self.created = {}
         self.show_text = show_text
+        self.id_lookups = []
 
-    def inject_note(self, note_id, text):
-        """A note somebody else wrote in the same discussion."""
+    def inject_note(self, note_id, text, created="unset"):
+        """A note somebody else wrote in the same discussion (created: ISO text, None = no time)."""
         self.notes.append(note_id)
         self.texts[note_id] = text
+        if created == "unset":
+            created = datetime.now(timezone.utc).isoformat()
+        if created is not None:
+            self.created[note_id] = created
         self.latest = note_id
 
     def get_discussion_ids(self, applicant_id):
+        self.id_lookups.append(applicant_id)
         return list(self.ids)
 
     def append_note(self, discussion_id, body):
@@ -265,13 +272,21 @@ class Discussions:
         self.latest = f"note-{len(self.posts)}"
         self.notes.append(self.latest)
         self.texts[self.latest] = body
+        self.created[self.latest] = datetime.now(timezone.utc).isoformat()
         return {"note_id": self.latest}
 
     def get_discussion(self, discussion_id):
         return {"title": "Task Note", "mostRecentNoteId": self.latest,
                 "noteCount": 5 + len(self.notes),
-                "notes": [({"id": n, "body": self.texts[n]} if self.show_text and n in self.texts
-                           else {"id": n}) for n in self.notes]}
+                "notes": [self._row(n) for n in self.notes]}
+
+    def _row(self, n):
+        row = {"id": n}
+        if self.show_text and n in self.texts:
+            row["body"] = self.texts[n]
+        if n in self.created:
+            row["createdDate"] = self.created[n]
+        return row
 
 
 class Owners:
@@ -282,8 +297,10 @@ class Owners:
         self.fail_before_save = (list(fail_before_save) if isinstance(fail_before_save, (list, tuple))
                                  else ([fail_before_save] if fail_before_save else []))
         self.calls = []
+        self.attempts = []
 
     def reassign(self, task_id, applicant_id, new_assignee, description="", expected_assignee="Robie AI"):
+        self.attempts.append(new_assignee)
         if new_assignee in self.unresolved:
             raise cdp.AssigneeUnresolvedError("Missing or ambiguous assignee option; no edit")
         if self.fail_before_save:
@@ -317,6 +334,16 @@ def _verify(store, job_id, disc, owners, verifier_store=None):
     action = store.get_checkpoint(job_id, "action") or {}
     intake._build_engine(store, verifier)._verify(store.get_job(job_id), action)
     return store.get_job(job_id)
+
+
+def _lapse(store, job_id):
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with store.transaction() as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=? WHERE id=?", (past, job_id))
+
+
+def _later_ms(seconds=5):
+    return str(int((datetime.now(timezone.utc) + timedelta(seconds=seconds)).timestamp() * 1000))
 
 
 def _age(store, job_id, hours):
@@ -395,7 +422,8 @@ def test_second_request_after_handback_gets_its_own_note(store, second_ask):
     assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
     owners.assignee = "Robie AI"  # staff hands it back to Robie with a new ask
     job2, created = ensure_task_job(
-        store, make_task(last_modified="2026-10-04T09:00:00", description=second_ask))
+        store, make_task(last_modified="2026-10-04T09:00:00", description=second_ask),
+        report_received_at=_later_ms(), confirm_returned=lambda t: True)
     assert not created and job2["status"] == JobStatus.PENDING.value
     after = worker.process_job(store, job2)
     assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
@@ -896,7 +924,8 @@ def test_a_handed_back_task_that_returns_unchanged_is_a_new_round(store):
     job = _work(store, worker, make_task())
     assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
     owners.assignee = "Robie AI"
-    again, created = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"))
+    again, created = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"),
+                                     report_received_at=_later_ms(), confirm_returned=lambda t: True)
     assert not created and again["status"] == JobStatus.PENDING.value
     assert again["payload"]["round"] == 1
 
@@ -914,8 +943,321 @@ def test_a_human_answer_is_scoped_to_its_own_round(store):
     assert _verify(store, first["id"], disc, owners, verifier_store=store)["status"] == JobStatus.COMPLETE.value
     owners.assignee = "Robie AI"
     again, _ = ensure_task_job(store, make_task(created_by="", assigned_producer="", csr="",
-                                                last_modified="2026-10-05T09:00:00"))
+                                                last_modified="2026-10-05T09:00:00"),
+                               report_received_at=_later_ms(), confirm_returned=lambda t: True)
     assert again["payload"]["round"] == 1
     third = _worker(disc, owners).process_job(store, again)
     assert third["status"] == JobStatus.AWAITING_HUMAN_INPUT.value, "reused an answer from an earlier round"
     assert owners.calls == ["Mike Sosa"]
+
+
+# ---------------------------------------------------------------------------
+# Clara's second review of #774 (7405c20): fenced records, changed targets,
+# evidence of a return, consistent freshness, and old identical notes.
+# ---------------------------------------------------------------------------
+
+# ---- 1. effect-record writes are fenced, not just transitions -------------------------------
+
+def test_a_late_worker_cannot_overwrite_the_replacements_attempt_record(store):
+    disc, state = Discussions(), {}
+
+    class Hung(Owners):
+        def reassign(self, task_id, applicant_id, new_assignee, **kwargs):
+            self.attempts.append(new_assignee)
+            if len(self.attempts) == 1:
+                # The original worker hangs inside attempt 1. Its lease lapses, the job is
+                # recovered, a replacement pauses (unknown result), a human grants ONE retry,
+                # and the replacement's retry (attempt 2) also ends unknown.
+                job_id = state["job_id"]
+                _lapse(store, job_id)
+                intake.recover_stale_running(store)
+                state["b1"] = _worker(disc, self).process_job(store, store.get_job(job_id))["status"]
+                assert intake.resume_task("63429523", db_path=store.path, allow_retry_save=True) == 0
+                state["b2"] = _worker(disc, self).process_job(store, store.get_job(job_id))["status"]
+                raise TimeoutError("the original finally gives up")  # a late, stale outcome record
+            raise TimeoutError("attempt 2 outcome unknown")
+
+    owners = Hung()
+    job, _ = ensure_task_job(store, make_task())
+    state["job_id"] = job["id"]
+    original = _worker(disc, owners).process_job(store, job)
+    assert state["b1"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert state["b2"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    record = store.get_checkpoint(job["id"], "task-reassign-intent:0")
+    assert record["attempt"] == 2, "a late worker rewrote the replacement's attempt record"
+    assert original["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    store.resume(job["id"])  # the retry grant was used up by attempt 2
+    third = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert third["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert len(owners.attempts) == 2, "a used retry grant became valid again"
+
+
+def test_a_late_worker_cannot_write_a_note_record_after_losing_its_lease(store):
+    disc, state = Discussions(), {}
+    original_append = disc.append_note
+
+    def append_then_lose_lease(discussion_id, body):
+        original_append(discussion_id, body)
+        _lapse(store, state["job_id"])
+        intake.recover_stale_running(store)
+        raise TimeoutError("accepted, then the worker lost its lease")
+
+    disc.append_note = append_then_lose_lease
+    job, _ = ensure_task_job(store, make_task(description="Test task for Roby - please ignore"))
+    state["job_id"] = job["id"]
+    result = _worker(disc, Owners()).process_job(store, job)
+    assert result["status"] == JobStatus.PENDING.value  # recovered, and the late worker changed nothing
+    intent = store.get_checkpoint(job["id"], "task-note-intent:0:test-ack")
+    assert intent["state"] == "uncertain" and intent["note_id"] == ""
+
+
+# ---- 2. an unresolved Save blocks another Save even for a different person -----------------------
+
+def test_an_unresolved_save_blocks_a_save_to_a_different_person(store):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task("63429523", db_path=store.path, assign_to="Mike Sosa") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert owners.attempts == ["Carlo Ferrara"], "a changed target bypassed the unknown-outcome check"
+
+
+def test_a_retry_grant_names_the_person_it_applies_to(store):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task("63429523", db_path=store.path, assign_to="Mike Sosa",
+                              allow_retry_save=True) == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
+    assert owners.calls == ["Mike Sosa"]
+
+
+def test_a_save_that_landed_on_someone_else_is_not_followed_by_another_save(store):
+    disc, owners = Discussions(), Owners(crash_after_save=SystemExit("killed after save"))
+    job, _ = ensure_task_job(store, make_task())
+    with pytest.raises(SystemExit):
+        _worker(disc, owners).process_job(store, job)
+    _lapse(store, job["id"])
+    assert intake.recover_stale_running(store) == [job["id"]]
+    store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    store.transition(job["id"], JobStatus.AWAITING_HUMAN_INPUT, expected={JobStatus.RUNNING},
+                     error="x", resume_status=JobStatus.PENDING, release_lease=True)
+    assert intake.resume_task("63429523", db_path=store.path, assign_to="Mike Sosa") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert owners.attempts == ["Carlo Ferrara"], "a second Save was attempted after the first landed"
+
+
+# ---- 3. a new round needs evidence the task actually returned to Robie ---------------------------
+
+def _handed_back_job(store, disc, owners):
+    job = _work(store, _worker(disc, owners), make_task())
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+    return job
+
+
+def test_a_delayed_report_cannot_open_a_new_round(store):
+    disc, owners = Discussions(), Owners()
+    job = _handed_back_job(store, disc, owners)
+    applied = datetime.fromisoformat(store.get_checkpoint(job["id"], "task-reassign-intent:0")["applied_at"])
+    delayed_ms = str(int((applied - timedelta(minutes=10)).timestamp() * 1000))
+    again, created = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"),
+                                     report_received_at=delayed_ms, confirm_returned=lambda t: True)
+    assert not created and again["status"] == JobStatus.COMPLETE.value
+    assert int(again["payload"].get("round") or 0) == 0
+
+
+def test_a_new_round_needs_a_live_read_that_shows_robie(store):
+    disc, owners = Discussions(), Owners()
+    _handed_back_job(store, disc, owners)
+    again, _ = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"),
+                               report_received_at=_later_ms(), confirm_returned=lambda t: False)
+    assert again["status"] == JobStatus.COMPLETE.value and int(again["payload"].get("round") or 0) == 0
+
+
+def test_without_a_return_check_no_new_round_is_ever_opened(store):
+    disc, owners = Discussions(), Owners()
+    _handed_back_job(store, disc, owners)
+    again, _ = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"))
+    assert again["status"] == JobStatus.COMPLETE.value and int(again["payload"].get("round") or 0) == 0
+
+
+def test_intake_reads_the_task_live_before_opening_a_round(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    holder = {"report": _report(task, message_id="m1")}
+    _wire_intake(monkeypatch, None, disc, owners, {"on": True})
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id))
+    assert job["status"] == JobStatus.COMPLETE.value and owners.assignee == "Carlo Ferrara"
+    # A lagging report claims the task is Robie's again, but it is still with Carlo.
+    later = make_task(last_modified="2026-10-05T09:00:00")
+    holder["report"] = _report(later, message_id="m2")
+    assert intake.run_intake(db_path=db) == 0
+    assert JobStore(db).get_job(job["id"])["status"] == JobStatus.COMPLETE.value
+    assert len(disc.posts) == 1
+    # Now it really is back with Robie.
+    owners.assignee = "Robie AI"
+    holder["report"] = _report(later, message_id="m3")
+    assert intake.run_intake(db_path=db) == 0
+    final = JobStore(db).get_job(job["id"])
+    assert final["status"] == JobStatus.COMPLETE.value and int(final["payload"]["round"]) == 1
+    assert len(disc.posts) == 2
+
+
+# ---- 4. freshness applies to new work everywhere; owed recovery is separate -------------------------
+
+def _record_processed(db, message_id):
+    store = JobStore(db)
+    intake._ensure_intake_table(store)
+    intake._record_run(store, message_id=message_id, digest="d", filename="f.csv",
+                       task_count=1, jobs_created=1, status="ok")
+
+
+def test_an_already_processed_stale_report_does_not_start_new_work(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    ensure_task_job(JobStore(db), task)  # PENDING, no effect taken yet
+    _record_processed(db, "m1")
+    _wire_intake(monkeypatch, _report(task, message_id="m1", minutes_ago=240), disc, owners, {"on": True})
+    assert intake.run_intake(db_path=db) == 2
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id))
+    assert job["status"] == JobStatus.PENDING.value
+    assert disc.posts == [] and owners.calls == []
+
+
+def test_owed_recovery_still_completes_when_the_latest_report_is_stale(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    holder = {"report": _report(task, message_id="m1")}
+    _wire_intake(monkeypatch, None, disc, owners, {"on": True})
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
+    original = disc.append_note
+    def accepted_then_timeout(*args):
+        original(*args)
+        raise TimeoutError("accepted before receipt")
+    disc.append_note = accepted_then_timeout
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id))
+    disc.append_note = original
+    assert intake.resume_task(task.task_id, db_path=db, note_id="note-1") == 0
+    holder["report"] = _report(None, message_id="m2", minutes_ago=240)
+    assert intake.run_intake(db_path=db) == 2  # new work is refused...
+    final = JobStore(db).get_job(job["id"])
+    assert final["status"] == JobStatus.COMPLETE.value, final.get("last_error")  # ...owed recovery is not
+    assert len(disc.posts) == 1
+
+
+def test_owed_recovery_never_builds_call_dependencies(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    store = JobStore(db)
+    disc, owners = Discussions(), Owners()
+    job = _work(store, _worker(disc, owners), make_task())
+    assert job["status"] == JobStatus.VERIFYING.value
+    monkeypatch.setattr(intake, "_build_discussion_client", lambda: disc)
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: owners)
+    monkeypatch.setattr(intake, "reassign_enabled", lambda: True)
+    def boom():
+        raise AssertionError("call dependencies were built during task recovery")
+    monkeypatch.setattr("robie_job_engine.bland_prod_wiring.build_call_dependencies", boom)
+    assert intake._recover_owed(store) == 1
+    assert store.get_job(job["id"])["status"] == JobStatus.COMPLETE.value
+
+
+# ---- 5. an old identical note is not proof of a new request ---------------------------------------------
+
+def test_an_old_identical_note_is_not_adopted_as_the_note_for_this_request(store):
+    disc, owners = Discussions(), Owners()
+    first = _uncertain_note_job(store, disc, owners)
+    disc.inject_note("note-77", disc.posts[0][1],
+                     created=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-77") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value, "adopted an old identical note"
+    assert len(disc.posts) == 1
+
+
+@pytest.mark.parametrize("created", [None, "2026-10-04T10:00:00"])
+def test_a_note_without_a_trustworthy_creation_time_is_not_adopted(store, created):
+    disc, owners = Discussions(), Owners()
+    first = _uncertain_note_job(store, disc, owners)
+    disc.inject_note("note-78", disc.posts[0][1], created=created)  # none, or a naive time
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-78") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert len(disc.posts) == 1
+
+
+def test_a_note_from_an_earlier_round_cannot_be_adopted_for_a_later_one(store):
+    disc, owners = Discussions(), Owners()
+    worker = _worker(disc, owners)
+    job = _work(store, worker, make_task())
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+    owners.assignee = "Robie AI"
+    again, _ = ensure_task_job(store, make_task(last_modified="2026-10-05T09:00:00"),
+                               report_received_at=_later_ms(), confirm_returned=lambda t: True)
+    assert int(again["payload"]["round"]) == 1
+    original = disc.append_note
+    def accepted_then_timeout(*args):
+        original(*args)
+        raise TimeoutError("accepted before receipt")
+    disc.append_note = accepted_then_timeout
+    second = worker.process_job(store, again)
+    assert second["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    disc.append_note = original
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-1") in (0, 1)  # round 0's note
+    after = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value, "reused a note from an earlier round"
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-2") == 0  # this round's own note
+    done = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert done["status"] == JobStatus.VERIFYING.value, done.get("last_error")
+
+
+# ---- Test-only task restriction: unrelated tasks stop before lookups or jobs ---------------------
+
+def test_unrelated_tasks_are_stopped_before_any_lookup_or_job(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    allowed = make_task()
+    other = make_task(task_id="70000001", applicant_id="25486692", discussion_id="900000001")
+    disc, owners = Discussions(), Owners()
+    report = IngestedReport(message_id="m1", filename="Robie_AI_-_Task_Check-In_1.csv", digest="d",
+                            received_at=_now_ms(), tasks=(other, allowed))
+    _wire_intake(monkeypatch, report, disc, owners, {"on": True})
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", allowed.task_id)
+    assert intake.run_intake(db_path=db) == 0
+    store = JobStore(db)
+    assert _find_by_idempotency_key(store, task_idempotency_key(other.task_id)) is None
+    assert _find_by_idempotency_key(store, task_idempotency_key(allowed.task_id)) is not None
+    assert "25486692" not in disc.id_lookups, "an unrelated client was looked up"
+
+
+@pytest.mark.parametrize("value", [None, "", "  ,  "])
+def test_a_test_environment_refuses_to_run_without_a_task_restriction(tmp_path, monkeypatch, value):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    _wire_intake(monkeypatch, _report(task), disc, owners, {"on": True})
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    if value is None:
+        monkeypatch.delenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", raising=False)
+    else:
+        monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", value)
+    assert intake.run_intake(db_path=db) == 2
+    assert _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id)) is None
+    assert disc.id_lookups == [] and disc.posts == []
+
+
+def test_the_task_restriction_also_limits_owed_recovery(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    store = JobStore(db)
+    disc, owners = Discussions(), Owners()
+    job = _work(store, _worker(disc, owners), make_task())
+    assert job["status"] == JobStatus.VERIFYING.value
+    monkeypatch.setattr(intake, "_build_discussion_client", lambda: disc)
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: owners)
+    monkeypatch.setattr(intake, "reassign_enabled", lambda: True)
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "70000001")  # not this task
+    assert intake._recover_owed(store) == 0
+    assert store.get_job(job["id"])["status"] == JobStatus.VERIFYING.value
