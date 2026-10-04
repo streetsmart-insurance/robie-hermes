@@ -115,6 +115,46 @@ def test_get_discussion_by_id():
     assert record["discussionId"] == "d9"
 
 
+def test_get_discussion_with_notes_uses_the_with_notes_path():
+    client = make_client(token_routes([("with-notes", {"discussionId": "d9", "notes": []})]))
+    record = client.get_discussion_with_notes("d9")
+    assert record["discussionId"] == "d9"
+    urls = [call["url"] for call in client._urlopen.calls if "with-notes" in call["url"]]
+    assert urls and urls[0].endswith("/v8/discussions/d9/with-notes")
+
+
+def test_with_notes_read_is_complete_only_for_the_whole_list():
+    proven = {"note_count": 1, "most_recent_note_id": "n1"}
+    whole = {"discussionId": "d1", "notes": [{"noteId": "n1", "body": "hello"}]}
+    assert disc.with_notes_read_is_complete(whole, proven)
+    assert not disc.with_notes_read_is_complete(whole)
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 1, "mostRecentNoteId": "n1"}
+    )
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 0, "notes": []},
+        {"note_count": 0, "most_recent_note_id": ""},
+    )
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "notes": [{"noteId": "n1"}]},
+        proven,
+    )
+    # A first page, a nested count, totalCount/pageSize, and a bare list
+    # are not proof, even when they look locally consistent.
+    page = [{"noteId": "n-page", "body": "other"}]
+    plain = {"note_count": 4, "most_recent_note_id": "n-latest"}
+    assert not disc.with_notes_read_is_complete({"notes": page}, plain)
+    assert not disc.with_notes_read_is_complete(
+        {"discussion": {"noteCount": 1, "mostRecentNoteId": "n-page"}, "notes": page},
+        plain,
+    )
+    assert not disc.with_notes_read_is_complete(
+        {"totalCount": 4, "pageSize": 1, "notes": page},
+        plain,
+    )
+    assert not disc.with_notes_read_is_complete(page, plain)
+
+
 # ---------------------------------------------------------------------------
 # append
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=ROBIE Ascend unmatched-notice digest (prints the email unless the live drop-in is installed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+# 0022 so a state file this unit creates is mode 0644. The store lives in
+# data/ascend-api/. Do not chmod the shared data directory.
+UMask=0022
+# Start in / so a stray /tmp/robie_job_engine cannot shadow imports.
+WorkingDirectory=/
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+# Same files the API poller writes. Do not set ASCEND_API_SOURCE_LIVE here.
+Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.db
+Environment=ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.dry-run.db
+# Delegated Gmail sender the verification mailer already uses. The leading
+# dash keeps a dry run alive when the file is absent. No new credential.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+# Live mail is the 30-live.conf drop-in. Do not set it in this unit.
+# The index refresh pages PolicyApi once (about 380 GETs for a 38k book).
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_unmatched_digest
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+TimeoutStartSec=45min

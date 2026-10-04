@@ -63,6 +63,10 @@ from .secrets import redact_text
 logger = logging.getLogger(__name__)
 
 LIVE_ENV = "ASCEND_API_SOURCE_LIVE"
+# Ready-to-file rows the digest has matched. One poll files at most this many.
+READY_FILE_LIMIT = 25
+# A ready row that fails this many times leaves the queue for a person to file.
+FILE_ATTEMPT_LIMIT = 5
 REMITTANCE_APPLICANT_ENV = "ASCEND_API_REMITTANCE_APPLICANT_ID"
 DB_ENV = "ASCEND_API_NOTICE_DB"
 DRY_RUN_DB_ENV = "ASCEND_API_NOTICE_DRY_RUN_DB"
@@ -81,6 +85,12 @@ STORE_FILE_MODE = 0o644
 STORE_DIR_MODE = 0o755
 DEFAULT_LOOKBACK_MINUTES = 20
 CURSOR_OVERLAP_MINUTES = 5
+# A poll that could not file does not move the cursor. The next filing
+# poll still must not treat a multi-day gap as one live batch, and it
+# must not drop the older notices when the cursor finally moves.
+CATCHUP_LIMIT = timedelta(hours=72)
+CATCHUP_REVIEW = "older than the catch-up window"
+TRANSIENT_BACKOFF = timedelta(hours=2)
 PAGE_SIZE = 25
 MAX_PAGES = 40
 STALL_RUNS = 4
@@ -637,7 +647,8 @@ class EventKeyStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at TEXT NOT NULL,
                     ok INTEGER NOT NULL,
-                    error TEXT NOT NULL DEFAULT ''
+                    error TEXT NOT NULL DEFAULT '',
+                    live INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS cursors (
                     name TEXT PRIMARY KEY,
@@ -655,6 +666,17 @@ class EventKeyStore:
                 """
             )
             _ensure_filed_identity_columns(conn)
+            _ensure_poll_columns(conn)
+            try:
+                _ensure_unmatched_tables(conn)
+            except sqlite3.Error as exc:
+                # The poller unit must keep running when the accounting
+                # tables cannot be added. CREATE IF NOT EXISTS is idempotent
+                # and does not require the digest timer to be installed.
+                logger.warning(
+                    "unmatched notice tables were not created: %s",
+                    type(exc).__name__,
+                )
 
     def is_filed(self, event_key: str) -> bool:
         with self._connect() as conn:
@@ -831,13 +853,22 @@ class EventKeyStore:
                 (_iso(moment),),
             )
 
-    def note_poll_result(self, *, ok: bool, error: str, started_at: str) -> int:
-        """Record the run and return the consecutive-failure streak."""
+    def note_poll_result(
+        self, *, ok: bool, error: str, started_at: str, live: bool = False
+    ) -> int:
+        """Record the run and return the consecutive-failure streak.
+
+        ``live`` is whether this process was filing notes. The digest reads
+        the newest row. It does not read ``ASCEND_API_SOURCE_LIVE`` itself.
+        """
         cleaned = redact_text(str(error or ""))[:500]
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO poll_runs (started_at, ok, error) VALUES (?, ?, ?)",
-                (started_at, 1 if ok else 0, cleaned),
+                """
+                INSERT INTO poll_runs (started_at, ok, error, live)
+                VALUES (?, ?, ?, ?)
+                """,
+                (started_at, 1 if ok else 0, cleaned, 1 if live else 0),
             )
             rows = conn.execute(
                 "SELECT ok FROM poll_runs ORDER BY id DESC LIMIT ?",
@@ -851,6 +882,639 @@ class EventKeyStore:
                 break
             streak += 1
         return streak
+
+    def latest_poll_run(self) -> dict[str, Any] | None:
+        """The newest poll record, including ones older than the digest window."""
+        with self._connect() as conn:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT id, started_at, ok, live
+                    FROM poll_runs
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "started_at": str(row["started_at"] or ""),
+            "ok": bool(row["ok"]),
+            "live": bool(row["live"]),
+        }
+
+    def upsert_unmatched(
+        self,
+        notice: ApiNotice,
+        *,
+        reason: str,
+        seen_at: str,
+        suggestion_client: str = "",
+        suggestion_policy: str = "",
+        update_suggestion: bool = False,
+    ) -> None:
+        """Insert or refresh one unmatched notice. ``first_seen`` stays put.
+
+        A later unmatched sight of a resolved key reopens it. Suggestion
+        text is replaced only when ``update_suggestion`` is set, and only
+        in this store. Nothing is written to EZLynx.
+        """
+        policies = [
+            str(number).strip()
+            for number in notice.policy_numbers
+            if str(number or "").strip()
+        ]
+        flag = 1 if update_suggestion else 0
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO unmatched_notices (
+                    event_key, insured_name, program_id, loan_id, policy_numbers,
+                    notice_type, amount_cents, first_seen, last_seen, reason,
+                    resolved_at, suggestion_client, suggestion_policy,
+                    aged_out_notified_at, subject, body, program_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    insured_name=excluded.insured_name,
+                    program_id=excluded.program_id,
+                    loan_id=excluded.loan_id,
+                    policy_numbers=excluded.policy_numbers,
+                    notice_type=excluded.notice_type,
+                    amount_cents=excluded.amount_cents,
+                    last_seen=excluded.last_seen,
+                    reason=excluded.reason,
+                    resolved_at=NULL,
+                    ready_at=NULL,
+                    file_attempts=0,
+                    last_attempt_at=NULL,
+                    file_failure='',
+                    subject=excluded.subject,
+                    body=excluded.body,
+                    program_json=excluded.program_json,
+                    suggestion_client=CASE WHEN ? = 1 THEN excluded.suggestion_client
+                        ELSE unmatched_notices.suggestion_client END,
+                    suggestion_policy=CASE WHEN ? = 1 THEN excluded.suggestion_policy
+                        ELSE unmatched_notices.suggestion_policy END,
+                    aged_out_notified_at=CASE
+                        WHEN unmatched_notices.resolved_at IS NOT NULL
+                             AND unmatched_notices.resolved_at != ''
+                        THEN NULL
+                        ELSE unmatched_notices.aged_out_notified_at
+                    END
+                """,
+                (
+                    notice.event_key,
+                    str(notice.insured_name or "").strip(),
+                    notice.program_id,
+                    _stored_loan_id(notice),
+                    json.dumps(policies),
+                    notice.event_type,
+                    notice.amount_cents,
+                    seen_at,
+                    seen_at,
+                    reason,
+                    suggestion_client,
+                    suggestion_policy,
+                    str(notice.subject or ""),
+                    str(notice.body or ""),
+                    json.dumps(notice.program or {}, default=str),
+                    flag,
+                    flag,
+                ),
+            )
+
+    def resolve_unmatched(self, event_key: str, resolved_at: str) -> None:
+        """Mark one notice resolved. A missing row is left alone."""
+        key = str(event_key or "").strip()
+        moment = str(resolved_at or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET resolved_at=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (moment, key),
+            )
+
+    def list_unmatched(self) -> list[dict[str, Any]]:
+        """Every unmatched row, including resolved ones. Empty if the table is new."""
+        with self._connect() as conn:
+            try:
+                fetched = conn.execute(
+                    "SELECT * FROM unmatched_notices ORDER BY first_seen, event_key"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [_unmatched_row(row) for row in fetched]
+
+    def mark_ready_to_file(self, event_key: str, ready_at: str) -> None:
+        """Remember that one client matched. Does not file and does not resolve."""
+        key = str(event_key or "").strip()
+        moment = str(ready_at or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET ready_at=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (moment, key),
+            )
+
+    def list_ready_to_file(
+        self, limit: int = READY_FILE_LIMIT, *, now: str = ""
+    ) -> list[dict[str, Any]]:
+        """Open rows the digest matched. Never-tried rows come first.
+
+        A row that has already failed sorts after every row that has not
+        been tried, then by the oldest attempt, then by ``ready_at``. After
+        ``FILE_ATTEMPT_LIMIT`` failures the row stays on the email and is
+        not picked again. At most ``limit`` rows. A row in a transient
+        hold stays off the list until that time. A catch-up review row
+        stays off the list even if something marked it ready.
+        """
+        cap = max(0, int(limit))
+        if cap == 0:
+            return []
+        moment = str(now or "").strip() or _iso(_now())
+        with self._connect() as conn:
+            try:
+                fetched = conn.execute(
+                    """
+                    SELECT * FROM unmatched_notices
+                    WHERE (resolved_at IS NULL OR resolved_at='')
+                      AND ready_at IS NOT NULL AND ready_at != ''
+                      AND subject != '' AND body != ''
+                      AND COALESCE(file_attempts, 0) < ?
+                      AND COALESCE(reason, '') != ?
+                      AND (
+                        transient_hold_until IS NULL
+                        OR transient_hold_until = ''
+                        OR transient_hold_until <= ?
+                      )
+                    ORDER BY CASE
+                        WHEN last_attempt_at IS NULL OR last_attempt_at = '' THEN 0
+                        ELSE 1
+                    END,
+                    last_attempt_at,
+                    ready_at,
+                    event_key
+                    LIMIT ?
+                    """,
+                    (FILE_ATTEMPT_LIMIT, CATCHUP_REVIEW, moment, cap),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [_unmatched_row(row) for row in fetched]
+
+    def note_ready_attempt(self, event_key: str, attempted_at: str, plain_reason: str) -> int:
+        """Count one failed filing. Returns the new attempt count, or 0 if the row is gone."""
+        key = str(event_key or "").strip()
+        moment = str(attempted_at or "").strip()
+        reason = str(plain_reason or "").strip() or "The note was not filed."
+        if not key or not moment:
+            return 0
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET file_attempts = COALESCE(file_attempts, 0) + 1,
+                    last_attempt_at = ?,
+                    file_failure = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (moment, reason, key),
+            )
+            row = conn.execute(
+                "SELECT file_attempts FROM unmatched_notices WHERE event_key=?",
+                (key,),
+            ).fetchone()
+        if row is None or row["file_attempts"] is None:
+            return 0
+        return int(row["file_attempts"])
+
+    def note_transient_hold(self, event_key: str, hold_until: str) -> None:
+        """Wait out an EZLynx 5xx or timeout without using an attempt."""
+        key = str(event_key or "").strip()
+        moment = str(hold_until or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET transient_hold_until = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (moment, key),
+            )
+
+    def mark_transient_retry_used(self, event_key: str) -> None:
+        """The unpaid retry after a 5xx has been taken. Later failures count."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET transient_retry_used = 1,
+                    transient_hold_until = ''
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (key,),
+            )
+
+    def note_file_failure(self, event_key: str, plain_reason: str) -> None:
+        """Remember a filing note for the email without using an attempt."""
+        key = str(event_key or "").strip()
+        reason = str(plain_reason or "").strip()
+        if not key or not reason:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET file_failure = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (reason, key),
+            )
+
+    def refresh_unmatched_policy(
+        self,
+        event_key: str,
+        policy_numbers: list[str],
+        body: str,
+        program_json: str,
+    ) -> None:
+        """Store the policy number just read from Ascend. Does not file or resolve."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        numbers = [str(number).strip() for number in policy_numbers if str(number or "").strip()]
+        if not numbers:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET policy_numbers=?, body=?, program_json=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (json.dumps(numbers), str(body or ""), str(program_json or "{}"), key),
+            )
+
+    def mark_aged_out_notified(self, event_keys: list[str], notified_at: str) -> None:
+        moment = str(notified_at or "").strip()
+        if not moment:
+            return
+        with self._connect() as conn:
+            for key in event_keys:
+                cleaned = str(key or "").strip()
+                if not cleaned:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE unmatched_notices
+                    SET aged_out_notified_at=?
+                    WHERE event_key=?
+                    """,
+                    (moment, cleaned),
+                )
+
+    def set_unmatched_suggestion(
+        self, event_key: str, client_name: str, policy_number: str
+    ) -> None:
+        """Store suggestion text on an open row. Does not write to EZLynx."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET suggestion_client=?, suggestion_policy=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (str(client_name or "").strip(), str(policy_number or "").strip(), key),
+            )
+
+    def save_policy_index(
+        self,
+        rows: list[dict[str, str]],
+        *,
+        built_at: str,
+        calls: int,
+        total_size: int | None,
+        pages: int,
+    ) -> None:
+        """Replace the policy-number index. Callers pass only a complete read."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM ezlynx_policy_index")
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ezlynx_policy_index (
+                        policy_key, policy_number, applicant_name, applicant_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("policy_key") or ""),
+                        str(row.get("policy_number") or ""),
+                        str(row.get("applicant_name") or ""),
+                        str(row.get("applicant_id") or ""),
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO ezlynx_policy_index_meta (
+                    name, built_at, calls, row_count, total_size, complete, pages
+                ) VALUES ('book', ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    built_at=excluded.built_at,
+                    calls=excluded.calls,
+                    row_count=excluded.row_count,
+                    total_size=excluded.total_size,
+                    complete=1,
+                    pages=excluded.pages
+                """,
+                (built_at, int(calls), len(rows), total_size, int(pages)),
+            )
+
+    def policy_index(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """The last complete index. An incomplete or missing index returns no rows."""
+        with self._connect() as conn:
+            try:
+                meta_row = conn.execute(
+                    "SELECT * FROM ezlynx_policy_index_meta WHERE name='book'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return [], {}
+            if meta_row is None or int(meta_row["complete"] or 0) != 1:
+                return [], dict(meta_row) if meta_row is not None else {}
+            fetched = conn.execute(
+                """
+                SELECT policy_key, policy_number, applicant_name, applicant_id
+                FROM ezlynx_policy_index
+                """
+            ).fetchall()
+        return [dict(row) for row in fetched], dict(meta_row)
+
+
+def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
+    """Add the accounting tables. Safe to run on a database that already has them."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS unmatched_notices (
+            event_key TEXT PRIMARY KEY,
+            insured_name TEXT NOT NULL DEFAULT '',
+            program_id TEXT NOT NULL DEFAULT '',
+            loan_id TEXT NOT NULL DEFAULT '',
+            policy_numbers TEXT NOT NULL DEFAULT '[]',
+            notice_type TEXT NOT NULL DEFAULT '',
+            amount_cents INTEGER,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            resolved_at TEXT,
+            suggestion_client TEXT NOT NULL DEFAULT '',
+            suggestion_policy TEXT NOT NULL DEFAULT '',
+            aged_out_notified_at TEXT,
+            ready_at TEXT,
+            subject TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            program_json TEXT NOT NULL DEFAULT '{}',
+            file_attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            file_failure TEXT NOT NULL DEFAULT '',
+            transient_hold_until TEXT,
+            transient_retry_used INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
+            policy_key TEXT NOT NULL,
+            policy_number TEXT NOT NULL,
+            applicant_name TEXT NOT NULL DEFAULT '',
+            applicant_id TEXT NOT NULL,
+            PRIMARY KEY (policy_key, applicant_id)
+        );
+        CREATE TABLE IF NOT EXISTS ezlynx_policy_index_meta (
+            name TEXT PRIMARY KEY,
+            built_at TEXT NOT NULL,
+            calls INTEGER NOT NULL,
+            row_count INTEGER NOT NULL,
+            total_size INTEGER,
+            complete INTEGER NOT NULL,
+            pages INTEGER NOT NULL
+        );
+        """
+    )
+    _ensure_unmatched_columns(conn)
+
+
+def _ensure_unmatched_columns(conn: sqlite3.Connection) -> None:
+    """Add filing columns on a store created before ready-to-file existed."""
+    have = {str(row[1]) for row in conn.execute("PRAGMA table_info(unmatched_notices)")}
+    additions = (
+        ("ready_at", "TEXT"),
+        ("subject", "TEXT NOT NULL DEFAULT ''"),
+        ("body", "TEXT NOT NULL DEFAULT ''"),
+        ("program_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("file_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_attempt_at", "TEXT"),
+        ("file_failure", "TEXT NOT NULL DEFAULT ''"),
+        ("transient_hold_until", "TEXT"),
+        ("transient_retry_used", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    for name, ddl in additions:
+        if name not in have:
+            conn.execute(f"ALTER TABLE unmatched_notices ADD COLUMN {name} {ddl}")
+
+
+def _ensure_poll_columns(conn: sqlite3.Connection) -> None:
+    """Remember whether a poll was filing. Old stores gain the column once."""
+    have = {str(row[1]) for row in conn.execute("PRAGMA table_info(poll_runs)")}
+    if "live" not in have:
+        conn.execute("ALTER TABLE poll_runs ADD COLUMN live INTEGER NOT NULL DEFAULT 0")
+
+
+def plain_file_failure(reason: str) -> str:
+    """One sentence for the accounting email. No field names and no code labels."""
+    text = str(reason or "").strip().lower()
+    if text.startswith("applicant_unresolved") or "policy_outcome" in text:
+        return "The policy number still did not match one client."
+    if text.startswith("write_scope_refused"):
+        return "That client is outside the accounts Robie is allowed to write."
+    if text.startswith("driver_gate_refused"):
+        return "Robie is not allowed to write notes right now."
+    if text.startswith("discussion_error"):
+        return "The EZLynx discussion could not be read."
+    if text.startswith("task_not") or "task_not_created" in text:
+        return "The follow-up task was not created."
+    return "The note was not filed."
+
+
+def _already_in_ezlynx(outcome: dict[str, Any]) -> bool:
+    """True when this same bill's note is already in EZLynx.
+
+    A same-policy note from an earlier month is not this bill. That result
+    is a ``recent_same_notice`` only when the due date, amount, or invoice
+    number was confirmed.
+    """
+    if str(outcome.get("status") or "") == "done":
+        return True
+    reason = str(outcome.get("reason") or "")
+    if reason == "api_already_filed" or reason.startswith("existing_note_duplicate"):
+        return True
+    detail = outcome.get("detail")
+    if not isinstance(detail, dict):
+        return False
+    if reason.startswith("recent_same_notice"):
+        return bool(detail.get("notice_anchor_matched"))
+    if detail.get("existing_note_duplicate"):
+        return True
+    return False
+
+
+def _hold_transient(store: EventKeyStore, event_key: str, seen_at: str) -> None:
+    """Park a ready row for two hours. This does not count as a failed attempt."""
+    moment = parse_time(seen_at) or _now()
+    store.note_transient_hold(event_key, _iso(moment + TRANSIENT_BACKOFF))
+
+
+def _retry_was_used(row: dict[str, Any]) -> bool:
+    return int(row.get("transient_retry_used") or 0) == 1
+
+
+def _hold_is_set(row: dict[str, Any]) -> bool:
+    return bool(str(row.get("transient_hold_until") or "").strip())
+
+
+def _record_ready_miss(
+    store: EventKeyStore,
+    row: dict[str, Any],
+    event_key: str,
+    seen_at: str,
+    reason: str,
+    *,
+    maybe_note: bool = False,
+    free_retry: bool = False,
+) -> None:
+    """One unpaid pause, then one unpaid retry. After that, misses count.
+
+    A later HTTP 5xx does not start another free pause. The free retry is
+    marked used whatever came back, including a refusal that is not a 5xx
+    and a with-notes uncertainty. A note POST that returns 5xx or times out
+    may already be in EZLynx, so the maybe-already-filed warning is stored
+    on that pause and kept afterward. A with-notes failure before any POST
+    did not send a note, so it does not get that warning.
+    """
+    from .ascend_unmatched_digest import MAYBE_NOTE_LINE
+
+    text = str(reason or "")
+    transient = _is_transient_failure(text)
+    used = _retry_was_used(row)
+    held = _hold_is_set(row)
+    # The unconfirmed-note guard, a note POST that may have landed, or a
+    # row already carrying that warning, keeps the warning. A later refusal
+    # must not replace it with "The note was not filed."
+    keep_maybe = (
+        maybe_note
+        or _note_post_may_have_landed(text)
+        or "couldn't confirm that note was added" in text.lower()
+        or str(row.get("file_failure") or "").strip() == MAYBE_NOTE_LINE
+    )
+    if free_retry or (not used and held):
+        store.mark_transient_retry_used(event_key)
+        if keep_maybe:
+            store.note_file_failure(event_key, MAYBE_NOTE_LINE)
+        return
+    if not used and not held and transient:
+        _hold_transient(store, event_key, seen_at)
+        if keep_maybe:
+            store.note_file_failure(event_key, MAYBE_NOTE_LINE)
+        return
+    stored = MAYBE_NOTE_LINE if keep_maybe else plain_file_failure(text)
+    store.note_ready_attempt(event_key, seen_at, stored)
+
+
+def _is_transient_failure(reason: str) -> bool:
+    """True for an EZLynx 5xx, a timeout, or a dropped connection.
+
+    The discussion client reports a timeout or a network drop as
+    ``transport failed``, and that text does not always contain the word
+    timeout. ``discussion_error`` counts only when the text also names an
+    HTTP 5xx, a timeout, or a transport failure. A short outage must not
+    use up the five filing attempts.
+    """
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    if "timeout" in text or "timed out" in text or "transport failed" in text:
+        return True
+    return re.search(r"http\s*5\d\d", text) is not None
+
+
+def _note_post_may_have_landed(reason: str) -> bool:
+    """True when a note POST returned 5xx or timed out.
+
+    The server may have stored the note before the client saw the error.
+    A with-notes GET that fails before any POST is not this case.
+    """
+    text = str(reason or "")
+    if not _is_transient_failure(text):
+        return False
+    lowered = text.lower()
+    if "existing_note_unreadable" in lowered:
+        return False
+    return re.search(r"\bpost (?:failed|transport)\b", lowered) is not None
+
+
+def _poll_will_file(live: bool) -> bool:
+    """True when this poll may file notes.
+
+    ``ASCEND_API_SOURCE_LIVE=1`` is not enough. A lease that would refuse
+    the write is recorded as not filing, so the accounting email does not
+    say the notes are on.
+    """
+    if not live:
+        return False
+    try:
+        from .ascend_notice_driver import _driver_gate_refusal
+
+        refusal = _driver_gate_refusal()
+    except Exception as exc:  # noqa: BLE001 - do not promise a filing we cannot check
+        logger.warning("driver lease was not checked: %s", type(exc).__name__)
+        return False
+    return not bool(refusal)
+
+
+def _unmatched_row(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        parsed = json.loads(item.get("policy_numbers") or "[]")
+    except json.JSONDecodeError:
+        parsed = []
+    item["policy_numbers"] = (
+        [str(number) for number in parsed if str(number or "").strip()]
+        if isinstance(parsed, list)
+        else []
+    )
+    if item.get("amount_cents") is not None:
+        item["amount_cents"] = int(item["amount_cents"])
+    return item
 
 
 def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[dict[str, str]]:
@@ -1939,6 +2603,25 @@ def _window_start(store: EventKeyStore, now: datetime) -> datetime:
     return now - timedelta(minutes=minutes)
 
 
+def _catchup_review_before(window: datetime, now: datetime) -> datetime | None:
+    """When the cursor is older than 72 hours, notices before this time are reviewed.
+
+    Call this only for a window that came from the cursor. An explicit
+    ``since`` or ``LOOKBACK_ENV`` is the range the caller asked to see.
+    The fetch still starts at the cursor, so older notices are stored
+    instead of disappearing when the cursor moves forward. Returns None
+    when the gap is inside the cap.
+    """
+    floor = now - CATCHUP_LIMIT
+    if window >= floor:
+        return None
+    logger.warning(
+        "Ascend poll catch-up is capped at 72 hours; updates before %s go to the review list",
+        _iso(floor),
+    )
+    return floor
+
+
 def build_client() -> Any:
     """The same client and secret path the hourly ``robie-ascend-sync`` uses."""
     from .ascend_sync import AscendApiClient
@@ -1985,6 +2668,10 @@ def run_once(
     started = _iso(moment)
     live = live_enabled()
     window = since or _window_start(store, moment)
+    # The cap is for a cursor that fell behind. An explicit ``since`` or the
+    # LOOKBACK_ENV window is the range the caller asked to see.
+    from_cursor = since is None and store.cursor() is not None
+    review_before = _catchup_review_before(window, moment) if from_cursor else None
     since_iso = _iso(window)
     wrapped = client if isinstance(client, GetOnlyClient) else GetOnlyClient(client)
     feeds, errors = poll_feeds(wrapped, since_iso)
@@ -2025,6 +2712,8 @@ def run_once(
     from .ascend_notice_driver import NullNoticeSource
 
     ctx.dry_run = not live
+    ctx.remember_filings = True
+    ctx.now = moment
     ctx.source = NullNoticeSource()
     ctx.ascend_client = _SnapshotPrograms(programs)
     if hasattr(ctx, "seen_notice_events"):
@@ -2032,11 +2721,35 @@ def run_once(
     if hasattr(ctx, "planned_category_discussions"):
         ctx.planned_category_discussions.clear()
 
+    try:
+        from .ascend_unmatched_digest import persist_unmatched_notice, resolve_unmatched_notice
+    except Exception as exc:  # noqa: BLE001 - the poll files even if the digest is absent
+        logger.warning("unmatched digest helpers unavailable: %s", type(exc).__name__)
+        persist_unmatched_notice = None
+        resolve_unmatched_notice = None
+
+    def _remember_unmatched(action: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        if fn is None:
+            return None
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - one store error must not stop the poll
+            logger.warning("unmatched notice %s failed: %s", action, type(exc).__name__)
+            return None
+
+    def _resolve_keys(notice: ApiNotice) -> None:
+        for key in (notice.event_key, *notice.alias_keys):
+            _remember_unmatched("resolve", resolve_unmatched_notice, store, key, seen_at)
+
     results: list[dict[str, Any]] = []
     lines: list[str] = []
     ask: list[dict[str, str]] = []
+    seen_at = _iso(moment)
     for notice in notices:
+        # A notice already filed stays closed. Checking this before the
+        # catch-up split keeps a stuck cursor from reopening it as a review row.
         if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
+            _resolve_keys(notice)
             results.append(
                 {
                     "event_key": notice.event_key,
@@ -2046,12 +2759,50 @@ def run_once(
                 }
             )
             continue
+        occurred = parse_time(notice.occurred_at) or parse_time(notice.anchor)
+        if review_before is not None and occurred is not None and occurred < review_before:
+            outcome = {
+                "event_key": notice.event_key,
+                "event_type": notice.event_type,
+                "status": "skipped",
+                "reason": "catchup_review",
+                "detail": {"unmatched_reason": CATCHUP_REVIEW},
+            }
+            plain = _remember_unmatched(
+                "persist",
+                persist_unmatched_notice,
+                store,
+                notice,
+                outcome,
+                seen_at=seen_at,
+            )
+            ask.append(
+                {
+                    "event_key": notice.event_key,
+                    "event_type": notice.event_type,
+                    "program_id": notice.program_id,
+                    "insured_name": notice.insured_name,
+                    "reason": "catchup_review",
+                    "unmatched_reason": str(plain or CATCHUP_REVIEW),
+                }
+            )
+            results.append(outcome)
+            continue
         if notice.remittance or notice.event_type == triage.AGENCY_REMITTANCE:
             outcome = _file_remittance(ctx, notice)
         else:
             outcome = _file_through_driver(ctx, notice)
         results.append(outcome)
         if str(outcome.get("reason") or "").startswith("applicant_unresolved"):
+            plain = _remember_unmatched(
+                "persist",
+                persist_unmatched_notice,
+                store,
+                notice,
+                outcome,
+                seen_at=seen_at,
+            )
+            detail = outcome.get("detail") if isinstance(outcome.get("detail"), dict) else {}
             ask.append(
                 {
                     "event_key": notice.event_key,
@@ -2059,23 +2810,41 @@ def run_once(
                     "program_id": notice.program_id,
                     "insured_name": notice.insured_name,
                     "reason": str(outcome.get("reason") or ""),
+                    "unmatched_reason": str(plain or detail.get("unmatched_reason") or ""),
                 }
             )
+        elif str(outcome.get("status") or "") in {"dry_run", "done"}:
+            # Matched on this poll, including a dry run that would file and
+            # a live file. The email driver resolves its own filings.
+            _resolve_keys(notice)
         if outcome.get("status") in {"dry_run", "done"}:
             lines.append(_would_file_line(notice, outcome.get("detail") or {}))
             if live and outcome.get("status") == "done":
                 store.record_filed(notice)
+                _resolve_keys(notice)
         elif outcome.get("reason") == "remittance_target_unconfigured":
             logger.info(
                 "skip %s remittance_target_unconfigured",
                 notice.event_key,
             )
 
+    filing = _poll_will_file(live)
+    ready_results: list[dict[str, Any]] = []
+    if filing:
+        ready_results = _file_ready_unmatched(
+            ctx,
+            store,
+            programs=programs,
+            seen_at=seen_at,
+        )
+        results.extend(ready_results)
+
     ok = not errors
     streak = store.note_poll_result(
         ok=ok,
         error="; ".join(errors),
         started_at=started,
+        live=filing,
     )
     alerted = False
     if streak >= STALL_RUNS:
@@ -2084,12 +2853,13 @@ def run_once(
             f"Last error: {redact_text('; '.join(errors))[:400]}"
         )
         alerted = _alert(message, alerter)
-    if ok and live:
+    if ok and filing:
         store.advance_cursor(moment)
     summary = {
         "dry_run": not live,
-        "live": live,
+        "live": filing,
         "since": since_iso,
+        "catchup_capped": review_before is not None,
         "http_methods": ["GET"],
         "feeds": {path: len(feeds.get(path) or []) for path in FEEDS},
         "errors": errors,
@@ -2099,6 +2869,8 @@ def run_once(
         "would_file_count": len(lines),
         "ask": ask,
         "results": results,
+        "ready_checked": len(ready_results),
+        "ready_filed": sum(1 for row in ready_results if row.get("status") == "done"),
     }
     for line in lines:
         logger.warning("%s", line)
@@ -2252,6 +3024,150 @@ class _SnapshotPrograms:
             if wanted in numbers:
                 return {"program": dict(program), "program_id": program_id}
         return None
+
+
+def _notice_from_ready_row(row: dict[str, Any]) -> ApiNotice | None:
+    """Rebuild the notice the digest stored. Empty text cannot be filed."""
+    subject = str(row.get("subject") or "").strip()
+    body = str(row.get("body") or "")
+    if not subject or not str(body).strip():
+        return None
+    try:
+        program = json.loads(row.get("program_json") or "{}")
+    except json.JSONDecodeError:
+        program = {}
+    if not isinstance(program, dict):
+        program = {}
+    numbers = row.get("policy_numbers") or []
+    if isinstance(numbers, str):
+        numbers = [numbers]
+    return ApiNotice(
+        event_key=str(row.get("event_key") or "").strip(),
+        event_type=str(row.get("notice_type") or "").strip(),
+        program_id=str(row.get("program_id") or "").strip(),
+        anchor=str(row.get("first_seen") or "").strip(),
+        occurred_at=str(row.get("first_seen") or "").strip(),
+        policy_numbers=tuple(str(number) for number in numbers if str(number or "").strip()),
+        insured_name=str(row.get("insured_name") or "").strip(),
+        program=program,
+        subject=subject,
+        body=body,
+        amount_cents=row.get("amount_cents"),
+    )
+
+
+def _file_ready_unmatched(
+    ctx: Any,
+    store: EventKeyStore,
+    *,
+    programs: list[dict[str, Any]],
+    seen_at: str,
+    limit: int = READY_FILE_LIMIT,
+) -> list[dict[str, Any]]:
+    """File digest matches through the same path as a notice from the feed.
+
+    Live only. The caller must not invoke this while the API source is
+    dry-run. At most ``limit`` rows. A note that is already in EZLynx,
+    including an exact duplicate and this same bill posted on or after
+    first_seen, is recorded as filed and the row is resolved. Any other
+    result counts as one attempt. A failure while recording that attempt
+    does not stop the remaining rows or the poll record. Write scope,
+    dedupe, and discussion ownership stay inside ``_file_through_driver``.
+    """
+    if not live_enabled():
+        return []
+    ready = store.list_ready_to_file(limit, now=seen_at)
+    extra: list[dict[str, Any]] = []
+    queued: list[tuple[dict[str, Any], ApiNotice]] = []
+    for row in ready:
+        notice = _notice_from_ready_row(row)
+        if notice is None or not notice.event_key:
+            continue
+        if notice.program:
+            extra.append(notice.program)
+        queued.append((row, notice))
+    ctx.ascend_client = _SnapshotPrograms([*extra, *programs])
+    previous = getattr(ctx, "ready_row_filing", False)
+    previous_retry = getattr(ctx, "transient_note_retry", False)
+    ctx.ready_row_filing = True
+    filed: list[dict[str, Any]] = []
+    try:
+        for _row, notice in queued:
+            # Only a row parked by a 5xx or timeout may clear an unconfirmed note.
+            # Mark that free retry used before the outcome, so a success or a
+            # non-5xx refusal cannot leave the row eligible for another pause.
+            on_free_retry = _hold_is_set(_row) and not _retry_was_used(_row)
+            ctx.transient_note_retry = on_free_retry
+            if on_free_retry:
+                try:
+                    store.mark_transient_retry_used(notice.event_key)
+                except Exception as exc:  # noqa: BLE001 - still file; the miss path marks it too
+                    logger.warning(
+                        "ready-to-file %s retry flag was not stored: %s",
+                        notice.event_key,
+                        type(exc).__name__,
+                    )
+            try:
+                if store.is_filed(notice.event_key):
+                    store.resolve_unmatched(notice.event_key, seen_at)
+                    filed.append(
+                        {
+                            "event_key": notice.event_key,
+                            "event_type": notice.event_type,
+                            "status": "done",
+                            "reason": "api_already_filed",
+                        }
+                    )
+                    continue
+                outcome = _file_through_driver(ctx, notice)
+                reason = str(outcome.get("reason") or "")
+                detail = outcome.get("detail") if isinstance(outcome.get("detail"), dict) else {}
+                if _already_in_ezlynx(outcome):
+                    store.record_filed(notice)
+                    store.resolve_unmatched(notice.event_key, seen_at)
+                    outcome = {**outcome, "status": "done"}
+                else:
+                    _record_ready_miss(
+                        store,
+                        _row,
+                        notice.event_key,
+                        seen_at,
+                        reason,
+                        maybe_note=bool(detail.get("maybe_note")),
+                        free_retry=on_free_retry,
+                    )
+                filed.append(outcome)
+            except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
+                logger.warning(
+                    "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
+                )
+                try:
+                    _record_ready_miss(
+                        store,
+                        _row,
+                        notice.event_key,
+                        seen_at,
+                        f"error: {type(exc).__name__}: {exc}",
+                        free_retry=on_free_retry,
+                    )
+                except Exception as record_exc:  # noqa: BLE001 - a locked store must not abort the poll
+                    logger.warning(
+                        "ready-to-file %s attempt was not recorded: %s",
+                        notice.event_key,
+                        type(record_exc).__name__,
+                    )
+                filed.append(
+                    {
+                        "event_key": notice.event_key,
+                        "event_type": notice.event_type,
+                        "status": "skipped",
+                        "reason": f"error: {type(exc).__name__}",
+                    }
+                )
+    finally:
+        ctx.ready_row_filing = previous
+        ctx.transient_note_retry = previous_retry
+    return filed
 
 
 def _file_through_driver(ctx: Any, notice: ApiNotice) -> dict[str, Any]:
@@ -2550,6 +3466,7 @@ def main(argv: list[str] | None = None) -> int:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc}",
                 started_at=_iso(_now()),
+                live=_poll_will_file(live),
             )
             if streak >= STALL_RUNS:
                 _alert(

@@ -512,6 +512,15 @@ class EzlynxApiClient:
         self._token_expires_at = now + max(expires_in - TOKEN_EXPIRY_SKEW_SECONDS, 60)
         return self._token
 
+    def clear_cached_token(self) -> None:
+        """Drop the cached bearer so the next call grants again.
+
+        PolicyApi paging uses this once after HTTP 401. It does not write
+        a policy and does not log the token.
+        """
+        self._token = None
+        self._token_expires_at = 0.0
+
     def _post_form(
         self, url: str, form: dict[str, str], *, authenticated: bool
     ) -> dict[str, Any]:
@@ -734,6 +743,22 @@ class EzlynxApiClient:
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
+
+    def search_policy_page(self, page_index: int, page_size: int) -> dict[str, Any]:
+        """Read-only paged GET of the policy book. No name, email, or phone.
+
+        PolicyApi ignores ApplicantName, Email, and PhoneNumber and returns
+        the whole book (totalSize around 38k). Those parameters are not
+        sent. ``pageIndex`` and ``pageSize`` match the fields on the search
+        envelope. This method does not create or update a policy.
+        """
+        index = int(page_index)
+        size = int(page_size)
+        if index < 0 or size < 1 or size > 200:
+            raise EzlynxApiError(None, "policy page bounds are invalid")
+        return self._search_policy_api(
+            {"pageIndex": str(index), "pageSize": str(size)}
+        )
 
     def search_applicants_by_name_and_email(self, name: str, email: str) -> dict[str, Any]:
         """Read-only PolicyApi search by insured name and email.

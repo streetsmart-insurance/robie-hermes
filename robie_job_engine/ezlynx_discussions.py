@@ -71,6 +71,21 @@ _PHONE_LIKE = re.compile(
 )
 
 
+def _transport_timed_out(exc: BaseException) -> bool:
+    """True when a urlopen failure is a timeout, including one wrapped by URLError."""
+    seen: list[BaseException] = [exc]
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        seen.append(reason)
+    for item in seen:
+        if isinstance(item, TimeoutError):
+            return True
+        text = f"{type(item).__name__} {item}".lower()
+        if "timeout" in text or "timed out" in text:
+            return True
+    return False
+
+
 class DiscussionApiError(RuntimeError):
     """Transport, authentication, or API failure. Messages never carry secrets."""
 
@@ -451,7 +466,13 @@ class DiscussionApiClient:
                 exc.code, f"Discussion API {method} failed: HTTP {exc.code} {detail}"
             ) from exc
         except (error.URLError, TimeoutError, OSError) as exc:
-            raise DiscussionApiError(None, f"Discussion API {method} transport failed") from exc
+            # A timeout or a dropped connection can land after the server
+            # stored the note. Keep "transport failed", and say "timed out"
+            # when the error is a timeout, so the ready-row pause can see both.
+            detail = "transport failed"
+            if _transport_timed_out(exc):
+                detail = "transport failed: timed out"
+            raise DiscussionApiError(None, f"Discussion API {method} {detail}") from exc
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -511,7 +532,11 @@ class DiscussionApiClient:
         return rows
 
     def get_discussion(self, discussion_id: str) -> dict[str, Any]:
-        """Single discussion by id (v8 discussions/:discussionId)."""
+        """Single discussion by id (v8 discussions/:discussionId).
+
+        This read has title, note count, and the latest note id. It does
+        not include note bodies.
+        """
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")
@@ -1114,6 +1139,62 @@ def iter_discussion_notes(record: Any):
 
 
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def _with_notes_rows(record: Any) -> list[Any] | None:
+    """The note list from a with-notes payload, including a bare JSON list."""
+    if isinstance(record, list):
+        return record
+    if not isinstance(record, dict):
+        return None
+    for key in ("notes", "Notes"):
+        rows = record.get(key)
+        if isinstance(rows, list):
+            return rows
+    return None
+
+
+def with_notes_read_is_complete(record: Any, plain: dict[str, Any] | None = None) -> bool:
+    """True only when with-notes is proven to be the whole discussion.
+
+    ``plain`` is the metadata from ``GET v8/discussions/{id}``: ``note_count``
+    and ``most_recent_note_id``. The with-notes list must be that long and
+    must contain that latest note id. A first page with no count, a count
+    nested under ``discussion``, ``totalCount`` plus ``pageSize``, or a bare
+    list is not proof by itself. Missing plain metadata is not proof either.
+    Note bodies have to be readable when the list is not empty, so a missing
+    body means the text is absent rather than unread.
+    """
+    if not isinstance(plain, dict):
+        return False
+    count = plain.get("note_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return False
+    latest = str(plain.get("most_recent_note_id") or "").strip()
+    if not latest:
+        return False
+    if isinstance(record, dict):
+        meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+        for key in ("next", "Next", "hasMore", "HasMore", "nextPage", "NextPage"):
+            if record.get(key) or meta.get(key):
+                return False
+        for key in ("totalCount", "TotalCount"):
+            total = record.get(key)
+            if isinstance(total, str) and total.strip().isdigit():
+                total = int(total.strip())
+            if isinstance(total, bool):
+                total = None
+            if isinstance(total, int) and total != count:
+                return False
+    notes = _with_notes_rows(record)
+    if notes is None or len(notes) != count:
+        return False
+    if not any(_note_id_of(row) == latest for row in notes):
+        return False
+    body_record = record if isinstance(record, dict) else {"notes": notes}
+    if not _payload_has_note_bodies(body_record):
+        return False
+    return True
 
 
 def _payload_has_note_bodies(record: Any) -> bool:

@@ -39,6 +39,7 @@ PROD_ONLY = {
     "chat_intake",
     "preflight_alert_delivery",
     "ascend_driver_stall",
+    "ascend_unmatched_digest",
 }
 
 

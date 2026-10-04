@@ -1,0 +1,4 @@
+[Service]
+# Install with scripts/install-ascend-unmatched-digest.sh --live
+# Absent, the service prints the email to the journal and sends nothing.
+Environment=ASCEND_UNMATCHED_DIGEST_LIVE=1

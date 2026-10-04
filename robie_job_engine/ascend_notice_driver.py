@@ -91,13 +91,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextvars
 import json
 import logging
 import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
@@ -922,6 +923,23 @@ def _resolve_by_name_and_email(
     return _unique_identity(result, _both, via="name_and_email", label="name and email")
 
 
+# Plain reasons for the accounting list. Filing does not use these.
+# A near match is never an applicant resolution.
+POLICY_OUTCOME_NO_NUMBER = "no policy number"
+POLICY_OUTCOME_NOT_IN_EZLYNX = "policy not in EZLynx"
+POLICY_OUTCOME_MULTIPLE = "multiple candidates"
+POLICY_OUTCOME_INCOMPLETE = "incomplete search"
+_POLICY_SEARCH_OUTCOME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ascend_policy_search_outcome",
+    default=POLICY_OUTCOME_NO_NUMBER,
+)
+
+
+def current_policy_search_outcome() -> str:
+    """Why the exact policy search did not choose one client. Empty if it did."""
+    return _POLICY_SEARCH_OUTCOME.get()
+
+
 def _resolve_by_policy_numbers(
     ezlynx_client: Any, numbers: list[str]
 ) -> tuple[ApplicantResolution | None, str, bool]:
@@ -931,33 +949,43 @@ def _resolve_by_policy_numbers(
     true only when every number produced zero rows or stayed incomplete
     after one retry. Several rows, or applicant ids that disagree, stop
     the cascade.
+
+    The context value records the policy step for the accounting list.
+    It does not change which applicant is filed.
     """
     found: list[tuple[str, str]] = []
+    saw_incomplete = False
     for number in numbers:
         try:
             result = _search_retry(
                 lambda number=number: ezlynx_client.search_policy_by_number(number)
             )
         except Exception as exc:  # noqa: BLE001 - fail closed, keep the class
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
             return None, f"policy_search_failed: {type(exc).__name__}", False
         if _page_is_incomplete(result):
+            saw_incomplete = True
             continue
         matched = _rows_matching_policy(_policy_rows(result), number)
         if len(matched) == 0:
             continue
         if len(matched) != 1:
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_MULTIPLE)
             return None, f"applicant_unresolved: {len(matched)} candidate rows", False
         account_id = _first_present(matched[0], _APPLICANT_ID_KEYS)
         if not account_id:
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
             return None, (
                 f"applicant_unresolved: {len(matched)} candidate row lacks accountId"
             ), False
         found.append((account_id, number))
     unique = {account_id for account_id, _number in found}
     if len(unique) > 1:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_MULTIPLE)
         return None, f"applicant_unresolved: {len(unique)} candidate rows", False
     if len(unique) == 1:
         account_id, number = found[0]
+        _POLICY_SEARCH_OUTCOME.set("")
         return (
             ApplicantResolution(
                 applicant_id=account_id,
@@ -968,6 +996,10 @@ def _resolve_by_policy_numbers(
             "",
             False,
         )
+    if saw_incomplete:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
+    else:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_NOT_IN_EZLYNX)
     return None, "applicant_unresolved: 0 candidate rows", True
 
 
@@ -1019,6 +1051,7 @@ def resolve_applicant(
     PolicyApi rows have no CSR field. This function does not return one.
     """
     numbers = [str(item or "").strip() for item in policy_numbers if str(item or "").strip()]
+    _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_NO_NUMBER)
     if numbers:
         resolution, reason, fall_through = _resolve_by_policy_numbers(ezlynx_client, numbers)
         if resolution is not None or not fall_through:
@@ -1173,11 +1206,26 @@ class DriverContext:
     dry_run: bool = True
     due_days: int = DEFAULT_DUE_DAYS
     today: date = field(default_factory=date.today)
+    # The poll clock. Ready-row comparisons use this so a test clock and a
+    # note timestamp stay on the same timeline.
+    now: datetime | None = None
     # In-run collapse. Cleared at the start of each run_driver call.
     seen_notice_events: list[dict[str, Any]] = field(default_factory=list)
     # (applicant id, canonical category title) -> discussion id, or a
     # planned-create token when this run has not created it yet.
     planned_category_discussions: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Set only while the API poll is filing a digest-matched ready row.
+    # That path skips a note already posted for this same bill.
+    ready_row_filing: bool = False
+    # The API poller can write the shared discussion-note ledger. The email
+    # driver cannot (its unit only writes its own state directory), so it
+    # leaves this false and does not try.
+    remember_filings: bool = False
+    # Set for one ready row whose previous attempt was an EZLynx 5xx or
+    # timeout. Only that retry may look at with-notes and, on a complete
+    # miss, clear the sent-unconfirmed row. Every other filing leaves the
+    # unconfirmed guard in place.
+    transient_note_retry: bool = False
 
 
 @dataclass
@@ -1582,6 +1630,159 @@ def _list_category_discussion(
     return chosen, match_count
 
 
+_UNCONFIRMED_GUARD = "I couldn't confirm that note was added."
+
+
+def _confirm_landed_note(
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    note_id: str,
+) -> None:
+    """Upgrade the sent-unconfirmed row once the discussion shows the body."""
+    from .discussion_note_ledger import (
+        CONFIRMED,
+        DiscussionNoteLedgerError,
+        record_posted_note,
+    )
+
+    try:
+        record_posted_note(
+            applicant_id,
+            discussion_id,
+            note_text=note_text,
+            note_id=note_id,
+            source="discussion_reread",
+            refresh=True,
+            confirmation=CONFIRMED,
+        )
+    except DiscussionNoteLedgerError as exc:
+        logger.warning("landed note was not confirmed in the ledger: %s", exc)
+
+
+def _plain_note_snapshot(client: Any, discussion_id: str) -> dict[str, Any] | None:
+    """noteCount and mostRecentNoteId from the plain discussion read.
+
+    That read has no note bodies. A failure here is not proof the with-notes
+    list is the whole discussion.
+    """
+    getter = getattr(client, "get_discussion", None)
+    if not callable(getter):
+        return None
+    try:
+        return discussions.discussion_note_snapshot(getter(discussion_id))
+    except Exception as exc:  # noqa: BLE001 - no metadata, so do not clear the guard
+        logger.warning(
+            "plain discussion re-read failed for %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+def _keep_unconfirmed_guard(filed: dict[str, Any]) -> dict[str, Any]:
+    """The with-notes read did not prove the note. Do not post."""
+    kept = dict(filed)
+    kept["maybe_note"] = True
+    return kept
+
+
+def _settle_unconfirmed_note(
+    client: Any,
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    filed: dict[str, Any],
+    *,
+    allow: bool,
+) -> dict[str, Any]:
+    """On a transient retry, settle only from a complete with-notes read.
+
+    ``allow`` is true only for a ready row parked by an HTTP 5xx or a
+    timeout. Every other filing keeps the unconfirmed guard. A plain
+    discussion read has no note bodies, so this uses
+    ``GET v8/discussions/{id}/with-notes``. The identical body marks the
+    note filed and posts nothing. Clearing the unconfirmed row requires
+    positive proof from the plain read: the with-notes list is exactly
+    ``noteCount`` long, contains ``mostRecentNoteId``, and does not
+    contain this body. Anything else keeps the guard.
+    """
+    if not allow or _UNCONFIRMED_GUARD not in str(filed.get("reason") or ""):
+        return filed
+    getter = getattr(client, "get_discussion_with_notes", None)
+    if not callable(getter):
+        return _keep_unconfirmed_guard(filed)
+    try:
+        record = getter(discussion_id)
+    except Exception as exc:  # noqa: BLE001 - leave the guard; do not post blind
+        logger.warning(
+            "with-notes re-read failed for discussion %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return _keep_unconfirmed_guard(filed)
+    if discussions._payload_has_note_bodies(record):
+        matched = discussions.find_identical_note(record, note_text)
+        if matched is not None:
+            note_id = _note_id_from(matched)
+            _confirm_landed_note(applicant_id, discussion_id, note_text, note_id)
+            return {
+                "status": "filed",
+                "reason": "The note was already on the discussion.",
+                "applicant_id": applicant_id,
+                "discussion_id": discussion_id,
+                "discussion_title": filed.get("discussion_title"),
+                "note_id": note_id or None,
+                "read_back": True,
+                "verified_by": "text",
+            }
+    plain = _plain_note_snapshot(client, discussion_id)
+    if not discussions.with_notes_read_is_complete(record, plain):
+        return _keep_unconfirmed_guard(filed)
+    try:
+        from .discussion_note_ledger import undo_unconfirmed_note
+
+        undo_unconfirmed_note(applicant_id, discussion_id, note_text=note_text)
+    except Exception as exc:  # noqa: BLE001 - do not post while the guard row remains
+        logger.warning(
+            "unconfirmed note row was not cleared for discussion %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return _keep_unconfirmed_guard(filed)
+    return discussions.file_note_to_existing_discussion(
+        client,
+        applicant_id,
+        note_text,
+        discussion_id=discussion_id,
+        dry_run=False,
+    )
+
+
+def _file_existing_note(
+    ctx: DriverContext,
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+) -> dict[str, Any]:
+    """Post to an existing discussion. Settle only a transient retry."""
+    filed = discussions.file_note_to_existing_discussion(
+        ctx.discussion_client,
+        applicant_id,
+        note_text,
+        discussion_id=discussion_id,
+        dry_run=False,
+    )
+    return _settle_unconfirmed_note(
+        ctx.discussion_client,
+        applicant_id,
+        discussion_id,
+        note_text,
+        filed,
+        allow=bool(getattr(ctx, "transient_note_retry", False)),
+    )
+
+
 def _read_existing_note(
     client: Any,
     applicant_id: str,
@@ -1646,6 +1847,165 @@ def _read_existing_note(
     outcome["note_id"] = _note_id_from(matched)
     outcome["read"] = True
     return outcome
+
+
+_RECENT_NOTE_WINDOW = timedelta(days=30)
+_NOTE_TIME_KEYS = (
+    "createdAt",
+    "CreatedAt",
+    "createdDate",
+    "CreatedDate",
+    "postedAt",
+    "PostedAt",
+    "created",
+    "Created",
+    "date",
+    "Date",
+)
+
+
+def _compact_policy(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+
+
+def _note_posted_at(row: dict[str, Any]) -> datetime | None:
+    # EZLynx note timestamps often have no offset. Naive EZLynx report
+    # timestamps are already treated as agency-local America/New_York
+    # (see task_verifier). The same assumption applies to a zone-less
+    # note stamp. A stamp that already carries an offset is converted
+    # from that offset.
+    from zoneinfo import ZoneInfo
+
+    eastern = ZoneInfo("America/New_York")
+    for key in _NOTE_TIME_KEYS:
+        raw = str(row.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=eastern)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _note_has_policy_and_type(body: str, policy_numbers: list[str], notice_type: str) -> bool:
+    """True when the note names this policy and this Ascend notice type."""
+    compact = _compact_policy(body)
+    named = False
+    for number in policy_numbers:
+        token = _compact_policy(number)
+        if len(token) >= 4 and token in compact:
+            named = True
+            break
+    if not named:
+        return False
+    folded = str(body or "").casefold()
+    if notice_type == triage.CANCELLATION:
+        return "non-pay cancellation" in folded
+    heading = str(triage._NOTICE_HEADINGS.get(notice_type) or "").casefold()
+    if not heading:
+        return False
+    return f"{heading} notice" in folded
+
+
+def recent_same_notice(
+    client: Any,
+    *,
+    applicant_id: str,
+    discussion_id: str,
+    policy_numbers: list[str],
+    notice_type: str,
+    now: datetime | None = None,
+    not_before: datetime | None = None,
+    notice_text: str = "",
+) -> dict[str, Any] | None:
+    """A note already posted for this same bill.
+
+    It has to be on or after ``not_before`` (the ready row's first_seen),
+    name this policy and notice type, and share the due date, the amount,
+    or the invoice number. Last month's late notice is a different bill.
+    Discussion reads are checked first. A ledger row counts only when it
+    carries the same anchors.
+    """
+    from .discussion_note_ledger import (
+        anchors_overlap,
+        find_recent_notice_filing,
+        notice_anchors,
+    )
+
+    if not_before is None:
+        return None
+    floor = not_before
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    floor = floor.astimezone(timezone.utc)
+    wanted = notice_anchors(notice_text)
+    if not any(wanted.values()):
+        return None
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    pinned = str(discussion_id or "").strip()
+    getter = getattr(client, "get_discussion", None)
+    if pinned and callable(getter):
+        detail = getter(pinned)
+        for row in discussions.iter_discussion_notes(detail):
+            if not isinstance(row, dict):
+                continue
+            posted = _note_posted_at(row)
+            if posted is None or posted < floor:
+                continue
+            age = moment - posted
+            if age < timedelta(0) or age > _RECENT_NOTE_WINDOW:
+                continue
+            body = discussions._note_body(row)
+            if not _note_has_policy_and_type(body, policy_numbers, notice_type):
+                continue
+            if not anchors_overlap(wanted, notice_anchors(body)):
+                continue
+            return {"note_id": _note_id_from(row), "source": "discussion"}
+    remembered = find_recent_notice_filing(
+        applicant_id,
+        pinned,
+        policy_numbers,
+        notice_type,
+        now=moment,
+        not_before=floor,
+        notice_text=notice_text,
+    )
+    if remembered is None:
+        return None
+    return {
+        "note_id": str(remembered.get("note_id") or ""),
+        "source": "ledger",
+    }
+
+
+def _remember_notice_filing(
+    *,
+    applicant_id: str,
+    discussion_id: str,
+    policy_numbers: list[str],
+    notice_type: str,
+    notice_text: str,
+) -> None:
+    """Remember a note the API poller posted. The email driver does not call this."""
+    from .discussion_note_ledger import DiscussionNoteLedgerError, remember_notice_filing
+
+    try:
+        remember_notice_filing(
+            applicant_id,
+            discussion_id,
+            policy_numbers=policy_numbers,
+            notice_type=notice_type,
+            notice_text=notice_text,
+        )
+    except DiscussionNoteLedgerError as exc:
+        logger.warning("notice filing was not remembered: %s", exc)
 
 
 def signed_notice_note(note_text: str) -> str:
@@ -1900,6 +2260,9 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         )
         if resolution is None:
             result.reason = reason
+            outcome = current_policy_search_outcome()
+            if outcome:
+                result.detail["unmatched_reason"] = outcome
             result.detail["needs_human_review"] = True
             return result
     needs_csr_task = notice_type == triage.CANCELLATION or (
@@ -2050,6 +2413,44 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["existing_note_id"] = note_match["note_id"]
     if note_match.get("reason") and not note_match.get("read"):
         result.detail["existing_note_read_reason"] = note_match["reason"]
+    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
+        # The note text on this discussion could not be read. Do not post a
+        # note that may already be there. This is before the recent-note
+        # read: a 404 on with-notes is a DiscussionApi miss, and that miss
+        # can make the next plain read fail closed for the wrong reason.
+        result.reason = f"existing_note_unreadable: {note_match['bodies_error']}"
+        return result
+
+    # A ready row does not post again when this discussion already has a
+    # note for this same bill: posted on or after first_seen, and the due
+    # date, amount, or invoice number matches. Last month's late notice
+    # does not count. A failed read does not post.
+    if ctx.ready_row_filing and chosen_id:
+        try:
+            recent = recent_same_notice(
+                ctx.discussion_client,
+                applicant_id=resolution.applicant_id,
+                discussion_id=chosen_id,
+                policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
+                notice_type=notice_type,
+                now=ctx.now,
+                not_before=_note_posted_at({"createdAt": notice.internal_date}),
+                notice_text="\n".join(
+                    part for part in (notice.subject, notice.body, note_text) if part
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - do not post when the check cannot finish
+            result.reason = f"discussion_error: {type(exc).__name__}"
+            return result
+        if recent:
+            note_id = str(recent.get("note_id") or "").strip()
+            result.reason = (
+                f"recent_same_notice: {note_id}" if note_id else "recent_same_notice"
+            )
+            result.detail["notice_anchor_matched"] = True
+            if note_id:
+                result.detail["existing_note_id"] = note_id
+            return result
 
     # Write scope before filing. A narrow allowlist must not hide a real match.
     scope_refusal = _write_scope_refusal_reason(resolution.applicant_id)
@@ -2061,11 +2462,6 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = (
             f"existing_note_duplicate: {note_id}" if note_id else "existing_note_duplicate"
         )
-        return result
-    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
-        # The note text on this discussion could not be read. Do not post a
-        # note that may already be there.
-        result.reason = f"existing_note_unreadable: {note_match['bodies_error']}"
         return result
 
     # Cancellations are notes only. Do not list or apply Ascend NOC.
@@ -2095,12 +2491,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 except EzlynxDriverGateRefused as exc:
                     result.reason = f"driver_gate_refused: {exc}"
                     return result
-                filed = discussions.file_note_to_existing_discussion(
-                    ctx.discussion_client,
+                filed = _file_existing_note(
+                    ctx,
                     resolution.applicant_id,
+                    chosen_id,
                     note_text,
-                    discussion_id=chosen_id,
-                    dry_run=False,
                 )
         elif ctx.dry_run:
             authorize_notice_write(
@@ -2185,12 +2580,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                         "reason": "recovered category discussion already has this note",
                     }
                 else:
-                    filed = discussions.file_note_to_existing_discussion(
-                        ctx.discussion_client,
+                    filed = _file_existing_note(
+                        ctx,
                         resolution.applicant_id,
+                        chosen_id,
                         note_text,
-                        discussion_id=chosen_id,
-                        dry_run=False,
                     )
             else:
                 created_id = str(filed.get("discussion_id") or "").strip()
@@ -2210,6 +2604,8 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             result.reason = "no matching discussion"
             result.detail["needs_human_review"] = True
             return result
+        if filed.get("maybe_note"):
+            result.detail["maybe_note"] = True
         result.reason = (
             f"note_not_filed: {filed.get('reason_code')}: {filed.get('reason')}"
         )
@@ -2315,6 +2711,24 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
+    # The email driver does not write the ledger. Its unit can only write
+    # /var/lib/robie-ascend-notice-driver, and a copy there is invisible to
+    # the API poller. Ready-row checks read the discussion. The poller sets
+    # remember_filings because it can write the shared ledger.
+    if result.status == "done" and ctx.remember_filings:
+        _remember_notice_filing(
+            applicant_id=resolution.applicant_id,
+            discussion_id=str(result.detail.get("discussion_id") or chosen_id),
+            policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
+            notice_type=notice_type,
+            notice_text="\n".join(
+                part for part in (notice.subject, notice.body, note_text) if part
+            ),
+        )
+    # The notice driver cannot write the API store. Its unit is
+    # ProtectSystem=strict and ReadWritePaths covers only
+    # /var/lib/robie-ascend-notice-driver. The digest marks a match ready
+    # to file; the API poll files it.
     if notice_type == triage.CANCELLATION:
         result.detail["label"] = {
             "status": "label_skipped_by_policy",
