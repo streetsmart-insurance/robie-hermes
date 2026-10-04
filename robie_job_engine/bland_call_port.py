@@ -107,8 +107,14 @@ class BlandTransportCallPort:
         if self.execute is not True:
             return {"success": False, "error": "execute is off", "call_ids": []}
         cap = max_duration_minutes(self.env)
+        transfer = None
+        if isinstance(metadata, dict):
+            raw_transfer = str(metadata.get("transfer_phone_number") or "").strip()
+            if raw_transfer.startswith("+"):
+                transfer = raw_transfer
         body = bland_payload_spec(
-            dial, task_text, first_sentence, voicemail_message, 1, metadata=metadata,
+            dial, task_text, first_sentence, voicemail_message, 1,
+            metadata=metadata, transfer_phone_number=transfer,
         )
         body["max_duration"] = int(cap) if cap == int(cap) else cap
         logger.info("placing Bland call to a number ending %s", dial[-4:])
