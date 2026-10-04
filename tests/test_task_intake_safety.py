@@ -299,13 +299,20 @@ class Owners:
         self.calls = []
         self.attempts = []
         self.live_description = None  # None: the live request equals what the caller passes
+        self.live_fields = {}         # live values that differ from make_task()'s defaults
+        self.hide_fields = ()         # fields the live read cannot return
         self.state_error = None
 
     def read_task_state(self, task_id, applicant_id, description=""):
         if self.state_error is not None:
             raise self.state_error
-        return {"assignee": self.assignee,
-                "description": self.live_description if self.live_description is not None else description}
+        state = {"assignee": self.assignee,
+                 "description": self.live_description if self.live_description is not None else description,
+                 "created_by": "Carlo Ferrara", "assigned_producer": "", "csr": "", "activity_labels": ""}
+        state.update(self.live_fields)
+        for name in self.hide_fields:
+            state.pop(name, None)
+        return state
 
     def reassign(self, task_id, applicant_id, new_assignee, description="", expected_assignee="Robie AI"):
         self.attempts.append(new_assignee)
@@ -1428,3 +1435,109 @@ def test_a_normal_pass_keeps_main_call_wiring_and_only_owed_recovery_disables_it
     assert (normal.phone_lookup, normal.bland_client, normal.call_dry_run) == ("PHONE", "BLAND", True)
     owed, _ = intake._build_worker_and_engine(store, allow_calls=False)
     assert owed.phone_lookup is None and owed.bland_client is None
+
+
+# ---------------------------------------------------------------------------
+# Clara's fourth review (cb6d949): the current-request proof must cover every
+# consequential field, not just the assignee and description.
+# ---------------------------------------------------------------------------
+
+def test_an_older_report_naming_the_previous_producer_cannot_hand_the_task_back_to_them(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    original = make_task(created_by="", assigned_producer="Mike Sosa", csr="")
+    disc, owners = Discussions(), Owners()
+    holder = {"report": _report(original, message_id="m1")}
+    _wire_intake(monkeypatch, None, disc, owners, {"on": True})
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(original.task_id))
+    assert job["status"] == JobStatus.COMPLETE.value and owners.calls == ["Mike Sosa"]
+    # A human returns the task with the SAME description but Producer A (Mike) changed to B (Jazmin).
+    owners.assignee = "Robie AI"
+    owners.live_fields = {"created_by": "", "assigned_producer": "Jazmin Molina", "csr": ""}
+    # An older report arrives afterward, still naming A, received after the handback.
+    holder["report"] = _report(make_task(created_by="", assigned_producer="Mike Sosa", csr="",
+                                         last_modified="2026-10-05T09:00:00"), message_id="m2")
+    assert intake.run_intake(db_path=db) == 0
+    same = JobStore(db).get_job(job["id"])
+    assert same["status"] == JobStatus.COMPLETE.value and int(same["payload"].get("round") or 0) == 0
+    assert owners.calls == ["Mike Sosa"], "handed the task back to the former producer"
+    assert len(disc.posts) == 1
+    # A report that names the real current producer opens the round, and the task goes to B.
+    holder["report"] = _report(make_task(created_by="", assigned_producer="Jazmin Molina", csr="",
+                                         last_modified="2026-10-05T10:00:00"), message_id="m3")
+    assert intake.run_intake(db_path=db) == 0
+    final = JobStore(db).get_job(job["id"])
+    assert final["status"] == JobStatus.COMPLETE.value and int(final["payload"]["round"]) == 1
+    assert owners.calls == ["Mike Sosa", "Jazmin Molina"]
+
+
+def _confirm(monkeypatch, owners, task):
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: owners)
+    return intake._confirm_returned(task)
+
+
+def test_the_return_check_passes_only_when_every_consequential_field_matches(monkeypatch):
+    task = make_task(created_by="Carlo Ferrara", assigned_producer="Mike Sosa", csr="Jazmin Molina",
+                     description="Send the dec page", )
+    owners = Owners(assignee="Robie AI")
+    owners.live_fields = {"assigned_producer": "Mike Sosa", "csr": "Jazmin Molina"}
+    assert _confirm(monkeypatch, owners, task) is True
+
+
+@pytest.mark.parametrize("field,live", [
+    ("created_by", "Someone Else"), ("assigned_producer", "Jazmin Molina"),
+    ("csr", "Jazmin Molina"), ("activity_labels", "Robie Call"),
+])
+def test_a_live_routing_field_that_differs_from_the_report_row_is_a_stale_snapshot(monkeypatch, field, live):
+    task = make_task(created_by="Carlo Ferrara", assigned_producer="Mike Sosa", csr="", description="Send the dec page")
+    owners = Owners(assignee="Robie AI")
+    owners.live_fields = {"assigned_producer": "Mike Sosa", field: live}
+    assert _confirm(monkeypatch, owners, task) is False
+
+
+@pytest.mark.parametrize("field", ["created_by", "assigned_producer", "csr", "activity_labels", "description"])
+def test_a_consequential_field_the_live_read_cannot_return_is_unproven(monkeypatch, field):
+    task = make_task(created_by="Carlo Ferrara", assigned_producer="Mike Sosa", csr="", description="Send the dec page")
+    owners = Owners(assignee="Robie AI")
+    owners.live_fields = {"assigned_producer": "Mike Sosa"}
+    owners.hide_fields = (field,)
+    assert _confirm(monkeypatch, owners, task) is False
+
+
+def test_blank_routing_fields_on_both_sides_still_match(monkeypatch):
+    task = make_task(created_by="", assigned_producer="", csr="", description="Send the dec page")
+    owners = Owners(assignee="Robie AI")
+    owners.live_fields = {"created_by": ""}
+    assert _confirm(monkeypatch, owners, task) is True
+
+
+class _Scope:
+    """A page or dialog whose labelled fields are known; anything else has no match."""
+    def __init__(self, fields): self.fields = fields
+    def get_by_label(self, name, exact): return self.fields.get(name, _Field("", count=0))
+
+
+def test_all_consequential_fields_are_read_from_exactly_one_labelled_field_each():
+    panel = _Scope({"Description": _Field("Send  the dec page"), "Created by": _Field("Carlo Ferrara"),
+                    "Labels": _Field("")})
+    page = _Scope({"Producer": _Field("Mike Sosa"), "CSR": _Field("")})
+    state = cdp._read_consequential_fields(panel, page)
+    assert state == {"description": "Send the dec page", "created_by": "Carlo Ferrara",
+                     "assigned_producer": "Mike Sosa", "csr": "", "activity_labels": ""}
+
+
+def test_a_missing_or_ambiguous_consequential_field_raises_instead_of_guessing():
+    page = _Scope({"Producer": _Field("Mike Sosa"), "CSR": _Field("")})
+    with pytest.raises(cdp.ReassignError, match="created_by"):
+        cdp._read_consequential_fields(_Scope({"Description": _Field("x"), "Labels": _Field("")}), page)
+    with pytest.raises(cdp.ReassignError, match="ambiguous|Ambiguous"):
+        cdp._read_consequential_fields(
+            _Scope({"Description": _Field("x"), "Created by": _Field("a", count=2), "Labels": _Field("")}), page)
+
+
+def test_the_guessed_dom_labels_are_published_as_unverified():
+    contract = cdp.unverified_dom_contract()
+    assert set(contract["fields"]) == {"description", "created_by", "assigned_producer", "csr", "activity_labels"}
+    assert contract["status"] == "UNVERIFIED"
+    assert all(contract["fields"][name] for name in contract["fields"])
