@@ -22,7 +22,7 @@ INTEGRATION (for the task worker / Job Engine):
     #        dict {"phone": str|None, "ambiguous": bool, "candidates":
     #        [{"label": "Cell"}, ...]} when the applicant has several
     #        numbers and no clear best — the handler fails closed.
-    #      - BlandCallPort: HTTP POST https://api.bland.ai/v1/calls with the
+    #      - BlandCallPort: the Bland transport posts /v1/calls with the
     #        Jake-spec payload (see robie_job_engine.bland_config).
     #        Required get_call_status(call_id) lets the handler VERIFY the
     #        outcome instead of trusting the placement ack; without a
@@ -105,13 +105,19 @@ RELIABILITY CONTRACT (rock solid):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Protocol
+from zoneinfo import ZoneInfo
 
+from .business_calendar import us_federal_holidays
+from .call_opt_out import pressed_opt_out
 from .bland_config import (
+    CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
     CALLER_ID,
     KAREN_VOICE_ID,
@@ -125,7 +131,34 @@ logger = logging.getLogger(__name__)
 # Constants (Jake's specs + Carlo's corrections)
 # ---------------------------------------------------------------------------
 
-TRANSFER_NUMBER = "+17324622360"  # Carlo's direct line for live transfers
+# Calling window. Outbound dials only, weekdays, America/New_York by default.
+# Env overrides the built-in hours when RobieCallConfig leaves them unset.
+CALL_WINDOW_START_ENV = "ROBIE_CALL_WINDOW_START"
+CALL_WINDOW_END_ENV = "ROBIE_CALL_WINDOW_END"
+CALL_WINDOW_TZ_ENV = "ROBIE_CALL_WINDOW_TZ"
+DEFAULT_CALL_WINDOW_START = 9   # 9:00 inclusive
+DEFAULT_CALL_WINDOW_END = 18    # 18:00 exclusive (6:00 PM)
+DEFAULT_CALL_WINDOW_TZ = "America/New_York"
+
+
+def _resolve_transfer_number(ports: RobieCallPorts,
+                             assigned_by: str) -> Optional[str]:
+    """The direct-dial number Eva may transfer to, or None.
+
+    Only a wired transfer lookup can supply a number. With no lookup, a
+    failed lookup, or an unknown person, there is no transfer target and
+    Eva takes a message instead. There is no placeholder number.
+    """
+    if ports.transfer_lookup is None or not assigned_by:
+        return None
+    try:
+        candidate = ports.transfer_lookup.get_transfer_number(assigned_by)
+        normalized = _normalize_phone(candidate) if candidate else None
+        if normalized:
+            return normalized
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("transfer lookup failed for %r: %s", assigned_by, exc)
+    return None
 
 CALL_KEYWORDS = ("call", "phone", "dial", "ring", "callback", "call back")
 
@@ -296,6 +329,20 @@ class RecordingUploadPort(Protocol):
         ...
 
 
+class TransferLookupPort(Protocol):
+    """Resolve a staff member's direct-dial number for live call transfers.
+
+    Implemented against the RingCentral account (staff extensions/DIDs).
+    When Roby hits trouble on a call — e.g. the other party is getting
+    frustrated — Eva transfers the live call to the person who assigned
+    the task, so a human takes over instead of the call dying.
+    """
+
+    def get_transfer_number(self, assignee_name: str) -> Optional[str]:
+        """Return the assignee's direct dial number, or None when unknown."""
+        ...
+
+
 class CheckpointError(Exception):
     """A durable checkpoint read or write failed.
 
@@ -317,6 +364,10 @@ class RobieCallPorts:
     chat_alert: Optional[Callable[[str], bool]] = None  # posts to ROBIE health Chat
     task_status: Optional[TaskStatusPort] = None  # skip already-closed tasks
     job_checkpoint: Optional[CallJobCheckpointPort] = None  # durable restart recovery
+    transfer_lookup: Optional[TransferLookupPort] = None  # assignee DID for live transfers
+    opt_out_store: Optional[Any] = None  # press 6 stops later automated calls
+    opt_in_store: Optional[Any] = None  # marketing workflows require a recorded opt-in
+    call_dedupe: Optional[Any] = None  # one automated call per note per day
 
 
 @dataclass
@@ -335,6 +386,14 @@ class RobieCallConfig:
     # the task fails closed (open, alerted, honest note).
     outcome_poll_tries: int = 6
     outcome_poll_interval_s: int = 10
+    # None means "use the env override, else the built-in default".
+    calling_window_start_hour: Optional[int] = None
+    calling_window_end_hour: Optional[int] = None
+    calling_window_tz: Optional[str] = None
+    # Test seam. Production leaves this unset and uses the real clock.
+    now: Optional[datetime] = None
+    # Press 2 is offered only when this is true and the number is mobile.
+    sms_configured: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +451,15 @@ _TASK_FIELD_ALIASES: Dict[str, List[str]] = {
     "applicant_name": ["Account Name", "Applicant Name", "applicant_name", "Client Name"],
     "assigned_by": ["Task Created By", "Assigned By", "Created By", "assigned_by", "CreatedBy"],
     "assigned_to": ["Assigned To", "AssignedTo", "assigned_to", "Task Assigned To"],
+    "assigned_producer": [
+        "Assigned Producer", "assigned_producer",
+        "Applicant Data Assigned Producer",
+    ],
     "due_date": ["Task Due Date", "Due Date", "due_date"],
+    "activity_labels": ["Activity Labels", "activity_labels"],
+    "workflow": ["Workflow", "workflow"],
+    "discussion_id": ["Discussion ID", "discussion_id", "DiscussionID"],
+    "phone_is_mobile": ["Phone Is Mobile", "phone_is_mobile"],
 }
 
 
@@ -410,6 +477,14 @@ def is_call_task(task: Dict[str, Any]) -> bool:
     are NOT call tasks (substring matching caused false positives that
     could have dialed a client for a non-call task).
     """
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(
+        _pick(task, "activity_labels"),
+        _pick(task, "subject") + " " + _pick(task, "description"),
+    )
+    if decision.action in ("workflow", "freeform"):
+        return True
     text = _pick(task, "subject") + " " + _pick(task, "description")
     return bool(_CALL_KEYWORD_RE.search(text))
 
@@ -465,6 +540,19 @@ def _instruction_ambiguity(instruction: str) -> Optional[str]:
     return None
 
 
+def _phone_is_mobile(ports: RobieCallPorts, task: Dict[str, Any], applicant_id: str) -> bool:
+    flag = _pick(task, "phone_is_mobile").lower()
+    if flag in ("1", "true", "yes"):
+        return True
+    method = getattr(ports.phone_lookup, "is_mobile", None)
+    if method is None:
+        return False
+    try:
+        return bool(method(applicant_id))
+    except Exception:  # noqa: BLE001 — no text offer when the lookup fails
+        return False
+
+
 def _normalize_spoken(text: str) -> str:
     """Normalize text that will be SPOKEN by TTS (first_sentence, voicemail).
 
@@ -481,14 +569,143 @@ def _normalize_spoken(text: str) -> str:
     return collapsed
 
 
+# Broad scrubber: DiscussionApi rejects digit runs that look like phones,
+# including a bare 10-digit policy number. Dialing uses a stricter rule.
 _PHONE_LIKE_RE = re.compile(
     r"(\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})")
 
+# A phone is formatted when the groups are separated (732-555-0142,
+# (732) 555-0142, 1-800-776-4737). A bare digit run is not.
+_PHONE_FORMATTED_RE = re.compile(
+    r"(?<!\d)(?:\+?1[\s\-.]?)?(?:\(\d{3}\)[\s\-.]?\d{3}[\s\-.]\d{4}"
+    r"|\d{3}[\s\-.]\d{3}[\s\-.]\d{4})(?!\d)"
+)
+_BARE_DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{6,15}(?!\d)")
+# "policy 7685786571", "pol #123", "claim: 999", "quote number 1234567890".
+_POLICY_CONTEXT_RE = re.compile(
+    r"(?i)(?:\b(?:policy|pol|claim|quote)\b"
+    r"(?:\s*(?:number|no|num|#))?\s*[:#.\-]?\s*)$"
+)
+# Clear phone wording. "number" alone does not win when a policy/claim/quote
+# word already claimed the same digits.
+_PHONE_WORDING_RE = re.compile(
+    r"(?i)(?:\b(?:phone|cell|cellphone|mobile|telephone)\b|\bnumber\b"
+    r"|\bcall\b(?:\s+\S+){0,6}\s+\bat\b)\s*[:#.\-]?\s*$"
+)
+# Alphanumeric policy tokens (WC5-33S-B276B9-026). Never a phone.
+_POLICY_ALNUM_RE = re.compile(
+    r"\b(?=[A-Za-z0-9-]*\d)(?=[A-Za-z0-9-]*[A-Za-z])[A-Za-z][A-Za-z0-9-]{4,30}\b"
+)
+_NAMED_CALLEE_RE = re.compile(
+    r"\b[Cc]all\s+([A-Z][A-Za-z][A-Za-z'&.-]*"
+    r"(?:\s+[A-Z][A-Za-z][A-Za-z'&.-]*)*)"
+)
+
 
 def _phones_in_text(text: str) -> List[str]:
-    """Extract phone-like numbers from free text, normalized to digits."""
-    return ["".join(c for c in m if c.isdigit())
-            for m in _PHONE_LIKE_RE.findall(text or "")]
+    """Digit runs that are clearly phones, not policy/claim/quote numbers."""
+    return ["".join(c for c in raw if c.isdigit())
+            for raw in _clear_phone_texts(text or "")]
+
+
+def _context_before(text: str, start: int, window: int = 80) -> str:
+    return text[max(0, start - window):start]
+
+
+def _overlaps(start: int, end: int, spans: List[tuple]) -> bool:
+    return any(not (end <= left or start >= right) for left, right in spans)
+
+
+def _is_known_policy_shape(digits: str) -> bool:
+    """True for shapes this agency treats as policy numbers, not phones.
+
+    Bare 6–15 digit runs and 11-digit runs that are not a leading-1
+    national number. A formatted phone (separators) is not this shape.
+    A bare 10-digit run, and a bare 11-digit run starting with 1, match
+    both a policy number and a phone — those stay ambiguous unless the
+    request clearly introduces them as a phone.
+    """
+    if not digits.isdigit():
+        return True
+    if len(digits) == 10:
+        return False
+    if len(digits) == 11 and digits.startswith("1"):
+        return False
+    return True
+
+
+def _policy_token_spans(text: str) -> List[tuple]:
+    """Spans of alphanumeric policy tokens. Digits inside them are not phones."""
+    return [(m.start(), m.end()) for m in _POLICY_ALNUM_RE.finditer(text or "")]
+
+
+def _clear_phone_texts(text: str) -> List[str]:
+    """Raw spans the request clearly gives as a phone number."""
+    found: List[str] = []
+    policy_spans = _policy_token_spans(text or "")
+    formatted = list(_PHONE_FORMATTED_RE.finditer(text or ""))
+    spans = [(m.start(), m.end()) for m in formatted]
+    for match in formatted:
+        if _overlaps(match.start(), match.end(), policy_spans):
+            continue
+        if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
+            continue
+        found.append(match.group(0))
+    for match in _BARE_DIGIT_RUN_RE.finditer(text or ""):
+        if _overlaps(match.start(), match.end(), spans):
+            continue
+        if _overlaps(match.start(), match.end(), policy_spans):
+            continue
+        if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
+            continue
+        digits = match.group(0)
+        if _is_known_policy_shape(digits):
+            continue
+        if _PHONE_WORDING_RE.search(_context_before(text, match.start())):
+            found.append(digits)
+    return found
+
+
+def _phone_directive(instruction: str) -> tuple:
+    """(normalized phone or None, ambiguous).
+
+    Digits are a phone only when the request clearly gives one: phone,
+    cell, number, or "call at" wording, or a phone-formatted number.
+    Digits after policy/pol/claim/quote are never a phone. A known policy
+    shape is never a phone. A bare 10-digit run with none of those signals
+    is ambiguous — the caller must ask, not dial.
+    """
+    text = instruction or ""
+    clear = _clear_phone_texts(text)
+    if clear:
+        return _normalize_phone("".join(c for c in clear[0] if c.isdigit())), False
+    formatted = list(_PHONE_FORMATTED_RE.finditer(text))
+    spans = [(m.start(), m.end()) for m in formatted] + _policy_token_spans(text)
+    for match in _BARE_DIGIT_RUN_RE.finditer(text):
+        if _overlaps(match.start(), match.end(), spans):
+            continue
+        if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
+            continue
+        digits = match.group(0)
+        if _is_known_policy_shape(digits):
+            continue
+        # Bare 10-digit (or leading-1) run, no phone wording: could be
+        # a policy number. Ask. Do not dial it.
+        return None, True
+    return None, False
+
+
+def _extract_explicit_phone(instruction: str) -> Optional[str]:
+    """The task's phone number when the request clearly gives one.
+
+    Policy, claim, and quote numbers are not phones. An ambiguous digit
+    run returns None; callers must check `_phone_directive` and ask
+    instead of dialing.
+    """
+    phone, ambiguous = _phone_directive(instruction)
+    if ambiguous:
+        return None
+    return phone
 
 
 def _scrub_phones(text: str) -> str:
@@ -497,11 +714,10 @@ def _scrub_phones(text: str) -> str:
 
 
 def _instruction_phone_mismatch(instruction: str, dialed_phone: str) -> Optional[str]:
-    """Detect when the task text names a different number than EZLynx.
+    """Detect when the task text names a different phone than the one dialed.
 
-    EZLynx wins (it's the system of record), but the mismatch is flagged
-    for the note — a sloppy human may have typed a wrong number, and staff
-    should know which one was actually dialed.
+    Only numbers the request clearly gives as a phone count. A policy,
+    claim, or quote number is not a mismatch.
     """
     dialed_digits = "".join(c for c in str(dialed_phone or "") if c.isdigit())
     for found in _phones_in_text(instruction):
@@ -511,6 +727,18 @@ def _instruction_phone_mismatch(instruction: str, dialed_phone: str) -> Optional
                 and found[-10:] != dialed_digits[-10:]):
             return found
     return None
+
+
+def _named_callee(instruction: str) -> str:
+    """The capitalized party after "call", if the instruction names one."""
+    match = _NAMED_CALLEE_RE.search(instruction or "")
+    return match.group(1).strip() if match else ""
+
+
+def _name_overlaps(left: str, right: str) -> bool:
+    left_tokens = {part for part in left.lower().split() if part}
+    right_tokens = {part for part in right.lower().split() if part}
+    return bool(left_tokens and right_tokens and (left_tokens & right_tokens))
 
 
 def _instruction_name_mismatch(instruction: str,
@@ -553,6 +781,97 @@ def _normalize_phone(raw: Any) -> Optional[str]:
     if len(digits) > 7:
         return "+" + digits
     return None
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _format_hour(hour: int) -> str:
+    """9 -> '9:00 AM', 18 -> '6:00 PM'."""
+    shown = hour % 12 or 12
+    suffix = "AM" if hour < 12 else "PM"
+    return f"{shown}:00 {suffix}"
+
+
+def _calling_window(config: RobieCallConfig) -> tuple:
+    """(start_hour, end_hour, ZoneInfo or None, error).
+
+    start is inclusive, end is exclusive. error is set when the window
+    cannot be applied safely — the caller must not dial.
+    """
+    start = (config.calling_window_start_hour
+             if config.calling_window_start_hour is not None
+             else _env_int(CALL_WINDOW_START_ENV, DEFAULT_CALL_WINDOW_START))
+    end = (config.calling_window_end_hour
+           if config.calling_window_end_hour is not None
+           else _env_int(CALL_WINDOW_END_ENV, DEFAULT_CALL_WINDOW_END))
+    tz_name = (config.calling_window_tz
+               or os.environ.get(CALL_WINDOW_TZ_ENV, "").strip()
+               or DEFAULT_CALL_WINDOW_TZ)
+    if end <= start or not (0 <= start <= 23) or not (1 <= end <= 24):
+        return start, end, None, "calling window hours are not usable"
+    try:
+        zone = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 - bad tz must not dial
+        return start, end, None, f"calling window timezone {tz_name!r} is not valid"
+    return start, end, zone, None
+
+
+def _calling_now(config: Optional[RobieCallConfig] = None) -> datetime:
+    """Clock for the calling window. Tests pass config.now."""
+    if config is not None and config.now is not None:
+        return config.now
+    _start, _end, zone, _err = _calling_window(config or RobieCallConfig())
+    if zone is None:
+        return datetime.now(ZoneInfo(DEFAULT_CALL_WINDOW_TZ))
+    return datetime.now(zone)
+
+
+def _outside_calling_window(config: RobieCallConfig) -> Optional[str]:
+    """Plain-English reason when an outbound call must not be dialed.
+
+    Weekdays 9:00 AM–6:00 PM America/New_York by default. Configurable
+    via RobieCallConfig or ROBIE_CALL_WINDOW_START / _END / _TZ.
+    """
+    start, end, zone, error = _calling_window(config)
+    if error or zone is None:
+        return error or "calling window is not configured"
+    current = _calling_now(config)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=zone)
+    else:
+        current = current.astimezone(zone)
+    if current.weekday() >= 5:
+        return (
+            f"weekend; outbound calls run weekdays "
+            f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
+        )
+    if current.date() in us_federal_holidays(current.year):
+        return (
+            f"federal holiday; outbound calls run weekdays "
+            f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
+        )
+    minute_of_day = current.hour * 60 + current.minute
+    if minute_of_day < start * 60 or minute_of_day >= end * 60:
+        return (
+            f"outside {_format_hour(start)}–{_format_hour(end)} {zone.key}"
+        )
+    return None
+
+
+def _calling_window_label(config: RobieCallConfig) -> str:
+    start, end, zone, error = _calling_window(config)
+    tz = zone.key if zone is not None else DEFAULT_CALL_WINDOW_TZ
+    if error:
+        return error
+    return f"weekdays {_format_hour(start)}–{_format_hour(end)} {tz}"
 
 
 def _retryable_call(fn: Callable[[], Any], *, what: str, tries: int = 3) -> Any:
@@ -805,6 +1124,68 @@ def _call_was_connected(status_result: Dict[str, Any]) -> bool:
     return dur > 0
 
 
+def _was_transferred(status_result: Dict[str, Any]) -> bool:
+    """Did this call end via a live transfer to a human?
+
+    Eva transfers when the other party gets frustrated or asks for a human.
+    Bland reports this in the status payload (explicit flag or a transfer
+    status); either counts. A transferred call is verified (we know what
+    happened) but NOT task success — the assigner took over.
+    """
+    if status_result.get("transferred"):
+        return True
+    return "transfer" in str(status_result.get("status") or "").lower()
+
+
+def _outcome_was_transferred(outcome: Dict[str, Any]) -> bool:
+    """True when any verified call in the outcome was transferred."""
+    return any(
+        _was_transferred(st)
+        for st in (outcome.get("statuses") or {}).values()
+    )
+
+
+def _identity_line(producer_name: str) -> str:
+    """Who Eva said she was calling for. The assigned producer, never a placeholder."""
+    who = (producer_name or "").strip() or "the assigned producer"
+    return (
+        f"Eva identified herself as an AI assistant calling on behalf of {who} "
+        f"from StreetSmart Insurance."
+    )
+
+
+def _format_transfer_note(applicant_name: str, instruction: str,
+                          call_result: Dict[str, Any],
+                          transfer_to: str,
+                          producer_name: str = "") -> str:
+    """Structured note for a frustration transfer. Plain English, no digits.
+
+    Covers what Carlo requires: why Roby transferred, the call outcome,
+    and the notes of the call.
+    """
+    who = applicant_name or "the client"
+    topic = _scrub_phones((instruction or "")[:120].strip())
+    attempts = call_result.get("attempts") or []
+    call_ids = ", ".join(call_result.get("call_ids") or []) or "n/a"
+    # Call notes: transcript/summary excerpt when Bland provided one.
+    notes_bit = ""
+    for a in reversed(attempts):
+        summary = (a.get("summary") or a.get("transcript_summary") or "").strip()
+        if summary:
+            notes_bit = f" Call notes: {_scrub_phones(summary[:500])}"
+            break
+    lines = [
+        f"Roby transferred this call to {transfer_to or 'the task assigner'}.",
+        f"Why: the person on the line was getting frustrated, so Roby handed "
+        f"the live call to a human instead of continuing.",
+        f"Call outcome: the call connected and was transferred "
+        f"(call IDs {call_ids}).{notes_bit}",
+        f"This was about {topic} for {who}.",
+        _identity_line(producer_name),
+    ]
+    return "\n".join(lines)
+
+
 def _verify_call_outcome(
     bland_port: Any, call_ids: List[str], config: RobieCallConfig
 ) -> Dict[str, Any]:
@@ -868,16 +1249,17 @@ def _format_recovery_note(
     applicant_name: str,
     instruction: str,
     call_result: Dict[str, Any],
+    producer_name: str = "",
+    called_party: str = "",
 ) -> str:
     """Outcome note for a call recovered after an interruption.
 
     States plainly that Robie is reconciling a previous attempt, then the
     verified outcome. Never contains a phone number.
     """
-    who = applicant_name or "the client"
-    topic = _scrub_phones((instruction or "")[:120].strip())
     verdict = _format_outcome_note(
-        applicant_name, instruction, call_result, "skipped")
+        applicant_name, instruction, call_result, "skipped",
+        producer_name=producer_name, called_party=called_party)
     return (
         f"Robie recovered this call after an interruption — a previous "
         f"attempt had already dialed, so Robie did NOT call again and "
@@ -897,12 +1279,15 @@ def bland_payload_spec(
     voicemail_message: str,
     attempt: int,
     metadata: Optional[Dict[str, Any]] = None,
+    transfer_phone_number: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The exact POST /v1/calls body the BlandCallPort must send per attempt.
 
     This is the contract the worker's production Bland wiring implements.
     Attempt 1: voicemail_action=hangup (silent). Attempt 2: leave_message
-    with the full slow voicemail_message.
+    with the full slow voicemail_message. transfer_phone_number is included
+    only when a transfer lookup resolved a real direct dial. With no lookup
+    the payload has no transfer target.
     """
     payload: Dict[str, Any] = {
         "phone_number": phone,
@@ -914,9 +1299,10 @@ def bland_payload_spec(
         "wait_for_greeting": True,
         "first_sentence": first_sentence,
         "from": CALLER_ID,
-        "transfer_phone_number": TRANSFER_NUMBER,
         "max_duration": 12,  # minutes
     }
+    if transfer_phone_number:
+        payload["transfer_phone_number"] = transfer_phone_number
     if attempt <= 1:
         payload["voicemail_action"] = "hangup"
     else:
@@ -931,24 +1317,73 @@ def bland_payload_spec(
 # Eva's call script (Jake's specs via bland_config)
 # ---------------------------------------------------------------------------
 
-def _build_eva_task(instruction: str, applicant_name: str) -> str:
-    """Eva's task prompt: AI disclosure + freeform instruction + screener rules."""
-    policy = BlandRedialPolicy()
+def _script_policy(producer_name: str) -> BlandRedialPolicy:
+    """Intro and voicemail name the client's assigned producer, not a placeholder."""
+    who = (producer_name or "").strip() or "the assigned producer"
+    config = BlandCallConfig(
+        intro_template=(
+            "Hi, this is an AI assistant calling on behalf of "
+            f"{who} from StreetSmart Insurance. {{reason}}."
+        ),
+        voicemail_message_template=(
+            "Hi, this is an AI assistant calling on behalf of "
+            f"{who} from StreetSmart Insurance. {{reason}}. "
+            "Please call us back at {callback_spoken}. "
+            "Again, that's {callback_spoken}."
+        ),
+    )
+    return BlandRedialPolicy(config)
+
+
+def _build_eva_task(instruction: str, applicant_name: str, *,
+                    on_behalf_of: bool = False,
+                    called_party: str = "",
+                    producer_name: str = "",
+                    transfer_to_name: str = "",
+                    transfer_number: str = "") -> str:
+    """Eva's task prompt: AI disclosure + freeform instruction + screener rules.
+
+    Calls are on behalf of the client's assigned producer.
+    on_behalf_of / called_party: the task directs a third-party call (e.g.
+    the carrier). Eva names who she called and which client it is for.
+    transfer_to_name/transfer_number: a resolved direct dial. When
+    transfer_number is empty there is no transfer offer; Eva takes a message.
+    """
+    policy = _script_policy(producer_name)
     name_bit = f" The client is {applicant_name}." if applicant_name else ""
+    behalf_bit = ""
+    if on_behalf_of and called_party:
+        behalf_bit = (
+            f" You are calling {called_party}"
+            f"{f' for {applicant_name}' if applicant_name else ''}."
+        )
+    if transfer_number:
+        transfer_bit = (
+            f" If the person you are speaking with gets frustrated, asks for a "
+            f"human, or you cannot complete what was asked, transfer the call "
+            f"to {transfer_to_name or 'the person who owns this task'} "
+            f"at {transfer_number}."
+        )
+    else:
+        transfer_bit = (
+            " If the person gets frustrated or asks for a human, do not "
+            "transfer the call. Take a message and ask them to call "
+            f"{CALLBACK_NUMBER}."
+        )
     return (
-        f"{policy.build_intro(instruction.strip())}{name_bit} "
-        f"{BlandCallConfig().screener_instructions} "
-        f"If the call is transferred, transfer to {TRANSFER_NUMBER}."
+        f"{policy.build_intro(instruction.strip())}{name_bit}{behalf_bit} "
+        f"{BlandCallConfig().screener_instructions}"
+        f"{transfer_bit}"
     )
 
 
-def _build_first_sentence(instruction: str) -> str:
-    policy = BlandRedialPolicy()
+def _build_first_sentence(instruction: str, producer_name: str = "") -> str:
+    policy = _script_policy(producer_name)
     return policy.build_intro(instruction.strip())
 
 
-def _build_voicemail_message(instruction: str) -> str:
-    policy = BlandRedialPolicy()
+def _build_voicemail_message(instruction: str, producer_name: str = "") -> str:
+    policy = _script_policy(producer_name)
     # One-sentence reason for the message; the policy adds AI disclosure + callback.
     reason = instruction.strip().split(".")[0][:160]
     return policy.build_voicemail_message(reason or "following up on your account")
@@ -1055,6 +1490,8 @@ def _format_outcome_note(
     recording_status: str,
     phone_mismatch: Optional[str] = None,
     name_mismatch: Optional[str] = None,
+    producer_name: str = "",
+    called_party: str = "",
 ) -> str:
     """Outcome note. Plain English, first line states the outcome.
 
@@ -1065,7 +1502,9 @@ def _format_outcome_note(
     """
     call_ids = ", ".join(call.get("call_ids") or []) or "n/a"
     attempts = call.get("attempts") or []
-    who = applicant_name or "the client"
+    who = (called_party or "").strip() or applicant_name or "the client"
+    client = applicant_name or "the client"
+    behalf = (producer_name or "").strip()
     first = who.split()[0]
     # The instruction goes into the note — scrub any phone numbers first
     # (the Discussion API rejects them).
@@ -1099,8 +1538,15 @@ def _format_outcome_note(
         bool(call.get("success")) or any(a.get("success") for a in attempts)
     )
 
+    behalf_bit = f" on behalf of {behalf}" if behalf else ""
+    if call.get("dry_run"):
+        return (
+            f"DRY RUN: no call was placed{behalf_bit}. "
+            f"Nothing was dialed about {topic}."
+        )
+
     if connected:
-        lines = [f"Called {who} about {topic}.",
+        lines = [f"Called {who}{behalf_bit} about {topic}.",
                  "The call was successful."]
         # What happened, honestly.
         vm_hit = call.get("voicemail_hit")
@@ -1117,18 +1563,21 @@ def _format_outcome_note(
         elif vm_hit or answered == "voicemail":
             lines.append("The call went to voicemail.")
         elif answered == "human":
-            lines.append(f"Spoke with {first}.")
+            if called_party and called_party != applicant_name:
+                lines.append(f"Spoke with someone at {who}.")
+            else:
+                lines.append(f"Spoke with {first}.")
         elif answered == "unknown" or not answered:
             lines.append("The call connected but we couldn't confirm whether "
                          "it reached the person or voicemail.")
     elif unknown:
-        lines = [f"Attempted to call {who} about {topic}.",
+        lines = [f"Attempted to call {who}{behalf_bit} about {topic}.",
                  "We couldn't confirm whether the call went through — the "
                  "phone system accepted the request but we lost track of the "
                  "outcome. No message was confirmed left."]
     else:
         err = str(call.get("error") or "the call did not connect")
-        lines = [f"Attempted to call {who} about {topic}.",
+        lines = [f"Attempted to call {who}{behalf_bit} about {topic}.",
                  f"The call was NOT successful: {err}.",
                  "No message was left."]
 
@@ -1147,11 +1596,10 @@ def _format_outcome_note(
                      "the one on file; we called the number on file.")
     if name_mismatch:
         lines.append(f"Note: the task mentioned {name_mismatch}, but the "
-                     f"applicant on file is {who} — please check the right "
+                     f"applicant on file is {client} — please check the right "
                      f"person was reached.")
 
-    lines.append("Eva identified herself as an AI assistant calling for Jake "
-                 "from StreetSmart Insurance.")
+    lines.append(_identity_line(behalf))
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
@@ -1349,10 +1797,32 @@ def _handle_call_task(
             "duplicate_reason": "same instruction already handled for applicant",
         }
 
+    # Robie Call is free-form. Only the lead follow-up label uses a script.
+    # The nine Splice workflows stay available to render, and a label cannot
+    # select them.
+    from .call_pickup import (
+        LEAD_WORKFLOW_ID,
+        CallPickup,
+        calling_day,
+        classify_call_request,
+        note_dedupe_key,
+    )
+    from .splice_scripts import get_workflow
+
+    decision = classify_call_request(_pick(task, "activity_labels"), instruction)
+    explicit = _pick(task, "workflow")
+    if explicit == LEAD_WORKFLOW_ID and decision.action != "freeform":
+        decision = CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
+    workflow = None
+    if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
+        workflow = get_workflow(LEAD_WORKFLOW_ID)
+    note_topic = workflow.title if workflow is not None else instruction
+
     # ---- 3c. Ambiguity guard ------------------------------------------------
     # "call him" with no topic: do NOT guess. Leave the task open and file
     # a clarification note so staff can fix the instruction.
-    ambiguity = _instruction_ambiguity(instruction)
+    # A resolved workflow already has its script, so a short label is enough.
+    ambiguity = None if workflow is not None else _instruction_ambiguity(instruction)
     if ambiguity:
         log.warning("ambiguous instruction for task %s: %s", task_id, ambiguity)
         clar_note = (
@@ -1454,7 +1924,7 @@ def _handle_call_task(
                 return _recover_interrupted_call(
                     task, config, ports, log, fail,
                     task_id, applicant_id, applicant_name, assigned_by,
-                    instruction, [found_id], checkpoint,
+                    note_topic, [found_id], checkpoint,
                 )
         # No recent call found — the dial likely never went through, but
         # we do NOT auto-redial. Fail closed for human review.
@@ -1474,14 +1944,47 @@ def _handle_call_task(
         return fail("kill switch active (ROBIE_CALL_HALT); failing closed")
 
     # ---- 5. Phone lookup ---------------------------------------------------
-    try:
-        raw_phone = _retryable_call(
-            lambda: ports.phone_lookup.get_phone(applicant_id),
-            what=f"phone lookup applicant {applicant_id}",
+    # An explicit number in the task ("Call Progressive at 1-800-776-4737")
+    # overrides the applicant's number on file. The call still logs on the
+    # applicant's account. Policy, claim, and quote numbers are not phones.
+    # A bare digit run that could be either is a question, not a dial.
+    explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
+    if phone_text_ambiguous:
+        log.warning("ambiguous number in task %s; asking instead of dialing",
+                    task_id)
+        clar_note = (
+            "Robie received a call task but couldn't tell which phone to "
+            "dial. The task includes a number that might be a policy, claim, "
+            "or quote number rather than a phone number. Robie will not "
+            "guess and will not dial it. Please update the task with the "
+            "phone to call — for example, 'call at' followed by the number, "
+            "or the word 'phone' or 'cell' before it — or remove the number "
+            "if Robie should use the phone on file. Robie will pick this up "
+            "on the next check."
         )
-    except Exception as exc:  # noqa: BLE001
-        return fail(f"phone lookup failed: {exc}")
-    phone, phone_ambiguity = _resolve_phone(raw_phone)
+        wb = _writeback_once(
+            ports, task_id, "clarification_ambiguous_number",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "ambiguous number in the task; asked which phone to call, "
+            "task left open",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
+    if explicit_phone:
+        log.info("using task-provided phone number for task %s", task_id)
+        phone, phone_ambiguity = explicit_phone, None
+    else:
+        try:
+            raw_phone = _retryable_call(
+                lambda: ports.phone_lookup.get_phone(applicant_id),
+                what=f"phone lookup applicant {applicant_id}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return fail(f"phone lookup failed: {exc}")
+        phone, phone_ambiguity = _resolve_phone(raw_phone)
     if phone_ambiguity is not None:
         # Several numbers on file, no clear best: do NOT guess. File a
         # clarification note (labels only — notes must never contain
@@ -1544,7 +2047,7 @@ def _handle_call_task(
             f"(around the time of a previous attempt that timed out), so "
             f"Robie did NOT dial again to avoid calling twice. "
             f"If the client mentions a call from Eva, it was that attempt.\n"
-            f"Eva identifies as an AI assistant for Jake from StreetSmart Insurance."
+            f"{_identity_line(_pick(task, 'assigned_producer'))}"
         )
         writeback = _writeback_once(
             ports, task_id, "recent_call_skip",
@@ -1574,7 +2077,24 @@ def _handle_call_task(
     # with a clarification note instead of merely flagging it in the note.
     phone_mismatch = _instruction_phone_mismatch(instruction, phone)
     name_mismatch = _instruction_name_mismatch(instruction, applicant_name)
-    if name_mismatch:
+    # On-behalf-of calling: the task names someone other than the applicant
+    # AND provides an explicit phone ("Call Progressive at 1-800-776-4737"
+    # on Mary Smith's account). That's a directed third-party call — allowed.
+    # The note names who was called. The call is on behalf of the client's
+    # assigned producer. Without an explicit phone, a two-word name mismatch
+    # still fails closed: the phone on file belongs to the applicant.
+    callee = _named_callee(instruction)
+    called_party = ""
+    if explicit_phone:
+        if name_mismatch:
+            called_party = name_mismatch
+        elif callee and not _name_overlaps(callee, applicant_name):
+            called_party = callee
+    on_behalf_of = bool(called_party)
+    if on_behalf_of:
+        log.info("on-behalf-of call for task %s: dialing %r for applicant %r",
+                 task_id, called_party, applicant_name)
+    if name_mismatch and not on_behalf_of:
         log.warning("instruction names %r but applicant is %r; failing closed",
                     name_mismatch, applicant_name)
         clar_note = (
@@ -1595,10 +2115,160 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
-    eva_task = _build_eva_task(instruction, applicant_name)
-    first_sentence = _normalize_spoken(_build_first_sentence(instruction))
-    voicemail_message = _normalize_spoken(_build_voicemail_message(instruction))
-    metadata = {"task_id": task_id, "applicant_id": applicant_id, "source": "robie-call-task"}
+    # Calls are on behalf of the client's assigned producer. Missing
+    # producer is a question, not a guess and not Jake.
+    producer_name = _pick(task, "assigned_producer")
+    if not producer_name:
+        log.warning("task %s has no assigned producer; asking instead of dialing",
+                    task_id)
+        clar_note = (
+            "Robie received a call task but couldn't place the call: this "
+            "client has no assigned producer. Calls are placed on behalf of "
+            "the client's assigned producer. Please set the assigned producer "
+            "on the account and Robie will pick this up on the next check."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_assigned_producer",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "no assigned producer; asked instead of dialing, task left open",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
+    opt_outs = getattr(ports, "opt_out_store", None)
+    if opt_outs is not None and opt_outs.is_opted_out(applicant_id):
+        log.info("task %s skipped; applicant opted out of automated calls", task_id)
+        skip_note = (
+            "Robie did not call. This client opted out of automated phone "
+            "calls. Automated calls stay off until a person turns them back on."
+        )
+        wb = _writeback_once(
+            ports, task_id, "opt_out_skip",
+            applicant_id, skip_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "client opted out of automated calls; not dialed",
+            writeback=wb,
+        )
+    if workflow is not None and workflow.marketing:
+        opt_ins = getattr(ports, "opt_in_store", None)
+        recorded = opt_ins is not None and opt_ins.has_opt_in(applicant_id)
+        if not recorded:
+            log.info(
+                "task %s skipped; %s requires a recorded opt-in and this "
+                "client has none",
+                task_id, workflow.title,
+            )
+            return fail(
+                "no recorded opt-in; marketing call not dialed",
+                skipped_opt_in=True,
+            )
+    # No outbound dials outside the calling window. Queue the task (leave
+    # it open, do not mark it processed) and say so once. Never dial.
+    window_block = _outside_calling_window(config)
+    if window_block:
+        log.info("task %s outside calling window (%s); not dialing",
+                 task_id, window_block)
+        writeback: Dict[str, Any] = {
+            "status": "dry_run" if config.dry_run else "skipped",
+            "note_id": None,
+            "discussion_id": None,
+            "reason": "outside calling window; nothing written"
+            if config.dry_run else "outside calling window",
+        }
+        if not config.dry_run:
+            topic = _scrub_phones((instruction or "")[:120].strip())
+            queue_note = (
+                f"Robie queued this call and did not dial. "
+                f"Outbound calls are placed only during "
+                f"{_calling_window_label(config)}. "
+                f"This was about {topic}. "
+                f"Robie will place the call on the next check inside that "
+                f"window. To schedule a different time, update the task."
+            )
+            writeback = _writeback_once(
+                ports, task_id, "outside_calling_window",
+                applicant_id, queue_note, title_hint=None)
+        return fail(
+            f"outside calling window ({window_block}); call queued, not dialed",
+            queued_for_calling_window=True,
+            writeback=writeback,
+            call={"success": False, "call_ids": [], "dry_run": bool(config.dry_run)},
+        )
+    # Transfer target only when a lookup resolves one. Otherwise Eva takes
+    # a message. There is no placeholder transfer number.
+    transfer_number = _resolve_transfer_number(ports, producer_name) or ""
+    if workflow is not None:
+        from .splice_scripts import (
+            render_live,
+            render_text,
+            render_voicemail,
+            spoken_first_name,
+            text_option_allowed,
+        )
+
+        first = spoken_first_name(applicant_name)
+        offer_text = text_option_allowed(
+            workflow,
+            mobile=_phone_is_mobile(ports, task, applicant_id),
+            sms_configured=bool(config.sms_configured),
+        )
+        live = render_live(
+            workflow,
+            first_name=first,
+            agent=producer_name,
+            transfer_number=transfer_number,
+            offer_text=offer_text,
+        )
+        first_sentence = f"Hi {first}," if first else "Hi,"
+        voicemail_message = render_voicemail(
+            workflow, first_name=first, agent=producer_name,
+        )
+        operator = []
+        if transfer_number:
+            operator.append(
+                f"When the caller presses 1, transfer to {producer_name} "
+                f"at {transfer_number}."
+            )
+        else:
+            operator.append(
+                "Do not transfer this call. If the caller presses 1, take a "
+                f"message and ask them to call {CALLBACK_NUMBER}."
+            )
+        if offer_text:
+            operator.append("When the caller presses 2, send this text and nothing else:")
+            operator.append(render_text(workflow) or "")
+        else:
+            operator.append("Do not offer or send a text message.")
+        operator.append("When the caller presses 4, repeat the spoken script.")
+        operator.append(
+            "When the caller presses 6, they opted out of automated calls. "
+            "Confirm that and end the call."
+        )
+        eva_task = live + "\n\n" + "\n".join(operator)
+    else:
+        eva_task = _build_eva_task(
+            instruction, applicant_name,
+            on_behalf_of=on_behalf_of,
+            called_party=called_party,
+            producer_name=producer_name,
+            transfer_to_name=producer_name if transfer_number else "",
+            transfer_number=transfer_number,
+        )
+        first_sentence = _normalize_spoken(
+            _build_first_sentence(instruction, producer_name))
+        voicemail_message = _normalize_spoken(
+            _build_voicemail_message(instruction, producer_name))
+    metadata = {"task_id": task_id, "applicant_id": applicant_id, "source": "robie-call-task",
+                "transfer_to": producer_name if transfer_number else None,
+                "transfer_phone_number": transfer_number or None,
+                "on_behalf_of": on_behalf_of,
+                "called_party": called_party or applicant_name or None,
+                "on_behalf_of_producer": producer_name,
+                "workflow": workflow.id if workflow is not None else None}
 
     # ---- 6a. Durable call intent (BEFORE the dial) --------------------------
     # Save the intent to dial BEFORE the Bland POST. If the POST times out,
@@ -1643,15 +2313,37 @@ def _handle_call_task(
                  task_id, "***")
 
     if config.dry_run:
-        log.info("[DRY_RUN] would place call to applicant %s", applicant_id)
-        call_result: Dict[str, Any] = {
-            "success": True,
-            "dry_run": True,
-            "call_ids": [],
-            "attempts": [{"attempt": 1, "mode": "DRY_RUN"}, {"attempt": 2, "mode": "DRY_RUN"}],
-            "voicemail_hit": False,
-            "redialed": False,
-            "recording_url": None,
+        # A dry run dials nothing and files nothing. It must not write a
+        # lost-outcome note for a call that never left.
+        log.info("[DRY_RUN] would place call to applicant %s; nothing written",
+                 applicant_id)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "applicant_id": applicant_id,
+            "call": {
+                "success": True,
+                "dry_run": True,
+                "call_ids": [],
+                "attempts": [],
+                "voicemail_hit": False,
+                "redialed": False,
+                "recording_url": None,
+                "error": None,
+            },
+            "writeback": {
+                "status": "dry_run",
+                "note_id": None,
+                "discussion_id": None,
+                "reason": "dry run: nothing written",
+            },
+            "recording": None,
+            "reassigned": False,
+            "chat_alerted": False,
+            "outcome_verified": False,
+            "outcome_successful": False,
             "error": None,
         }
     else:
@@ -1660,12 +2352,47 @@ def _handle_call_task(
         # on /v1/calls, so a retried timeout could double-dial the client.
         # A failed task stays OPEN and is redelivered on the next 30-min
         # report cycle, with human visibility via the chat alert below.
+        dedupe = getattr(ports, "call_dedupe", None)
+        if dedupe is not None:
+            day = calling_day(_calling_now(config))
+            dedupe_key = note_dedupe_key(
+                applicant_id, _pick(task, "discussion_id"), instruction, task_id,
+            )
+            if dedupe.already_called(dedupe_key, day):
+                log.info(
+                    "task %s already called for this note today; not dialing",
+                    task_id,
+                )
+                wb = _writeback_once(
+                    ports, task_id, "same_day_dedupe", applicant_id,
+                    "Robie did not call again. This note was already called today.",
+                    title_hint=None,
+                )
+                _mark_processed(task_id)
+                _mark_content_processed(applicant_id, instruction)
+                return {
+                    "ok": True,
+                    "task_id": task_id,
+                    "applicant_id": applicant_id,
+                    "call": {"success": False, "call_ids": []},
+                    "writeback": wb,
+                    "recording": None,
+                    "reassigned": False,
+                    "chat_alerted": False,
+                    "error": None,
+                    "duplicate_suppressed": True,
+                }
+            dedupe.record(dedupe_key, day)
         try:
             call_result = ports.bland.place_call_with_double_dial(
                 phone, eva_task, first_sentence, voicemail_message, metadata
             )
         except Exception as exc:  # noqa: BLE001
             call_result = {"success": False, "error": str(exc)[:300], "call_ids": []}
+
+    if opt_outs is not None and pressed_opt_out(call_result):
+        opt_outs.record_opt_out(applicant_id, source="press-6")
+        log.info("applicant %s opted out of automated calls", applicant_id)
 
     tripped = _bland_record(bool(call_result.get("success")))
     if tripped:
@@ -1744,8 +2471,9 @@ def _handle_call_task(
         # keeps the call_ids so the next cycle reconciles instead of
         # redialing.
         note_body = _format_outcome_note(
-            applicant_name, instruction, call_result, "skipped",
+            applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
+            producer_name=producer_name, called_party=called_party,
         )
         writeback = _writeback_once(
             ports, task_id, "outcome_unverified",
@@ -1770,7 +2498,14 @@ def _handle_call_task(
             chat_alerted=chat_alerted,
         )
 
-    if outcome_verified and not outcome_successful:
+    # A transferred call is verified (we know what happened) but never
+    # task success — Eva handed a live call to the assigner. It must not
+    # fall into the "ended without success" branch below.
+    transferred = _outcome_was_transferred(outcome)
+    if transferred:
+        log.info("call transferred to %s for task %s", assigned_by, task_id)
+
+    if outcome_verified and not outcome_successful and not transferred:
         # The call ENDED but did NOT succeed (failed, busy, no-answer,
         # canceled). This is not task completion — file the note honestly,
         # alert, fail closed. NO reassignment. The checkpoint keeps the
@@ -1780,8 +2515,9 @@ def _handle_call_task(
             for cid in call_ids
         ]
         note_body = _format_outcome_note(
-            applicant_name, instruction, call_result, "skipped",
+            applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
+            producer_name=producer_name, called_party=called_party,
         )
         writeback = _writeback_once(
             ports, task_id, "outcome_unsuccessful",
@@ -1828,10 +2564,19 @@ def _handle_call_task(
         recording_status = "pending"
 
     # ---- 10. Writeback ------------------------------------------------------
-    note_body = _format_outcome_note(
-        applicant_name, instruction, call_result, recording_status,
-        phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
-    )
+    # Transferred calls (Eva handed a frustrated caller to the assigner) get
+    # the structured transfer note — why, outcome, call notes — and are never
+    # ok: the human now owns the objective.
+    if transferred:
+        note_body = _format_transfer_note(
+            applicant_name, note_topic, call_result, assigned_by,
+            producer_name=producer_name)
+    else:
+        note_body = _format_outcome_note(
+            applicant_name, note_topic, call_result, recording_status,
+            phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
+            producer_name=producer_name, called_party=called_party,
+        )
     return _finalize_call(
         task_id=task_id,
         applicant_id=applicant_id,
@@ -1849,6 +2594,7 @@ def _handle_call_task(
         ports=ports,
         log=log,
         fail=fail,
+        transferred=transferred,
     )
 
 
@@ -1870,14 +2616,20 @@ def _finalize_call(
     ports: RobieCallPorts,
     log: logging.LoggerAdapter,
     fail: Callable[..., Dict[str, Any]],
+    transferred: bool = False,
 ) -> Dict[str, Any]:
     """Shared tail: writeback -> reassign (with read-back) -> mark -> result.
 
     Used by both the normal path and the crash-recovery path.
+
+    transferred: Eva handed the live call to the assigner (frustration
+    path). The note body is the structured transfer note; ok is False even
+    when the call verified — Roby did not complete the objective, the
+    human now owns it. Reassignment back to the assigner still runs.
     """
     call_ids = call_result.get("call_ids") or []
     writeback = _writeback_once(
-        ports, task_id, "outcome",
+        ports, task_id, "outcome_transferred" if transferred else "outcome",
         applicant_id, note_body, title_hint=None
     )
     wb_ok = writeback.get("status") in ("filed", "dry_run")
@@ -1989,13 +2741,18 @@ def _finalize_call(
     # a placement ack (HTTP 200) is never proof the call happened. The task
     # is done only when Bland confirms a terminal status AND that status
     # shows a real connection.
+    # A transferred call is never ok: Eva handed a live call to the assigner,
+    # so Roby did not complete the objective — the human now owns it.
     # Reassignment is reported separately (reassigned + reassign_error) — a
     # routing problem must not masquerade as a call failure, nor vice versa.
     # CRITICAL: verified alone is not enough — the call must have SUCCEEDED
     # (connected). A verified "failed"/"busy"/"no-answer" is not task success.
-    ok = wb_ok and outcome_verified and outcome_successful
+    ok = wb_ok and outcome_verified and outcome_successful and not transferred
     if ok:
         error = None
+    elif transferred:
+        error = (f"call transferred to {assigned_by or 'the task assigner'}; "
+                 "task returned for human follow-up")
     elif not outcome_verified:
         error = "call outcome unverified"
     elif not outcome_successful:
@@ -2104,7 +2861,14 @@ def _recover_interrupted_call(
     log.info("recovery for task %s: outcome verified=%s successful=%s",
              task_id, outcome_verified, outcome_successful)
 
-    note_body = _format_recovery_note(applicant_name, instruction, call_result)
+    producer_name = _pick(task, "assigned_producer")
+    called_party = ""
+    callee = _named_callee(instruction)
+    if callee and not _name_overlaps(callee, applicant_name):
+        called_party = callee
+    note_body = _format_recovery_note(
+        applicant_name, instruction, call_result,
+        producer_name=producer_name, called_party=called_party)
 
     if not outcome_verified:
         writeback = _writeback_once(

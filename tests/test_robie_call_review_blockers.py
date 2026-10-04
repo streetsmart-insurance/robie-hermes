@@ -18,14 +18,18 @@ Covers the exact failure modes the review reproduced against PRs #745/#746:
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robie_job_engine import robie_call_handler as rch
+
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +139,15 @@ def make_ports(**over) -> Any:
         chat_alert=lambda text: True,
         task_status=None,
         job_checkpoint=checkpoint,
+        transfer_lookup=over.get("transfer_lookup"),
     )
 
 
 def make_config(**over) -> Any:
     # NOTE: there is no verification opt-out. Outcome verification is
     # unconditional: a placement ack alone never marks the task ok.
-    kw = dict(dry_run=False, outcome_poll_tries=1, outcome_poll_interval_s=0)
+    kw = dict(dry_run=False, now=IN_WINDOW,
+              outcome_poll_tries=1, outcome_poll_interval_s=0)
     kw.update(over)
     return rch.RobieCallConfig(**kw)
 
@@ -154,6 +160,7 @@ def make_task(**over) -> Dict[str, Any]:
         "Applicant ID": "A-100",
         "Applicant Name": "John Smith",
         "Task Created By": "Jane Producer",
+        "Assigned Producer": "Jane Producer",
         "Assigned To": "Robie AI",
         "Task Due Date": "2026-10-10",
     }
@@ -583,3 +590,160 @@ def test_failed_intent_save_then_retry_dials_once(clean_state):
     r2 = rch.handle_robie_call_task(make_task(), make_config(), ports2)
     assert r2["ok"] is True
     assert bland.dials == 1
+
+
+# ---------------------------------------------------------------------------
+# 10. free-form calling: explicit number, on-behalf-of, frustration transfer
+# ---------------------------------------------------------------------------
+
+class FakeTransferLookup:
+    """TransferLookupPort fake: name -> direct dial number."""
+
+    def __init__(self, directory=None, raise_on_lookup: bool = False):
+        self.directory = directory or {}
+        self.raise_on_lookup = raise_on_lookup
+        self.lookups: List[str] = []
+
+    def get_transfer_number(self, assignee_name: str) -> Optional[str]:
+        self.lookups.append(assignee_name)
+        if self.raise_on_lookup:
+            raise RuntimeError("RingCentral down (simulated)")
+        return self.directory.get(assignee_name)
+
+
+def test_extract_explicit_phone():
+    assert rch._extract_explicit_phone(
+        "Call Progressive at 1-800-776-4737 about the surcharge") == "+18007764737"
+    assert rch._extract_explicit_phone(
+        "Call John Smith about his renewal documents") is None
+    assert rch._extract_explicit_phone("") is None
+
+
+def test_explicit_phone_overrides_applicant_lookup(clean_state):
+    """Free-form: a number in the task wins over the applicant's number."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland, phone=FakePhone("+15551234567"))
+    task = make_task(**{
+        "Task Description": "Call Progressive at 1-800-776-4737 about the policy.",
+    })
+    result = rch.handle_robie_call_task(task, make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    # The dialed number is the task's, not the applicant's.
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-100")]["phone"] == "+18007764737"
+
+
+def test_no_explicit_phone_uses_applicant_lookup(clean_state):
+    """No number in the task: falls back to the applicant's number on file."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland, phone=FakePhone("+15551234567"))
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is True
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-100")]["phone"] == "+15551234567"
+
+
+def test_third_party_with_explicit_number_is_on_behalf_of(clean_state):
+    """'Call Progressive at 1-800-...' on Mary Smith's account: allowed as
+    an on-behalf-of call. Everything logs on the applicant's account."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    task = make_task(**{
+        "Applicant Name": "Mary Smith",
+        "Task Description": (
+            "Call Progressive at 1-800-776-4737 about Mary Smith's "
+            "policy surcharge."),
+    })
+    result = rch.handle_robie_call_task(task, make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    # Eva's prompt frames it as on-behalf-of.
+    eva_task = rch._build_eva_task(
+        task["Task Description"], "Mary Smith", on_behalf_of=True,
+        called_party="Progressive", producer_name="Jane Producer",
+        transfer_to_name="Jane Producer", transfer_number="+15559876543")
+    assert "on behalf of Jane Producer" in eva_task
+    assert "calling Progressive" in eva_task
+    assert "for Mary Smith" in eva_task
+    assert "Jake" not in eva_task
+
+
+def test_name_mismatch_without_number_still_fails_closed(clean_state):
+    """No explicit number + wrong name: still fail closed, no dial."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    task = make_task(**{
+        "Task Description": "Call Mary Johnson about her renewal documents",
+    })
+    result = rch.handle_robie_call_task(task, make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert "Mary Johnson" in (result.get("error") or "")
+
+
+def test_transfer_lookup_resolves_assigner_did():
+    ports = make_ports(
+        transfer_lookup=FakeTransferLookup({"Jane Producer": "+15559876543"}))
+    assert rch._resolve_transfer_number(
+        ports, "Jane Producer") == "+15559876543"
+
+
+def test_transfer_lookup_without_a_number_takes_a_message():
+    # No port wired, an unknown name, and a failed lookup are all "no target".
+    assert rch._resolve_transfer_number(make_ports(), "Jane Producer") is None
+    ports = make_ports(transfer_lookup=FakeTransferLookup({}))
+    assert rch._resolve_transfer_number(ports, "Nobody Here") is None
+    ports = make_ports(transfer_lookup=FakeTransferLookup(raise_on_lookup=True))
+    assert rch._resolve_transfer_number(ports, "Jane Producer") is None
+
+
+def test_eva_prompt_has_frustration_transfer():
+    prompt = rch._build_eva_task(
+        "Call about the surcharge", "Mary Smith",
+        transfer_to_name="Jane Producer", transfer_number="+15559876543")
+    assert "frustrated" in prompt
+    assert "Jane Producer" in prompt
+    assert "+15559876543" in prompt
+
+
+def test_transferred_call_is_not_ok_but_reassigned(clean_state):
+    """Eva transferred a frustrated caller to the assigner: the task is not
+    ok (Roby didn't complete it), it goes back to the assigner, and the
+    note covers why, the outcome, and the call notes."""
+    bland = FakeBland(statuses={
+        "call-1": {"status": "completed", "transferred": True,
+                   "answered_by": "human", "duration_s": 120,
+                   "transcript_summary": "Caller got upset about the wait."},
+    })
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert bland.dials == 1
+    # Not ok: the human took over.
+    assert result["ok"] is False
+    assert "transferred" in (result.get("error") or "").lower()
+    # Reassigned back to the assigner (Jane Producer).
+    assert result["reassigned"] is True
+    assert ports.task_reassign.reassigns == [("T-100", "Jane Producer")]
+    # The note covers why, the outcome, and the call notes.
+    assert clean_state.calls == 1  # one structured transfer note filed
+    # Content assertions via the formatter directly.
+    note = rch._format_transfer_note(
+        "John Smith", "Call about renewal",
+        {"call_ids": ["call-1"],
+         "attempts": [{"summary": "Caller got upset about the wait."}]},
+        "Jane Producer")
+    assert "transferred this call to Jane Producer" in note
+    assert "frustrated" in note
+    assert "call IDs call-1" in note
+    assert "Caller got upset" in note
+    assert "555" not in note  # no digits leak
+
+
+def test_payload_uses_assigner_transfer_number():
+    payload = rch.bland_payload_spec(
+        "+18007764737", "task", "hi", "bye", 1,
+        transfer_phone_number="+15559876543")
+    assert payload["transfer_phone_number"] == "+15559876543"
+    fallback = rch.bland_payload_spec("+18007764737", "task", "hi", "bye", 1)
+    assert "transfer_phone_number" not in fallback

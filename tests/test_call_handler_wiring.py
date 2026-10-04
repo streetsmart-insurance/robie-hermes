@@ -6,15 +6,20 @@ Job Engine checkpoint/status adapters.
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robie_job_engine.ezlynx_task_report import AssignedTask
+from robie_job_engine.models import JobStatus
 from robie_job_engine.task_assignment_worker import TaskAssignmentWorker
+
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
 
 rch = pytest.importorskip(
     "robie_job_engine.robie_call_handler",
@@ -95,13 +100,25 @@ class FakeReassigner:
     def read_assignee(self, task_id, applicant_id, description=""):
         return self.current
 
+    def read_task_state(self, task_id, applicant_id, description=""):
+        """The live pre-Save state the worker must prove before any Save."""
+        return {"assignee": self.current, "description": description, "created_by": "Jane Producer",
+                "assigned_producer": "Jane Producer", "csr": "", "activity_labels": ""}
+
+
+class OwnsDiscussion:
+    """Proves D-200 belongs to the applicant (the worker refuses writes otherwise)."""
+
+    def get_discussion_ids(self, applicant_id):
+        return ["D-200"]
+
 
 def make_task(**over) -> AssignedTask:
     kw = dict(
         task_id="63429200",
         title="Callback request",
         description="Call John Smith about his renewal documents",
-        applicant_id="25486200",
+        applicant_id="220250093",
         applicant_name="John Smith",
         assigned_to="Robie AI",
         due_date="2026-10-10",
@@ -111,7 +128,7 @@ def make_task(**over) -> AssignedTask:
         discussion_id="D-200",
         last_modified="2026-10-03T10:00:00Z",
         created_by="Jane Producer",
-        assigned_producer="",
+        assigned_producer="Jane Producer",
         csr="",
     )
     kw.update(over)
@@ -129,6 +146,7 @@ def clean_state(monkeypatch):
                 "discussion_id": "D-200", "applicant_id": applicant_id}
 
     monkeypatch.setattr(rch, "_writeback_outcome_note", fake_writeback)
+    monkeypatch.setattr(rch, "_calling_now", lambda config=None: IN_WINDOW)
     return calls
 
 
@@ -137,7 +155,7 @@ def test_callback_routes_to_call_handler(clean_state):
     bland = FakeBland()
     reassigner = FakeReassigner()
     worker = TaskAssignmentWorker(
-        discussion_client=object(),
+        discussion_client=OwnsDiscussion(),
         task_reassigner=reassigner,
         reassign_enabled=True,
         phone_lookup=FakePhone(),
@@ -146,7 +164,7 @@ def test_callback_routes_to_call_handler(clean_state):
     )
     assert worker._call_handler_available() is True
     job = {"id": "job-1", "payload": {
-        "task_id": "63429200", "applicant_id": "25486200",
+        "task_id": "63429200", "applicant_id": "220250093",
         "account_name": "John Smith", "assigned_to": "Robie AI",
         "title": "Callback request",
         "description": "Call John Smith about his renewal documents",
@@ -154,7 +172,7 @@ def test_callback_routes_to_call_handler(clean_state):
         "created_date": "2026-10-03", "task_status": "Open",
         "discussion_id": "D-200", "last_modified": "2026-10-03T10:00:00Z",
         "task_created_by": "Jane Producer",
-        "assigned_producer": "", "csr": "",
+        "assigned_producer": "Jane Producer", "csr": "",
     }}
     action = worker._do_work(store, job)
     assert action["call_task"] is True
@@ -187,3 +205,54 @@ def test_non_callback_task_not_routed_to_handler(clean_state):
     # the router does not claim it.
     assert worker._categorize_task(task) == "document"
     assert bland.dials == 0
+
+
+class TransitionStore(FakeStore):
+    def __init__(self):
+        super().__init__()
+        self.row = {"id": "job-1", "status": JobStatus.PENDING, "error": None}
+
+    def transition(self, job_id, status, *, expected=None, error=None,
+                   release_lease=False, **kwargs):
+        current = self.row["status"]
+        if expected is not None and current not in expected:
+            raise RuntimeError(f"invalid transition {current} -> {status}")
+        self.row["id"] = job_id
+        self.row["status"] = status
+        self.row["error"] = error
+        self.row["release_lease"] = release_lease
+        return dict(self.row)
+
+
+def test_outside_calling_window_returns_job_to_pending(clean_state, monkeypatch):
+    evening = datetime(2026, 10, 7, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr(rch, "_calling_now", lambda config=None: evening)
+    store = TransitionStore()
+    bland = FakeBland()
+    worker = TaskAssignmentWorker(
+        discussion_client=OwnsDiscussion(),
+        task_reassigner=FakeReassigner(),
+        reassign_enabled=True,
+        phone_lookup=FakePhone(),
+        bland_client=bland,
+        call_dry_run=False,
+    )
+    job = {"id": "job-1", "payload": {
+        "task_id": "63429200", "applicant_id": "220250093",
+        "account_name": "John Smith", "assigned_to": "Robie AI",
+        "title": "Callback request",
+        "description": "Call John Smith about his renewal documents",
+        "due_date": "2026-10-10", "priority": "Normal",
+        "created_date": "2026-10-03", "task_status": "Open",
+        "discussion_id": "D-200", "last_modified": "2026-10-03T10:00:00Z",
+        "task_created_by": "Jane Producer",
+        "assigned_producer": "Jane Producer", "csr": "",
+    }}
+    store.row["payload"] = job["payload"]
+    finished = worker.process_job(store, job)
+    assert bland.dials == 0
+    assert finished["status"] == JobStatus.PENDING
+    assert finished["release_lease"] is True
+    assert "calling window" in (finished["error"] or "")
+    assert store.row["status"] != JobStatus.AWAITING_HUMAN_INPUT
+    assert store.row["status"] != JobStatus.COMPLETE

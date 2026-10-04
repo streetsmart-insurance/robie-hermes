@@ -1,0 +1,13 @@
+{
+  "family": "intent_to_cancel_copy",
+  "from": "no-reply@useascend.com",
+  "subject": "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: Policy(s) at risk for cancellation",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (1046b)",
+    "    text/html (22493b)",
+    "  application/pdf (683319b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "Hi Zeus,\r\n\r\nFixture Insured A LLC has an overdue payment of $1,353.18 due on 09/08/2026. Please see attached Notice of Intent to Cancel document. If no payment is received by 09/29/2026, our system will issue a notice of cancelation for the following policies:\r\n\r\nPolicyGeneral Liability (XPT Partners, LLC DBA: XPT Specialty )Policy IDBCGL86103185Effective date06/08/2026 \r\n\r\nWhile we have already notified your customer to request payment, you can send a link directly and find further details here ( https://dashboard.useascend.com/programs/c820e585-e6b8-4fdc-abf8-b06d304288df ).\r\n\r\nPlease don't hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by AscendAscend"
+}

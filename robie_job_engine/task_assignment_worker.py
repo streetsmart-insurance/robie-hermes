@@ -25,6 +25,22 @@ Job Engine lifecycle (driven by the intake, verified independently):
 - VERIFYING -> UNVERIFIED: the read-back did not confirm the write.
   The note is never auto-reposted.
 
+Exact client and no repeats:
+
+- Before any write the applicant must be on the compiled write allowlist and
+  EZLynx must confirm the report's Discussion ID is one of that applicant's
+  discussions (`_assert_write_target`). The verifier repeats the check.
+- Notes are reserved per (round, purpose) before the POST; a reassignment is
+  reserved before the Save and reconciled by READING the assignee after a
+  crash or unknown outcome. Nothing is repeated on a guess: an unknown Save is
+  never replayed because the task still shows Robie (the UI Save is not an
+  atomic compare-and-set); one more needs an explicit human authorization.
+- A worker holds a lease on its job, renewed before every external effect, and
+  every move it makes is fenced by that lease. A human's answer, and a note a
+  human adopts, are bound to their own round and exact content.
+- Return owner: Task Created By -> Assigned Producer -> CSR (or the person a
+  human chose on resume); never Robie itself. The verifier recomputes it.
+
 Safety invariants (repo contract):
 
 - EZLynx notes are API-only (DiscussionApi). The browser/CDP path is
@@ -41,8 +57,11 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import os
+import re
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from .ezlynx_task_report import AssignedTask
@@ -63,12 +82,167 @@ REASSIGN_PRECEDENCE = (
 )
 
 
+# Worker-side checkpoint kinds. Note and reassignment intents are per round
+# (a round starts when a task that was handed back returns to Robie) and, for
+# notes, per purpose, so one job can legitimately write more than one note
+# without ever repeating the same one.
+LEGACY_NOTE_KIND = "task-note-intent"
+NOTE_KIND_PREFIX = "task-note-intent:"
+REASSIGN_KIND_PREFIX = "task-reassign-intent:"
+HUMAN_ANSWER_PREFIX = "human-answer:"
+LEASE_SECONDS = 900
+
+
+# Everything a handback depends on. The stored report row and the LIVE task must agree on ALL of
+# these immediately before a Save, or the row is an old snapshot: a human may have changed the
+# Producer, CSR, creator, labels or instructions since it was generated.
+CONSEQUENTIAL_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
+
+
+def routing_proof_problem(state: dict[str, Any], task: AssignedTask, *, expected_assignee: str) -> str | None:
+    """Why the live task state does NOT prove the stored row is current; None when it does.
+
+    A field the live read could not return is unproven, never assumed to match or to be blank.
+    """
+    def norm(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    live_owner = str(state.get("assignee") or "").strip()
+    if live_owner.casefold() != (expected_assignee or "").strip().casefold():
+        return f"the live owner is {live_owner or 'unknown'!r}, not {expected_assignee!r}"
+    for name in CONSEQUENTIAL_FIELDS:
+        if name not in state or state[name] is None:
+            return f"{name} could not be read live, so it is unproven"
+        if norm(state[name]) != norm(getattr(task, name)):
+            return f"the live {name} differs from the report row (an old snapshot)"
+    if not norm(state["description"]):
+        return "the live instructions are empty"
+    return None
+
+
+def prove_fresh_routing(reassigner: Any, task: AssignedTask, *, expected_assignee: str) -> None:
+    """Live proof that the stored routing is current. Required immediately before EVERY Save.
+
+    Raises NeedsHuman (no Save) when the live read is unavailable, unreadable, or disagrees.
+    """
+    reader = getattr(reassigner, "read_task_state", None)
+    if reader is None:
+        raise NeedsHuman(f"Task {task.task_id}: routing cannot be read live, so no Save was sent.")
+    try:
+        state = reader(task.task_id, task.applicant_id, description=task.description)
+    except Exception as exc:  # noqa: BLE001 — an unreadable or uncontracted field is unproven
+        raise NeedsHuman(
+            f"Task {task.task_id}: routing could not be proven live ({type(exc).__name__}: {str(exc)[:200]}); "
+            "no Save was sent."
+        ) from exc
+    problem = routing_proof_problem(state, task, expected_assignee=expected_assignee)
+    if problem:
+        raise NeedsHuman(f"Task {task.task_id}: {problem}; no Save was sent. "
+                         "Wait for a newer report, then resume.")
+
+
+def human_answer_kind(round_no: int) -> str:
+    """A human's answer belongs to one round of one task; a later round asks again."""
+    return f"{HUMAN_ANSWER_PREFIX}{round_no}"
+
+
+def job_round(job: dict[str, Any]) -> int:
+    return int((job.get("payload") or {}).get("round") or 0)
+
+ROBIE_NAME = "Robie AI"
+FIELD_LABELS = dict(REASSIGN_PRECEDENCE) | {"human_choice": "the person you chose"}
+
+
 class NeedsHuman(Exception):
     """The worker needs a human answer before this job can proceed."""
 
 
+class CallQueued(Exception):
+    """The call is outside the calling window. Leave the job pending."""
+
+
+class CallHeld(Exception):
+    """The call was not placed and should be tried on a later pass."""
+
+
 class UnverifiedNoteError(Exception):
     """A note post could not be confirmed via read-back."""
+
+
+class LeaseLost(Exception):
+    """This worker no longer holds the job's lease; it must stop and change nothing."""
+
+
+class _Lease:
+    """One worker's lease on one Job, renewed before every external effect.
+
+    The store's own lease is the fence: another worker can only take the Job
+    after this lease lapses and is recovered, and every transition made here
+    is applied only while this worker still owns it. EZLynx cannot check a
+    token, so the lease margin (LEASE_SECONDS, renewed before each effect) plus
+    the durable intents bound the residual risk; they do not remove it.
+    Stores without lease support (some test doubles) run unfenced.
+    """
+
+    def __init__(self, store: Any, job_id: str):
+        self.store = store
+        self.job_id = job_id
+        self.supported = hasattr(store, "claim") and hasattr(store, "renew_lease")
+        self.token = f"task-intake:{os.getpid()}:{uuid.uuid4().hex}" if self.supported else None
+
+    def acquire(self) -> bool:
+        if not self.supported:
+            return True
+        return self.store.claim(self.job_id, self.token, lease_seconds=LEASE_SECONDS) is not None
+
+    def fence(self) -> None:
+        if not self.supported:
+            return
+        try:
+            self.store.renew_lease(self.job_id, self.token, lease_seconds=LEASE_SECONDS)
+        except RuntimeError as exc:
+            raise LeaseLost(str(exc)) from exc
+
+    def kw(self) -> dict[str, Any]:
+        return {"lease_owner": self.token} if self.supported else {}
+
+    def write_checkpoint(self, kind: str, data: dict[str, Any], *, monotonic_attempt: bool = False) -> None:
+        """Write a checkpoint only while this worker still owns the lease, atomically.
+
+        Effect records (intents, receipts, the action record) are fenced like status
+        moves: a worker that lost its lease cannot rewrite a replacement's record.
+        With `monotonic_attempt`, a record can never move to a LOWER attempt number,
+        so a used retry authorization can never become valid again.
+        """
+        if not self.supported:
+            self.store.checkpoint(self.job_id, kind, data)
+            return
+        from .secrets import redact_mapping
+        from .store import canonical_json, utc_now
+
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT lease_owner FROM jobs WHERE id=?", (self.job_id,)).fetchone()
+            if row is None or row["lease_owner"] != self.token:
+                raise LeaseLost("job lease is missing or owned by another worker")
+            if monotonic_attempt:
+                current = conn.execute(
+                    "SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?",
+                    (self.job_id, kind)).fetchone()
+                if current is not None and int(json.loads(current[0]).get("attempt") or 0) > int(data.get("attempt") or 0):
+                    raise LeaseLost("a newer attempt record already exists")
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES(?,?,?,?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET data_json=excluded.data_json,created_at=excluded.created_at""",
+                (self.job_id, kind, canonical_json(redact_mapping(data)), utc_now()))
+
+    def release(self) -> None:
+        if not self.supported:
+            return
+        with self.store.transaction() as conn:
+            conn.execute(
+                "UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL WHERE id=? AND lease_owner=?",
+                (self.job_id, self.token),
+            )
 
 
 class TaskReassigner(Protocol):
@@ -126,10 +300,47 @@ def reassign_target(task: AssignedTask) -> tuple[str | None, str | None]:
     return None, None
 
 
+_TEST_WORD = re.compile(r"\btest(?:s|ing)?\b")
+_ROBIE_WORD = re.compile(r"\b(?:robie|roby)\b")
+
+
 def is_test_task(task: AssignedTask) -> bool:
-    """True for obvious test/placeholder tasks (left alone, not reassigned)."""
+    """True for obvious test/placeholder tasks (left alone, not reassigned).
+
+    Whole words only: "latest" and "problem" must never make a real request
+    look like a test task, because a test task is never handed back.
+    """
     text = f"{task.title} {task.description}".lower()
-    return "test" in text and "rob" in text
+    return bool(_TEST_WORD.search(text) and _ROBIE_WORD.search(text))
+
+
+def reassign_candidates(
+    task: AssignedTask, *, human_choice: str | None = None
+) -> list[tuple[str, str]]:
+    """Ordered return owners as (name, field).
+
+    A person a human chose on resume replaces the precedence. Otherwise it is
+    Task Created By -> Assigned Producer -> CSR, skipping blanks, duplicates,
+    Robie itself and whoever currently holds the task: Robie must never be
+    its own return target.
+    """
+    if human_choice and human_choice.strip():
+        return [(human_choice.strip(), "human_choice")]
+    values = {
+        "task_created_by": task.created_by,
+        "assigned_producer": task.assigned_producer,
+        "csr": task.csr,
+    }
+    holder = (task.assigned_to or "").strip().casefold()
+    seen: set[str] = {ROBIE_NAME.casefold(), holder}
+    out: list[tuple[str, str]] = []
+    for field_name, _label in REASSIGN_PRECEDENCE:
+        name = (values.get(field_name) or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        out.append((name, field_name))
+    return out
 
 
 def utcnow_iso() -> str:
@@ -159,6 +370,8 @@ class _WorkerReassignPortAdapter:
             validate_identity(task_id, self._task.applicant_id)
             if task_id != self._task.task_id:
                 raise ValueError("Foreign task identity; reassignment not sent")
+            prove_fresh_routing(self._reassigner, self._task,
+                                expected_assignee=(self._task.assigned_to or ROBIE_NAME))
             attempted = True
             verified = self._reassigner.reassign(
                 task_id, self._task.applicant_id, new_assignee,
@@ -199,6 +412,10 @@ class TaskAssignmentWorker:
         phone_lookup: Any | None = None,
         bland_client: Any | None = None,
         call_dry_run: bool = True,
+        transfer_lookup: Any | None = None,
+        opt_out_store: Any | None = None,
+        opt_in_store: Any | None = None,
+        call_dedupe: Any | None = None,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
@@ -211,6 +428,12 @@ class TaskAssignmentWorker:
         self.phone_lookup = phone_lookup
         self.bland_client = bland_client
         self.call_dry_run = call_dry_run
+        self.transfer_lookup = transfer_lookup
+        self.opt_out_store = opt_out_store
+        self.opt_in_store = opt_in_store
+        self.call_dedupe = call_dedupe
+        self._lease: _Lease | None = None
+        self._last_note_kind = LEGACY_NOTE_KIND
 
     # -- job lifecycle -------------------------------------------------
 
@@ -219,34 +442,82 @@ class TaskAssignmentWorker:
 
         Returns the job row after the terminal transition of this phase.
         COMPLETE is never set here — only the independent verifier may.
+
+        The job's lease is taken first and every move is fenced by it, so a
+        worker that lost its lease (and was replaced) changes nothing.
         """
         job_id = job["id"]
-        job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        lease = _Lease(store, job_id)
+        if not lease.acquire():
+            logger.info("Job %s is leased by another worker; not starting", job_id)
+            return store.get_job(job_id)
+        try:
+            job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING}, **lease.kw())
+        except Exception:
+            lease.release()
+            raise
+        self._lease = lease
+        try:
+            return self._run_claimed_job(store, job, lease)
+        except LeaseLost as e:
+            logger.warning("Job %s: lease lost, stopping without changes: %s", job_id, e)
+            return store.get_job(job_id)
+        finally:
+            self._lease = None
+
+    def _move(self, store: Any, lease: _Lease, job_id: str, status: JobStatus, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return store.transition(job_id, status, expected={JobStatus.RUNNING},
+                                    release_lease=True, **lease.kw(), **kwargs)
+        except RuntimeError as exc:
+            # We expected RUNNING under OUR lease. Anything else (another owner, or the job
+            # already recovered to PENDING) means this worker lost the job.
+            if "lease" in str(exc) or "invalid transition" in str(exc):
+                raise LeaseLost(str(exc)) from exc
+            raise
+
+    def _run_claimed_job(self, store: Any, job: dict[str, Any], lease: _Lease) -> dict[str, Any]:
+        job_id = job["id"]
         try:
             action = self._do_work(store, job)
+        except CallQueued as e:
+            logger.info("Job %s queued until the calling window: %s", job_id, e)
+            return self._move(store, lease, job_id, JobStatus.PENDING, error=str(e)[:500])
+        except CallHeld as e:
+            logger.info("Job %s not dialed; left pending: %s", job_id, e)
+            return self._move(store, lease, job_id, JobStatus.PENDING, error=str(e)[:500])
         except NeedsHuman as e:
             logger.warning(f"Job {job_id} needs a human: {e}")
-            return store.transition(
-                job_id,
-                JobStatus.AWAITING_HUMAN_INPUT,
-                expected={JobStatus.RUNNING},
-                error=str(e)[:500],
-                resume_status=JobStatus.PENDING,
-                release_lease=True,
-            )
+            return self._move(store, lease, job_id, JobStatus.AWAITING_HUMAN_INPUT,
+                              error=str(e)[:500], resume_status=JobStatus.PENDING)
+        except UnverifiedNoteError as e:
+            logger.warning(f"Job {job_id} has an unconfirmed note: {e}")
+            return self._move(
+                store, lease, job_id, JobStatus.AWAITING_HUMAN_INPUT,
+                error=(f"Note state is uncertain and will not be reposted: {e}. "
+                       "Check the discussion in EZLynx, then resume with --note-id "
+                       "if the note is there."),
+                resume_status=JobStatus.PENDING)
+        except LeaseLost:
+            raise
         except Exception as e:  # noqa: BLE001 — fail-closed with the error on the job
             logger.error(f"Job {job_id} failed: {e}")
-            return store.transition(
-                job_id,
-                JobStatus.FAILED,
-                expected={JobStatus.RUNNING},
-                error=f"{type(e).__name__}: {e}"[:500],
-                release_lease=True,
-            )
-        store.checkpoint(job_id, "action", action)
-        return store.transition(
-            job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING}, release_lease=True
-        )
+            return self._move(store, lease, job_id, JobStatus.FAILED,
+                              error=f"{type(e).__name__}: {e}"[:500])
+        lease.write_checkpoint("action", action)
+        return self._move(store, lease, job_id, JobStatus.VERIFYING)
+
+    def _fence(self) -> None:
+        """Renew this worker's lease immediately before an external effect."""
+        if self._lease is not None:
+            self._lease.fence()
+
+    def _write(self, store: Any, job_id: str, kind: str, data: dict[str, Any], **kwargs: Any) -> None:
+        """Every effect record goes through the lease when this worker holds one."""
+        if self._lease is not None:
+            self._lease.write_checkpoint(kind, data, **kwargs)
+        else:
+            store.checkpoint(job_id, kind, data)
 
     # -- the work ------------------------------------------------------
 
@@ -256,28 +527,27 @@ class TaskAssignmentWorker:
         task = _task_from_payload(payload)
         from .ezlynx_task_cdp import validate_identity
         validate_identity(task.task_id, task.applicant_id)
+        # No write of any kind (note, reassignment, call) before the applicant
+        # is cleared and the discussion is proven to belong to it.
+        self._assert_write_target(task)
         timestamp = utcnow_iso()
 
         if is_test_task(task):
-            note_id = self._post_note_verified(
+            note = self._note_record(
                 store, job, task.discussion_id,
                 "Roby here — this looks like a test task, so I'm leaving it "
                 "alone. No action taken.",
+                purpose="test-ack", text="test-task acknowledgment",
             )
             self._record(task, "completed", "Test task; note posted, no action taken.", timestamp)
             return {
                 "test_task": True,
                 "category": "test",
-                "note": {
-                    "discussion_id": task.discussion_id,
-                    "note_id": note_id,
-                    "text": "test-task acknowledgment",
-                },
+                "note": note,
                 "reassigned": None,
             }
 
         category = self._categorize_task(task)
-        target, target_field = reassign_target(task)
 
         # Route callback tasks to the Robie Call handler (PR #746) when its
         # ports are wired. The handler runs inside this same durable job —
@@ -285,7 +555,12 @@ class TaskAssignmentWorker:
         if category == "callback" and self._call_handler_available():
             return self._do_call_task(store, job, task, timestamp)
 
-        if target is None:
+        answer = self._human_answer(store, job, task)
+        candidates = reassign_candidates(
+            task, human_choice=str(answer.get("assign_to") or "").strip() or None
+        )
+
+        if not candidates:
             # No valid person to send this back to — say so on the task,
             # then wait for a human on the SAME job.
             self._post_note_verified(
@@ -293,57 +568,236 @@ class TaskAssignmentWorker:
                 "Roby here — I read this task but couldn't complete it, and I "
                 "couldn't tell who to send it back to (no creator, producer, "
                 "or CSR listed). Flagging for the team.",
+                purpose="needs-target",
             )
             self._record(task, "awaiting_human", "No reassignment target; flagged for team.", timestamp)
             raise NeedsHuman(
                 f"Task {task.task_id}: no Task Created By / Assigned Producer / CSR — "
-                "a human must pick who gets this task back."
+                "a human must pick who gets this task back "
+                "(resume with --assign-to NAME)."
             )
 
-        target_label = dict(REASSIGN_PRECEDENCE)[target_field]
-
-        reassigned: dict[str, Any] | None = None
-        if self.reassign_enabled and self.reassigner is not None:
-            verified_assignee = self.reassigner.reassign(
-                task.task_id, task.applicant_id, target,
-                description=task.description, expected_assignee=task.assigned_to,
-            )
-            reassigned = {"to": target, "verified_assignee": verified_assignee}
-            note_body = (
-                f"Roby here — I read this request ({category}) but I can't "
-                f"complete it myself, so I've sent it back to {verified_assignee} "
-                f"({target_label})."
-            )
-        else:
-            note_body = (
+        if not (self.reassign_enabled and self.reassigner is not None):
+            target, target_field = candidates[0]
+            self._post_note_verified(
+                store, job, task.discussion_id,
                 f"Roby here — I read this request ({category}) but I can't "
                 f"complete it myself. It needs to go back to {target} "
-                f"({target_label}); automatic reassignment is off, so please "
-                "reassign it in EZLynx."
+                f"({FIELD_LABELS[target_field]}); automatic reassignment is off, so "
+                "please reassign it in EZLynx.",
+                purpose="gate-off",
             )
-
-        note_id = self._post_note_verified(store, job, task.discussion_id, note_body)
-
-        if reassigned is None:
             self._record(task, "awaiting_human", f"Reassignment gate off; flagged for reassign to {target}.", timestamp)
             raise NeedsHuman(
                 f"Task {task.task_id}: reassignment gate is off — a human must "
                 f"reassign to {target} in EZLynx."
             )
 
+        reassigned = self._reassign_with_reconciliation(store, job, task, candidates, answer)
+        note = self._note_record(
+            store, job, task.discussion_id,
+            f"Roby here — I read this request ({category}) but I can't "
+            f"complete it myself, so I've sent it back to "
+            f"{reassigned['verified_assignee']} ({FIELD_LABELS[reassigned['field']]}).",
+            purpose="handoff", text="handoff to " + reassigned["verified_assignee"],
+        )
         self._record(task, "completed", f"Reassigned to {reassigned['verified_assignee']}; note posted.", timestamp)
         return {
             "test_task": False,
             "category": category,
-            "reassign_target": target,
-            "reassign_field": target_field,
-            "note": {
-                "discussion_id": task.discussion_id,
-                "note_id": note_id,
-                "text": "handoff to " + reassigned["verified_assignee"],
-            },
+            "reassign_target": reassigned["to"],
+            "reassign_field": reassigned["field"],
+            "note": note,
             "reassigned": reassigned,
         }
+
+    def _human_answer(self, store: Any, job: dict[str, Any], task: AssignedTask) -> dict[str, Any]:
+        """The human's answer for THIS round of THIS task; anything else is ignored."""
+        round_no = job_round(job)
+        data = store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
+        if data and (str(data.get("task_id")) != task.task_id
+                     or str(data.get("applicant_id")) != task.applicant_id
+                     or int(data.get("round", -1)) != round_no):
+            return {}
+        return data
+
+    # -- exact client ------------------------------------------------------
+
+    def _assert_write_target(self, task: AssignedTask) -> None:
+        """Refuse every write unless the applicant is cleared and owns the discussion.
+
+        The report's Discussion ID is data, not proof. EZLynx is asked which
+        discussions belong to this applicant, and the write allowlist is the
+        repo's compiled one. Anything unproven pauses the job with no write.
+        """
+        from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
+
+        try:
+            applicant = require_allowed_ezlynx_write_applicant(task.applicant_id)
+        except Exception as exc:  # noqa: BLE001 — scope/driver refusals pause the job
+            raise NeedsHuman(
+                f"Task {task.task_id}: applicant {task.applicant_id} is not cleared "
+                f"for Robie writes ({type(exc).__name__}); nothing was written."
+            ) from exc
+        lookup = getattr(self.client, "get_discussion_ids", None)
+        if lookup is None:
+            raise NeedsHuman(
+                f"Task {task.task_id}: cannot prove discussion {task.discussion_id} "
+                f"belongs to applicant {applicant}; nothing was written."
+            )
+        try:
+            owned = [str(item).strip() for item in lookup(applicant)]
+        except Exception as exc:  # noqa: BLE001 — transient read: resume retries
+            raise NeedsHuman(
+                f"Task {task.task_id}: could not read applicant {applicant}'s "
+                f"discussions ({type(exc).__name__}); nothing was written. "
+                "Resume to retry."
+            ) from exc
+        if owned.count(str(task.discussion_id).strip()) != 1:
+            raise NeedsHuman(
+                f"Task {task.task_id}: discussion {task.discussion_id} is not one of "
+                f"applicant {applicant}'s discussions; nothing was written."
+            )
+
+    # -- reassignment with durable intent and reconciliation ----------------
+
+    def _read_assignee(self, task: AssignedTask) -> str:
+        return str(self.reassigner.read_assignee(
+            task.task_id, task.applicant_id, description=task.description) or "").strip()
+
+    def _reassign_with_reconciliation(
+        self, store: Any, job: dict[str, Any], task: AssignedTask,
+        candidates: list[tuple[str, str]], answer: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Hand the task to the first return owner EZLynx can select.
+
+        An intent is committed before any Save. After a crash or an unknown
+        outcome the assignee is READ, never assumed: already the target means
+        it landed. Anything else is NOT proof the Save did not happen or will
+        not still land (the UI Save is not an atomic compare-and-set), so Robie
+        never repeats it on its own: the job pauses, and one more Save needs an
+        explicit human authorization (--allow-retry-save) that is good for that
+        one attempt only.
+        """
+        from .ezlynx_task_cdp import AssigneeUnresolvedError
+
+        answer = answer or {}
+        kind = f"{REASSIGN_KIND_PREFIX}{job_round(job)}"
+        expected = (task.assigned_to or ROBIE_NAME).strip() or ROBIE_NAME
+        intent = store.get_checkpoint(job["id"], kind) or {}
+        skipped = [str(name) for name in intent.get("skipped") or []]
+        attempt = int(intent.get("attempt") or 0)
+        applied_at = intent.get("applied_at")
+
+        def save(state: str, target: str, **extra: Any) -> None:
+            nonlocal applied_at
+            if state == "applied" and not applied_at:
+                applied_at = utcnow_iso()
+            data = {"task_id": task.task_id, "applicant_id": task.applicant_id,
+                    "expected_assignee": expected, "target": target, "state": state,
+                    "attempt": attempt, "skipped": list(skipped),
+                    **({"applied_at": applied_at} if applied_at else {}), **extra}
+            self._write(store, job["id"], kind, data, monotonic_attempt=True)
+            if store.get_checkpoint(job["id"], kind) != data:
+                raise UnverifiedNoteError("Reassignment intent not durable; nothing sent")
+
+        def result(name: str, field: str, verified: str) -> dict[str, Any]:
+            return {"to": name, "field": field, "verified_assignee": verified,
+                    "skipped_unresolved": list(skipped)}
+
+        def retry_authorized(name: str) -> bool:
+            grant = answer.get("retry_save") or {}
+            return (str(grant.get("target") or "").casefold() == name.casefold()
+                    and int(grant.get("after_attempt", -1)) == attempt)
+
+        for name, field in candidates:
+            if name.casefold() in {item.casefold() for item in skipped}:
+                continue
+            prior = str(intent.get("target") or "")
+            if prior and intent.get("state") in ("applied", "attempting", "uncertain"):
+                # A Save to ANYONE that is not known to have failed blocks every other
+                # Save, whoever is asked for now: it may already have landed, or still land.
+                try:
+                    current = self._read_assignee(task)
+                except Exception as exc:  # noqa: BLE001
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: could not read the assignee to reconcile "
+                        f"an earlier reassignment to {prior} ({type(exc).__name__}); "
+                        "nothing was sent. Resume to retry."
+                    ) from exc
+                if current.casefold() == prior.casefold():
+                    save("applied", prior, verified_assignee=current)
+                    if prior.casefold() == name.casefold():
+                        return result(name, field, current)
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: the earlier reassignment to {prior} landed, but "
+                        f"the return owner now requested is {name}. Nothing more was sent; "
+                        "a human must move the task."
+                    )
+                if intent.get("state") == "applied":
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: it was returned to {prior} but now shows "
+                        f"{current or 'unknown'!r}; nothing was sent. A human must look at the task."
+                    )
+                if not retry_authorized(name):
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: an earlier reassignment to {prior} has an unknown "
+                        f"result and the task now shows {current or 'unknown'!r}. I will not send "
+                        "another Save on my own, to anyone, because that one may still land. Check "
+                        f"EZLynx; if the task is still with {expected} and you want me to try once "
+                        f"more for {name}, resume with --allow-retry-save."
+                    )
+                if current.casefold() != expected.casefold():
+                    raise NeedsHuman(
+                        f"Task {task.task_id}: the assignee is {current!r}, not {expected!r} "
+                        f"or {prior!r}; nothing was sent. A human must look at the task."
+                    )
+            if field != "human_choice":
+                # Immediately before every Save, including the first round and any retry, prove
+                # the routing that produced this target is current. Done BEFORE the intent so a
+                # refusal is certainly not an unknown Save. A person's explicit choice does not
+                # depend on report routing; the Save's own owner check still applies.
+                prove_fresh_routing(self.reassigner, task, expected_assignee=expected)
+            attempt += 1
+            save("attempting", name)
+            self._fence()
+            try:
+                verified = self.reassigner.reassign(
+                    task.task_id, task.applicant_id, name,
+                    description=task.description, expected_assignee=expected)
+            except AssigneeUnresolvedError:
+                skipped.append(name)
+                save("skipped", name)
+                intent = {"target": name, "state": "skipped"}
+                continue
+            except Exception as exc:  # noqa: BLE001 — outcome unknown: read, never assume
+                save("uncertain", name, error=str(exc)[:200])
+                try:
+                    current = self._read_assignee(task)
+                except Exception:  # noqa: BLE001
+                    current = ""
+                if current.casefold() == name.casefold():
+                    save("applied", name, verified_assignee=current)
+                    return result(name, field, current)
+                raise NeedsHuman(
+                    f"Task {task.task_id}: the reassignment to {name} could not be "
+                    f"confirmed ({type(exc).__name__}); the task shows {current or 'unknown'!r}. "
+                    "Robie will not repeat the Save on its own. Check EZLynx, then resume this job."
+                ) from exc
+            if str(verified).strip().casefold() != name.casefold():
+                save("uncertain", name, error=f"reassigner reported {str(verified)!r}")
+                raise NeedsHuman(
+                    f"Task {task.task_id}: asked to return the task to {name} but EZLynx "
+                    f"reported {str(verified)!r}; nothing more was sent. A human must look at the task."
+                )
+            save("applied", name, verified_assignee=str(verified))
+            return result(name, field, str(verified))
+
+        raise NeedsHuman(
+            f"Task {task.task_id}: none of the return owners could be selected in EZLynx "
+            f"({', '.join(name for name, _ in candidates)}); a human must pick one "
+            "(resume with --assign-to NAME)."
+        )
 
     def _call_handler_available(self) -> bool:
         """True when the Robie Call handler and its required ports are wired."""
@@ -377,10 +831,14 @@ class TaskAssignmentWorker:
             "Task Subject": task.title,
             "Task Description": task.description,
             "Applicant ID": task.applicant_id,
-            "Applicant Name": payload.get("account_name") or "",
+            "Applicant Name": payload.get("account_name") or task.applicant_name or "",
             "Task Created By": task.created_by,
+            "Assigned Producer": task.assigned_producer,
             "Assigned To": payload.get("assigned_to") or "Robie AI",
             "Task Due Date": task.due_date,
+            "Activity Labels": task.activity_labels,
+            "Discussion ID": task.discussion_id,
+            "Workflow": payload.get("workflow") or "",
         }
         reassign_port = (
             _WorkerReassignPortAdapter(self.reassigner, task)
@@ -392,9 +850,30 @@ class TaskAssignmentWorker:
             bland=self.bland_client,
             discussion_client=self.client,
             task_reassign=reassign_port,
+            transfer_lookup=self.transfer_lookup,
+            opt_out_store=self.opt_out_store,
+            opt_in_store=self.opt_in_store,
+            call_dedupe=self.call_dedupe,
         )
-        config = rch.RobieCallConfig(dry_run=self.call_dry_run)
+        config = rch.RobieCallConfig(
+            dry_run=self.call_dry_run,
+            sms_configured=os.environ.get("ROBIE_CALL_SMS_CONFIGURED") == "1",
+        )
         result = rch.handle_robie_call_task(task_dict, config, ports)
+        if result.get("skipped_opt_in"):
+            self._record(
+                task, "skipped",
+                "Marketing call skipped; no recorded opt-in.",
+                timestamp,
+            )
+            raise CallHeld(str(result.get("error") or "no recorded opt-in"))
+        if result.get("queued_for_calling_window"):
+            self._record(
+                task, "queued",
+                f"Robie Call queued: {result.get('error')}.",
+                timestamp,
+            )
+            raise CallQueued(str(result.get("error") or "outside calling window"))
 
         note = result.get("writeback") or {}
         action: dict[str, Any] = {
@@ -431,6 +910,11 @@ class TaskAssignmentWorker:
 
     def _categorize_task(self, task: AssignedTask) -> str:
         """Sort the request from its activity type and note text."""
+        from .call_pickup import classify_call_request
+
+        labeled = classify_call_request(task.activity_labels, task.description)
+        if labeled.action in ("workflow", "freeform"):
+            return "callback"
         text = f"{task.title} {task.description}".lower()
         if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
             return "callback"
@@ -447,12 +931,18 @@ class TaskAssignmentWorker:
     # -- verified note posting (API only) -------------------------------
 
     def _post_note_verified(self, store: Any, job: dict[str, Any],
-                            discussion_id: str, body: str) -> str:
+                            discussion_id: str, body: str, purpose: str = "note") -> str:
         """Reserve once in the real JobStore, then reconcile by exact receipt ID.
 
         DiscussionApi has no idempotent POST contract. An intent without a
         durable receipt is permanently uncertain, including after a crash.
         Metadata changes and HTTP acceptance cannot authorize another send.
+        The reservation is per (round, purpose): a resume or a new round may
+        write a different note, but never the same one twice.
+
+        A note a human adopted after an uncertain post (--note-id) is accepted
+        only when the discussion shows that exact ID once, with exactly the text
+        Robie meant to write; otherwise it stays unconfirmed.
         """
         from .ezlynx_task_cdp import validate_identity
         from .store import canonical_json, utc_now
@@ -461,17 +951,32 @@ class TaskAssignmentWorker:
                           str(payload.get("applicant_id") or ""))
         if not discussion_id or self.client is None:
             raise ValueError("No discussion identity/client; note not sent")
-        identity = {"task_id": payload["task_id"], "applicant_id": payload["applicant_id"],
-                    "discussion_id": discussion_id,
-                    "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
-        kind = "task-note-intent"
+        round_no = job_round(job)
+        base = {"task_id": payload["task_id"], "applicant_id": payload["applicant_id"],
+                "discussion_id": discussion_id,
+                "body_sha256": hashlib.sha256(body.encode()).hexdigest()}
+        identity = {**base, "purpose": purpose, "round": round_no}
+        kind = f"{NOTE_KIND_PREFIX}{round_no}:{purpose}"
+        legacy = store.get_checkpoint(job["id"], LEGACY_NOTE_KIND)
+        if legacy is not None:
+            if all(legacy.get(k) == v for k, v in base.items()):
+                kind, identity = LEGACY_NOTE_KIND, base  # continue an intent written before per-purpose kinds
+            elif legacy.get("state") != "confirmed":
+                raise UnverifiedNoteError("Earlier note intent is unresolved; not sent")
+        self._last_note_kind = kind
+        self._fence()
         # INSERT is a durable compare-and-set, following the outbox contract.
         # No time-based lease can allow a second POST of an uncertain note.
         with store.transaction() as conn:
+            if self._lease is not None and self._lease.supported:
+                owner = conn.execute("SELECT lease_owner FROM jobs WHERE id=?", (job["id"],)).fetchone()
+                if owner is None or owner["lease_owner"] != self._lease.token:
+                    raise LeaseLost("job lease is missing or owned by another worker")
             row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?",
                                (job["id"], kind)).fetchone()
             fresh = row is None
-            intent = {**identity, "state": "uncertain", "note_id": ""} if fresh else json.loads(row[0])
+            intent = ({**identity, "state": "uncertain", "note_id": "", "reserved_at": utc_now()}
+                      if fresh else json.loads(row[0]))
             if any(intent.get(k) != v for k, v in identity.items()):
                 raise UnverifiedNoteError("Existing note intent differs; not sent")
             if fresh:
@@ -486,16 +991,81 @@ class TaskAssignmentWorker:
             except Exception as exc:
                 raise UnverifiedNoteError("Note acceptance uncertain; not reposting") from exc
             intent["note_id"] = _extract_note_id(response)
-            store.checkpoint(job["id"], kind, intent)
+            self._write(store, job["id"], kind, intent)
         note_id = str(intent.get("note_id") or "")
         if not note_id:
             raise UnverifiedNoteError("No durable destination note ID; not reposting")
         record = self.client.get_discussion(discussion_id)
-        if not _contains_note_id(record, note_id):
-            raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
+        adopted_pending = bool(intent.get("adopted")) and intent.get("state") != "confirmed"
+        try:
+            if not _contains_note_id(record, note_id):
+                raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
+            if adopted_pending:
+                self._assert_adopted_note(store, job, kind, intent, payload, discussion_id, body, record, note_id)
+        except UnverifiedNoteError as exc:
+            if adopted_pending:
+                # A refused adoption, including an ID that does not exist at all, must not
+                # poison the record: clear it (keeping why) so a person can adopt another ID.
+                rejected = {key: value for key, value in intent.items() if key not in ("adopted", "adoption")}
+                rejected.update({"note_id": "", "adoption_rejected": {"note_id": note_id, "reason": str(exc)[:200]}})
+                self._write(store, job["id"], kind, rejected)
+            raise
         intent["state"] = "confirmed"
-        store.checkpoint(job["id"], kind, intent)
+        self._write(store, job["id"], kind, intent)
         return note_id
+
+    @staticmethod
+    def _assert_adopted_note(store: Any, job: dict[str, Any], kind: str, intent: dict[str, Any],
+                             payload: dict[str, Any], discussion_id: str, body: str,
+                             record: Any, note_id: str) -> None:
+        """An adopted note is accepted only as THIS request's note.
+
+        Matching text in the right discussion is not enough: an old note with
+        identical words proves nothing about this request. The discussion must show
+        the exact ID once, with the exact text, created after this request's note was
+        reserved (a trustworthy, time-zoned timestamp), and that ID must not already
+        belong to any other note of this job.
+        """
+        adoption = intent.get("adoption") or {}
+        if (str(adoption.get("note_id")) != note_id
+                or str(adoption.get("applicant_id")) != str(payload.get("applicant_id"))
+                or str(adoption.get("discussion_id")) != str(discussion_id)):
+            raise UnverifiedNoteError("Adopted note is not bound to this applicant and discussion")
+        text = _note_text_for_id(record, note_id)
+        if text is None:
+            raise UnverifiedNoteError("Adopted note's text cannot be read, so it cannot be "
+                                      "confirmed as the note Robie meant to write")
+        if _norm_text(text) != _norm_text(body):
+            raise UnverifiedNoteError("Adopted note does not match the note Robie meant to write")
+        reserved = _aware_time(intent.get("reserved_at"))
+        if reserved is None:
+            raise UnverifiedNoteError("This note was reserved by an older version; its creation "
+                                      "cannot be tied to this request, so it is not adopted")
+        created = _note_created_at(record, note_id)
+        if created is None:
+            raise UnverifiedNoteError("Adopted note has no trustworthy creation time; it cannot "
+                                      "be shown to belong to this request")
+        if created < reserved - timedelta(seconds=NOTE_CLOCK_SKEW_SECONDS):
+            raise UnverifiedNoteError("Adopted note was created before this request's note was "
+                                      "reserved; an older note with the same words is not this request's")
+        if _note_id_used_elsewhere(store, job["id"], kind, note_id):
+            raise UnverifiedNoteError("Adopted note already belongs to another note of this job")
+
+    def _note_record(self, store: Any, job: dict[str, Any], discussion_id: str, body: str,
+                     *, purpose: str, text: str) -> dict[str, Any]:
+        """Post (or reconcile) one note and describe it for the verifier."""
+        note_id = self._post_note_verified(store, job, discussion_id, body, purpose=purpose)
+        intent = store.get_checkpoint(job["id"], self._last_note_kind) or {}
+        return {
+            "discussion_id": discussion_id,
+            "note_id": note_id,
+            "text": text,
+            "purpose": purpose,
+            "round": job_round(job),
+            "body_norm_sha256": hashlib.sha256(_norm_text(body).encode()).hexdigest(),
+            "adopted": bool(intent.get("adopted")),
+            "reserved_at": intent.get("reserved_at"),
+        }
 
     def _record(self, task: AssignedTask, action: str, detail: str, timestamp: str) -> None:
         self.results.append(TaskResult(
@@ -505,6 +1075,71 @@ class TaskAssignmentWorker:
             detail=detail,
             timestamp=timestamp,
         ))
+
+
+# Clock tolerance for the adopted-note creation-time check: a note created up to this many
+# seconds BEFORE its reservation is still accepted. 120 s is an UNMEASURED ESTIMATE of
+# EZLynx-vs-server clock difference; an older note with identical words must be hours or
+# days older to be refused by time alone (the used-elsewhere check covers the rest).
+NOTE_CLOCK_SKEW_SECONDS = 120
+_NOTE_TIME_KEYS = ("createdDate", "CreatedDate", "createdAt", "CreatedAt", "created", "Created",
+                   "dateCreated", "DateCreated", "timestamp", "Timestamp")
+
+
+def _aware_time(value: Any) -> datetime | None:
+    """A time-zoned datetime, or None. A naive time cannot be compared reliably."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _note_created_at(record: Any, note_id: str) -> datetime | None:
+    """When EZLynx says the ONE note with this ID was created (time-zoned), else None."""
+    from .ezlynx_discussions import iter_discussion_notes, _note_id_of
+
+    rows = [row for row in iter_discussion_notes(record) if _note_id_of(row) == note_id]
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    for key in _NOTE_TIME_KEYS:
+        found = _aware_time(rows[0].get(key))
+        if found is not None:
+            return found
+    return None
+
+
+def _note_id_used_elsewhere(store: Any, job_id: str, this_kind: str, note_id: str) -> bool:
+    with store.connect() as conn:
+        rows = conn.execute(
+            "SELECT kind, data_json FROM checkpoints WHERE job_id=? AND (kind LIKE ? OR kind=?)",
+            (job_id, f"{NOTE_KIND_PREFIX}%", LEGACY_NOTE_KIND)).fetchall()
+    return any(kind != this_kind and str(json.loads(data_json).get("note_id") or "") == note_id
+               for kind, data_json in rows)
+
+
+_NOTE_TEXT_KEYS = ("body", "Body", "text", "Text", "noteText", "NoteText", "note", "Note", "content", "Content")
+
+
+def _norm_text(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _note_text_for_id(record: Any, note_id: str) -> str | None:
+    """The text of the ONE note with this ID, or None if it is not shown exactly once with text."""
+    from .ezlynx_discussions import iter_discussion_notes, _note_id_of
+
+    rows = [row for row in iter_discussion_notes(record) if _note_id_of(row) == note_id]
+    if len(rows) != 1:
+        return None
+    for key in _NOTE_TEXT_KEYS:
+        value = rows[0].get(key) if isinstance(rows[0], dict) else None
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def _contains_note_id(record: dict[str, Any], note_id: str) -> bool:
@@ -546,6 +1181,7 @@ def _task_from_payload(payload: dict[str, Any]) -> AssignedTask:
         created_by=str(payload.get("task_created_by") or ""),
         assigned_producer=str(payload.get("assigned_producer") or ""),
         csr=str(payload.get("csr") or ""),
+        activity_labels=str(payload.get("activity_labels") or ""),
     )
 
 
@@ -562,9 +1198,53 @@ class TaskIntakeVerifier:
         *,
         discussion_client: DiscussionClient | None = None,
         task_reassigner: TaskReassigner | None = None,
+        store: Any | None = None,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
+        self.store = store
+
+    def _return_owner_problem(self, job: dict[str, Any], action: dict[str, Any]) -> str | None:
+        """Why the recorded return owner is not the one the rules require.
+
+        Recomputed from the job payload, not from the worker's own claim:
+        Created By -> Assigned Producer -> CSR, skipping only people the
+        worker recorded as unselectable in EZLynx, or a person a human chose.
+        """
+        if action.get("call_task") or not action.get("reassigned"):
+            return None
+        reassigned = action["reassigned"]
+        target = str(reassigned.get("to") or "").strip()
+        if not target:
+            return "reassignment record has no target"
+        verified = str(reassigned.get("verified_assignee") or "").strip()
+        if verified.casefold() != target.casefold():
+            return f"assignee read back as {verified!r}, not the intended return owner {target!r}"
+        task = _task_from_payload(job.get("payload") or {})
+        if str(action.get("reassign_field") or "") == "human_choice":
+            if self.store is None:
+                return None
+            round_no = job_round(job)
+            answer = self.store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
+            if (str(answer.get("task_id")) != task.task_id
+                    or str(answer.get("applicant_id")) != task.applicant_id
+                    or int(answer.get("round", -1)) != round_no):
+                return f"no human answer is recorded for round {round_no} of this task"
+            chosen = str(answer.get("assign_to") or "").strip()
+            if chosen.casefold() != target.casefold():
+                return f"return owner {target!r} is not the person a human chose ({chosen!r})"
+            return None
+        names = [name for name, _ in reassign_candidates(task)]
+        folded = [name.casefold() for name in names]
+        if target.casefold() not in folded:
+            return f"return owner {target!r} is not Task Created By, Assigned Producer or CSR"
+        skipped = {str(item).casefold() for item in reassigned.get("skipped_unresolved") or []}
+        passed_over = [n for n in names[:folded.index(target.casefold())]
+                       if n.casefold() not in skipped]
+        if passed_over:
+            return (f"{passed_over[0]!r} comes before {target!r} in Task Created By -> "
+                    "Assigned Producer -> CSR and was not recorded as unselectable")
+        return None
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult:
         """Independently verify the note (and reassignment) landed in EZLynx."""
@@ -592,6 +1272,38 @@ class TaskIntakeVerifier:
                 retryable=True,
             )
 
+        problem = self._return_owner_problem(job, action)
+        if problem:
+            return _unverified(
+                job, captured, discussion_id,
+                {"note_id": note_id, "discussion_id": discussion_id}, {}, error=problem,
+            )
+
+        applicant_id = str(payload.get("applicant_id") or "")
+        lookup = getattr(self.client, "get_discussion_ids", None)
+        if lookup is None:
+            return _unverified(
+                job, captured, discussion_id,
+                {"note_id": note_id, "discussion_id": discussion_id}, {},
+                error="verifier cannot prove the discussion belongs to the applicant",
+            )
+        try:
+            owned = [str(item).strip() for item in lookup(applicant_id)]
+        except Exception as e:  # noqa: BLE001 — transient read failure retries
+            return _unverified(
+                job, captured, discussion_id,
+                {"note_id": note_id, "discussion_id": discussion_id},
+                {"error": f"discussion ownership read failed: {e}"},
+                error=f"discussion ownership read failed: {e}", retryable=True,
+            )
+        if owned.count(discussion_id) != 1:
+            return _unverified(
+                job, captured, discussion_id,
+                {"note_id": note_id, "discussion_id": discussion_id, "applicant_id": applicant_id},
+                {"discussion_ids": owned[:20]},
+                error=f"discussion {discussion_id} is not one of applicant {applicant_id}'s discussions",
+            )
+
         from .ezlynx_discussions import discussion_note_snapshot
 
         try:
@@ -606,6 +1318,25 @@ class TaskIntakeVerifier:
                 error=f"discussion read-back failed: {e}",
                 retryable=True,
             )
+
+        if (action.get("note") or {}).get("adopted"):
+            text = _note_text_for_id(record, note_id)
+            want = str((action.get("note") or {}).get("body_norm_sha256") or "")
+            if text is None or hashlib.sha256(_norm_text(text).encode()).hexdigest() != want:
+                return _unverified(
+                    job, captured, discussion_id,
+                    {"note_id": note_id, "discussion_id": discussion_id}, {},
+                    error="the adopted note's text does not match the note Robie meant to write",
+                )
+            reserved = _aware_time((action.get("note") or {}).get("reserved_at"))
+            created = _note_created_at(record, note_id)
+            if (reserved is None or created is None
+                    or created < reserved - timedelta(seconds=NOTE_CLOCK_SKEW_SECONDS)):
+                return _unverified(
+                    job, captured, discussion_id,
+                    {"note_id": note_id, "discussion_id": discussion_id}, {},
+                    error="the adopted note cannot be shown to have been created for this request",
+                )
 
         latest = str(snapshot.get("most_recent_note_id") or "")
         expected: dict[str, Any] = {"note_id": note_id, "discussion_id": discussion_id}

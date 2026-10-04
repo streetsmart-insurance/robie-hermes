@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "status": "UNVERIFIED",
+  "note": "No field has been observed on the real EZLynx page, so none is declared. Code never guesses a selector: a field is read only if it is declared here with an observation record. Fill this from a reviewed read-only Test inspection (docs/EZLYNX_TASK_FIELD_DISCOVERY.md); until every required field is declared, task reassignment stays disabled.",
+  "required_fields": [
+    "description",
+    "created_by",
+    "assigned_producer",
+    "csr",
+    "activity_labels"
+  ],
+  "fields": {}
+}

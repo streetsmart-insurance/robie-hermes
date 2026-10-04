@@ -1,0 +1,11 @@
+[Unit]
+Description=ROBIE morning health digest at 07:00 Eastern
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=robie-health-digest.service
+
+[Install]
+WantedBy=timers.target

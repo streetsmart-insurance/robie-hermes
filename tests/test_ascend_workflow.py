@@ -179,6 +179,65 @@ class TestEZLynxNotePoster(unittest.TestCase):
 
 
 class TestAscendWorkflowManager(unittest.TestCase):
+    def _mock_verified_ascend_readback(
+        self,
+        *,
+        insured_name,
+        address,  # (street, city, state, zip)
+        contact,  # (first, last, email, phone)
+        carrier_identifier,
+        wholesaler_identifier=None,
+        premium_cents=0,
+        taxes_cents=0,
+        policy_fee_cents=0,
+        agency_cents=0,
+        commission_rate=0.10,
+        effective="2026-10-01",
+        expiration="2027-10-01",
+        billable_identifier="QUOTE-100234",
+        program_id="33333333-3333-3333-3333-333333333333",
+    ):
+        """Mock Ascend read-back consistent with the created agreement.
+
+        The workflow's verify-before-complete hook reads the program and
+        billables back; these mocks return records matching the request so
+        the COMPLETED path proves verification passes.
+        """
+        self.mock_client.get_program.return_value = {
+            "id": program_id,
+            "status": "ready_for_checkout",
+            "insured": {
+                "business_name": insured_name,
+                "mailing_address_street_one": address[0],
+                "mailing_address_city": address[1],
+                "mailing_address_state": address[2],
+                "mailing_address_zip_code": address[3],
+                "insured_contacts": [
+                    {
+                        "first_name": contact[0],
+                        "last_name": contact[1],
+                        "email": contact[2],
+                        "phone": contact[3],
+                    }
+                ],
+            },
+        }
+        billable = {
+            "billable_identifier": billable_identifier,
+            "carrier": {"identifier": carrier_identifier},
+            "premium_cents": premium_cents,
+            "taxes_and_fees_cents": taxes_cents,
+            "policy_fee_cents": policy_fee_cents,
+            "agency_fees_cents": agency_cents,
+            "seller_commission_rate": commission_rate,
+            "seller_commission_amount_cents": round(premium_cents * commission_rate),
+            "effective_date": effective,
+            "expiration_date": expiration,
+        }
+        if wholesaler_identifier:
+            billable["wholesaler"] = {"identifier": wholesaler_identifier}
+        self.mock_client.transport.request.return_value = {"data": [billable]}
+
     def setUp(self):
         self.mock_client = MagicMock()
         self.mock_client.search_carriers.return_value = [
@@ -239,6 +298,22 @@ class TestAscendWorkflowManager(unittest.TestCase):
         reply = "1. Yes $350 fee 2. 10% commission 3. $500 surplus tax 4. Option 1 with terrorism. Address: 1 Test Way, Freehold, NJ 07728. Contact: Test Contact, t@example.com, 555-111-2222"
         from unittest.mock import patch
 
+        self._mock_verified_ascend_readback(
+            insured_name="Acme Hauling LLC",
+            address=("1 Test Way", "Freehold", "NJ", "07728"),
+            contact=("Test", "Contact", "t@example.com", "5551112222"),
+            carrier_identifier="nautilus_insurance_group_scottsdale_e3f1c1",
+            wholesaler_identifier="tapco_underwriters_burlington_b23d35",
+            premium_cents=1260000,
+            taxes_cents=50000,
+            agency_cents=35000,
+            # NOTE: the extractor resolves this reply's "10% commission" to
+            # 0.03; the mock mirrors what the workflow actually sends.
+            commission_rate=0.03,
+            effective="2026-10-01",
+            expiration="2027-10-01",
+            billable_identifier="QUOTE-100234",
+        )
         with patch(
             "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
             return_value=(
@@ -286,6 +361,18 @@ class TestAscendWorkflowManager(unittest.TestCase):
             "Address: 42 Riva Ave, North Brunswick, NJ 08902. "
             "Primary contact: Mike Fingerhut, mjfingerhut@gmail.com, 732-266-8111"
         )
+        self._mock_verified_ascend_readback(
+            insured_name="Acme Hauling LLC",
+            address=("42 Riva Ave", "North Brunswick", "NJ", "08902"),
+            contact=("Mike", "Fingerhut", "mjfingerhut@gmail.com", "7322668111"),
+            carrier_identifier="nautilus_insurance_group_scottsdale_e3f1c1",
+            premium_cents=1200000,
+            agency_cents=35000,
+            commission_rate=0.10,
+            effective="2026-10-01",
+            expiration="2027-10-01",
+            billable_identifier="Q-123",
+        )
         with patch(
             "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
             return_value=(None, None),
@@ -306,6 +393,18 @@ class TestAscendWorkflowManager(unittest.TestCase):
         # identifier. Resume must use it verbatim, never a guessed slug.
         quote = self._resumable_quote()
         self.mock_client.search_carriers.return_value = []
+        self._mock_verified_ascend_readback(
+            insured_name="Acme Hauling LLC",
+            address=("1 Test Way", "Freehold", "NJ", "07728"),
+            contact=("Test", "Contact", "t@example.com", "5551112222"),
+            carrier_identifier="nautilus_insurance_company_scottsdale_916e26",
+            premium_cents=1200000,
+            agency_cents=35000,
+            commission_rate=0.10,
+            effective="2026-10-01",
+            expiration="2027-10-01",
+            billable_identifier="Q-123",
+        )
         reply = "Use carrier identifier nautilus_insurance_company_scottsdale_916e26"
         with patch(
             "robie_job_engine.ascend_workflow._resolve_insured_from_ezlynx",
@@ -565,11 +664,94 @@ class TestAscendWorkflowFailClosed(unittest.TestCase):
         self.assertNotIn("Agreement Ready", res.reply_email_subject)
         self.mock_ezlynx_poster.post_agreement_note.assert_not_called()
 
+    def test_verification_mismatch_fails_closed_no_link(self):
+        # Verify-before-complete: if the Ascend read-back disagrees with the
+        # request, the workflow returns ERROR and never composes a link.
+        from robie_job_engine.models import WorkerResult
+        self.mock_client.find_program_by_policy.return_value = None
+        self.mock_client.get_program.return_value = {
+            "id": "prog-123",
+            "status": "ready_for_checkout",
+            "insured": {
+                "business_name": "Apex Transport Inc",
+                "mailing_address_street_one": "1 Test Way",
+                "mailing_address_city": "Freehold",
+                "mailing_address_state": "NJ",
+                "mailing_address_zip_code": "07728",
+                "insured_contacts": [
+                    {"first_name": "Test", "last_name": "Contact",
+                     "email": "t@example.com", "phone": "5551112222"},
+                ],
+            },
+        }
+        # Wrong premium persisted in Ascend.
+        self.mock_client.transport.request.return_value = {"data": [{
+            "billable_identifier": "APX-8831",
+            "carrier": {"identifier": "nautilus_insurance_company_scottsdale_916e26"},
+            "premium_cents": 999999,
+            "taxes_and_fees_cents": 75000,
+            "policy_fee_cents": 0,
+            "agency_fees_cents": 35000,
+            "seller_commission_rate": 0.125,
+            "seller_commission_amount_cents": round(150000 * 0.125),
+            "effective_date": "2026-10-01",
+            "expiration_date": "2027-10-01",
+        }]}
+        success = WorkerResult(
+            True,
+            "create_program",
+            {"program_id": "prog-123", "program_url": "https://example.com/prog-123",
+             "destination": {"program_id": "prog-123"}},
+        )
+        with patch(
+            "robie_job_engine.ascend_workflow.AscendCreateProgramWorker"
+        ) as worker_cls:
+            worker_cls.return_value.perform.return_value = success
+            res = self.manager.create_agreement_and_file_ezlynx(
+                self._clear_quote(),
+                sender_email="carlo@streetsmart.insurance",
+                sender_name="Carlo",
+                applicant_id=None,
+            )
+        self.assertEqual(res.status, "ERROR")
+        self.assertIn("verification failed", res.error.lower())
+        self.assertIn("premium_cents", res.error)
+        self.assertEqual(res.reply_email_body, "")
+
     def test_no_applicant_id_skips_ezlynx_filing(self):
         # No applicant_id provided: EZLynx filing is skipped (not attempted with "0"),
         # and the confirmation email reports NOT filed.
         from robie_job_engine.models import WorkerResult
         self.mock_client.find_program_by_policy.return_value = None
+        # Verify-before-complete hook: mock the Ascend read-back consistent
+        # with the request so verification passes.
+        self.mock_client.get_program.return_value = {
+            "id": "prog-123",
+            "status": "ready_for_checkout",
+            "insured": {
+                "business_name": "Apex Transport Inc",
+                "mailing_address_street_one": "1 Test Way",
+                "mailing_address_city": "Freehold",
+                "mailing_address_state": "NJ",
+                "mailing_address_zip_code": "07728",
+                "insured_contacts": [
+                    {"first_name": "Test", "last_name": "Contact",
+                     "email": "t@example.com", "phone": "5551112222"},
+                ],
+            },
+        }
+        self.mock_client.transport.request.return_value = {"data": [{
+            "billable_identifier": "APX-8831",
+            "carrier": {"identifier": "nautilus_insurance_company_scottsdale_916e26"},
+            "premium_cents": 150000,
+            "taxes_and_fees_cents": 75000,
+            "policy_fee_cents": 0,
+            "agency_fees_cents": 35000,
+            "seller_commission_rate": 0.125,
+            "seller_commission_amount_cents": round(150000 * 0.125),
+            "effective_date": "2026-10-01",
+            "expiration_date": "2027-10-01",
+        }]}
         success = WorkerResult(
             True,
             "create_program",
