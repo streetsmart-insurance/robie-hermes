@@ -10,8 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
+import sys
+import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from typing import Any, Optional
 
 from robie_job_engine.quote_extractor import ExtractedQuote
@@ -19,6 +23,166 @@ from robie_job_engine.quote_extractor import ExtractedQuote
 logger = logging.getLogger(__name__)
 
 ROBIE_SIGNATURE = "\n\nRobie was here"
+
+# Renewal-automation tree that owns the Zapier-backed EZLynx task client.
+# Configurable so the import does not depend on the process CWD or on
+# whichever ``src`` package happens to sit earlier on sys.path. This repo
+# ships its own top-level ``src`` (accountability). With the release root on
+# PYTHONPATH, ``from src.ezlynx...`` binds that package and raises
+# ``No module named 'src.ezlynx'``.
+DEFAULT_RENEWAL_AUTOMATION_ROOT = "/opt/renewal-automation-system"
+RENEWAL_AUTOMATION_ROOT_ENV = "ROBIE_RENEWAL_AUTOMATION_ROOT"
+_TASK_SUCCESS_STATUSES = {"success"}
+_ZAPIER_HOOK_URL = re.compile(r"https?://hooks\.zapier\.com/\S+", re.IGNORECASE)
+
+
+def resolve_renewal_automation_root(explicit: Optional[str] = None) -> str:
+    """Return the renewal-automation root used to load ``EZLynxApiClient``.
+
+    An explicit poster root wins, then ``ROBIE_RENEWAL_AUTOMATION_ROOT``,
+    then ``/opt/renewal-automation-system``.
+    """
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env = os.environ.get(RENEWAL_AUTOMATION_ROOT_ENV, "").strip()
+    if env:
+        return env
+    return DEFAULT_RENEWAL_AUTOMATION_ROOT
+
+
+def _renewal_import_paths(root: str) -> list[str]:
+    paths = [root]
+    lib = os.path.join(root, "venv", "lib")
+    if os.path.isdir(lib):
+        for entry in sorted(os.listdir(lib)):
+            site = os.path.join(lib, entry, "site-packages")
+            if os.path.isdir(site):
+                paths.append(site)
+    return paths
+
+
+def _public_failure_text(text: str) -> str:
+    """Short failure text safe to log and alert. Hook URLs are redacted."""
+    cleaned = _ZAPIER_HOOK_URL.sub("https://hooks.zapier.com/[redacted]", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > 500:
+        cleaned = cleaned[:500] + "..."
+    return cleaned or "create_user_task failed"
+
+
+def _exception_reason(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}: {exc.reason}"
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    if isinstance(code, int) and code >= 400:
+        return f"HTTP {code}: {exc.__class__.__name__}"
+    text = str(exc).strip()
+    if text:
+        return f"{exc.__class__.__name__}: {text}"
+    return exc.__class__.__name__
+
+
+def _task_result_failure_reason(result: Any) -> Optional[str]:
+    """None when ``result`` is a real success. Otherwise a failure reason.
+
+    A 2xx payload whose status is ``success`` is passed through unchanged by
+    the caller. Anything else — including an HTTP error dict — is a failure.
+    """
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+        if status in _TASK_SUCCESS_STATUSES:
+            return None
+        code = result.get("status_code", result.get("http_status"))
+        try:
+            code_int = int(code) if code is not None and str(code).strip() != "" else None
+        except (TypeError, ValueError):
+            code_int = None
+        reason = result.get("reason") or result.get("error") or result.get("message")
+        if code_int is not None and code_int >= 400:
+            return str(reason or f"HTTP {code_int}")
+        if reason:
+            return str(reason)
+        if status:
+            return f"create_user_task status {status!r} is not success"
+        return "create_user_task returned no success status"
+    code = getattr(result, "status_code", None)
+    if isinstance(code, int):
+        if 200 <= code < 300:
+            return None
+        return f"HTTP {code}"
+    return f"create_user_task returned {type(result).__name__}, not a success result"
+
+
+def _task_error_result(
+    *,
+    applicant_id: str,
+    title: str,
+    assigned_user: Optional[str],
+    due_days_out: int,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "reason": reason,
+        "applicant_id": applicant_id,
+        "task_title": title,
+        "assigned_user": assigned_user or "Account Manager",
+        "due_days_out": due_days_out,
+    }
+
+
+@contextmanager
+def _renewal_src_import(root: str):
+    """Load ``src.*`` from ``root`` for one call, then restore the process.
+
+    The file ``src/ezlynx/api_client.py`` must exist under ``root``. This
+    does not import ``src.ezlynx`` from the process CWD.
+    """
+    root = os.path.abspath(root)
+    client_file = os.path.join(root, "src", "ezlynx", "api_client.py")
+    if not os.path.isfile(client_file):
+        raise ImportError(
+            "renewal-automation EZLynx client not found at "
+            f"{client_file} (set {RENEWAL_AUTOMATION_ROOT_ENV})"
+        )
+    saved_modules = {
+        key: sys.modules.pop(key)
+        for key in list(sys.modules)
+        if key == "src" or key.startswith("src.")
+    }
+    saved_path = list(sys.path)
+    try:
+        extras = [path for path in _renewal_import_paths(root) if os.path.isdir(path)]
+        sys.path[:] = extras + [path for path in saved_path if path not in extras]
+        yield
+    finally:
+        for key in list(sys.modules):
+            if key == "src" or key.startswith("src."):
+                del sys.modules[key]
+        sys.modules.update(saved_modules)
+        sys.path[:] = saved_path
+
+
+def _invoke_renewal_create_user_task(root: str, **kwargs: Any) -> Any:
+    """Call renewal-automation ``EZLynxApiClient.create_user_task`` (Zapier)."""
+    with _renewal_src_import(root):
+        from src.ezlynx.api_client import EZLynxApiClient
+
+        client = EZLynxApiClient()
+        hook = getattr(client, "create_user_task", None)
+        if not callable(hook):
+            raise AttributeError(
+                "EZLynxApiClient.create_user_task is missing "
+                "(Zapier task hook is not available)"
+            )
+        return hook(
+            applicant_id=kwargs["applicant_id"],
+            title=kwargs["title"],
+            description=kwargs["description"],
+            assigned_user=kwargs.get("assigned_user"),
+            due_days_out=kwargs.get("due_days_out", 0),
+        )
 
 
 def format_ascend_agreement_note(quote: ExtractedQuote, program_url: str) -> str:
@@ -420,9 +584,11 @@ class EZLynxAgreementPoster:
         self,
         services_url: str = "https://services.ezlynx.com",
         cli_path: str = "/opt/renewal-automation-system/scripts/ezlynx_cli.py",
+        renewal_root: Optional[str] = None,
     ):
         self.services_url = services_url
         self.cli_path = cli_path
+        self.renewal_root = renewal_root
 
     def post_agreement_note(
         self,
@@ -543,36 +709,47 @@ class EZLynxAgreementPoster:
         assigned_user: Optional[str] = None,
         due_days_out: int = 0,
     ) -> dict[str, Any]:
-        """Create a follow-up task for CSR/Producer in EZLynx."""
-        try:
-            import sys
-            for extra_path in (
-                "/opt/renewal-automation-system",
-                "/opt/renewal-automation-system/venv/lib/python3.12/site-packages",
-                "/opt/renewal-automation-system/venv/lib/python3.11/site-packages",
-            ):
-                if os.path.exists(extra_path) and extra_path not in sys.path:
-                    sys.path.append(extra_path)
-            from src.ezlynx.api_client import EZLynxApiClient
-            client = EZLynxApiClient()
-            if hasattr(client, "create_user_task"):
-                return client.create_user_task(
-                    applicant_id=applicant_id,
-                    title=title,
-                    description=description,
-                    assigned_user=assigned_user,
-                    due_days_out=due_days_out,
-                )
-        except Exception as exc:
-            logger.warning("Failed to invoke EZLynxApiClient.create_user_task: %s", exc)
+        """Create a follow-up task via the renewal-automation Zapier hook.
 
-        return {
-            "status": "success",
-            "applicant_id": applicant_id,
-            "task_title": title,
-            "assigned_user": assigned_user or "Account Manager",
-            "due_days_out": due_days_out,
-        }
+        Import errors, a missing hook, HTTP errors, and any other exception
+        return ``status: "error"`` with a reason. A real client success is
+        returned unchanged. This never fabricates success.
+        """
+        root = resolve_renewal_automation_root(self.renewal_root)
+        try:
+            result = _invoke_renewal_create_user_task(
+                root,
+                applicant_id=applicant_id,
+                title=title,
+                description=description,
+                assigned_user=assigned_user,
+                due_days_out=due_days_out,
+            )
+        except Exception as exc:
+            reason = _public_failure_text(_exception_reason(exc))
+            logger.error("EZLynx create_task failed: %s", reason)
+            return _task_error_result(
+                applicant_id=applicant_id,
+                title=title,
+                assigned_user=assigned_user,
+                due_days_out=due_days_out,
+                reason=reason,
+            )
+        failure = _task_result_failure_reason(result)
+        if failure is not None:
+            reason = _public_failure_text(failure)
+            logger.error("EZLynx create_task failed: %s", reason)
+            return _task_error_result(
+                applicant_id=applicant_id,
+                title=title,
+                assigned_user=assigned_user,
+                due_days_out=due_days_out,
+                reason=reason,
+            )
+        if isinstance(result, dict):
+            return result
+        code = getattr(result, "status_code", None)
+        return {"status": "success", "status_code": code}
 
     def apply_account_label(
         self,
