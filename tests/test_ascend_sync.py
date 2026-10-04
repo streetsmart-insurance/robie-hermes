@@ -183,6 +183,8 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
         self.mock_api = MagicMock()
         self.mock_matcher = MagicMock()
         self.mock_poster = MagicMock()
+        self.mock_poster.create_task.return_value = {"status": "success"}
+        self.mock_poster.post_custom_note.return_value = {"status": "success"}
 
         self.manager = AscendEZLynxSyncManager(
             api_client=self.mock_api,
@@ -483,6 +485,8 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
         mock_matcher.match_account.return_value = ("app-kjb", "Jake Ferrara")
 
         mock_poster = MagicMock()
+        mock_poster.create_task.return_value = {"status": "success"}
+        mock_poster.post_custom_note.return_value = {"status": "success"}
         manager = AscendEZLynxSyncManager(
             api_client=mock_api,
             store=self.store,
