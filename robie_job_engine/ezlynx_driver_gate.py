@@ -29,6 +29,7 @@ KNOWN_HOLDERS = {
     "hermes-test-01": "TEST",
 }
 REFUSED = "EZLYNX_DRIVER_NOT_IN"
+LEASE_NOT_WITH_PRODUCTION = "driver lease not with PRODUCTION"
 
 
 class EzlynxDriverGateRefused(RuntimeError):
@@ -104,6 +105,26 @@ def check_driver_gate(
     if expires_at <= current:
         return DriverDecision(False, expected, "driver lease expired")
     return DriverDecision(True, expected, "driver is IN")
+
+
+def production_driver_refused(
+    *,
+    hostname: str | None = None,
+    now: datetime | None = None,
+    reader: Callable[[], str] | None = None,
+) -> bool:
+    """True when this process must hold PRODUCTION and the lease does not.
+
+    CI hosts leave the gate off, so this stays false there. A missing,
+    expired, or TEST-held lease is a refusal: nothing should be dialed
+    or written until PRODUCTION holds it again.
+    """
+    if not gate_required(hostname):
+        return False
+    if expected_holder(hostname) != "PRODUCTION":
+        return False
+    decision = check_driver_gate(hostname=hostname, now=now, reader=reader)
+    return not decision.allowed
 
 
 def require_driver_in(**kwargs: object) -> DriverDecision:

@@ -103,7 +103,7 @@ class FakeReassigner:
     def read_task_state(self, task_id, applicant_id, description=""):
         """The live pre-Save state the worker must prove before any Save."""
         return {"assignee": self.current, "description": description, "created_by": "Jane Producer",
-                "assigned_producer": "Jane Producer", "csr": "", "activity_labels": ""}
+                "assigned_producer": "Jane Producer", "csr": "", "activity_labels": "Robie Call"}
 
 
 class OwnsDiscussion:
@@ -173,6 +173,8 @@ def test_callback_routes_to_call_handler(clean_state):
         "discussion_id": "D-200", "last_modified": "2026-10-03T10:00:00Z",
         "task_created_by": "Jane Producer",
         "assigned_producer": "Jane Producer", "csr": "",
+        "activity_labels": "Robie Call",
+        "dialable": True,
     }}
     action = worker._do_work(store, job)
     assert action["call_task"] is True
@@ -247,6 +249,8 @@ def test_outside_calling_window_returns_job_to_pending(clean_state, monkeypatch)
         "discussion_id": "D-200", "last_modified": "2026-10-03T10:00:00Z",
         "task_created_by": "Jane Producer",
         "assigned_producer": "Jane Producer", "csr": "",
+        "activity_labels": "Robie Call",
+        "dialable": True,
     }}
     store.row["payload"] = job["payload"]
     finished = worker.process_job(store, job)

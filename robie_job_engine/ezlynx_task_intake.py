@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Intake orchestrator: Gmail report -> one durable Job Engine job per task.
 
-Runs on a schedule (every ~30 min, offset from the Looker delivery):
+Runs on a schedule (every 5 minutes, offset from the Looker delivery):
 
 1. Fetch the latest "Robie AI - Task Check-In" delivery (fail-closed
    envelope; skips already-processed message IDs).
@@ -63,6 +63,7 @@ from .ezlynx_task_inbox import TaskInboxError, fetch_latest_task_report
 from .ezlynx_task_jobs import (
     ACTION_TYPE,
     _find_by_idempotency_key,
+    _received_time,
     ensure_task_job,
     task_idempotency_key,
 )
@@ -431,15 +432,293 @@ def _confirm_returned(task: AssignedTask) -> bool:
 
 
 def _report_age_minutes(report: Any) -> float | None:
-    try:
-        received = datetime.fromtimestamp(int(report.received_at) / 1000, tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError, OSError):
+    # Gmail internalDate arrives as millisecond epoch; fixtures and older
+    # callers may use ISO. _received_time parses both; unparseable is unknown.
+    received = _received_time(getattr(report, "received_at", ""))
+    if received is None:
         return None
     return (datetime.now(timezone.utc) - received).total_seconds() / 60
 
 
+HEARTBEAT_DDL = """
+CREATE TABLE IF NOT EXISTS ezlynx_task_intake_heartbeats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message_id TEXT,
+    digest TEXT,
+    newest_created_et TEXT,
+    row_count INTEGER,
+    error TEXT
+);
+"""
+
+
+def _ensure_heartbeat_table(store: JobStore) -> None:
+    with store.connect() as conn:
+        conn.execute(HEARTBEAT_DDL)
+
+
+def newest_created_et(tasks: list[Any]) -> str:
+    """Latest Created Date after conversion to America/New_York."""
+    stamps = [str(getattr(task, "created_at_et", "") or "") for task in tasks]
+    stamps = [stamp for stamp in stamps if stamp]
+    return max(stamps) if stamps else ""
+
+
+def _heartbeat(
+    store: JobStore,
+    *,
+    status: str,
+    message_id: str = "",
+    digest: str = "",
+    newest_et: str = "",
+    row_count: int = 0,
+    error: str = "",
+) -> None:
+    _ensure_heartbeat_table(store)
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO ezlynx_task_intake_heartbeats
+               (created_at, status, message_id, digest, newest_created_et, row_count, error)
+               VALUES (?,?,?,?,?,?,?)""",
+            (utcnow_iso(), status, message_id, digest, newest_et, row_count, error[:500]),
+        )
+
+
+def _record_run(
+    store: JobStore,
+    *,
+    message_id: str,
+    digest: str,
+    filename: str,
+    task_count: int,
+    jobs_created: int,
+    status: str,
+    error: str = "",
+) -> None:
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO ezlynx_task_intake_runs
+               (message_id, digest, filename, task_count, jobs_created, status, error, created_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(message_id) DO UPDATE SET
+                 status=excluded.status, error=excluded.error,
+                 task_count=excluded.task_count, jobs_created=excluded.jobs_created,
+                 created_at=excluded.created_at""",
+            (message_id, digest, filename, task_count, jobs_created, status, error, utcnow_iso()),
+        )
+
+
+def _build_discussion_client():
+    """DiscussionApiClient from the standard secret path (fail-closed)."""
+    from urllib.parse import urlparse
+
+    from .ezlynx_api import load_ezlynx_api_config
+    from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
+
+    api_config = load_ezlynx_api_config()
+    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    config = DiscussionApiConfig(
+        discussion_base_url=origin + "/DiscussionApi/",
+        token_endpoint=str(api_config.token_endpoint),
+        client_id=str(api_config.client_id),
+        client_secret=str(api_config.client_secret),
+        username=str(api_config.username),
+        integration_group_id=str(api_config.integration_group_id),
+        scope="DiscussionApi openid",
+    )
+    return DiscussionApiClient(config)
+
+
+def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
+    """JobEngine with our independent verifier — the only path to COMPLETE."""
+    from .engine import JobEngine
+
+    return JobEngine(store, {}, {ACTION_TYPE: verifier})
+
+
+def _dry_run_enabled(flag: bool) -> bool:
+    if flag:
+        return True
+    return os.environ.get("ROBIE_TASK_INTAKE_DRY_RUN", "").strip() == "1"
+
+
+def _max_task_age_hours() -> int | None:
+    raw = os.environ.get("ROBIE_CALL_MAX_TASK_AGE_HOURS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _intake_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _created_moment(task: Any):
+    from .report_clock import report_created_et
+
+    raw = (
+        str(getattr(task, "created_at", "") or "")
+        or str(getattr(task, "created_at_et", "") or "")
+        or str(getattr(task, "created_date", "") or "")
+    )
+    return report_created_et(raw)
+
+
+def _labeled_call(task: Any) -> bool:
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(getattr(task, "activity_labels", "") or "", "")
+    return decision.action in ("workflow", "freeform")
+
+
+def _age_block(task: Any, now: datetime, max_hours: int | None) -> str | None:
+    from .report_clock import within_task_age
+
+    created = _created_moment(task)
+    if created is None:
+        return "unparseable"
+    if not within_task_age(created, now, max_hours=max_hours):
+        return "too_old"
+    return None
+
+
+def select_intake_work(
+    tasks: list[Any],
+    statuses: dict[str, str],
+    *,
+    now: datetime,
+    max_tasks: int,
+    max_age_hours: int | None,
+    first_seen: set[str] | None = None,
+    job_task_ids: set[str] | None = None,
+) -> tuple[list[Any], list[tuple[Any, str]], list[str], str]:
+    """Newest eligible work, one-time hold notes, and the cap alert.
+
+    Baseline rows are never dialed. A labeled call is age-checked, held,
+    or routed only the first time it is seen. If the seen store already
+    knew the task, or any job in any state exists for that task id, this
+    pass does nothing with it. ``deferred`` is the exception: a hold that
+    could not be sent because the driver lease was out is tried again,
+    and only when no job exists.
+
+    ``first_seen is None`` means the caller is selecting a fresh list and
+    every row is eligible. Labeled calls that are too old, or whose
+    Created Date cannot be read, are held instead of dialed. A hold that
+    already has a note, or that was already attempted, is not posted again.
+    """
+    known_jobs = job_task_ids or set()
+    work: list[Any] = []
+    hold: list[tuple[Any, str]] = []
+    for task in tasks:
+        task_id = str(task.task_id)
+        status = statuses.get(task_id, "")
+        if status == "baseline":
+            continue
+        if _labeled_call(task):
+            first = (
+                first_seen is None
+                or task_id in first_seen
+                or (status == "deferred" and task_id not in known_jobs)
+            )
+            if task_id in known_jobs or not first:
+                continue
+            block = _age_block(task, now, max_age_hours)
+            if block:
+                if status not in {"hitl", "hitl_attempted"}:
+                    hold.append((task, block))
+                continue
+        if status == "capped":
+            continue
+        work.append(task)
+
+    def sort_key(item: Any) -> float:
+        created = _created_moment(item)
+        return created.timestamp() if created is not None else float("-inf")
+
+    work.sort(key=sort_key, reverse=True)
+    hold.sort(key=lambda pair: sort_key(pair[0]), reverse=True)
+    chosen = work[:max_tasks]
+    overflow = work[max_tasks:]
+    chosen_hold = hold[:max_tasks]
+    overflow_hold = hold[max_tasks:]
+    alert = ""
+    if overflow or overflow_hold:
+        alert = (
+            f"Batch cap: processing {len(chosen)} of {len(work)} eligible tasks "
+            f"(cap {max_tasks}); {len(overflow)} not dialed."
+        )
+    return chosen, chosen_hold, [str(task.task_id) for task in overflow], alert
+
+
+_HOLD_TOO_OLD = (
+    "Roby here — I did not place a call. This task is older than the "
+    "calling window, so a person needs to decide what to do with it."
+)
+_HOLD_UNPARSEABLE = (
+    "Roby here — I did not place a call. The Created Date could not be "
+    "read, so a person needs to decide what to do with it."
+)
+
+
+def _stored_cap_error(store: JobStore, message_id: str) -> str:
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT error FROM ezlynx_task_intake_runs WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+    if row is None:
+        return ""
+    text = str(row["error"] or "")
+    return text if text.lower().startswith("batch cap") else ""
+
+
+def _jobs_for_report(store: JobStore, tasks: list[Any]) -> dict[str, dict[str, Any]]:
+    """Any job row for these task ids, keyed by task id."""
+    from .ezlynx_task_jobs import _find_by_idempotency_key
+
+    found: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = str(getattr(task, "task_id", "") or "")
+        if not task_id:
+            continue
+        job = _find_by_idempotency_key(store, task_idempotency_key(task_id))
+        if job is not None:
+            found[task_id] = job
+    return found
+
+
+def _production_lease_refused() -> bool:
+    from .ezlynx_driver_gate import production_driver_refused
+
+    return production_driver_refused()
+
+
+def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
+    body = _HOLD_UNPARSEABLE if reason == "unparseable" else _HOLD_TOO_OLD
+    discussion_id = str(getattr(task, "discussion_id", "") or "")
+    if not discussion_id:
+        return False
+    response = client.append_note(
+        discussion_id,
+        body,
+        applicant_id=str(getattr(task, "applicant_id", "") or ""),
+    )
+    if not isinstance(response, dict):
+        return False
+    note_id = str(response.get("noteId") or response.get("note_id") or "")
+    return bool(note_id)
+
+
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     """Run one intake pass. Returns 0 healthy, 2 on failure (health check alerts)."""
+    dry_run = _dry_run_enabled(dry_run)
     try:
         allowed = allowed_task_ids()
     except TaskRestrictionError as e:
@@ -448,6 +727,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
 
     store = JobStore(db_path or default_db_path())
     _ensure_intake_table(store)
+    _ensure_heartbeat_table(store)
 
     if not dry_run:
         recovered = recover_stale_running(store, allowed=allowed)
@@ -467,10 +747,12 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         report = fetch_latest_task_report(service)
     except (TaskInboxError, Exception) as e:  # noqa: BLE001 — fail-closed, recorded
         logger.error(f"Inbox fetch failed: {e}")
+        _heartbeat(store, status="failed", error=f"inbox: {e}")
         return 2
 
     if report is None:
         logger.info("No delivery yet — quiet.")
+        _heartbeat(store, status="no_email")
         return 0
 
     # Unrelated tasks stop HERE: before any lookup, job, cap count or note.
@@ -478,8 +760,29 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     if len(tasks) != len(report.tasks):
         logger.info(f"Task restriction dropped {len(report.tasks) - len(tasks)} unrelated task(s)")
 
+    newest_et = str(getattr(report, "newest_created_et", "") or "") or newest_created_et(tasks)
     age = _report_age_minutes(report)
     fresh = age is not None and age <= MAX_REPORT_AGE_MINUTES
+
+    if dry_run:
+        from .ezlynx_write_scope import all_clients_scope_honored, describe_write_scope
+
+        scope_line = describe_write_scope()
+        logger.info(
+            "[DRY-RUN] %s Robie tasks; no jobs, no EZLynx writes, no worker. %s",
+            len(tasks), scope_line,
+        )
+        scope_error = ""
+        if os.environ.get("ROBIE_ENV", "").strip().upper() in {"PRODUCTION", "PROD", "LIVE"}:
+            if not all_clients_scope_honored():
+                scope_error = "write scope did not resolve to all clients"
+                logger.error("[DRY-RUN] %s", scope_error)
+        _heartbeat(
+            store, status="failed" if scope_error else "ok",
+            message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=scope_error,
+        )
+        return 2 if scope_error else 0
 
     if _already_processed(store, report.message_id):
         # Already ran. NEW work still needs a fresh report; a stale one starts nothing.
@@ -489,15 +792,29 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                          "no new work is started.")
             return 2
         resumed = _resumable_jobs(store, tasks)
-        if not resumed:
+        # A job left PENDING (lease refused after the delivery was recorded,
+        # or the call was queued) is still eligible. A finished job is not
+        # touched, and no second note is posted.
+        pending = [
+            job for job in _jobs_for_report(store, tasks).values()
+            if JobStatus(job["status"]) == JobStatus.PENDING
+        ]
+        if not resumed and (not pending or _production_lease_refused()):
+            if pending:
+                from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
+                logger.error(LEASE_NOT_WITH_PRODUCTION)
             logger.info(f"Delivery {report.message_id} already processed — quiet.")
+            _heartbeat(
+                store, status="ok", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count,
+                error=_stored_cap_error(store, report.message_id),
+            )
             return 0
-        if dry_run:
-            logger.info(f"[DRY-RUN] {len(resumed)} resumed job(s) to work.")
-            return 0
-        logger.info(f"Delivery {report.message_id} already processed; working {len(resumed)} resumed job(s).")
+        to_work = resumed if resumed else pending
+        logger.info(f"Delivery {report.message_id} already processed; "
+                    f"working {len(to_work)} resumed/pending job(s).")
         try:
-            _work_new(store, resumed, {t.task_id for t in tasks}, allowed)
+            _work_new(store, to_work, {t.task_id for t in tasks}, allowed)
         except _ClientUnavailable as e:
             logger.error(f"Discussion client unavailable: {e}")
             return 2
@@ -510,55 +827,182 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                f"{'of unknown age' if age is None else f'{int(age)} min old'} "
                f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it.")
         logger.error(msg)
-        if not dry_run:
-            _record_run(
-                store, message_id=report.message_id, digest=report.digest,
-                filename=report.filename, task_count=len(tasks), jobs_created=0,
-                status="stale", error=msg,
-            )
+        _record_run(
+            store, message_id=report.message_id, digest=report.digest,
+            filename=report.filename, task_count=len(tasks), jobs_created=0,
+            status="stale", error=msg,
+        )
+        _heartbeat(
+            store, status="failed", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=msg,
+        )
         return 2
 
     logger.info(f"Delivery {report.message_id}: {len(tasks)} Robie AI tasks")
 
-    # 2. Blast-radius cap.
-    if len(tasks) > MAX_TASKS_PER_RUN:
-        msg = (
-            f"Batch cap exceeded: {len(tasks)} tasks > {MAX_TASKS_PER_RUN}. "
-            "Refusing to process; alerting."
-        )
-        logger.error(msg)
+    # Seen-task store. An empty or missing table is the first run: record
+    # every current id as baseline and dial none of them. A missing jobs.db
+    # creates that empty table, so it cannot re-dial the report.
+    from .bland_prod_wiring import live_calls_enabled
+    from .ezlynx_seen_tasks import SeenTaskStore
+    from .ezlynx_task_jobs import remember_live_mode
+
+    seen = SeenTaskStore(store.path)
+    if seen.is_empty():
+        seen.baseline([task.task_id for task in tasks], report_digest=report.digest)
+        msg = f"First-run baseline: recorded {len(tasks)} tasks and dialed none."
+        logger.warning(msg)
         _record_run(
             store, message_id=report.message_id, digest=report.digest,
             filename=report.filename, task_count=len(tasks), jobs_created=0,
-            status="over_cap", error=msg,
+            status="ok", error=msg,
         )
-        return 2
+        _heartbeat(
+            store, status="ok", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=msg,
+        )
+        return 0
 
-    # 3. One durable job per task ID.
+    new_ids, dropped = seen.observe(
+        [task.task_id for task in tasks], report_digest=report.digest,
+    )
+    if dropped:
+        logger.info(
+            "%s previously seen tasks are absent from this report; not dialing them",
+            len(dropped),
+        )
+    now = _intake_now()
+    live = live_calls_enabled()
+    enabled_at = remember_live_mode(store, live=live, now=utcnow_iso())
+    from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
+
+    existing_jobs = _jobs_for_report(store, tasks)
+    chosen, hold, overflow_ids, cap_alert = select_intake_work(
+        tasks, seen.statuses(), now=now, max_tasks=MAX_TASKS_PER_RUN,
+        max_age_hours=_max_task_age_hours(),
+        first_seen=new_ids,
+        job_task_ids=set(existing_jobs),
+    )
+    lease_blocked = _production_lease_refused()
+    if lease_blocked:
+        # Once per run. Jobs stay pending and hold notes stay retryable.
+        logger.error(LEASE_NOT_WITH_PRODUCTION)
+        for task, _reason in hold:
+            seen.mark(task.task_id, "deferred")
+        for task_id in overflow_ids:
+            seen.mark(task_id, "deferred")
+    else:
+        for task_id in overflow_ids:
+            seen.mark(task_id, "capped")
+        if cap_alert:
+            logger.error(cap_alert)
+
+    # 2. One durable job per chosen task ID (774's handback proof + 776's dialable terms).
     jobs_created = 0
     jobs: list[dict[str, Any]] = []
     failures: list[str] = []
-    for task in tasks:
+    queued_at = utcnow_iso()
+    for task in chosen:
+        previously_seen = task.task_id not in new_ids
         try:
             job, created = ensure_task_job(
                 store, task,
                 report_message_id=report.message_id, report_digest=report.digest,
                 report_received_at=report.received_at, confirm_returned=_confirm_returned,
+                reopen_terminal=not previously_seen,
+                live=live,
+                queued_at=queued_at,
+                live_enabled_at=enabled_at,
             )
             jobs.append(job)
-            if created:
+            if created and not previously_seen:
                 jobs_created += 1
         except Exception as e:  # noqa: BLE001 — one bad task must not kill the batch
             logger.error(f"ensure_task_job failed for {task.task_id}: {e}")
             failures.append(f"{task.task_id}: {type(e).__name__}")
 
-    if dry_run:
-        logger.info(f"[DRY-RUN] {len(jobs)} jobs ensured ({jobs_created} new); no work performed.")
+    # 3. Hold notes for labeled calls that are too old (or undated): posted once,
+    # never repeated. Needs the discussion client; the worker build below reuses it.
+    discussion_client: Any = None
+    if hold:
+        try:
+            discussion_client = _build_discussion_client()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Discussion client unavailable: {e}")
+            _record_run(
+                store, message_id=report.message_id, digest=report.digest,
+                filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
+                status="failed", error=f"discussion client: {e}",
+            )
+            _heartbeat(
+                store, status="failed", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+            )
+            return 2
+        from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
+        lease_note_logged = False
+        for task, reason in hold:
+            posted = False
+            lease_refused = False
+            try:
+                posted = _post_hold_note(discussion_client, task, reason)
+            except EzlynxDriverGateRefused as e:
+                # Raised before the note is sent. Leave it retryable.
+                lease_refused = True
+                if not lease_note_logged:
+                    logger.error(LEASE_NOT_WITH_PRODUCTION)
+                    lease_note_logged = True
+                logger.error("hold note not sent for %s: %s", task.task_id, e)
+            except Exception as e:  # noqa: BLE001
+                logger.error("hold note failed for %s: %s", task.task_id, e)
+            if lease_refused:
+                seen.mark(task.task_id, "deferred")
+                continue
+            if posted:
+                seen.mark(task.task_id, "hitl")
+            else:
+                seen.mark(task.task_id, "hitl_attempted")
+                logger.error(
+                    "hold note for %s had no note id; recorded the attempt and will not repeat",
+                    task.task_id,
+                )
+
+    # A lease refusal is not a finished delivery. Leaving the message
+    # unrecorded lets the next tick dial the same pending job, or post
+    # the hold note, once PRODUCTION holds the lease.
+    if lease_blocked:
+        _heartbeat(
+            store, status="ok", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=LEASE_NOT_WITH_PRODUCTION,
+        )
         return 0
 
-    # 4-6. Work PENDING jobs for tasks in THIS fresh report only, then verify.
+    # 4. Work PENDING jobs for tasks in THIS fresh report only, then verify.
+    in_report = {t.task_id for t in tasks}
+    pending_ids = {job["id"] for job in jobs}
+    for task_id, job in _jobs_for_report(store, tasks).items():
+        if task_id not in in_report or job["id"] in pending_ids:
+            continue
+        if JobStatus(job["status"]) != JobStatus.PENDING:
+            continue
+        jobs.append(job)
+        pending_ids.add(job["id"])
+
+    if not jobs and not hold and not failures:
+        _record_run(
+            store, message_id=report.message_id, digest=report.digest,
+            filename=report.filename, task_count=len(tasks), jobs_created=0,
+            status="ok", error=cap_alert,
+        )
+        _heartbeat(
+            store, status="ok", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=cap_alert,
+        )
+        return 0
+
     try:
-        worker = _work_new(store, jobs, {t.task_id for t in tasks}, allowed)
+        worker = _work_new(store, jobs, in_report, allowed)
     except _ClientUnavailable as e:
         logger.error(f"Discussion client unavailable: {e}")
         _record_run(
@@ -566,15 +1010,23 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
             status="failed", error=f"discussion client: {e}",
         )
+        _heartbeat(
+            store, status="failed", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+        )
         return 2
 
-    # 7. Record the run. A task that could not get a job is NOT a healthy run.
+    # 5. Record the run. A task that could not get a job is NOT a healthy run.
     status = "partial" if failures else "ok"
+    run_error = cap_alert or (("no durable job for: " + "; ".join(failures))[:500] if failures else "")
     _record_run(
         store, message_id=report.message_id, digest=report.digest,
         filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-        status=status,
-        error=("no durable job for: " + "; ".join(failures))[:500] if failures else "",
+        status=status, error=run_error,
+    )
+    _heartbeat(
+        store, status="ok", message_id=report.message_id, digest=report.digest,
+        newest_et=newest_et, row_count=report.row_count, error=run_error,
     )
     actions = {}
     for r in worker.results:

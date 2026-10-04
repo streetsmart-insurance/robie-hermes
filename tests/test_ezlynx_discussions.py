@@ -130,6 +130,22 @@ def test_append_note_posts_to_notes_endpoint():
     assert body == {"type": "Note", "body": "Renewal update — (phone on file)"}
 
 
+def test_append_note_enforces_write_scope_when_the_applicant_is_named(monkeypatch):
+    routes = token_routes([("/notes", {"noteId": "n42"})])
+    client = make_client(routes)
+    monkeypatch.delenv("ROBIE_EZLYNX_WRITE_SCOPE", raising=False)
+    monkeypatch.delenv("ROBIE_PLAYGROUND", raising=False)
+    with pytest.raises(EzlynxWriteScopeError, match="EZLYNX_WRITE_SCOPE_REFUSED"):
+        client.append_note("d1", "Held for a person.", applicant_id="80026158")
+    assert client._urlopen.posts_to("/notes") == []
+
+    monkeypatch.setenv("ROBIE_EZLYNX_WRITE_SCOPE", "all")
+    monkeypatch.setenv("ROBIE_PLAYGROUND", "1")
+    created = client.append_note("d1", "Held for a person.", applicant_id="80026158")
+    assert created == {"noteId": "n42"}
+    assert len(client._urlopen.posts_to("/v8/discussions/d1/notes")) == 1
+
+
 def test_append_note_refuses_phone_numbers():
     client = make_client(token_routes())
     with pytest.raises(disc.DiscussionApiError, match="phone-number-like"):

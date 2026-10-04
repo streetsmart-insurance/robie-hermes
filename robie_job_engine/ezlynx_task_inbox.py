@@ -24,7 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from .ezlynx_task_report import AssignedTask, TaskReportParseError, parse_task_report
+from .ezlynx_task_report import AssignedTask, TaskReportParseError, parse_task_report_detail
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ class IngestedReport:
     digest: str          # sha256 of the raw CSV bytes
     received_at: str     # Gmail internalDate, ISO-ish
     tasks: tuple[AssignedTask, ...]
+    row_count: int = 0   # data rows in the CSV, including non-Robie rows
+    newest_created_et: str = ""  # max Created Date across every row, Eastern
 
 
 def _payload_headers(payload: dict) -> dict[str, str]:
@@ -175,19 +177,21 @@ def fetch_latest_task_report(service) -> IngestedReport | None:
         raise TaskInboxError(f"{message_id}: attachment is not valid UTF-8: {e}")
 
     try:
-        tasks = parse_task_report(csv_text)
+        parsed = parse_task_report_detail(csv_text)
     except TaskReportParseError as e:
         raise TaskInboxError(f"{message_id}: CSV failed validation: {e}")
 
     digest = hashlib.sha256(content).hexdigest()
     logger.info(
-        f"Ingested {message_id} ({filename}): {len(tasks)} Robie AI tasks, "
-        f"digest {digest[:12]}"
+        f"Ingested {message_id} ({filename}): {len(parsed.tasks)} Robie AI tasks, "
+        f"{parsed.row_count} rows, digest {digest[:12]}"
     )
     return IngestedReport(
         message_id=message_id,
         filename=filename,
         digest=digest,
         received_at=str(internal_ms),
-        tasks=tuple(tasks),
+        tasks=tuple(parsed.tasks),
+        row_count=parsed.row_count,
+        newest_created_et=parsed.newest_created_et,
     )
