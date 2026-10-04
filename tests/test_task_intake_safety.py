@@ -1822,7 +1822,7 @@ class _AccountPage:
 
 
 def _supervised(monkeypatch, tmp_path, *, dialog_metas=None, dialog_values=None, page_metas=None, page_values=None,
-                cancel_fails=False, tabs=None, inventory=None, host=TEST_HOST):
+                cancel_fails=False, tabs=None, inventory=None, host=TEST_HOST, driver=None):
     """A fully-confirmed, supervised Test setup around fakes; returns (kwargs, log, page)."""
     monkeypatch.setenv("ROBIE_ENV", "TEST")
     monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
@@ -1845,6 +1845,8 @@ def _supervised(monkeypatch, tmp_path, *, dialog_metas=None, dialog_values=None,
         log.append(("cancel", "clicked")); page.cancelled = True
     monkeypatch.setattr(cdp, "_cancel_dialog", cancel)
     monkeypatch.setattr(insp, "_hostname", lambda: host)
+    monkeypatch.setattr(insp, "_driver_gate_status", lambda: driver or
+                        {"allowed": True, "holder": "TEST", "reason": "driver is IN"}, raising=False)
     monkeypatch.setattr(insp, "_exclusive_session", session)
     monkeypatch.setattr(insp, "_job_inventory", lambda db_path=None: [] if inventory is None else inventory)
     monkeypatch.setattr(insp, "_list_browser_tabs",
@@ -2194,3 +2196,204 @@ def test_a_login_or_expired_session_page_stops_the_inspection(monkeypatch, tmp_p
     saved = json.loads(kwargs["output_path"].read_text())
     assert saved["stopped"]["reason"].startswith("unexpected page") and saved["approved_fields"] == []
     assert not any(entry[0] in ("describe", "read", "open") for entry in log)
+
+
+# ---------------------------------------------------------------------------
+# Clara's review of #778 (4762b4d): no sibling capture, and the second stage revalidates the
+# ACTUAL element's identity, visibility and credential classification before any value is read.
+# ---------------------------------------------------------------------------
+import os  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+_FAKE_DOM = r"""
+const accessed = [];
+const byId = {};
+function mk(spec) {
+  const el = {
+    _style: spec.style || { display: 'block', visibility: 'visible' },
+    tagName: (spec.tag || 'div').toUpperCase(), id: spec.id || '', className: spec.cls || '',
+    hidden: !!spec.hidden, readOnly: false, disabled: false, isContentEditable: false,
+    labels: null, offsetParent: spec.offscreen ? null : {}, children: [],
+    getAttribute(n) { const v = (spec.attrs || {})[n]; return v === undefined ? null : v; },
+    getClientRects() { return spec.offscreen ? [] : [1]; },
+    querySelector(sel) { accessed.push(spec.key + '.querySelector'); return spec.credDescendant ? {} : null; },
+  };
+  for (const prop of ['value', 'innerText', 'textContent', 'nextElementSibling']) {
+    Object.defineProperty(el, prop, { enumerable: true,
+      get() { accessed.push(spec.key + '.' + prop); return prop === 'nextElementSibling' ? (spec.sibling || null) : (spec[prop] === undefined ? '' : spec[prop]); } });
+  }
+  el._spec = spec;
+  return el;
+}
+global.window = { getComputedStyle: (el) => el._style };
+global.document = { getElementById: (id) => byId[id] || null };
+"""
+
+
+def _node(script_body):
+    node = shutil.which("node")
+    if not node:
+        if os.environ.get("CI"):
+            pytest.fail("node is required in CI to test the in-page JavaScript")
+        pytest.skip("node is not available locally")
+    program = _FAKE_DOM + f"""
+const DESCRIBE = {json.dumps(insp.DESCRIBE_JS_ELEMENT)};
+const READ = {json.dumps(insp.READ_JS_ELEMENT)};
+const fnDescribe = eval(DESCRIBE), fnRead = eval(READ);
+const out = (function() {{ {script_body} }})();
+process.stdout.write(JSON.stringify({{ out, accessed }}));
+"""
+    proc = subprocess.run([node, "-e", program], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_no_sibling_text_is_captured_or_even_requested():
+    import importlib, inspect as _inspect
+    source = _inspect.getsource(importlib.import_module("robie_job_engine.task_field_inspector"))
+    assert "next_sibling_text" not in source and "nextElementSibling" not in source
+
+
+def test_a_hidden_sensitive_sibling_is_never_touched_in_either_stage():
+    result = _node(r"""
+      const producer = mk({ key: 'producer', tag: 'span', attrs: { 'aria-label': 'Producer' }, innerText: 'Mike Sosa' });
+      const secret = mk({ key: 'secret', tag: 'span', attrs: { 'aria-label': 'Security token' },
+                          style: { display: 'none', visibility: 'visible' }, innerText: 'SECRET-TOKEN',
+                          value: 'SECRET-TOKEN', textContent: 'SECRET-TOKEN' });
+      producer._spec.sibling = secret;
+      const root = { querySelectorAll: () => [producer, secret] };
+      const metas = fnDescribe(root, undefined);
+      const wanted = [{ index: 0, name: 'Producer', tag: 'span', type: '', role: '' }];
+      const rows = fnRead(root, wanted);
+      return { metas, rows };
+    """)
+    assert result["out"]["rows"][0]["value"] == "Mike Sosa" and not result["out"]["rows"][0].get("rejected")
+    touched = [item for item in result["accessed"] if item.startswith("secret.") or item.endswith(".nextElementSibling")]
+    assert touched == [], f"a sibling was touched: {touched}"
+    assert "SECRET" not in json.dumps(result["out"])
+
+
+def test_describe_never_reads_a_value_text_or_content_of_any_element():
+    result = _node(r"""
+      const els = [mk({ key: 'a', tag: 'input', attrs: { type: 'password', 'aria-label': 'Password' }, value: 'hunter2' }),
+                   mk({ key: 'b', tag: 'span', attrs: { 'aria-label': 'Producer' }, innerText: 'Mike', textContent: 'Mike' })];
+      return fnDescribe({ querySelectorAll: () => els }, undefined);
+    """)
+    assert [m["name"] for m in result["out"]] == ["Password", "Producer"]
+    assert result["accessed"] == [], f"the describe stage read content: {result['accessed']}"
+
+
+@pytest.mark.parametrize("mutation,expected", [
+    ("spec.style = { display: 'none', visibility: 'visible' };", "hidden_or_invisible"),
+    ("spec.style = { display: 'block', visibility: 'hidden' };", "hidden_or_invisible"),
+    ("spec.hidden = true;", "hidden_or_invisible"),
+    ("spec.attrs['aria-hidden'] = 'true';", "hidden_or_invisible"),
+    ("spec.offscreen = true;", "hidden_or_invisible"),
+    ("spec.attrs.type = 'password';", "changed"),
+    ("spec.attrs.autocomplete = 'one-time-code';", "credential_like"),
+    ("spec.id = 'user-password';", "credential_like"),
+    ("spec.cls = 'secret-field';", "credential_like"),
+    ("spec.attrs['aria-label'] = 'Password';", "changed"),
+    ("spec.tag = 'input';", "changed"),
+    ("spec.credDescendant = true;", "credential_like"),
+])
+def test_an_element_that_changes_between_stages_is_rejected_before_its_value_is_read(mutation, expected):
+    result = _node(f"""
+      const spec = {{ key: 'target', tag: 'span', attrs: {{ 'aria-label': 'Producer' }}, innerText: 'Mike Sosa', value: 'Mike Sosa' }};
+      const el = mk(spec);
+      const root = {{ querySelectorAll: () => [el] }};
+      const metas = fnDescribe(root, undefined);
+      {mutation}
+      el._style = spec.style || el._style;
+      el.hidden = !!spec.hidden; el.id = spec.id || ''; el.className = spec.cls || '';
+      el.tagName = (spec.tag || 'span').toUpperCase(); el.offsetParent = spec.offscreen ? null : {{}};
+      return fnRead(root, [{{ index: 0, name: metas[0].name, tag: metas[0].tag, type: metas[0].type, role: metas[0].role }}]);
+    """)
+    row = result["out"][0]
+    assert row["value"] == "" and row["rejected"].startswith(expected), row
+    assert not [a for a in result["accessed"] if a.endswith((".value", ".innerText", ".textContent"))], \
+        f"a value was read before validation failed: {result['accessed']}"
+
+
+def test_an_unchanged_approved_element_is_read_through_visible_text_only():
+    result = _node(r"""
+      const el = mk({ key: 'p', tag: 'span', attrs: { 'aria-label': 'Producer' }, innerText: 'Mike  Sosa', textContent: 'Mike Sosa HIDDEN' });
+      const root = { querySelectorAll: () => [el] };
+      const m = fnDescribe(root, undefined)[0];
+      return fnRead(root, [{ index: 0, name: m.name, tag: m.tag, type: m.type, role: m.role }]);
+    """)
+    assert result["out"][0]["value"] == "Mike Sosa" and not result["out"][0]["rejected"]
+    assert "p.textContent" not in result["accessed"], "hidden descendant text could be included"
+
+
+def test_the_page_script_and_python_agree_on_what_is_credential_like():
+    names = ["Password", "Card number", "Security answer", "Verification code", "One-time code", "Account number",
+             "Routing number", "API key", "Login", "Instructions", "Producer", "Created by", "Assign this task",
+             "Labels", "CSR", "Description", "Spin class", "Notes sidebar"]
+    result = _node("const names = " + json.dumps(names) + r""";
+      return names.map((n) => {
+        const el = mk({ key: 'x', tag: 'span', attrs: { 'aria-label': n }, innerText: 'v' });
+        const root = { querySelectorAll: () => [el] };
+        const m = fnDescribe(root, undefined)[0];
+        const row = fnRead(root, [{ index: 0, name: m.name, tag: m.tag, type: m.type, role: m.role }])[0];
+        return row.rejected === 'credential_like';
+      });
+    """)
+    python = [insp.exclusion_reason(_meta(0, n)) == "credential_like" for n in names]
+    assert result["out"] == python, dict(zip(names, zip(result["out"], python)))
+
+
+def test_a_revalidation_rejection_from_the_page_is_counted_and_never_recorded(monkeypatch, tmp_path):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")],
+                                 dialog_values={0: "Send the dec page"})
+    original = _Dialog.evaluate
+    def rejecting(self, script, arg=None):
+        rows = original(self, script, arg)
+        if arg is not None:
+            return [{"index": r["index"], "name": "", "value": "", "rejected": "hidden_or_invisible"} for r in rows]
+        return rows
+    monkeypatch.setattr(_Dialog, "evaluate", rejecting)
+    insp.run_dom_inspection(**kwargs)
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    assert saved["approved_fields"] == [] and saved["excluded"]["revalidation_failed"] == 1
+    assert "Send the dec page" not in json.dumps(saved)
+
+
+def test_the_second_stage_request_carries_the_identity_it_must_revalidate(monkeypatch, tmp_path):
+    seen = []
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions", tag="textarea", type="")],
+                                 dialog_values={0: "x"})
+    original = _Dialog.evaluate
+    def spy(self, script, arg=None):
+        if arg is not None:
+            seen.append(arg)
+        return original(self, script, arg)
+    monkeypatch.setattr(_Dialog, "evaluate", spy)
+    insp.run_dom_inspection(**kwargs)
+    assert seen and set(seen[0][0]) >= {"index", "name", "tag", "type", "role"}
+
+
+# ---- browser ownership: the shared driver lease must ALREADY be Test's; the inspector only checks it ----
+
+@pytest.mark.parametrize("decision", [
+    {"allowed": False, "holder": "TEST", "reason": "driver belongs to PRODUCTION"},
+    {"allowed": False, "holder": "TEST", "reason": "driver is checked OUT"},
+    {"allowed": False, "holder": "TEST", "reason": "driver lease expired"},
+    {"allowed": True, "holder": "PRODUCTION", "reason": "driver is IN"},
+])
+def test_the_inspection_refuses_unless_test_already_holds_the_driver_lease(monkeypatch, tmp_path, decision):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, driver=decision)
+    with pytest.raises(insp.InspectionRefused, match="does not obtain or renew"):
+        insp.run_dom_inspection(**kwargs)
+    assert log == [] and not kwargs["output_path"].exists()
+
+
+def test_the_driver_lease_decision_is_recorded_and_never_acquired(monkeypatch, tmp_path):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")], dialog_values={0: "x"})
+    record = insp.run_dom_inspection(**kwargs)
+    assert record["preflight"]["driver_lease"] == {"allowed": True, "holder": "TEST", "reason": "driver is IN"}
+    import importlib, inspect as _inspect
+    source = _inspect.getsource(importlib.import_module("robie_job_engine.task_field_inspector"))
+    for acquiring in ("checkout", "check_out", "renew", "acquire", "set_metadata", "write_metadata"):
+        assert acquiring not in source.replace("does not obtain or renew", "")
