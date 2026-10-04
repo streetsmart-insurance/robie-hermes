@@ -17,6 +17,7 @@ import pytest
 
 from robie_job_engine import ascend_api_notice_source as api_notice_source
 from robie_job_engine import ascend_notice_driver as driver
+from robie_job_engine import discussion_note_ledger as note_ledger
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import ezlynx_discussions as discussions
 from robie_job_engine import ezlynx_org_labels as org_labels
@@ -2147,7 +2148,16 @@ def test_write_scope_all_is_only_on_approved_note_units():
     assert "--live" not in unit
     timer = (root / "deploy/systemd/robie-ascend-notice-driver.timer").read_text(encoding="utf-8")
     assert "Persistent=true" in timer
+    assert "OnBootSec=5min" in timer
+    assert "OnActiveSec=15min" in timer
     assert "OnUnitActiveSec=15min" in timer
+    assert (
+        "Environment=ASCEND_DRIVER_NOTE_LEDGER=/var/lib/robie-ascend-notice-driver/"
+        "discussion-note-ledger.json"
+        in unit
+    )
+    assert "install -o streetsmart-hermes -g streetsmart-hermes -m 0600" in unit
+    assert "discussion-note-ledger.json" in unit
     example = (
         root / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf.example"
     ).read_text(encoding="utf-8")
@@ -2632,3 +2642,198 @@ def test_discussion_client_with_notes_reads_the_with_notes_path():
     assert client._urlopen.calls[-1]["url"].endswith("/v8/discussions/d9/with-notes")
     with pytest.raises(discussions.DiscussionApiError):
         client.get_discussion_with_notes("")
+
+
+def test_driver_note_ledger_defaults_to_the_sandbox_dir(monkeypatch):
+    monkeypatch.delenv(note_ledger.DRIVER_NOTE_LEDGER_ENV, raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_STATE_DIR", raising=False)
+    assert (
+        note_ledger.driver_note_ledger_path()
+        == note_ledger.DEFAULT_DRIVER_NOTE_LEDGER_PATH
+    )
+
+
+def test_driver_ledger_copies_history_once_or_reads_it(tmp_path):
+    legacy = tmp_path / "old.json"
+    text = "Policy AYMGH-D payment failed: $412.10 could not be processed."
+    note = {
+        "applicant_id": "220250093",
+        "discussion_id": "d-pay",
+        "document_id": "",
+        "note_text_sha256": note_ledger.note_fingerprint(text),
+        "note_norm_sha256": note_ledger.note_norm_fingerprint(text),
+        "note_id": "n-1",
+        "confirmation": "confirmed",
+    }
+    legacy.write_text(json.dumps({"version": 1, "notes": [note]}), encoding="utf-8")
+    legacy.chmod(0o600)
+    dest = tmp_path / "state" / "discussion-note-ledger.json"
+    assert note_ledger.migrate_driver_note_ledger(dest, legacy) == "copied"
+    assert (dest.stat().st_mode & 0o777) == 0o600
+    assert note_ledger.migrate_driver_note_ledger(dest, legacy) == "kept"
+    assert json.loads(dest.read_text(encoding="utf-8"))["notes"] == [note]
+    assert json.loads(legacy.read_text(encoding="utf-8"))["notes"] == [note]
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not-a-directory", encoding="utf-8")
+    fallback_dest = blocked / "discussion-note-ledger.json"
+    assert note_ledger.migrate_driver_note_ledger(fallback_dest, legacy) == "fallback"
+    found = note_ledger.find_posted_note(
+        "220250093",
+        "d-pay",
+        text,
+        ledger_path=fallback_dest,
+    )
+    assert found is not None
+    assert found["note_id"] == "n-1"
+    assert json.loads(legacy.read_text(encoding="utf-8"))["notes"] == [note]
+
+
+def test_note_ledger_lock_failure_sends_nothing(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory mode")
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    parent.chmod(0o555)
+    path = parent / "discussion-note-ledger.json"
+    try:
+        with pytest.raises(note_ledger.DiscussionNoteLedgerError, match="cannot be locked"):
+            with note_ledger.serialized_ledger(path):
+                raise AssertionError("the lock must fail closed")
+    finally:
+        parent.chmod(0o755)
+
+
+def test_notice_driver_ledger_follows_the_env_var(tmp_path, monkeypatch):
+    dest = tmp_path / "discussion-note-ledger.json"
+    monkeypatch.setenv(note_ledger.DRIVER_NOTE_LEDGER_ENV, str(dest))
+    assert note_ledger.ledger_path_for_notice_driver() == dest
+    assert driver._notice_driver_ledger_path() == dest
+
+
+def test_live_driver_writes_the_opt_in_ledger(no_zap_fire, tmp_path, monkeypatch):
+    dest = tmp_path / "driver" / "discussion-note-ledger.json"
+    shared = tmp_path / "shared" / "discussion-note-ledger.json"
+    monkeypatch.setenv(note_ledger.DRIVER_NOTE_LEDGER_ENV, str(dest))
+    monkeypatch.setenv("ROBIE_DISCUSSION_NOTE_LEDGER", str(shared))
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+    )
+    driver._opt_in_email_driver_ledger(ctx)
+    assert ctx.note_ledger_path == dest
+    summary = driver.run_driver(ctx)
+    assert summary["results"][0]["status"] == "done"
+    assert len(discussion_client._urlopen.posts_to("/notes")) == 1
+    saved = json.loads(dest.read_text(encoding="utf-8"))
+    assert any(row.get("applicant_id") == ALLOWED_APPLICANT for row in saved["notes"])
+    assert not shared.exists()
+
+
+def test_unset_env_keeps_the_shared_ledger_outside_tests(no_zap_fire, tmp_path, monkeypatch):
+    monkeypatch.delenv(note_ledger.DRIVER_NOTE_LEDGER_ENV, raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_STATE_DIR", raising=False)
+    monkeypatch.setattr(note_ledger, "_under_automated_test", lambda: False)
+    monkeypatch.setattr(note_ledger, "_is_production_process", lambda: False)
+    shared = tmp_path / "data" / "discussion-note-ledger.json"
+    monkeypatch.setenv("ROBIE_DISCUSSION_NOTE_LEDGER", str(shared))
+    assert driver._notice_driver_ledger_path() is None
+    assert note_ledger.default_ledger_path() == shared
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+    )
+    driver._opt_in_email_driver_ledger(ctx)
+    assert ctx.note_ledger_path is None
+    summary = driver.run_driver(ctx)
+    assert summary["results"][0]["status"] == "done"
+    assert len(discussion_client._urlopen.posts_to("/notes")) == 1
+    saved = json.loads(shared.read_text(encoding="utf-8"))
+    assert any(row.get("applicant_id") == ALLOWED_APPLICANT for row in saved["notes"])
+    assert not note_ledger.DEFAULT_DRIVER_NOTE_LEDGER_PATH.exists()
+
+
+def test_settle_confirm_and_repost_use_the_driver_ledger(tmp_path, monkeypatch):
+    dest = tmp_path / "driver.json"
+    other = tmp_path / "other.json"
+    monkeypatch.setenv("ROBIE_DISCUSSION_NOTE_LEDGER", str(other))
+    text = "The payment failed and the note landed."
+
+    class Landed:
+        def get_discussion_with_notes(self, discussion_id):
+            return {"notes": [{"noteId": "n-9", "body": text}]}
+
+        def get_discussion(self, discussion_id):
+            return {"noteCount": 1, "mostRecentNoteId": "n-9"}
+
+    note_ledger.begin_unconfirmed_note("220250093", "d1", note_text=text, ledger_path=dest)
+    settled = driver._settle_unconfirmed_note(
+        Landed(),
+        "220250093",
+        "d1",
+        text,
+        {"status": "already_posted", "reason": driver._UNCONFIRMED_GUARD},
+        allow=True,
+        ledger_path=dest,
+    )
+    assert settled["status"] == "filed"
+    found = note_ledger.find_posted_note("220250093", "d1", text, ledger_path=dest)
+    assert found is not None
+    assert found["note_id"] == "n-9"
+    assert not other.exists()
+
+    other_text = "a different note that was not on the discussion"
+    note_ledger.begin_unconfirmed_note(
+        "220250093", "d1", note_text=other_text, ledger_path=dest
+    )
+    seen = {}
+
+    def fake_file(*args, **kwargs):
+        seen["ledger_path"] = kwargs.get("ledger_path")
+        return {"status": "filed", "discussion_id": "d1", "note_id": "n-new"}
+
+    monkeypatch.setattr(discussions, "file_note_to_existing_discussion", fake_file)
+
+    class Miss:
+        def get_discussion_with_notes(self, discussion_id):
+            return {
+                "notes": [{"noteId": "n-other", "body": "already there"}],
+                "noteCount": 1,
+                "mostRecentNoteId": "n-other",
+            }
+
+        def get_discussion(self, discussion_id):
+            return {"noteCount": 1, "mostRecentNoteId": "n-other"}
+
+    driver._settle_unconfirmed_note(
+        Miss(),
+        "220250093",
+        "d1",
+        other_text,
+        {"status": "already_posted", "reason": driver._UNCONFIRMED_GUARD},
+        allow=True,
+        ledger_path=dest,
+    )
+    assert seen["ledger_path"] == dest
+    assert (
+        note_ledger.find_posted_note("220250093", "d1", other_text, ledger_path=dest) is None
+    )
+    assert not other.exists()
+
+
+def test_unreadable_legacy_ledger_is_skipped(tmp_path, monkeypatch):
+    dest = tmp_path / "discussion-note-ledger.json"
+    legacy = tmp_path / "old.json"
+    legacy.write_text(json.dumps({"version": 1, "notes": [{"applicant_id": "1"}]}), encoding="utf-8")
+    real = Path.is_file
+
+    def guarded(self):
+        if self == legacy:
+            raise PermissionError("denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_file", guarded)
+    assert note_ledger.migrate_driver_note_ledger(dest, legacy) == "absent"
+    assert not dest.exists()

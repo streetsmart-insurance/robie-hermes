@@ -136,9 +136,10 @@ WEBHOOKS_LEFT_TO_EMAIL = frozenset(
     }
 )
 
-# Email notice types this poller can already have filed. Failed-payment
-# mail is late_payment in the email classifier and is excluded in
-# email_covered_by_api, not here.
+# Email notice types this poller can already have filed. Payment failed
+# mail is late_payment too. It skips only when the same policy and the
+# same invoice (or the same bill) are already filed. See
+# _payment_failed_email_key.
 API_OWNED_EMAIL_TYPES = frozenset(
     {
         triage.LATE_PAYMENT,
@@ -171,12 +172,31 @@ _LOAN_URL_RE = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
     re.IGNORECASE,
 )
+_FILED_SELECT_BILL = (
+    "event_key, program_id, event_type, anchor, occurred_at, invoice_id, "
+    "insured_name, loan_id, policy_numbers, due_on, amount"
+)
 _FILED_SELECT = (
     "event_key, program_id, event_type, anchor, occurred_at, invoice_id, "
     "insured_name, loan_id"
 )
 _FILED_SELECT_BASE = (
     "event_key, program_id, event_type, anchor, occurred_at, invoice_id"
+)
+_CHECKOUT_INVOICE_RE = re.compile(
+    r"/invoices/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    re.IGNORECASE,
+)
+# "Invoice date", "Invoice from", and "Invoice amount" are not invoice ids.
+_LABELED_INVOICE_UUID_RE = re.compile(
+    r"\bInvoice\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b",
+    re.IGNORECASE,
+)
+_LABELED_INVOICE_NUMBER_RE = re.compile(
+    r"\bInvoice\s+(?:No\.?|#)\s+([A-Za-z0-9-]{4,})",
+    re.IGNORECASE,
 )
 
 
@@ -192,8 +212,17 @@ def remittance_applicant_id() -> str:
 class ApiNoticeStoreUnavailable(RuntimeError):
     """Raised only by callers that still want a hard failure.
 
-    The email driver does not use this. A missing or unreadable live store
-    means the email files, because email is the source until the API is live.
+    The email driver does not use this. A missing live store means the
+    email files, because email is the source until the API is live.
+    """
+
+
+class ApiNoticeStoreUnreadable(RuntimeError):
+    """The live store exists but could not be read.
+
+    Payment-failed mail holds instead of posting. Other notice types still
+    file: a missed dedupe is one note, and a held past-due email is a
+    missed note.
     """
 
 
@@ -581,28 +610,54 @@ def _ensure_filed_identity_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE filed_events ADD COLUMN loan_id TEXT NOT NULL DEFAULT ''"
         )
+    for column in ("policy_numbers", "due_on", "amount"):
+        if column not in have:
+            conn.execute(
+                f"ALTER TABLE filed_events ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+            )
 
 
 def _fetch_filed_rows(
     conn: sqlite3.Connection, where: str, params: tuple[str, ...]
 ) -> list[dict[str, str]]:
-    """Read filed rows. A store from before the identity columns still reads."""
-    try:
-        fetched = conn.execute(
-            f"SELECT {_FILED_SELECT} FROM filed_events WHERE {where}",
-            params,
-        ).fetchall()
-    except sqlite3.OperationalError:
-        fetched = conn.execute(
-            f"SELECT {_FILED_SELECT_BASE} FROM filed_events WHERE {where}",
-            params,
-        ).fetchall()
-    return [dict(row) for row in fetched]
+    """Read filed rows. A store from before the bill columns still reads."""
+    last_error: sqlite3.OperationalError | None = None
+    for select in (_FILED_SELECT_BILL, _FILED_SELECT, _FILED_SELECT_BASE):
+        try:
+            fetched = conn.execute(
+                f"SELECT {select} FROM filed_events WHERE {where}",
+                params,
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            continue
+        return [dict(row) for row in fetched]
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def _stored_loan_id(notice: ApiNotice) -> str:
     program = notice.program if isinstance(notice.program, dict) else {}
     return str(program.get("loan_id") or "").strip()
+
+
+def _stored_bill_fields(notice: ApiNotice) -> tuple[str, str, str]:
+    """Policy list, due date, and amount saved so a later email can match."""
+    policies = [
+        str(item).strip() for item in notice.policy_numbers if str(item or "").strip()
+    ]
+    due = triage._due_on_date(notice.body) or ""
+    amount = cents_to_money(notice.amount_cents) or ""
+    if not amount:
+        amount = (
+            triage._money_matching(
+                notice.body,
+                r"(?:past-due payment of|payment of)\s+\$\s?([\d,]+\.\d{2})",
+            )
+            or ""
+        )
+    return json.dumps(policies), due, amount
 
 
 class EventKeyStore:
@@ -633,7 +688,10 @@ class EventKeyStore:
                     status TEXT NOT NULL,
                     recorded_at TEXT NOT NULL,
                     insured_name TEXT NOT NULL DEFAULT '',
-                    loan_id TEXT NOT NULL DEFAULT ''
+                    loan_id TEXT NOT NULL DEFAULT '',
+                    policy_numbers TEXT NOT NULL DEFAULT '',
+                    due_on TEXT NOT NULL DEFAULT '',
+                    amount TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_filed_program_type
                     ON filed_events(program_id, event_type);
@@ -693,19 +751,24 @@ class EventKeyStore:
             for key in keys:
                 if not key:
                     continue
+                policies, due_on, amount = _stored_bill_fields(notice)
                 conn.execute(
                     """
                     INSERT INTO filed_events (
                         event_key, program_id, event_type, anchor, occurred_at,
-                        invoice_id, status, recorded_at, insured_name, loan_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'filed', ?, ?, ?)
+                        invoice_id, status, recorded_at, insured_name, loan_id,
+                        policy_numbers, due_on, amount
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'filed', ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(event_key) DO UPDATE SET
                         status='filed',
                         occurred_at=excluded.occurred_at,
                         invoice_id=excluded.invoice_id,
                         recorded_at=excluded.recorded_at,
                         insured_name=excluded.insured_name,
-                        loan_id=excluded.loan_id
+                        loan_id=excluded.loan_id,
+                        policy_numbers=excluded.policy_numbers,
+                        due_on=excluded.due_on,
+                        amount=excluded.amount
                     """,
                     (
                         key,
@@ -717,6 +780,9 @@ class EventKeyStore:
                         moment,
                         str(notice.insured_name or "").strip(),
                         _stored_loan_id(notice),
+                        policies,
+                        due_on,
+                        amount,
                     ),
                 )
 
@@ -736,6 +802,28 @@ class EventKeyStore:
                 "event_type=? AND status='filed'",
                 (str(event_type or "").strip().lower(),),
             )
+
+    def all_filed(self) -> list[dict[str, str]]:
+        """Filed late-payment rows.
+
+        A payment confirmation can share an invoice id. It must not suppress
+        a Payment failed note.
+        """
+        with self._connect() as conn:
+            return _fetch_filed_rows(
+                conn,
+                "event_type=? AND status='filed'",
+                (triage.LATE_PAYMENT,),
+            )
+
+    def late_payment_episodes(self) -> dict[str, tuple[str, str]]:
+        """program id -> (status_holds, anchor) for late-payment episodes."""
+        with self._connect() as conn:
+            return _late_payment_episodes(conn)
+
+    def program_policy_map(self) -> dict[str, list[str]]:
+        with self._connect() as conn:
+            return _program_policy_map(conn)
 
     def episode_status(self, episode_id: str) -> str:
         with self._connect() as conn:
@@ -1547,6 +1635,323 @@ def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[d
         conn.close()
 
 
+def _connect_readonly_store(path: Path) -> sqlite3.Connection | None:
+    """Open the live store without creating it.
+
+    ``None`` means the file is absent. A present file that cannot be read
+    raises :class:`ApiNoticeStoreUnreadable`.
+    """
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ApiNoticeStoreUnreadable("not a file")
+    quoted = urlparse.quote(path.resolve().as_posix())
+    uri = f"file:{quoted}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise ApiNoticeStoreUnreadable(type(exc).__name__) from exc
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+    except sqlite3.Error as exc:
+        conn.close()
+        raise ApiNoticeStoreUnreadable(type(exc).__name__) from exc
+    return conn
+
+
+def _program_policy_map(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    try:
+        fetched = conn.execute(
+            "SELECT program_id, policy_numbers FROM program_policies"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    found: dict[str, list[str]] = {}
+    for row in fetched:
+        key = str(row["program_id"] or "").strip().lower()
+        if not key:
+            continue
+        try:
+            parsed = json.loads(str(row["policy_numbers"] or "[]"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, list):
+            continue
+        numbers = [str(item).strip() for item in parsed if str(item or "").strip()]
+        if numbers:
+            found[key] = numbers
+    return found
+
+
+def _readonly_payment_failed_context(
+    path: Path,
+) -> tuple[list[dict[str, str]], dict[str, list[str]], dict[str, tuple[str, str]]]:
+    conn = _connect_readonly_store(path)
+    if conn is None:
+        return [], {}, {}
+    try:
+        try:
+            rows = _fetch_filed_rows(
+                conn,
+                "event_type=? AND status='filed'",
+                (triage.LATE_PAYMENT,),
+            )
+        except sqlite3.Error as exc:
+            raise ApiNoticeStoreUnreadable(type(exc).__name__) from exc
+        return rows, _program_policy_map(conn), _late_payment_episodes(conn)
+    finally:
+        conn.close()
+
+
+def _late_payment_episodes(conn: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    """program id -> (status_holds, anchor). A missing table is no episodes."""
+    suffix = f"|{triage.LATE_PAYMENT}"
+    try:
+        fetched = conn.execute(
+            "SELECT episode_id, status_holds, anchor FROM episodes"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    found: dict[str, tuple[str, str]] = {}
+    for row in fetched:
+        episode_id = str(row["episode_id"] or "").strip().lower()
+        if not episode_id.endswith(suffix):
+            continue
+        program = episode_id[: -len(suffix)].strip()
+        if not program:
+            continue
+        found[program] = (
+            str(row["status_holds"] or ""),
+            str(row["anchor"] or "").strip(),
+        )
+    return found
+
+
+def _policy_numbers_on_row(raw: str) -> list[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [text]
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item or "").strip()]
+
+
+def _normalized_policies(values: list[str]) -> set[str]:
+    from .ascend_notice_driver import normalize_policy_number
+
+    return {
+        normalize_policy_number(item)
+        for item in values
+        if normalize_policy_number(item)
+    }
+
+
+def _row_policies(
+    row: dict[str, str], program_policies: dict[str, list[str]]
+) -> list[str]:
+    direct = _policy_numbers_on_row(str(row.get("policy_numbers") or ""))
+    if direct:
+        return direct
+    program = str(row.get("program_id") or "").strip().lower()
+    return list(program_policies.get(program) or [])
+
+
+def _row_invoice_tokens(row: dict[str, str]) -> set[str]:
+    found: set[str] = set()
+    invoice = str(row.get("invoice_id") or "").strip().lower()
+    if invoice:
+        found.add(invoice)
+    anchor = str(row.get("anchor") or "").strip().lower()
+    # Program-level anchors are timestamps. Those are not invoice ids.
+    if anchor and "t" not in anchor:
+        found.add(anchor)
+    return found
+
+
+def _payment_failed_invoice_ids(body: str, program_id: str) -> set[str]:
+    """Invoice ids on a Payment failed email. The program UUID is not one.
+
+    A checkout URL contributes its invoice UUID. Other tokens count only
+    when they are a UUID after ``Invoice`` or a value after ``Invoice No.``
+    or ``Invoice #``. ``Invoice date``, ``Invoice from``, and ``Invoice
+    amount`` are not ids.
+    """
+    text = str(body or "")
+    program = str(program_id or "").strip().lower()
+    found = {match.group(1).lower() for match in _CHECKOUT_INVOICE_RE.finditer(text)}
+    for pattern in (_LABELED_INVOICE_UUID_RE, _LABELED_INVOICE_NUMBER_RE):
+        for match in pattern.finditer(text):
+            token = match.group(1).strip().lower()
+            if token and token != program:
+                found.add(token)
+    found.discard(program)
+    return found
+
+
+def _failed_payment_amount(body: str) -> str:
+    amount = triage._money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+    if amount:
+        return amount
+    return (
+        triage._money_matching(
+            body,
+            r"Failed because of[^\n]*\n+\s*\$\s?([\d,]+\.\d{2})",
+        )
+        or ""
+    )
+
+
+def _norm_due(value: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", text):
+        return text
+    return _us_date(text)
+
+
+def _norm_amount(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"([\d,]+\.\d{2})", text)
+    if not match:
+        return ""
+    return triage.format_money_amount(match.group(1)) or ""
+
+
+def _anchors_equal(left: str, right: str) -> bool:
+    first = normalize_anchor(left) or str(left or "").strip()
+    second = normalize_anchor(right) or str(right or "").strip()
+    return bool(first) and first == second
+
+
+def _program_level_overdue_covers(
+    row: dict[str, str],
+    *,
+    program_id: str,
+    email_policies: set[str],
+    program_policies: dict[str, list[str]],
+    episodes: dict[str, tuple[str, str]],
+) -> bool:
+    """True when this no-invoice late payment is the current overdue episode.
+
+    Real Payment failed mail names an invoice and a fee-inclusive total, so
+    it does not match the program row's subtotal. The episode is the cover.
+    Policy overlap stays here. An exact invoice id does not need it.
+    """
+    if str(row.get("event_type") or "").strip().lower() not in {"", triage.LATE_PAYMENT}:
+        return False
+    if str(row.get("invoice_id") or "").strip() or _row_invoice_tokens(row):
+        return False
+    row_program = str(row.get("program_id") or "").strip().lower()
+    email_program = str(program_id or "").strip().lower()
+    if email_program and row_program and email_program != row_program:
+        return False
+    program = row_program or email_program
+    if not program:
+        return False
+    row_policies = _normalized_policies(_row_policies(row, program_policies))
+    if not email_policies or not row_policies or not (email_policies & row_policies):
+        return False
+    known = episodes.get(program)
+    if known is None:
+        # Filed before episodes were stored. The row itself is the episode.
+        return True
+    status, current = known
+    if status != "payment_overdue":
+        return False
+    return _anchors_equal(str(row.get("anchor") or ""), current)
+
+
+def _match_payment_failed(
+    rows: list[dict[str, str]],
+    program_policies: dict[str, list[str]],
+    *,
+    program_id: str,
+    body: str,
+    episodes: dict[str, tuple[str, str]] | None = None,
+) -> str:
+    """Event key when this Payment failed email was already filed.
+
+    An invoice UUID match stands on its own, including when the row has no
+    policy. A filed late payment with no invoice id covers the same program
+    and policy while that overdue episode is current, even when the email
+    names an invoice. Real mail has no due date and the amount includes the
+    card fee, so the due-and-amount fallback is only for an email that has
+    no invoice id, and only when the policies overlap. A different invoice
+    does not match through the due date.
+    """
+    email_policies = _normalized_policies(triage.extract_policy_numbers(body))
+    invoice_ids = _payment_failed_invoice_ids(body, program_id)
+    episode_rows = episodes or {}
+    email_due = triage._due_on_date(body) or ""
+    email_amount = _norm_amount(_failed_payment_amount(body))
+    for row in rows:
+        if invoice_ids and invoice_ids & _row_invoice_tokens(row):
+            return str(row.get("event_key") or "")
+    for row in rows:
+        if _program_level_overdue_covers(
+            row,
+            program_id=program_id,
+            email_policies=email_policies,
+            program_policies=program_policies,
+            episodes=episode_rows,
+        ):
+            return str(row.get("event_key") or "")
+    if invoice_ids or not email_policies:
+        return ""
+    for row in rows:
+        row_policies = _normalized_policies(_row_policies(row, program_policies))
+        if not email_policies & row_policies:
+            continue
+        if not email_due or not email_amount:
+            continue
+        if (
+            _norm_due(str(row.get("due_on") or "")) == email_due
+            and _norm_amount(str(row.get("amount") or "")) == email_amount
+        ):
+            return str(row.get("event_key") or "")
+    return ""
+
+
+def _payment_failed_email_key(
+    *,
+    program_id: str,
+    subject: str,
+    body: str,
+    store: EventKeyStore | None,
+) -> str:
+    """Filed event key for this Payment failed email.
+
+    Raises :class:`ApiNoticeStoreUnreadable` when the live file cannot be
+    read. A missing file is no row.
+    """
+    del subject  # classification already decided this is Payment failed
+    try:
+        if store is not None:
+            rows = store.all_filed()
+            policies = store.program_policy_map()
+            episodes = store.late_payment_episodes()
+        else:
+            rows, policies, episodes = _readonly_payment_failed_context(live_db_path())
+    except ApiNoticeStoreUnreadable:
+        raise
+    except sqlite3.Error as exc:
+        raise ApiNoticeStoreUnreadable(type(exc).__name__) from exc
+    return _match_payment_failed(
+        rows,
+        policies,
+        program_id=program_id,
+        body=body,
+        episodes=episodes,
+    )
+
+
 def email_covered_by_api(
     *,
     program_id: str,
@@ -1558,16 +1963,23 @@ def email_covered_by_api(
 ) -> str:
     """Event key when the live API poller already filed this email.
 
-    Empty means the email driver files it. A missing, unreadable, or empty
-    live store is empty: email is the only source until the API is live.
-    The dry-run database is never opened. Only rows with status ``filed``
-    count. The read path does not create a folder, a file, or a table.
+    Empty means the email driver files it. A missing or empty live store
+    is empty: email is the only source until the API is live. An unreadable
+    store is also empty for every type except Payment failed, which raises
+    :class:`ApiNoticeStoreUnreadable` so the driver holds. The dry-run
+    database is never opened. Only rows with status ``filed`` count. The
+    read path does not create a folder, a file, or a table.
     """
     kind = str(notice_type or "").strip()
     if kind not in API_OWNED_EMAIL_TYPES:
         return ""
     if kind == triage.LATE_PAYMENT and triage._payment_failed(subject, body):
-        return ""
+        return _payment_failed_email_key(
+            program_id=str(program_id or "").strip().lower(),
+            subject=subject,
+            body=body,
+            store=store,
+        )
     program = str(program_id or "").strip().lower()
     if not program and kind != triage.LATE_PAYMENT:
         return ""

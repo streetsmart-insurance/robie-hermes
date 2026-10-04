@@ -27,6 +27,14 @@
 #
 # Tests pass --prefix and stub --systemctl / --systemd-analyze. --prefix is
 # not for Production.
+#
+# The note ledger the driver locks lives in
+# /var/lib/robie-ascend-notice-driver/discussion-note-ledger.json
+# (mode 0600, owner streetsmart-hermes). The installer creates that
+# directory mode 0755 for the unit user. If
+# /opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json
+# has notes and the new file does not, it is copied once. The old file is
+# not locked and not written. Root can read it when the driver user cannot.
 
 set -euo pipefail
 
@@ -37,6 +45,9 @@ LIVE_EXAMPLE="30-live.conf.example"
 LIVE_CONF="30-live.conf"
 WRITE_SCOPE_CONF="10-write-scope.conf"
 STATE_DIR_DEFAULT="/var/lib/robie-ascend-notice-driver"
+UNIT_USER="streetsmart-hermes"
+UNIT_GROUP="streetsmart-hermes"
+LEGACY_LEDGER_DEFAULT="/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json"
 
 RELEASE_DIR=""
 PREFIX=""
@@ -49,7 +60,7 @@ SYSTEMCTL="${ASCEND_DRIVER_INSTALL_SYSTEMCTL:-systemctl}"
 ANALYZE="${ASCEND_DRIVER_INSTALL_ANALYZE:-systemd-analyze}"
 
 usage() {
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -161,6 +172,57 @@ ensure_dir() {
   fi
   mkdir -p "$dir"
   chmod "$mode" "$dir"
+}
+
+legacy_note_ledger() {
+  if [[ -n "${ASCEND_DRIVER_LEGACY_NOTE_LEDGER:-}" ]]; then
+    printf '%s\n' "$ASCEND_DRIVER_LEGACY_NOTE_LEDGER"
+    return
+  fi
+  if [[ -n "$PREFIX" ]]; then
+    printf '%s\n' "${PREFIX}${LEGACY_LEDGER_DEFAULT}"
+  else
+    printf '%s\n' "$LEGACY_LEDGER_DEFAULT"
+  fi
+}
+
+own_state_dir() {
+  local dir="$1"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf 'dry-run: chown %s:%s %q\n' "$UNIT_USER" "$UNIT_GROUP" "$dir"
+    return 0
+  fi
+  if [[ "${EUID}" -eq 0 ]] && id "$UNIT_USER" >/dev/null 2>&1; then
+    chown "${UNIT_USER}:${UNIT_GROUP}" "$dir"
+  fi
+}
+
+migrate_note_ledger() {
+  local legacy dest py status
+  legacy="$(legacy_note_ledger)"
+  dest="${STATE_DIR}/discussion-note-ledger.json"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf 'dry-run: migrate note ledger %q -> %q (mode 0600, owner %s)\n' \
+      "$legacy" "$dest" "$UNIT_USER"
+    return 0
+  fi
+  py="${ASCEND_DRIVER_INSTALL_PYTHON:-python3}"
+  if [[ -z "$PREFIX" && -x /opt/streetsmart-hermes/venv/bin/python ]]; then
+    py="/opt/streetsmart-hermes/venv/bin/python"
+  fi
+  status="$(
+    PYTHONPATH="${RELEASE_DIR}${PYTHONPATH:+:$PYTHONPATH}" \
+      ASCEND_DRIVER_NOTE_LEDGER="$dest" \
+      ASCEND_DRIVER_LEGACY_NOTE_LEDGER="$legacy" \
+      "$py" -c 'from robie_job_engine.discussion_note_ledger import migrate_driver_note_ledger; print(migrate_driver_note_ledger())'
+  )"
+  echo "note ledger migration: ${status}"
+  if [[ -f "$dest" ]]; then
+    chmod 0600 "$dest"
+    if [[ "${EUID}" -eq 0 ]] && id "$UNIT_USER" >/dev/null 2>&1; then
+      chown "${UNIT_USER}:${UNIT_GROUP}" "$dest"
+    fi
+  fi
 }
 
 dropin_sets_mailbox() {
@@ -307,6 +369,8 @@ install_release() {
     echo "dry-run: ${SYSTEMCTL} daemon-reload"
     echo "dry-run: ${ANALYZE} verify ${ETC}/${UNIT}"
     echo "dry-run: ${SYSTEMCTL} start ${UNIT}"
+    echo "dry-run: create ${STATE_DIR} mode 0755 owner ${UNIT_USER}"
+    echo "dry-run: migrate note ledger into ${STATE_DIR}/discussion-note-ledger.json mode 0600"
     echo "dry-run: print ${STATE_DIR}/last-run.json"
     if [[ "$DO_LIVE" -eq 1 ]]; then
       echo "dry-run: install ${LIVE_CONF} from ${LIVE_EXAMPLE} after the dry run"
@@ -331,9 +395,8 @@ install_release() {
   ensure_dir "$ETC" 0755
   ensure_dir "$DROPIN_DIR" 0755
   ensure_dir "$STATE_DIR" 0755
-  if [[ "${EUID}" -eq 0 ]] && id streetsmart-hermes >/dev/null 2>&1; then
-    chown streetsmart-hermes:streetsmart-hermes "$STATE_DIR"
-  fi
+  own_state_dir "$STATE_DIR"
+  migrate_note_ledger
 
   install_file "$src_unit" "${ETC}/${UNIT}"
   install_file "$src_timer" "${ETC}/${TIMER}"
