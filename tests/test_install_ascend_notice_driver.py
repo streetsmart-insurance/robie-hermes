@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -132,6 +133,8 @@ class InstallAscendNoticeDriverTests(unittest.TestCase):
             self.assertFalse((dropin / "30-live.conf").exists())
             timer = (etc / TIMER).read_text(encoding="utf-8")
             self.assertIn("Persistent=true", timer)
+            self.assertIn("OnBootSec=5min", timer)
+            self.assertIn("OnActiveSec=15min", timer)
             self.assertIn("OnUnitActiveSec=15min", timer)
             state = prefix / "var" / "lib" / "robie-ascend-notice-driver"
             self.assertTrue(state.is_dir())
@@ -203,6 +206,57 @@ class InstallAscendNoticeDriverTests(unittest.TestCase):
             self.assertFalse((dropin / "10-write-scope.conf").exists())
             self.assertIn("timer left stopped", rollback.stdout)
 
+    def test_install_copies_legacy_note_ledger_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            legacy_dir = (
+                prefix
+                / "opt"
+                / "streetsmart-hermes"
+                / "robie-job-engine"
+                / "data"
+            )
+            legacy_dir.mkdir(parents=True)
+            legacy = legacy_dir / "discussion-note-ledger.json"
+            note = {
+                "applicant_id": "220250093",
+                "discussion_id": "d-pay",
+                "document_id": "",
+                "note_text_sha256": "abc123",
+                "note_id": "n-1",
+            }
+            legacy.write_text(
+                json.dumps({"version": 1, "notes": [note]}),
+                encoding="utf-8",
+            )
+            legacy.chmod(0o600)
+            log = prefix / "stub.log"
+            result = self._run(prefix, log)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("note ledger migration: copied", result.stdout)
+            dest = (
+                prefix
+                / "var"
+                / "lib"
+                / "robie-ascend-notice-driver"
+                / "discussion-note-ledger.json"
+            )
+            self.assertTrue(dest.is_file())
+            self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o600)
+            state = dest.parent
+            self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o755)
+            saved = json.loads(dest.read_text(encoding="utf-8"))
+            self.assertEqual(saved["notes"], [note])
+            legacy.write_text(
+                json.dumps({"version": 1, "notes": [note, {"applicant_id": "9"}]}),
+                encoding="utf-8",
+            )
+            again = self._run(prefix, log)
+            self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+            self.assertIn("note ledger migration: kept", again.stdout)
+            kept = json.loads(dest.read_text(encoding="utf-8"))
+            self.assertEqual(kept["notes"], [note])
+
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp) / "preview"
@@ -212,6 +266,8 @@ class InstallAscendNoticeDriverTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("dry-run:", result.stdout)
             self.assertIn("ASCEND_DRIVER_MAILBOX", result.stdout)
+            self.assertIn("discussion-note-ledger.json mode 0600", result.stdout)
+            self.assertIn("owner streetsmart-hermes", result.stdout)
             self.assertIn("disable --now", result.stdout)
             self.assertFalse((prefix / "etc").exists())
             self.assertFalse(log.exists())

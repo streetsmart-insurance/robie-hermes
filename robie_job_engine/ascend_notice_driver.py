@@ -52,6 +52,32 @@ Safety (non-negotiable):
   read EZLynx. A separate read of the existing discussion note still
   runs, including for applicants the write allowlist blocks, and a note
   already on the discussion is not filed again.
+- A Payment failed email is ``api_already_filed`` when the live API store
+  already filed the same invoice id, even when that row has no policy.
+  A filed late-payment row with no invoice id also covers it when the
+  row is the same program and policy and that program is still in the
+  overdue episode. Real Payment failed mail has no due date, and the
+  amount includes the transaction fee, so that episode match is what
+  stops a second note. When the email itself has no invoice id, the
+  same policy plus the same due date and amount is the same bill.
+  A different invoice with no program-level row still files. A missing
+  store is no row. If that store cannot be read, the email is held
+  (``api_store_unreadable``) and nothing is posted. Other notice types
+  still file when the store is missing or unreadable.
+- The note ledger this driver locks is ``ASCEND_DRIVER_NOTE_LEDGER``,
+  which the email unit sets to
+  ``/var/lib/robie-ascend-notice-driver/discussion-note-ledger.json``.
+  ``main`` copies that path onto the context. Callers that do not opt
+  in, including the API poller, keep the shared ledger from
+  ``default_ledger_path``. The installer creates the directory mode
+  0755, owned by ``streetsmart-hermes`` (the unit user). The ledger file
+  is mode 0600. The sandbox can write only under that directory, so the
+  lock file lives beside the ledger. If the lock cannot be taken, nothing
+  is sent. When the new file has no notes, a readable copy of
+  ``/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json``
+  is copied once. If that copy cannot be written, lookups still read the
+  old file and do not lock or write it. The installer runs that copy as
+  root, because the old file is mode 0600 and owned by another account.
 - Never deletes anything. Never invents an applicant_id or a CSR username.
 - Live notes on an existing category discussion go through
   ``file_note_to_existing_discussion``. A missing category discussion is
@@ -99,6 +125,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
@@ -1221,6 +1248,10 @@ class DriverContext:
     # driver cannot (its unit only writes its own state directory), so it
     # leaves this false and does not try.
     remember_filings: bool = False
+    # Set by the email driver's main when ASCEND_DRIVER_NOTE_LEDGER is set.
+    # None keeps default_ledger_path(), which is the shared file the API
+    # poller can write. Do not point the poller at /var/lib.
+    note_ledger_path: Path | None = None
     # Set for one ready row whose previous attempt was an EZLynx 5xx or
     # timeout. Only that retry may look at with-notes and, on a complete
     # miss, clear the sent-unconfirmed row. Every other filing leaves the
@@ -1638,6 +1669,8 @@ def _confirm_landed_note(
     discussion_id: str,
     note_text: str,
     note_id: str,
+    *,
+    ledger_path: Path | None = None,
 ) -> None:
     """Upgrade the sent-unconfirmed row once the discussion shows the body."""
     from .discussion_note_ledger import (
@@ -1653,6 +1686,7 @@ def _confirm_landed_note(
             note_text=note_text,
             note_id=note_id,
             source="discussion_reread",
+            ledger_path=ledger_path,
             refresh=True,
             confirmation=CONFIRMED,
         )
@@ -1695,6 +1729,7 @@ def _settle_unconfirmed_note(
     filed: dict[str, Any],
     *,
     allow: bool,
+    ledger_path: Path | None = None,
 ) -> dict[str, Any]:
     """On a transient retry, settle only from a complete with-notes read.
 
@@ -1725,7 +1760,13 @@ def _settle_unconfirmed_note(
         matched = discussions.find_identical_note(record, note_text)
         if matched is not None:
             note_id = _note_id_from(matched)
-            _confirm_landed_note(applicant_id, discussion_id, note_text, note_id)
+            _confirm_landed_note(
+                applicant_id,
+                discussion_id,
+                note_text,
+                note_id,
+                ledger_path=ledger_path,
+            )
             return {
                 "status": "filed",
                 "reason": "The note was already on the discussion.",
@@ -1742,7 +1783,12 @@ def _settle_unconfirmed_note(
     try:
         from .discussion_note_ledger import undo_unconfirmed_note
 
-        undo_unconfirmed_note(applicant_id, discussion_id, note_text=note_text)
+        undo_unconfirmed_note(
+            applicant_id,
+            discussion_id,
+            note_text=note_text,
+            ledger_path=ledger_path,
+        )
     except Exception as exc:  # noqa: BLE001 - do not post while the guard row remains
         logger.warning(
             "unconfirmed note row was not cleared for discussion %s: %s",
@@ -1756,6 +1802,7 @@ def _settle_unconfirmed_note(
         note_text,
         discussion_id=discussion_id,
         dry_run=False,
+        ledger_path=ledger_path,
     )
 
 
@@ -1765,13 +1812,20 @@ def _file_existing_note(
     discussion_id: str,
     note_text: str,
 ) -> dict[str, Any]:
-    """Post to an existing discussion. Settle only a transient retry."""
+    """Post to an existing discussion. Settle only a transient retry.
+
+    The ledger is the email driver's opt-in file when ``main`` set it, and
+    the shared default otherwise. Confirm, undo, and the repost use that
+    same file.
+    """
+    ledger_path = getattr(ctx, "note_ledger_path", None)
     filed = discussions.file_note_to_existing_discussion(
         ctx.discussion_client,
         applicant_id,
         note_text,
         discussion_id=discussion_id,
         dry_run=False,
+        ledger_path=ledger_path,
     )
     return _settle_unconfirmed_note(
         ctx.discussion_client,
@@ -1780,6 +1834,7 @@ def _file_existing_note(
         note_text,
         filed,
         allow=bool(getattr(ctx, "transient_note_retry", False)),
+        ledger_path=ledger_path,
     )
 
 
@@ -1921,6 +1976,7 @@ def recent_same_notice(
     now: datetime | None = None,
     not_before: datetime | None = None,
     notice_text: str = "",
+    ledger_path: Path | None = None,
 ) -> dict[str, Any] | None:
     """A note already posted for this same bill.
 
@@ -1976,6 +2032,7 @@ def recent_same_notice(
         now=moment,
         not_before=floor,
         notice_text=notice_text,
+        ledger_path=ledger_path,
     )
     if remembered is None:
         return None
@@ -1992,6 +2049,7 @@ def _remember_notice_filing(
     policy_numbers: list[str],
     notice_type: str,
     notice_text: str,
+    ledger_path: Path | None = None,
 ) -> None:
     """Remember a note the API poller posted. The email driver does not call this."""
     from .discussion_note_ledger import DiscussionNoteLedgerError, remember_notice_filing
@@ -2003,6 +2061,7 @@ def _remember_notice_filing(
             policy_numbers=policy_numbers,
             notice_type=notice_type,
             notice_text=notice_text,
+            ledger_path=ledger_path,
         )
     except DiscussionNoteLedgerError as exc:
         logger.warning("notice filing was not remembered: %s", exc)
@@ -2230,10 +2289,22 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             result.reason = gate_reason
             return result
 
-    # Skip only when the live store has this key filed. A missing, empty,
-    # or unreadable store means email files. The poller's own api: notice
-    # is the writer and does not consult this hook.
-    covered_key = _api_source_already_filed(notice, notice_type, program_uuid)
+    # Skip only when the live store has this key filed. A missing or empty
+    # store means email files. Payment failed holds when the store cannot
+    # be read. The poller's own api: notice is the writer and does not
+    # consult this hook.
+    from .ascend_api_notice_source import ApiNoticeStoreUnreadable
+
+    try:
+        covered_key = _api_source_already_filed(notice, notice_type, program_uuid)
+    except ApiNoticeStoreUnreadable:
+        logger.warning(
+            "ascend api store is not readable; holding payment-failed notice %s",
+            notice.message_id,
+        )
+        result.reason = "api_store_unreadable"
+        result.detail["duplicate_source"] = "ascend_api"
+        return result
     if covered_key:
         result.reason = "api_already_filed"
         result.detail["event_key"] = covered_key
@@ -2438,6 +2509,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 notice_text="\n".join(
                     part for part in (notice.subject, notice.body, note_text) if part
                 ),
+                ledger_path=ctx.note_ledger_path,
             )
         except Exception as exc:  # noqa: BLE001 - do not post when the check cannot finish
             result.reason = f"discussion_error: {type(exc).__name__}"
@@ -2724,6 +2796,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             notice_text="\n".join(
                 part for part in (notice.subject, notice.body, note_text) if part
             ),
+            ledger_path=ctx.note_ledger_path,
         )
     # The notice driver cannot write the API store. Its unit is
     # ProtectSystem=strict and ReadWritePaths covers only
@@ -2767,15 +2840,35 @@ def _driver_gate_refusal() -> str:
     return ""
 
 
+def _notice_driver_ledger_path():
+    """Opt-in ledger for the email driver. None keeps the shared default.
+
+    ``ASCEND_DRIVER_NOTE_LEDGER`` is set by the email unit. Unset, including
+    outside a test, stays on ``default_ledger_path`` so the API poller can
+    write the shared ledger. ``main`` copies this onto the context. Notice
+    processing does not call it on its own.
+    """
+    from .discussion_note_ledger import ledger_path_for_notice_driver
+
+    return ledger_path_for_notice_driver()
+
+
+def _opt_in_email_driver_ledger(ctx: DriverContext) -> None:
+    """Point this context at the email driver's ledger when the unit opted in."""
+    ctx.note_ledger_path = _notice_driver_ledger_path()
+
+
 def _api_source_already_filed(
     notice: EmailNotice, notice_type: str, program_uuid: str
 ) -> str:
     """Live event key when that filing already happened. Empty means file.
 
-    A missing, empty, or unreadable live store is empty. Email is the only
-    source until the API poller is live, so the driver files the notice.
-    A message id of ``api:<event key>`` is the poller's own synthetic
-    notice. That path is the writer; its dedupe is the event-key store.
+    A missing or empty live store is empty. Email is the only source until
+    the API poller is live, so the driver files the notice. Payment failed
+    raises :class:`ApiNoticeStoreUnreadable` when the store cannot be read,
+    and the caller holds. A message id of ``api:<event key>`` is the
+    poller's own synthetic notice. That path is the writer; its dedupe is
+    the event-key store.
     """
     if str(notice.message_id or "").startswith("api:"):
         return ""
@@ -2783,7 +2876,10 @@ def _api_source_already_filed(
     if not program_id and notice_type != triage.LATE_PAYMENT:
         return ""
     try:
-        from .ascend_api_notice_source import email_covered_by_api
+        from .ascend_api_notice_source import (
+            ApiNoticeStoreUnreadable,
+            email_covered_by_api,
+        )
 
         found = email_covered_by_api(
             program_id=program_id,
@@ -2792,6 +2888,8 @@ def _api_source_already_filed(
             body=notice.body,
             internal_date=notice.internal_date,
         )
+    except ApiNoticeStoreUnreadable:
+        raise
     except Exception as exc:  # noqa: BLE001 - a bad store must not block the email
         logger.warning(
             "ascend api dedupe lookup failed (%s); filing %s",
@@ -3066,6 +3164,7 @@ def main(argv: list[str] | None = None) -> int:
             due_days=args.due_days,
             mailboxes=mailboxes,
         )
+        _opt_in_email_driver_ledger(ctx)
         summary = run_driver(ctx)
     except Exception as exc:  # noqa: BLE001 - top-level fail closed
         logger.error("driver failed closed: %s: %s", type(exc).__name__, exc)

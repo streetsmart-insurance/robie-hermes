@@ -3,7 +3,11 @@ Description=ROBIE Ascend notice driver every 15 minutes
 Documentation=file:/opt/streetsmart-hermes/current/scripts/install-ascend-notice-driver.sh
 
 [Timer]
+# OnUnitActiveSec alone has no next elapse until the service has run
+# once, so enable --now leaves NEXT at n/a. OnActiveSec is relative to
+# the timer itself and arms the first run. OnBootSec covers a reboot.
 OnBootSec=5min
+OnActiveSec=15min
 OnUnitActiveSec=15min
 Persistent=true
 AccuracySec=1min

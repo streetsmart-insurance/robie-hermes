@@ -12,6 +12,18 @@ A note that was sent but could not be confirmed is stored as
 ``sent, unconfirmed``. That row blocks another post until a person says yes
 after reviewing the uncertain outcome. Elapsed time cannot authorize a retry. A write that does not land
 is a failure: the caller must not post.
+
+The Ascend email notice driver does not lock the shared Production file at
+``/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json``.
+That file is mode 0600 and owned by another account, and the driver
+sandbox can write only under ``/var/lib/robie-ascend-notice-driver``.
+The email unit sets ``ASCEND_DRIVER_NOTE_LEDGER`` and ``main`` opts in.
+Every other caller, including the API poller, keeps
+``default_ledger_path``. The lock file is the sibling ``.lock``. If the
+lock cannot be taken, nothing is sent. When the driver ledger has no
+notes, a readable legacy file is copied once. If the copy cannot be
+written, lookups read the legacy file and do not lock or write it. An
+unreadable legacy path is skipped instead of raising.
 """
 
 from __future__ import annotations
@@ -39,6 +51,12 @@ LEDGER_FILENAME = "discussion-note-ledger.json"
 PROD_LEDGER_PATH = Path(
     "/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json"
 )
+DRIVER_NOTE_LEDGER_ENV = "ASCEND_DRIVER_NOTE_LEDGER"
+LEGACY_NOTE_LEDGER_ENV = "ASCEND_DRIVER_LEGACY_NOTE_LEDGER"
+DEFAULT_DRIVER_NOTE_LEDGER_DIR = Path("/var/lib/robie-ascend-notice-driver")
+DEFAULT_DRIVER_NOTE_LEDGER_PATH = DEFAULT_DRIVER_NOTE_LEDGER_DIR / LEDGER_FILENAME
+# Primary ledger path -> legacy file consulted read-only for dedupe.
+_READONLY_LEDGER_FALLBACKS: dict[str, Path] = {}
 _PRODUCTION_ENVS = frozenset({"PRODUCTION", "PROD", "LIVE"})
 
 # Notes that already posted on hermes-test-01 on 2026-09-30. DiscussionApi
@@ -227,6 +245,136 @@ def resolve_ledger_path(ledger_path: Path | str | None = None) -> Path:
     if ledger_path:
         return Path(ledger_path)
     return default_ledger_path()
+
+
+def _ledger_key(path: Path) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
+def driver_note_ledger_path() -> Path:
+    """Where the Ascend notice driver locks its note ledger.
+
+    ``ASCEND_DRIVER_NOTE_LEDGER`` wins. Otherwise the file is
+    ``discussion-note-ledger.json`` under ``ASCEND_DRIVER_STATE_DIR``, or
+    under ``/var/lib/robie-ascend-notice-driver`` when that env is unset.
+    """
+
+    override = str(os.environ.get(DRIVER_NOTE_LEDGER_ENV) or "").strip()
+    if override:
+        return Path(override)
+    state = str(os.environ.get("ASCEND_DRIVER_STATE_DIR") or "").strip()
+    if state:
+        return Path(state) / LEDGER_FILENAME
+    return DEFAULT_DRIVER_NOTE_LEDGER_PATH
+
+
+def _legacy_note_ledger_path() -> Path | None:
+    """The shared ledger to copy once. Tests do not open the Production path."""
+
+    override = str(os.environ.get(LEGACY_NOTE_LEDGER_ENV) or "").strip()
+    if override:
+        return Path(override)
+    if _under_automated_test():
+        return None
+    return PROD_LEDGER_PATH
+
+
+def _is_readable_file(path: Path) -> bool | None:
+    """True or False from ``is_file``. None when the path cannot be stat'd.
+
+    The legacy Production ledger is mode 0600 and owned by another account.
+    ``Path.is_file`` raises ``PermissionError`` there. Callers must not crash.
+    """
+
+    try:
+        return path.is_file()
+    except PermissionError:
+        return None
+
+
+def _ledger_has_notes(path: Path) -> bool:
+    """True when the file exists and is not an empty note list.
+
+    Unreadable JSON is treated as present so a later migrate does not
+    overwrite it. A path that cannot be stat'd is also present.
+    """
+
+    exists = _is_readable_file(path)
+    if exists is None:
+        return True
+    if not exists:
+        return False
+    try:
+        if path.stat().st_size == 0:
+            return False
+    except PermissionError:
+        return True
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not isinstance(parsed, dict):
+        return True
+    notes = parsed.get("notes")
+    return bool(notes)
+
+
+def migrate_driver_note_ledger(
+    dest: Path | str | None = None,
+    legacy: Path | str | None = None,
+) -> str:
+    """Copy legacy dedupe history into the driver ledger once.
+
+    Returns ``copied``, ``fallback``, ``kept``, or ``absent``. The legacy
+    file is never locked and never written. ``fallback`` means the history
+    was readable but could not be copied; lookups on ``dest`` still read it.
+    """
+
+    target = Path(dest) if dest is not None else driver_note_ledger_path()
+    source = Path(legacy) if legacy is not None else _legacy_note_ledger_path()
+    key = _ledger_key(target)
+    if _ledger_has_notes(target):
+        _READONLY_LEDGER_FALLBACKS.pop(key, None)
+        return "kept"
+    source_exists = _is_readable_file(source) if source is not None else False
+    if source is None or source_exists is not True:
+        return "absent"
+    try:
+        parsed = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "absent"
+    if not isinstance(parsed, dict) or not parsed.get("notes"):
+        return "absent"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_file(target, parsed)
+    except OSError:
+        _READONLY_LEDGER_FALLBACKS[key] = source
+        return "fallback"
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    _READONLY_LEDGER_FALLBACKS.pop(key, None)
+    return "copied"
+
+
+def ledger_path_for_notice_driver() -> Path | None:
+    """Driver ledger when the email unit has opted in. Otherwise None.
+
+    None means the caller uses ``default_ledger_path`` (the shared file).
+    The email unit sets ``ASCEND_DRIVER_NOTE_LEDGER``. The API poller does
+    not, and must not land on ``/var/lib/robie-ascend-notice-driver``:
+    that service can write only under ``/opt/.../data``. A set env migrates
+    a readable legacy ledger once.
+    """
+
+    override = str(os.environ.get(DRIVER_NOTE_LEDGER_ENV) or "").strip()
+    if not override:
+        return None
+    path = Path(override)
+    migrate_driver_note_ledger(path)
+    return path
 
 
 def find_posted_note(
@@ -888,12 +1036,34 @@ def _known_notes_apply() -> bool:
     return current_robie_env() == TEST_ENV_NAME
 
 
+def _note_identity(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("applicant_id") or ""),
+        str(row.get("discussion_id") or ""),
+        str(row.get("document_id") or ""),
+        str(row.get("note_text_sha256") or ""),
+        str(row.get("note_norm_sha256") or ""),
+    )
+
+
 def _rows(ledger_path: Path | str | None) -> list[dict[str, Any]]:
     rows = known_posted_notes() if _known_notes_apply() else []
-    payload = _read_file(resolve_ledger_path(ledger_path))
+    path = resolve_ledger_path(ledger_path)
+    payload = _read_file(path)
     for item in payload.get("notes") or []:
         if isinstance(item, dict):
             rows.append(item)
+    fallback = _READONLY_LEDGER_FALLBACKS.get(_ledger_key(path))
+    if fallback is None:
+        return rows
+    # Read-only. Do not lock or write the legacy file. A failed read holds
+    # the post: losing the history would file the note again.
+    extra = _read_file(fallback)
+    seen = {_note_identity(row) for row in rows if isinstance(row, dict)}
+    for item in extra.get("notes") or []:
+        if isinstance(item, dict) and _note_identity(item) not in seen:
+            rows.append(item)
+            seen.add(_note_identity(item))
     return rows
 
 

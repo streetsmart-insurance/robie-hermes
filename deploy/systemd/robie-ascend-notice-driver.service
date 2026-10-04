@@ -26,10 +26,18 @@ Environment=ROBIE_PLAYGROUND=1
 # Counts-only run log. The health check reads this file; it does not read
 # the journal. The driver sets the log to mode 0644 (this unit's umask is 0077).
 Environment=ASCEND_DRIVER_STATE_DIR=/var/lib/robie-ascend-notice-driver
+# Note ledger and its lock. The sandbox cannot write the shared ledger
+# under /opt/streetsmart-hermes/robie-job-engine/data (mode 0600, other
+# owner). Fail closed if this path cannot be locked: nothing is sent.
+Environment=ASCEND_DRIVER_NOTE_LEDGER=/var/lib/robie-ascend-notice-driver/discussion-note-ledger.json
 # streetsmart-hermes cannot exec the hermes-agent venv. /opt/streetsmart-hermes/.hermes
 # is 0700, owned by carlo_streetsmart_insurance. This venv is owned by
 # streetsmart-hermes and is the interpreter the driver imports on.
 ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0755 /var/lib/robie-ascend-notice-driver
+# Root copy, once, when the sandbox ledger is not there yet. The legacy
+# file is mode 0600 and owned by another account, so the service user
+# cannot read it. Do not lock or rewrite the legacy file.
+ExecStartPre=+/bin/sh -c 'legacy=/opt/streetsmart-hermes/robie-job-engine/data/discussion-note-ledger.json; dest=/var/lib/robie-ascend-notice-driver/discussion-note-ledger.json; if [ ! -e "$dest" ] && [ -f "$legacy" ]; then install -o streetsmart-hermes -g streetsmart-hermes -m 0600 "$legacy" "$dest"; fi'
 ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_notice_driver --due-days 2
 # Dry-run unless 30-live.conf sets ASCEND_DRIVER_LIVE=1. That drop-in is
 # shipped as 30-live.conf.example and is not installed by default.
