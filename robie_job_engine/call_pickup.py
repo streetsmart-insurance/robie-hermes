@@ -1,8 +1,9 @@
-"""Map a Task Check-In row onto one of the nine call workflows.
+"""Decide which Task Check-In labels place a call.
 
-Activity Labels and the note text use the same names as the phone label
-runner. "Robie Call" by itself is not a workflow. Each note is claimed
-at most once per America/New_York day.
+Only two labels dial. "Robie Call" uses the free-form handler. "Robie
+Lead Follow Up" (and the alias "Robie Call Follow Up") uses the lead
+script. The nine Splice workflow names are not labels. Each note is
+claimed at most once per America/New_York day.
 """
 from __future__ import annotations
 
@@ -14,31 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Longer phrases first so "sales center reviewed status" wins as one id.
-_WORKFLOW_PHRASES: tuple[tuple[str, str], ...] = (
-    ("sales center reviewed status", "sales_center_reviewed"),
-    ("additional information follow-up", "additional_information_follow_up"),
-    ("recommendations follow-up", "recommendations_follow_up"),
-    ("robie renewal reach-out", "renewal_reach_out"),
-    ("e-signature follow-up", "esignature_follow_up"),
-    ("renewal reach-out", "renewal_reach_out"),
-    ("renewal reach out", "renewal_reach_out"),
-    ("robie additional info", "additional_information_follow_up"),
-    ("robie recommendations", "recommendations_follow_up"),
-    ("robie returned mail", "returned_mail"),
-    ("robie sales center", "sales_center_reviewed"),
-    ("winback campaign", "winback_campaign"),
-    ("audit not complete", "audit_not_complete"),
-    ("robie unresponsive", "unresponsive"),
-    ("robie winback", "winback_campaign"),
-    ("sales center", "sales_center_reviewed"),
-    ("robie e-sign", "esignature_follow_up"),
-    ("returned mail", "returned_mail"),
-    ("robie audit", "audit_not_complete"),
-    ("winback", "winback_campaign"),
-)
-
-_ROBIE_CALL_PHRASE = "robie call"
+_LEAD_LABELS = ("robie lead follow up", "robie call follow up")
+_ROBIE_CALL = "robie call"
+LEAD_WORKFLOW_ID = "lead_follow_up"
 
 
 @dataclass(frozen=True)
@@ -62,33 +41,31 @@ def _label_parts(activity_labels: str) -> list[str]:
     ]
 
 
-def classify_call_request(activity_labels: str, note_text: str) -> CallPickup:
-    """Resolve a check-in row to a workflow, a skip, or neither.
+def _normalize_label(value: str) -> str:
+    text = (value or "").casefold().replace("-", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
-    A bare Robie Call label does not invent a script. Two workflows on
-    the same row are a conflict and are not dialed.
+
+def classify_call_request(activity_labels: str, note_text: str) -> CallPickup:
+    """Resolve a check-in row to a lead script, a free-form call, or neither.
+
+    "Robie Lead Follow Up" and "Robie Call Follow Up" are the lead script.
+    A Robie Call label with no lead label is free-form: Eva follows the
+    task description. Audit, sales, winback, and the other Splice names
+    do not start a call.
     """
-    found: set[str] = set()
-    labels = _label_parts(activity_labels)
-    haystack = " ".join(labels + [note_text or ""])
-    for phrase, workflow_id in _WORKFLOW_PHRASES:
-        if _phrase_present(haystack, phrase):
-            found.add(workflow_id)
-    robie_call = any(part.casefold() == _ROBIE_CALL_PHRASE for part in labels) or (
-        _phrase_present(note_text or "", _ROBIE_CALL_PHRASE)
+    labels = [_normalize_label(part) for part in _label_parts(activity_labels)]
+    note = _normalize_label(note_text)
+    lead = any(label in _LEAD_LABELS for label in labels) or any(
+        _phrase_present(note, phrase) for phrase in _LEAD_LABELS
     )
-    if len(found) > 1:
-        return CallPickup(
-            "skip_conflict",
-            reason="more than one call workflow on this note; not dialed",
-        )
-    if len(found) == 1:
-        return CallPickup("workflow", workflow_id=next(iter(found)))
+    if lead:
+        return CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
+    robie_call = any(label == _ROBIE_CALL for label in labels) or _phrase_present(
+        note, _ROBIE_CALL,
+    )
     if robie_call:
-        return CallPickup(
-            "skip_unscripted",
-            reason="Robie Call has no workflow; no script was used",
-        )
+        return CallPickup("freeform")
     return CallPickup("not_labeled")
 
 

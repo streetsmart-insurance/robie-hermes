@@ -1,7 +1,9 @@
-"""Spoken frames for the nine Splice workflows.
+"""Spoken frames for the Splice workflows and the lead follow-up.
 
-The per-workflow body is verbatim. There is no opt-out toll-free number,
-so that sentence is not included. Live calls still say press 6.
+The nine Splice bodies stay here as reference. A label does not select
+them. Lead follow-up uses the Sales Center frame: on behalf of the
+assigned producer, press 1 to reach that producer, press 2 when a text
+is offered, and press 6 to opt out. There is no opt-out toll-free number.
 """
 from __future__ import annotations
 
@@ -95,6 +97,13 @@ WORKFLOWS: dict[str, Workflow] = {
         "Unresponsive",
         "We are reaching out regarding your policies.",
         None,
+        False,
+    ),
+    "lead_follow_up": Workflow(
+        "lead_follow_up",
+        "Lead Follow Up",
+        "We are following up on your insurance inquiry or quote.",
+        "We are following up on your insurance inquiry or quote.",
         False,
     ),
 }

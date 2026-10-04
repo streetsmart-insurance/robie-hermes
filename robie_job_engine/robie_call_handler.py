@@ -483,7 +483,7 @@ def is_call_task(task: Dict[str, Any]) -> bool:
         _pick(task, "activity_labels"),
         _pick(task, "subject") + " " + _pick(task, "description"),
     )
-    if decision.action in ("workflow", "skip_unscripted", "skip_conflict"):
+    if decision.action in ("workflow", "freeform"):
         return True
     text = _pick(task, "subject") + " " + _pick(task, "description")
     return bool(_CALL_KEYWORD_RE.search(text))
@@ -1797,53 +1797,26 @@ def _handle_call_task(
             "duplicate_reason": "same instruction already handled for applicant",
         }
 
-    # A labeled workflow uses its script. A bare Robie Call label does not.
-    from .call_pickup import CallPickup, calling_day, classify_call_request, note_dedupe_key
+    # Robie Call is free-form. Only the lead follow-up label uses a script.
+    # The nine Splice workflows stay available to render, and a label cannot
+    # select them.
+    from .call_pickup import (
+        LEAD_WORKFLOW_ID,
+        CallPickup,
+        calling_day,
+        classify_call_request,
+        note_dedupe_key,
+    )
     from .splice_scripts import get_workflow
 
     decision = classify_call_request(_pick(task, "activity_labels"), instruction)
     explicit = _pick(task, "workflow")
-    if explicit and get_workflow(explicit) is not None:
-        if decision.action == "workflow" and decision.workflow_id != explicit:
-            decision = CallPickup(
-                "skip_conflict",
-                reason="the task names more than one call workflow; not dialed",
-            )
-        elif decision.action in ("not_labeled", "skip_unscripted"):
-            decision = CallPickup("workflow", workflow_id=explicit)
-    workflow = get_workflow(decision.workflow_id) if decision.action == "workflow" else None
+    if explicit == LEAD_WORKFLOW_ID and decision.action != "freeform":
+        decision = CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
+    workflow = None
+    if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
+        workflow = get_workflow(LEAD_WORKFLOW_ID)
     note_topic = workflow.title if workflow is not None else instruction
-    if decision.action in ("skip_unscripted", "skip_conflict"):
-        log.info("task %s skipped: %s", task_id, decision.reason)
-        if decision.action == "skip_unscripted":
-            skip_body = (
-                "Robie did not call. This task is labeled Robie Call and does "
-                "not name which call to make, so no script was used."
-            )
-        else:
-            skip_body = (
-                "Robie did not call. This task names more than one call "
-                "workflow, so no script was used."
-            )
-        wb = _writeback_once(
-            ports, task_id, decision.action,
-            applicant_id, skip_body, title_hint=None)
-        _mark_processed(task_id)
-        _mark_content_processed(applicant_id, instruction)
-        filed = wb.get("status") in ("filed", "dry_run")
-        return {
-            "ok": filed,
-            "task_id": task_id,
-            "applicant_id": applicant_id,
-            "call": {"success": False, "call_ids": []},
-            "writeback": wb,
-            "recording": None,
-            "reassigned": False,
-            "chat_alerted": False,
-            "error": None if filed else decision.reason,
-            "skipped_unscripted": decision.action == "skip_unscripted",
-            "skipped_conflict": decision.action == "skip_conflict",
-        }
 
     # ---- 3c. Ambiguity guard ------------------------------------------------
     # "call him" with no topic: do NOT guess. Leave the task open and file
@@ -2380,7 +2353,7 @@ def _handle_call_task(
         # A failed task stays OPEN and is redelivered on the next 30-min
         # report cycle, with human visibility via the chat alert below.
         dedupe = getattr(ports, "call_dedupe", None)
-        if workflow is not None and dedupe is not None:
+        if dedupe is not None:
             day = calling_day(_calling_now(config))
             dedupe_key = note_dedupe_key(
                 applicant_id, _pick(task, "discussion_id"), instruction, task_id,

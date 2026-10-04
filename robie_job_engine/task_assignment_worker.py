@@ -494,7 +494,7 @@ class TaskAssignmentWorker:
         from .call_pickup import classify_call_request
 
         labeled = classify_call_request(task.activity_labels, task.description)
-        if labeled.action in ("workflow", "skip_unscripted", "skip_conflict"):
+        if labeled.action in ("workflow", "freeform"):
             return "callback"
         text = f"{task.title} {task.description}".lower()
         if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
