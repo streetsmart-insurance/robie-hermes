@@ -114,6 +114,7 @@ def _task(**overrides):
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Assigned Producer": "Jane Producer",
+        "Activity Labels": "Robie Call",
     }
     task.update(overrides)
     return task
@@ -156,16 +157,21 @@ def test_federal_holiday_queues_and_does_not_dial():
     assert "holiday" in result["error"]
 
 
-def test_weekday_inside_the_window_still_dials():
+def test_unlabeled_do_not_call_and_splice_place_zero_dials():
     rch._reset_module_state_for_tests()
-    ports = _ports()
-    result = handle_robie_call_task(
-        _task(), RobieCallConfig(dry_run=False, now=IN_WINDOW), ports,
-    )
-    assert result["ok"] is True
-    assert len(ports.bland.calls) == 1
-    assert "Jane Producer" in ports.bland.calls[0]["task_text"]
-    assert "Jake" not in ports.bland.calls[0]["task_text"]
+    cases = [
+        {"Activity Labels": "", "Task Description": "Please call John about his renewal."},
+        {"Activity Labels": "", "Task Description": "Do not call or contact anyone."},
+        {"Activity Labels": "", "Task Subject": "[CALLBACK REQUIRED]"},
+        {"Activity Labels": "Robie audit", "Task Description": "Splice audit follow-up."},
+    ]
+    for overrides in cases:
+        ports = _ports()
+        result = handle_robie_call_task(
+            _task(**overrides), RobieCallConfig(dry_run=False, now=IN_WINDOW), ports,
+        )
+        assert result["ok"] is False
+        assert ports.bland.calls == []
 
 
 def test_dry_run_writes_nothing_and_names_the_producer():

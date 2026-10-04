@@ -163,6 +163,7 @@ def make_task(**over) -> Dict[str, Any]:
         "Assigned Producer": "Jane Producer",
         "Assigned To": "Robie AI",
         "Task Due Date": "2026-10-10",
+        "Activity Labels": "Robie Call",
     }
     task.update(over)
     return task

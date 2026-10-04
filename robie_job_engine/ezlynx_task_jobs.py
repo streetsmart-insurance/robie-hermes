@@ -39,8 +39,47 @@ ACTION_TYPE = "ezlynx.task_intake"
 def _workflow_id(task: AssignedTask) -> str:
     from .call_pickup import classify_call_request
 
-    decision = classify_call_request(task.activity_labels, task.description)
+    decision = classify_call_request(task.activity_labels, "")
     return decision.workflow_id if decision.action == "workflow" else ""
+
+
+def job_is_dialable(payload: dict[str, Any]) -> bool:
+    """False for a non-live queue, a missing flag, or a pre-live timestamp.
+
+    Jobs created before live mode have ``dialable`` false. A missing flag
+    on an older row is not dialable. ``queued_at`` before
+    ``live_enabled_at`` is not dialable even if the flag was copied forward.
+    """
+    if payload.get("dialable") is not True:
+        return False
+    queued = str(payload.get("queued_at") or "")
+    enabled = str(payload.get("live_enabled_at") or "")
+    if enabled and queued and queued < enabled:
+        return False
+    return True
+
+
+def remember_live_mode(store: Any, *, live: bool, now: str) -> str:
+    """Return when live mode was first enabled. Record it on the first live run."""
+    with store.connect() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS call_live_mode (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled_at TEXT NOT NULL
+            )"""
+        )
+        row = conn.execute(
+            "SELECT enabled_at FROM call_live_mode WHERE id=1"
+        ).fetchone()
+        if row is not None:
+            return str(row["enabled_at"] or "")
+        if not live:
+            return ""
+        conn.execute(
+            "INSERT INTO call_live_mode (id, enabled_at) VALUES (1, ?)",
+            (now,),
+        )
+    return now
 
 
 def task_idempotency_key(task_id: str) -> str:
@@ -53,6 +92,9 @@ def job_payload_for_task(
     *,
     report_message_id: str = "",
     report_digest: str = "",
+    live: bool = False,
+    queued_at: str = "",
+    live_enabled_at: str = "",
 ) -> dict[str, Any]:
     """Job payload carrying every ID the worker needs.
 
@@ -80,9 +122,14 @@ def job_payload_for_task(
         "assigned_producer": task.assigned_producer,
         "csr": task.csr,
         "activity_labels": task.activity_labels,
+        "created_at": task.created_at,
+        "created_at_et": task.created_at_et,
         "workflow": _workflow_id(task),
         "report_message_id": report_message_id,
         "report_digest": report_digest,
+        "queued_at": queued_at,
+        "dialable": bool(live),
+        "live_enabled_at": live_enabled_at,
     }
 
 
@@ -198,6 +245,10 @@ def ensure_task_job(
     report_digest: str = "",
     report_received_at: Any = None,
     confirm_returned: Callable[[AssignedTask], bool] | None = None,
+    reopen_terminal: bool = True,
+    live: bool = False,
+    queued_at: str = "",
+    live_enabled_at: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Return the durable job for this task, creating it if needed.
 
@@ -207,12 +258,16 @@ def ensure_task_job(
     - Known task, unchanged (same last_modified) -> returns the job as-is.
     - Known task, changed in EZLynx -> refreshes the payload. A job in a
       terminal state (COMPLETE / FAILED / CANCELLED / UNVERIFIED) reopens
-      to PENDING so the new version of the task gets worked. A job that
-      is waiting on a human keeps waiting (payload refreshed, same job).
+      to PENDING so the new version of the task gets worked, unless
+      reopen_terminal is False (an already-seen task stays finished). A job
+      that is waiting on a human keeps waiting (payload refreshed, same job).
       A RUNNING job keeps its lease (a live worker owns it).
+    - A job queued while calls were not live stays not dialable: the
+      original dialable/queued_at/live_enabled_at are kept, never upgraded.
     """
     payload = job_payload_for_task(
-        task, report_message_id=report_message_id, report_digest=report_digest
+        task, report_message_id=report_message_id, report_digest=report_digest,
+        live=live, queued_at=queued_at, live_enabled_at=live_enabled_at,
     )
     key = task_idempotency_key(task.task_id)
     existing = _find_by_idempotency_key(store, key)
@@ -252,6 +307,17 @@ def ensure_task_job(
     # only when Robie already handed the task back and it has since returned
     # to Robie; note and reassignment intents are keyed by round, so the new
     # round gets its own note while retries inside a round never repeat one.
+    #
+    # A job queued while calls were not live stays not dialable: the original
+    # dialable/queued_at/live_enabled_at travel forward, never upgraded.
+    if "dialable" in existing_payload:
+        payload["dialable"] = existing_payload.get("dialable") is True
+        payload["queued_at"] = existing_payload.get("queued_at") or payload["queued_at"]
+        payload["live_enabled_at"] = (
+            existing_payload.get("live_enabled_at") or payload["live_enabled_at"]
+        )
+    else:
+        payload["dialable"] = False
     status = prior_status
     round_no = int(existing_payload.get("round") or 0)
     if handed_back:
@@ -259,6 +325,13 @@ def ensure_task_job(
     if round_no:
         payload["round"] = round_no
     store.update_payload(job["id"], payload)
+    if status in TERMINAL_STATUSES and not reopen_terminal and not handed_back:
+        # Already seen and not a proven handback return: leave the finished
+        # job exactly as it is. A proven return (handed_back) always reopens.
+        logger.info(
+            f"Task {task.task_id} already seen; not reopening job {job['id']}"
+        )
+        return store.get_job(job["id"]), False
     if status in TERMINAL_STATUSES:
         job = store.transition(job["id"], JobStatus.PENDING)
         logger.info(
