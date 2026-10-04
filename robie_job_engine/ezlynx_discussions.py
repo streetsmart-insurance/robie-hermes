@@ -524,6 +524,25 @@ class DiscussionApiClient:
             return parsed
         raise DiscussionApiError(None, "discussion lookup returned unexpected shape")
 
+    def get_discussion_with_notes(self, discussion_id: str) -> dict[str, Any]:
+        """Discussion with its note bodies (v8 discussions/:discussionId/with-notes).
+
+        ``get_discussion`` returns metadata only (count, latest id, no text).
+        A duplicate check that compares note text must use this read, because
+        ``POST .../notes`` returns no note id to compare against.
+        """
+        discussion = str(discussion_id or "").strip()
+        if not discussion:
+            raise DiscussionApiError(None, "discussion id is required")
+        parsed = self._get(
+            f"v8/discussions/{parse.quote(discussion, safe='')}/with-notes"
+        )
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"discussionId": discussion, "notes": parsed}
+        raise DiscussionApiError(None, "discussion with-notes returned unexpected shape")
+
     # -- append ----------------------------------------------------------
 
     def append_note(
@@ -1770,20 +1789,20 @@ def build_with_note_payload(
 ) -> dict[str, Any]:
     """Pure builder for the ``POST v8/discussions/with-note`` body.
 
-    SHAPE UNVERIFIED (2026-09-28): the public Postman documentation names the
-    endpoint and says it creates a discussion with a note and returns a
-    DiscussionId, but does not show the request body. UAT probing was blocked
-    because no valid UAT applicant id is on file (220250093 is
-    Production-only). The shape below is the documented camelCase convention
-    used by the rest of the v8 Discussion API. If EZLynx rejects it, the
-    caller's 400 detail surfaces in the error and the filing holds
-    UNVERIFIED — never silently FILED.
+    Shape from the EZLynx Postman collection item "Create a discussion with
+    one note": ``applicantId`` is an integer, the title is nested under
+    ``discussion``, and the note sits under ``note``. A flat body with a
+    top-level ``title`` and a string ``applicantId`` returns HTTP 500.
+    Proven 2026-10-04: this nested shape created discussion 850001255
+    (HTTP 200; the response body is the bare integer DiscussionId).
     """
     applicant = str(applicant_id or "").strip()
     heading = str(title or "").strip()
     text = str(note_body or "").strip()
     if not applicant:
         raise DiscussionApiError(None, "applicant id is required")
+    if not applicant.isdigit() or not applicant.isascii() or int(applicant) <= 0:
+        raise DiscussionApiError(None, "applicant id must be a positive integer")
     if not heading or heading.casefold() == "untitled":
         raise DiscussionApiError(
             None, "a real discussion title is required; Untitled is forbidden"
@@ -1791,8 +1810,8 @@ def build_with_note_payload(
     if not text:
         raise DiscussionApiError(None, "note body is required")
     return {
-        "applicantId": applicant,
-        "title": heading,
+        "applicantId": int(applicant),
+        "discussion": {"title": heading},
         "note": {"type": note_type, "body": text},
     }
 
@@ -1844,13 +1863,11 @@ def create_discussion_with_note(
     payload = build_with_note_payload(applicant, heading, text,
                                       note_type=note_type)
     created = client._post(WITH_NOTE_PATH, payload)
-    discussion_id = ""
-    if isinstance(created, dict):
-        for key in ("discussionId", "DiscussionId", "id", "Id"):
-            value = str(created.get(key) or "").strip()
-            if value:
-                discussion_id = value
-                break
+    # EZLynx answers with the bare integer DiscussionId (850001255 on
+    # 2026-10-04). A digit string or an object with an id is also accepted.
+    from .ezlynx_task_api import discussion_id_from_create_response
+
+    discussion_id = discussion_id_from_create_response(created)
     if not discussion_id:
         raise DiscussionApiError(
             None,

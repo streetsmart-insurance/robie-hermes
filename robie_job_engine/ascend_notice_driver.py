@@ -1593,16 +1593,40 @@ def _read_existing_note(
 
     Write-scope is not checked here. Dry-run uses this for applicants the
     allowlist blocks so a reviewer can see an existing duplicate.
+
+    ``POST .../notes`` returns no note id, and ``GET v8/discussions/{id}``
+    has no note text, so the match reads ``.../with-notes`` (note bodies)
+    when the client can. ``bodies_error`` is set when that read failed; the
+    live path holds instead of posting blind (PNM Fencing discussion
+    346685002 collected 261 identical notes Sep 29-Oct 3 2026).
     """
     del applicant_id
-    outcome = {"read": False, "duplicate": False, "note_id": "", "reason": ""}
+    outcome = {
+        "read": False,
+        "duplicate": False,
+        "note_id": "",
+        "reason": "",
+        "bodies_read": False,
+        "bodies_error": "",
+    }
     record = {"discussionId": discussion_id}
     if not discussion_id:
         outcome["reason"] = "selected discussion has no id"
         return outcome
     detail: Any = None
+    with_notes = getattr(client, "get_discussion_with_notes", None)
+    if callable(with_notes):
+        try:
+            detail = with_notes(discussion_id)
+            outcome["read"] = True
+            outcome["bodies_read"] = True
+        except Exception as exc:  # noqa: BLE001 - live path holds on this
+            detail = None
+            outcome["bodies_error"] = f"{type(exc).__name__}: {exc}"
     getter = getattr(client, "get_discussion", None)
-    if callable(getter):
+    if detail is not None:
+        pass
+    elif callable(getter):
         try:
             detail = getter(discussion_id)
             outcome["read"] = True
@@ -1726,7 +1750,7 @@ def _prepare_dry_run_create(
         "reason": "dry run: create payload validated, nothing written",
         "applicant_id": applicant,
         "discussion_id": None,
-        "discussion_title": payload["title"],
+        "discussion_title": payload["discussion"]["title"],
         "note_id": None,
     }
 
@@ -2037,6 +2061,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = (
             f"existing_note_duplicate: {note_id}" if note_id else "existing_note_duplicate"
         )
+        return result
+    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
+        # The note text on this discussion could not be read. Do not post a
+        # note that may already be there.
+        result.reason = f"existing_note_unreadable: {note_match['bodies_error']}"
         return result
 
     # Cancellations are notes only. Do not list or apply Ascend NOC.
