@@ -37,6 +37,7 @@ PROD_ONLY = {
     "task_verifier_health",
     "tuesday_4359_proof",
     "chat_intake",
+    "preflight_alert_delivery",
 }
 
 
@@ -63,6 +64,8 @@ class HealthProfileSelectionTests(unittest.TestCase):
         names = [name for name, _fn in h.checks_for_profile("TEST")]
         for skipped in PROD_ONLY:
             self.assertNotIn(skipped, names)
+        production_names = [name for name, _fn in h.CHECKS]
+        self.assertIn("preflight_alert_delivery", production_names)
         for kept in ("code_version", "disk", "ezlynx_auth", "duplicate_guard", "stuck_leases"):
             self.assertIn(kept, names)
         for required in (

@@ -146,5 +146,37 @@ class EzlynxProbeImportTests(unittest.TestCase):
         self.assertIn("config not visible", detail)
 
 
+class PreflightAlertImportTests(unittest.TestCase):
+    def test_probe_prepends_script_release_not_prod(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            release = os.path.join(tmp, "opt", "streetsmart-hermes-test", "releases", "current")
+            _touch_package(release)
+            script = os.path.join(release, "scripts", "robie_health_check.py")
+            os.makedirs(os.path.dirname(script))
+            inserted: list[tuple[int, str]] = []
+
+            class _RecordingPath(list):
+                def insert(self, index, value):
+                    inserted.append((index, value))
+                    super().insert(index, value)
+
+            fake_preflight = types.ModuleType("robie_job_engine.production_preflight")
+            fake_preflight.parse_preflight_alert_state = lambda _text: None
+            package = types.ModuleType("robie_job_engine")
+            package.production_preflight = fake_preflight
+            with _isolated_env(), \
+                 patch.object(h, "__file__", script), \
+                 patch.object(h.sys, "path", _RecordingPath(list(h.sys.path))), \
+                 patch.dict(sys.modules, {
+                     "robie_job_engine": package,
+                     "robie_job_engine.production_preflight": fake_preflight,
+                 }):
+                ok, detail, _extra = h.check_preflight_alert_delivery(journal="")
+        self.assertEqual(inserted, [(0, release)])
+        self.assertNotIn(_PROD_RELEASE, [value for _, value in inserted])
+        self.assertTrue(ok)
+        self.assertIn("no preflight JSON", detail)
+
+
 if __name__ == "__main__":
     unittest.main()
