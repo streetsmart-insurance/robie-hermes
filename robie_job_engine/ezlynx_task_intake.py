@@ -33,7 +33,17 @@ lost its lease stops and changes nothing. Every external effect is also
 reserved before it is sent and reconciled by reading the destination, so even
 a late original cannot cause a repeat.
 
-A report older than MAX_REPORT_AGE_MINUTES is refused, not worked.
+A report older than MAX_REPORT_AGE_MINUTES is refused for NEW work, whether or not
+it was already processed. Finishing work that already took an effect (reconcile, note,
+verify) is separate: it is owed whatever the report says, it never needs a report, and
+it runs with calls disabled.
+
+Test-only task restriction: ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS (comma-separated task
+IDs) drops every other task before any discussion lookup or job is created. With
+ROBIE_ENV=TEST it is REQUIRED; unset or empty refuses the whole run.
+
+A handed-back task only starts a new round when the report arrived after the handback
+and a live read shows Robie as its owner.
 """
 
 from __future__ import annotations
@@ -219,7 +229,7 @@ def recover_stale_running(
     return recovered
 
 
-def _build_worker_and_engine(store: JobStore):
+def _build_worker_and_engine(store: JobStore, *, allow_calls: bool = True):
     try:
         discussion_client = _build_discussion_client()
     except Exception as e:  # noqa: BLE001
@@ -232,24 +242,30 @@ def _build_worker_and_engine(store: JobStore):
     else:
         logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
 
-    from .bland_prod_wiring import build_call_dependencies
-    from .call_opt_in import CallOptInStore
-    from .call_opt_out import CallOptOutStore
-    from .call_pickup import CallDedupeStore
+    if allow_calls:
+        from .bland_prod_wiring import build_call_dependencies
+        from .call_opt_in import CallOptInStore
+        from .call_opt_out import CallOptOutStore
+        from .call_pickup import CallDedupeStore
 
-    phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
-    store_dir = os.path.dirname(store.path)
+        phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
+        store_dir = os.path.dirname(store.path)
+        call_kwargs: dict[str, Any] = dict(
+            phone_lookup=phone_lookup, bland_client=bland_client, call_dry_run=call_dry_run,
+            transfer_lookup=transfer_lookup,
+            opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
+            opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
+            call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+        )
+    else:
+        # Recovery of work that already took an effect never places or queues a call:
+        # the worker's lease checks do not cover every effect inside the call handler.
+        call_kwargs = {}
     worker = TaskAssignmentWorker(
         discussion_client=discussion_client,
         task_reassigner=reassigner,
         reassign_enabled=reassign_enabled(),
-        phone_lookup=phone_lookup,
-        bland_client=bland_client,
-        call_dry_run=call_dry_run,
-        transfer_lookup=transfer_lookup,
-        opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
-        opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
-        call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+        **call_kwargs,
     )
     verifier = TaskIntakeVerifier(
         discussion_client=discussion_client, task_reassigner=reassigner, store=store
@@ -273,33 +289,100 @@ def _has_effect_intent(store: JobStore, job: dict[str, Any]) -> bool:
     return row is not None
 
 
-def _owed_jobs(store: JobStore) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+_UNSET: Any = object()
+ALLOWED_TASK_IDS_ENV = "ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS"
+
+
+class TaskRestrictionError(Exception):
+    """The Test-only task restriction is required but missing, or unusable."""
+
+
+def allowed_task_ids() -> frozenset[str] | None:
+    """Task IDs this intake may touch at all; None means no restriction.
+
+    ROBIE_ENV=TEST requires the restriction: unset, empty, or no valid ID refuses the
+    run, so a Test run can never ingest an unrelated task. Elsewhere it is optional,
+    but once set it is exact (a set-but-empty value allows nothing).
+    """
+    raw = os.environ.get(ALLOWED_TASK_IDS_ENV)
+    is_test = os.environ.get("ROBIE_ENV", "").strip().upper() == "TEST"
+    ids = frozenset(part.strip() for part in (raw or "").split(",")
+                    if re.fullmatch(r"[1-9][0-9]*", part.strip()))
+    if is_test and not ids:
+        raise TaskRestrictionError(
+            f"ROBIE_ENV=TEST requires {ALLOWED_TASK_IDS_ENV} (comma-separated task IDs)")
+    if raw is None:
+        return None
+    return ids
+
+
+def _is_allowed(job: dict[str, Any], allowed: frozenset[str] | None) -> bool:
+    return allowed is None or str((job.get("payload") or {}).get("task_id") or "") in allowed
+
+
+def _owed_jobs(store: JobStore, allowed: frozenset[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(PENDING jobs that already took an effect, jobs awaiting verification)."""
     pending = [j for j in store.list_jobs_by_status({JobStatus.PENDING})
-               if j.get("action_type") == ACTION_TYPE and _has_effect_intent(store, j)]
+               if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)
+               and _has_effect_intent(store, j)]
     verifying = [j for j in store.list_jobs_by_status({JobStatus.VERIFYING})
-                 if j.get("action_type") == ACTION_TYPE]
+                 if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)]
     return pending, verifying
 
 
-def _work_and_verify(store: JobStore, jobs: list[dict[str, Any]], in_report: set[str]):
-    """Work PENDING jobs, then verify VERIFYING jobs.
+def _verify_awaiting(store: JobStore, engine: Any, allowed: frozenset[str] | None) -> int:
+    done = 0
+    for row in store.list_jobs_by_status({JobStatus.VERIFYING}):
+        if row.get("action_type") != ACTION_TYPE or not _is_allowed(row, allowed):
+            continue
+        try:
+            fresh = store.get_job(row["id"])
+            engine._verify(fresh, store.get_checkpoint(fresh["id"], "action") or {})
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"verify raised for {row['id']}: {e}")
+    return done
 
-    A job is worked when its task is in THIS report, or when it already took an
-    external effect (reassignment removes a task from the report, but its note
-    and verification are still owed). A task the fresh report does not show and
-    that has done nothing is never started. Verification covers every task job
-    awaiting it.
+
+def _recover_owed(store: JobStore, allowed: Any = _UNSET) -> int:
+    """Finish work that already took an effect, whatever the latest report says.
+
+    Never needs a report, is not subject to the report age limit, and runs with
+    calls disabled. Returns how many jobs it worked or verified.
+    """
+    if allowed is _UNSET:
+        try:
+            allowed = allowed_task_ids()
+        except TaskRestrictionError:
+            return 0
+    pending, verifying = _owed_jobs(store, allowed)
+    if not pending and not verifying:
+        return 0
+    worker, engine = _build_worker_and_engine(store, allow_calls=False)
+    handled = 0
+    for job in pending:
+        task_id = str((job.get("payload") or {}).get("task_id") or "")
+        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
+            continue
+        try:
+            worker.process_job(store, store.get_job(job["id"]))
+            handled += 1
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"process_job raised for {task_id}: {e}")
+    return handled + _verify_awaiting(store, engine, allowed)
+
+
+def _work_new(store: JobStore, jobs: list[dict[str, Any]], in_report: set[str],
+              allowed: frozenset[str] | None = None):
+    """Work NEW tasks shown by a FRESH report, then verify what is awaiting.
+
+    Only a task the fresh report shows is started; owed recovery is separate.
     """
     worker, engine = _build_worker_and_engine(store)
-
-    owed_pending, _ = _owed_jobs(store)
-    owed_ids = {j["id"] for j in owed_pending}
-    seen = {j["id"] for j in jobs}
-    for job in jobs + [j for j in owed_pending if j["id"] not in seen]:
+    for job in jobs:
         payload = job.get("payload") or {}
         task_id = str(payload.get("task_id") or "")
-        if task_id not in in_report and job["id"] not in owed_ids:
+        if task_id not in in_report or not _is_allowed(job, allowed):
             continue
         if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
             continue
@@ -307,16 +390,7 @@ def _work_and_verify(store: JobStore, jobs: list[dict[str, Any]], in_report: set
             worker.process_job(store, store.get_job(job["id"]))
         except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
             logger.error(f"process_job raised for {task_id}: {e}")
-
-    for row in store.list_jobs_by_status({JobStatus.VERIFYING}):
-        if row.get("action_type") != ACTION_TYPE:
-            continue
-        try:
-            fresh = store.get_job(row["id"])
-            action = store.get_checkpoint(fresh["id"], "action") or {}
-            engine._verify(fresh, action)
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"verify raised for {row['id']}: {e}")
+    _verify_awaiting(store, engine, allowed)
     return worker
 
 
@@ -330,6 +404,17 @@ def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str
     return found
 
 
+def _confirm_returned(task: AssignedTask) -> bool:
+    """Live, read-only: is this task really owned by Robie right now?"""
+    try:
+        current = PlaywrightTaskReassigner().read_assignee(
+            task.task_id, task.applicant_id, description=task.description)
+    except Exception as e:  # noqa: BLE001 — unreadable is unproven
+        logger.warning(f"Live return check failed for {task.task_id}: {e}")
+        return False
+    return str(current).strip().casefold() == ROBIE_NAME.casefold()
+
+
 def _report_age_minutes(report: Any) -> float | None:
     try:
         received = datetime.fromtimestamp(int(report.received_at) / 1000, tz=timezone.utc)
@@ -340,6 +425,12 @@ def _report_age_minutes(report: Any) -> float | None:
 
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     """Run one intake pass. Returns 0 healthy, 2 on failure (health check alerts)."""
+    try:
+        allowed = allowed_task_ids()
+    except TaskRestrictionError as e:
+        logger.error(f"Refusing to run: {e}")
+        return 2
+
     store = JobStore(db_path or default_db_path())
     _ensure_intake_table(store)
 
@@ -347,6 +438,11 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         recovered = recover_stale_running(store)
         if recovered:
             logger.warning(f"Recovered {len(recovered)} stale RUNNING job(s): {recovered}")
+        # Work already under way is finished first, with calls off, whatever the report says.
+        try:
+            _recover_owed(store, allowed)
+        except _ClientUnavailable as e:
+            logger.error(f"Discussion client unavailable for owed recovery: {e}")
 
     # 1. Gmail -> latest delivery.
     from . import report_email_source
@@ -362,37 +458,42 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         logger.info("No delivery yet — quiet.")
         return 0
 
-    tasks = list(report.tasks)
+    # Unrelated tasks stop HERE: before any lookup, job, cap count or note.
+    tasks = [t for t in report.tasks if allowed is None or t.task_id in allowed]
+    if len(tasks) != len(report.tasks):
+        logger.info(f"Task restriction dropped {len(report.tasks) - len(tasks)} unrelated task(s)")
+
+    age = _report_age_minutes(report)
+    fresh = age is not None and age <= MAX_REPORT_AGE_MINUTES
 
     if _already_processed(store, report.message_id):
-        # The delivery already ran, but a human may since have resumed a job,
-        # a handed-back task may still owe its note, or a verification may be
-        # owed. Work only that, quietly.
+        # Already ran. NEW work still needs a fresh report; a stale one starts nothing.
+        if not fresh:
+            logger.error(f"Latest report {report.message_id} is stale "
+                         f"({'unknown age' if age is None else f'{int(age)} min'}); "
+                         "no new work is started.")
+            return 2
         resumed = _resumable_jobs(store, tasks)
-        owed_pending, owed_verifying = _owed_jobs(store)
-        if not resumed and not owed_pending and not owed_verifying:
+        if not resumed:
             logger.info(f"Delivery {report.message_id} already processed — quiet.")
             return 0
         if dry_run:
-            logger.info(f"[DRY-RUN] {len(resumed) + len(owed_pending)} job(s) to work, "
-                        f"{len(owed_verifying)} awaiting verification.")
+            logger.info(f"[DRY-RUN] {len(resumed)} resumed job(s) to work.")
             return 0
-        logger.info(f"Delivery {report.message_id} already processed; working "
-                    f"{len(resumed) + len(owed_pending)} pending job(s), verifying {len(owed_verifying)}.")
+        logger.info(f"Delivery {report.message_id} already processed; working {len(resumed)} resumed job(s).")
         try:
-            _work_and_verify(store, resumed, {t.task_id for t in tasks})
+            _work_new(store, resumed, {t.task_id for t in tasks}, allowed)
         except _ClientUnavailable as e:
             logger.error(f"Discussion client unavailable: {e}")
             return 2
         return 0
 
-    age = _report_age_minutes(report)
-    if age is None or age > MAX_REPORT_AGE_MINUTES:
-        # A stale (or undated) report describes a past state of the queue:
-        # tasks may already have been handed on. Never work from it.
+    if not fresh:
+        # A stale (or undated) report describes a past state of the queue: tasks may
+        # already have been handed on. Never start new work from it.
         msg = (f"Report {report.message_id} is "
                f"{'of unknown age' if age is None else f'{int(age)} min old'} "
-               f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to work from it.")
+               f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it.")
         logger.error(msg)
         if not dry_run:
             _record_run(
@@ -427,6 +528,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             job, created = ensure_task_job(
                 store, task,
                 report_message_id=report.message_id, report_digest=report.digest,
+                report_received_at=report.received_at, confirm_returned=_confirm_returned,
             )
             jobs.append(job)
             if created:
@@ -439,9 +541,9 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         logger.info(f"[DRY-RUN] {len(jobs)} jobs ensured ({jobs_created} new); no work performed.")
         return 0
 
-    # 4-6. Work PENDING jobs for tasks in THIS report only, then verify.
+    # 4-6. Work PENDING jobs for tasks in THIS fresh report only, then verify.
     try:
-        worker = _work_and_verify(store, jobs, {t.task_id for t in tasks})
+        worker = _work_new(store, jobs, {t.task_id for t in tasks}, allowed)
     except _ClientUnavailable as e:
         logger.error(f"Discussion client unavailable: {e}")
         _record_run(
@@ -559,9 +661,10 @@ def resume_task(
         if intent.get("state") not in ("attempting", "uncertain"):
             print("There is no unknown reassignment on this job to retry")
             return 1
-        answer["retry_save"] = {"target": intent.get("target"), "after_attempt": int(intent.get("attempt") or 0)}
-        notes.append(f"Recorded: one more Save to {intent.get('target')} is allowed (attempt "
-                     f"{int(intent.get('attempt') or 0) + 1}); this permission is used once")
+        grant_target = str(answer.get("assign_to") or intent.get("target") or "")
+        answer["retry_save"] = {"target": grant_target, "after_attempt": int(intent.get("attempt") or 0)}
+        notes.append(f"Recorded: one more Save to {grant_target} is allowed (attempt "
+                     f"{int(intent.get('attempt') or 0) + 1}); it names that person and is used once")
 
     if asking:
         store.checkpoint(job["id"], human_answer_kind(round_no), answer)

@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .ezlynx_task_report import AssignedTask
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
@@ -145,12 +145,59 @@ def _find_by_idempotency_key(store: Any, key: str) -> dict[str, Any] | None:
     return store.get_job(str(row["id"]))
 
 
+def _received_time(value: Any) -> datetime | None:
+    """When a report was received: Gmail's millisecond epoch, or an ISO time."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return _as_time(text)
+
+
+def _return_proven(
+    store: Any, job: dict[str, Any], payload: dict[str, Any], task: AssignedTask,
+    report_received_at: Any, confirm_returned: Callable[[AssignedTask], bool] | None,
+) -> bool:
+    """Evidence that a task Robie handed back is really back with Robie.
+
+    A newer Last Modified is not enough, and neither is a report row: a delayed
+    report can still list the task under Robie. Both must hold: the report arrived
+    AFTER the handback was applied, and a live read of the task shows Robie as its
+    owner right now. Without a way to read it, nothing is proven.
+    """
+    if confirm_returned is None:
+        return False
+    from .task_assignment_worker import REASSIGN_KIND_PREFIX
+
+    round_no = int(payload.get("round") or 0)
+    intent = store.get_checkpoint(job["id"], f"{REASSIGN_KIND_PREFIX}{round_no}") or {}
+    applied = _as_time(str(intent.get("applied_at") or ""))
+    received = _received_time(report_received_at)
+    if applied is None or received is None or received <= applied:
+        logger.info(f"Task {task.task_id}: report does not post-date the handback; no new round")
+        return False
+    try:
+        if confirm_returned(task):
+            return True
+    except Exception as exc:  # noqa: BLE001 — unreadable means unproven
+        logger.warning(f"Task {task.task_id}: live return check failed: {exc}")
+        return False
+    logger.info(f"Task {task.task_id}: live read does not show Robie as owner; no new round")
+    return False
+
+
 def ensure_task_job(
     store: Any,
     task: AssignedTask,
     *,
     report_message_id: str = "",
     report_digest: str = "",
+    report_received_at: Any = None,
+    confirm_returned: Callable[[AssignedTask], bool] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Return the durable job for this task, creating it if needed.
 
@@ -189,6 +236,11 @@ def ensure_task_job(
     prior_status = JobStatus(job["status"])
     handed_back = prior_status in TERMINAL_STATUSES and bool(
         (store.get_checkpoint(job["id"], "action") or {}).get("reassigned"))
+    if handed_back and not _return_proven(
+            store, job, existing_payload, task, report_received_at, confirm_returned):
+        # Robie handed this task back. Without evidence it came back, the row is a
+        # lagging or stale snapshot: leave the finished job exactly as it is.
+        return job, False
     if _payload_fingerprint(existing_payload) == request_fingerprint(task) and not handed_back:
         store.update_payload(job["id"], {**existing_payload, "last_modified": task.last_modified})
         return store.get_job(job["id"]), False
