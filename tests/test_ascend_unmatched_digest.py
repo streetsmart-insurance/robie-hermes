@@ -5,9 +5,11 @@ Synthetic fixtures only. No network, no EZLynx write, no email send.
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
+import logging
 import os
 from urllib import error as urlerror
 from datetime import datetime, timedelta, timezone
@@ -849,6 +851,187 @@ def test_policy_paging_backs_off_and_reauths_once(tmp_path):
             sleep=lambda _s: None,
         )
     assert fresh.policy_index()[0] == []
+
+
+def test_a_dropped_policy_page_is_retried_in_place(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    waits: list[float] = []
+
+    class DropOnce:
+        def __init__(self, error):
+            self.error = error
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 2 and self.calls.count(2) == 1:
+                raise self.error
+            row = {
+                "PolicyNumber": f"HO-{page_index}",
+                "ApplicantId": str(page_index),
+                "ApplicantName": "Fixture Hauling",
+            }
+            return _page([row], total=2)
+
+    dropped = DropOnce(http.client.IncompleteRead(b"partial"))
+    report = digest.refresh_policy_index(
+        dropped,
+        [store],
+        now=NOW,
+        page_size=1,
+        max_pages=4,
+        pause_s=0,
+        sleep=waits.append,
+    )
+    assert dropped.calls == [1, 2, 2]
+    assert waits == [1.0]
+    assert report["complete"] is True
+    assert report["saved"] is True
+    assert report["pages"] == 2
+    saved = {row["policy_number"] for row in store.policy_index()[0]}
+    assert saved == {"HO-1", "HO-2"}
+
+
+class ChunkedEncodingError(Exception):
+    """Same name as http.client.ChunkedEncodingError, which 3.12 does not ship."""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http.client.IncompleteRead(b"partial"),
+        ChunkedEncodingError("short"),
+        ConnectionError("reset"),
+        TimeoutError("timed out"),
+        EzlynxApiError(503, "down"),
+    ],
+)
+def test_a_policy_page_that_keeps_dropping_is_not_saved(tmp_path, error):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.save_policy_index(
+        [
+            {
+                "policy_key": "ho1",
+                "policy_number": "HO-OLD",
+                "applicant_name": "Old Book",
+                "applicant_id": "1",
+            }
+        ],
+        built_at="2026-10-01T00:00:00Z",
+        calls=1,
+        total_size=1,
+        pages=1,
+    )
+    waits: list[float] = []
+
+    class KeepsDropping:
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 1:
+                return _page(
+                    [{"PolicyNumber": "HO-1", "ApplicantId": "9", "ApplicantName": "New"}],
+                    total=2,
+                )
+            raise error
+
+    client = KeepsDropping()
+    with pytest.raises(type(error)):
+        digest.refresh_policy_index(
+            client,
+            [store],
+            now=NOW,
+            page_size=1,
+            max_pages=4,
+            pause_s=0,
+            sleep=waits.append,
+        )
+    assert client.calls == [1, 2, 2, 2, 2]
+    assert waits == [1.0, 2.0, 4.0]
+    rows, meta = store.policy_index()
+    assert [row["policy_number"] for row in rows] == ["HO-OLD"]
+    assert int(meta["complete"]) == 1
+
+
+def test_a_page_retry_stops_at_the_time_budget(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+
+    class LateDrop:
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 2:
+                clock.now = 9.5
+                raise http.client.IncompleteRead(b"partial")
+            return _page(
+                [{"PolicyNumber": "HO-1", "ApplicantId": "1", "ApplicantName": "One"}],
+                total=2,
+            )
+
+    client = LateDrop()
+    report = digest.refresh_policy_index(
+        client,
+        [store],
+        now=NOW,
+        page_size=1,
+        max_pages=5,
+        pause_s=0,
+        sleep=lambda _s: None,
+        budget_s=10,
+        clock=clock,
+    )
+    assert client.calls == [1, 2]
+    assert report["complete"] is False
+    assert report["saved"] is False
+    assert report["stopped"] == "time_budget"
+    assert store.policy_index()[0] == []
+
+
+def test_a_dropped_policy_list_still_sends_the_email(tmp_path, caplog):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    _open_unmatched(store, key="open-1", policy="HO-998877", name="Fixture Hauling LLC")
+
+    class Down:
+        def search_policy_page(self, page_index, page_size):
+            raise http.client.IncompleteRead(b"partial")
+
+        def search_policy_by_number(self, number):
+            return {"data": [], "totalSize": 0}
+
+    caplog.set_level(logging.WARNING, logger=digest.logger.name)
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=False,
+        ezlynx_client=Down(),
+        refresh=True,
+        pause_s=0,
+        sleep=lambda _s: None,
+    )
+    assert "Fixture Hauling LLC" in result["body"]
+    assert "Did you mean" not in result["body"]
+    assert store.policy_index()[0] == []
+    notes = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == digest.logger.name and record.levelno >= logging.WARNING
+    ]
+    assert notes == [
+        "The EZLynx policy list could not be read. This email has no suggestions."
+    ]
 
 
 def test_index_stops_at_the_time_budget(tmp_path):
