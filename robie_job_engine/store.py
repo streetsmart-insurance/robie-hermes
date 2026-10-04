@@ -574,15 +574,25 @@ class JobStore:
         resume_status: JobStatus | None = None,
         release_lease: bool = False,
         authority: str = "job-engine",
+        lease_owner: str | None = None,
     ) -> dict[str, Any]:
+        """Move a Job between statuses.
+
+        `lease_owner` fences the move: it applies only while that worker still
+        holds the Job's lease, checked in the same transaction as the update.
+        A worker whose lease lapsed and was recovered cannot overwrite the
+        replacement's state. Omitted, behaviour is unchanged.
+        """
         now = utc_now()
         with self.transaction() as conn:
-            row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = conn.execute("SELECT status, lease_owner FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise KeyError(job_id)
             current = JobStatus(row["status"])
             if expected is not None and current not in expected:
                 raise RuntimeError(f"invalid transition {current} -> {status}")
+            if lease_owner is not None and row["lease_owner"] != lease_owner:
+                raise RuntimeError("job lease is missing or owned by another worker")
             if status == JobStatus.COMPLETE:
                 evidence = conn.execute(
                     """SELECT locator,expected_json,observed_json,captured_at,

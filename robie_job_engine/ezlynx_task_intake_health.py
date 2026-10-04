@@ -8,6 +8,9 @@ OUTCOME (not just that the server is up):
    30 minutes; the check allows 75 minutes of slack).
 2. No task-intake jobs are stuck in RUNNING (a crashed worker).
 3. No task-intake jobs went UNVERIFIED or FAILED in the last 24 hours.
+4. No task-intake job is stuck waiting on a person (AWAITING_HUMAN_INPUT),
+   or sitting in PENDING / VERIFYING / RETRY_WAIT with nothing moving it.
+   Each alert names the owner (TASK_INTAKE_OWNER) and the resume command.
 
 Quiet when healthy (exit 0, no Chat post). On any failure it posts a
 plain-English alert to the ROBIE health Chat and exits 2.
@@ -33,6 +36,15 @@ logger = logging.getLogger("ezlynx_task_intake_health")
 INTAKE_FRESH_MINUTES = 75
 STUCK_RUNNING_MINUTES = 120
 FAILURE_WINDOW_HOURS = 24
+HUMAN_WAIT_HOURS = 4
+QUEUED_STUCK_MINUTES = 120
+OWNER_ENV = "TASK_INTAKE_OWNER"
+RESUME_HELP = ("python -m robie_job_engine.ezlynx_task_intake --resume TASK_ID "
+               "[--assign-to NAME | --note-id ID]")
+
+
+def _owner() -> str:
+    return os.environ.get(OWNER_ENV, "").strip() or f"unassigned (set {OWNER_ENV})"
 
 
 def default_db_path() -> str:
@@ -124,6 +136,40 @@ def check_intake(now: datetime | None = None) -> list[str]:
         problems.append(
             f"task {task_id} is {row['status']} (job {row['id'][:8]}): {err}"
         )
+
+    # 4. Jobs waiting on a person, or queued/verifying with nothing moving them.
+    owner = _owner()
+    human_cutoff = now - timedelta(hours=HUMAN_WAIT_HOURS)
+    queued_cutoff = now - timedelta(minutes=QUEUED_STUCK_MINUTES)
+    with store.connect() as conn:
+        rows = conn.execute(
+            """SELECT id, status, last_error, payload_json, updated_at FROM jobs
+               WHERE action_type=? AND status IN (?,?,?,?)""",
+            (ACTION_TYPE, JobStatus.AWAITING_HUMAN_INPUT.value, JobStatus.VERIFYING.value,
+             JobStatus.RETRY_WAIT.value, JobStatus.PENDING.value),
+        ).fetchall()
+    import json
+
+    for row in rows:
+        updated = _parse_ts(row["updated_at"])
+        try:
+            task_id = json.loads(row["payload_json"] or "{}").get("task_id", "?")
+        except Exception:
+            task_id = "?"
+        status = row["status"]
+        if status == JobStatus.AWAITING_HUMAN_INPUT.value:
+            if updated is None or updated <= human_cutoff:
+                hours = "an unknown time" if updated is None else f"{int((now - updated).total_seconds() // 3600)}h"
+                problems.append(
+                    f"task {task_id} has been waiting on a person for {hours} "
+                    f"(job {row['id'][:8]}, owner: {owner}): {(row['last_error'] or '')[:160]} "
+                    f"Resume with: {RESUME_HELP}"
+                )
+        elif updated is None or updated <= queued_cutoff:
+            problems.append(
+                f"task {task_id} has been {status} for over {QUEUED_STUCK_MINUTES} min "
+                f"(job {row['id'][:8]}, owner: {owner}) and nothing is moving it"
+            )
 
     return problems
 

@@ -2301,6 +2301,19 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         except (ValueError, RuntimeError) as exc:
             result.reason = f"task_not_built: {exc}"
             return result
+        if not ctx.dry_run and task_kind != TASK_KIND_DISPUTED_CHARGE:
+            zapier_result = result.detail.get("zapier_result")
+            if not isinstance(zapier_result, dict) or zapier_result.get("ok") is not True:
+                # Not created: leave the notice unread so it is not reported done.
+                error_text = (
+                    zapier_result.get("error")
+                    if isinstance(zapier_result, dict)
+                    else ""
+                )
+                result.reason = (
+                    f"task_not_created: {error_text or 'task was not accepted'}"
+                )
+                return result
         if ctx.dry_run and task_kind != TASK_KIND_DISPUTED_CHARGE:
             result.detail["zapier_result"] = {"ok": True, "dry_run": True}
         elif ctx.dry_run:
