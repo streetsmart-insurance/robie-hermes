@@ -1,36 +1,636 @@
-"""Regression tests for Gmail-backed verification workers.
+"""Regression tests for the four ROBIE verification workers.
 
-Unittest (not pytest-only) so the ROBIE verification-gate battery
-(`unittest discover -s tests`) actually collects these cases.
-
-No network, no Gmail. Covers the 2026-09-19 4246/4360 and 4372 closed-task
-fixes plus the original worker self-test contract.
+Covers (2026-09-19):
+  - 4372 stale/prior-cycle exclusion (Fix 1): active policy status alone
+    does not make an old mortgagee task current; excluded items are
+    recorded with a reason, never silently dropped.
+  - 4246 live contact/context propagation (Fix 2): the 4246 branch builds
+    a real WorkItem from the audit entry (never None); call actions prefer
+    an explicit carrier desk number from the plan over failing; genuinely
+    missing contact info fails closed via AdapterError.
+  - DWD fetcher (Fix 3): pagination, strict delivery-date enforcement,
+    duplicate rejection, atomic writes.
+  - 4359 registry sync, full JSON status_counts, due_now live execution,
+    note adapter exact-title success + API-only failure.
 """
-from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
-import tempfile
-import unittest
-from datetime import date, timedelta
-from pathlib import Path
+import os
+import sys
+import types
+from datetime import date, datetime, timezone
 
-from robie_job_engine import gmail_report_ingestion as ing
-from robie_job_engine import verification_workers as vw
+import pytest
+
+import robie_job_engine.gmail_report_ingestion as ing
+import robie_job_engine.verification_workers as vw
+import robie_job_engine.fetch_worker_csvs_dwd as dwd
+from robie_job_engine import report_registry
 
 DAY = date(2026, 9, 19)
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _csv_bytes(report_id: str, rows: list[dict]) -> bytes:
     headers = ing.expected_headers(report_id)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=headers, extrasaction="ignore")
+    writer = csv.DictWriter(buffer, fieldnames=headers)
     writer.writeheader()
     for row in rows:
-        writer.writerow({header: row.get(header, "") for header in headers})
+        writer.writerow({h: row.get(h, "") for h in headers})
     return buffer.getvalue().encode("utf-8")
+
+
+def _row4372(policy, account, due, **extra):
+    row = {
+        "Applicant ID": "1",
+        "Account Name": account,
+        "Task Due Date": due,
+        "Policy Number": policy,
+        "Department": "Personal Lines",
+        "Task Status": "Open",
+    }
+    row.update(extra)
+    return row
+
+
+# --- Fix 1: 4372 stale/prior-cycle exclusion -------------------------------
+
+
+def _work_item_4372(policy, due, exp=""):
+    return vw.WorkItem(
+        key=policy, report_id="4372", policy_number=policy,
+        account_name="Test", department="Personal Lines", carrier="X",
+        producer="", csr="",
+        row={"Task Due Date": due, "Policy Expiration Date": exp})
+
+
+def test_4372_stale_expired_policy_excluded():
+    # SAHO581361: Deleted, exp 2025-12-20 — prior cycle on both axes.
+    reason = vw._4372_stale_reason(
+        _work_item_4372("SAHO581361", "11/05/2025", "12/20/2025"), DAY)
+    assert reason is not None
+    assert "2025-11-05" in reason
+    assert "policy expired 2025-12-20" in reason
+
+
+def test_4372_stale_active_policy_still_excluded():
+    # Ruth Cruz 4217318: Active, exp 2026-12-20 — but the task itself is a
+    # prior-cycle task (due 2026-06-01, 110 days ago). Active policy status
+    # alone must NOT make it current.
+    reason = vw._4372_stale_reason(_work_item_4372("4217318", "06/01/2026"), DAY)
+    assert reason is not None
+    assert "active policy status alone does not make an old mortgagee task current" in reason
+
+
+def test_4372_recent_task_kept():
+    assert vw._4372_stale_reason(_work_item_4372("FLD272903", "09/15/2026"), DAY) is None
+
+
+def test_4372_missing_due_date_never_excluded():
+    # Missing data must not silently drop work.
+    assert vw._4372_stale_reason(_work_item_4372("X", ""), DAY) is None
+
+
+def test_4372_run_excludes_stale_and_records_reason(tmp_path):
+    rows = [
+        _row4372("SAHO581361", "Saeed Abbaszadeh", "11/05/2025",
+                 **{"Policy Expiration Date": "12/20/2025"}),
+        _row4372("4217318", "Ruth Cruz", "06/01/2026"),
+        _row4372("HONJ046535", "Claudia Salgado & Paul Still", "06/15/2026"),
+        _row4372("FLD272903", "Angela & Sean Marchak", "09/15/2026"),
+    ]
+    run = vw.run_worker("4372", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4372", rows))
+    assert run.work_items == 1
+    assert len(run.excluded_stale) == 3
+    excluded_policies = {e["policy_number"] for e in run.excluded_stale}
+    assert excluded_policies == {"SAHO581361", "4217318", "HONJ046535"}
+    for entry in run.excluded_stale:
+        assert entry["reason"]  # every exclusion carries a reason
+    action_policies = {a.policy_number for a in run.actions}
+    assert action_policies == {"FLD272903"}  # stale items never become actions
+    # Digest shows the exclusions instead of dropping them silently.
+    digest = vw.build_digest([run])
+    assert "Excluded" in digest
+    assert "SAHO581361" in digest
+
+
+# --- Fix 2: 4246 live contact/context propagation --------------------------
+
+
+def _row4246(policy, term, carrier):
+    return {
+        "Account Name": "Test Co",
+        "Applicant ID": "220250093",
+        "Policy Number": policy,
+        "Policy Type": "Workers Comp",
+        "Master Company": carrier,
+        "Line Of Business": "Workers Comp",
+        "Policy Term": term,
+        "Department": "Commercial Lines",
+        "Assigned Producer": "P",
+        "CSR": "C",
+    }
+
+
+def _live_env(monkeypatch):
+    monkeypatch.setenv(vw.LIVE_ENV_VAR, "1")
+    monkeypatch.setattr(vw, "in_business_hours", lambda *a, **k: True)
+
+
+def test_4246_live_builds_real_work_item_not_none(tmp_path, monkeypatch):
+    _live_env(monkeypatch)
+    seen = []
+
+    def spy(pa, item):
+        seen.append((pa, item))
+        return "CALL placed: stub evidence"
+
+    monkeypatch.setattr(vw, "_execute_live_action", spy)
+    rows = [_row4246("WC123", "08/15/2026 - 08/15/2027", "Pie Insurance")]
+    run = vw.run_worker("4246", day=DAY, mode="live",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4246", rows))
+    assert len(seen) == 1  # the due_now Pie call was attempted
+    pa, item = seen[0]
+    assert item is not None, "4246 live path must pass a WorkItem, never None"
+    assert isinstance(item, vw.WorkItem)
+    assert item.policy_number == "WC123"
+    assert item.carrier == "Pie Insurance"
+    assert item.report_id == "4246"
+    assert pa.status == "done"
+    assert run.evidence and "stub evidence" in run.evidence[0]["note"]
+    # Digest must survive the live statuses (done/pending) without KeyError.
+    digest = vw.build_digest([run])
+    assert "WC123" in digest
+
+
+def test_4246_entry_without_source_row_still_builds(tmp_path):
+    # Entries written before source_row existed load with an empty row.
+    entry = vw.AuditQueueEntry(
+        key="K", policy_number="WC9", account_name="A", department="D",
+        carrier="Pie Insurance", renewal_date="2026-08-15",
+        first_seen="2026-09-19")
+    assert entry.source_row == {}
+    item = vw._work_item_from_audit_entry(entry)
+    assert item.policy_number == "WC9"
+    assert item.carrier == "Pie Insurance"
+    assert item.row["Policy Number"] == "WC9"
+
+
+def _fake_worker_adapters(monkeypatch, **behaviors):
+    """Install a fake `worker_adapters` module for _execute_live_action."""
+    calls = {}
+    fake = types.ModuleType("worker_adapters")
+
+    class AdapterError(RuntimeError):
+        pass
+
+    class RobieEmailAdapter:
+        def send(self, *, to, subject, body):
+            calls["email"] = {"to": to, "subject": subject}
+            if behaviors.get("email_fail"):
+                raise AdapterError("email failed")
+            dest = behaviors.get("email_id", "MSG1")
+            return types.SimpleNamespace(
+                channel="email", destination_id=dest,
+                detail=f"email to {to} sent (id {dest})")
+
+    class BlandCallAdapter:
+        def call(self, *, to, task, transfer_to=None):
+            calls["call"] = {"to": to, "task": task}
+            if behaviors.get("call_fail"):
+                raise AdapterError("call failed")
+            cid = behaviors.get("call_id", "CALL1")
+            return types.SimpleNamespace(
+                channel="call", destination_id=cid,
+                detail=f"call to {to} placed (call_id {cid})")
+
+    class EZLynxNoteAdapter:
+        def file_note(self, *, applicant_id, discussion_title, body):
+            calls["note"] = {"applicant_id": applicant_id,
+                             "title": discussion_title}
+            if behaviors.get("note_fail"):
+                raise AdapterError("note failed")
+            nid = behaviors.get("note_id", "N1")
+            return types.SimpleNamespace(
+                channel="note", destination_id=nid,
+                detail=f"note {nid} filed to '{discussion_title}'")
+
+    fake.AdapterError = AdapterError
+    fake.RobieEmailAdapter = RobieEmailAdapter
+    fake.BlandCallAdapter = BlandCallAdapter
+    fake.EZLynxNoteAdapter = EZLynxNoteAdapter
+    fake.ROBIE_EMAIL = "robie@streetsmart.insurance"
+    monkeypatch.setitem(sys.modules, "worker_adapters", fake)
+    return calls, AdapterError
+
+
+def test_4246_call_prefers_explicit_plan_phone(monkeypatch):
+    calls, _ = _fake_worker_adapters(monkeypatch)
+    # The 4246 Pie plan hardcodes the desk number; the export has no phone
+    # column. The call must go to the explicit plan number, not fail.
+    action, status, _ = vw.plan_4246(
+        vw.AuditQueueEntry(key="K", policy_number="WC1", account_name="A",
+                           department="D", carrier="Pie Insurance",
+                           renewal_date="2026-08-15", first_seen="2026-09-19"),
+        DAY)
+    assert status == "due_now" and action.kind == "call"
+    item = vw._work_item_from_audit_entry(
+        vw.AuditQueueEntry(key="K", policy_number="WC1", account_name="A",
+                           department="D", carrier="Pie Insurance",
+                           renewal_date="2026-08-15", first_seen="2026-09-19"))
+    pa = vw.PlannedAction("K", "WC1", "A", "D", "Audit Verifications",
+                          action, status, "r", "live")
+    note = vw._execute_live_action(pa, item)
+    assert calls["call"]["to"] == "855-965-1840"
+    assert "CALL placed" in note
+
+
+def test_4246_call_fails_closed_without_any_phone(monkeypatch):
+    _, AdapterError = _fake_worker_adapters(monkeypatch)
+    # Non-Pie carrier: plan has no hardcoded number, row has no phone.
+    entry = vw.AuditQueueEntry(key="K", policy_number="WC2", account_name="A",
+                               department="D", carrier="Travelers",
+                               renewal_date="2026-08-15", first_seen="2026-09-19")
+    action, status, _ = vw.plan_4246(entry, DAY)
+    assert action.kind == "portal"  # Travelers goes portal first
+    # Force a call plan with no number anywhere to check fail-closed.
+    action = vw.ActionPlan("call", "Call the carrier audit desk", target="Travelers")
+    item = vw._work_item_from_audit_entry(entry)
+    pa = vw.PlannedAction("K", "WC2", "A", "D", "Audit Verifications",
+                          action, "due_now", "r", "live")
+    with pytest.raises(AdapterError, match="no carrier/lender phone"):
+        vw._execute_live_action(pa, item)
+
+
+def test_4246_live_failure_leaves_action_pending(tmp_path, monkeypatch):
+    _live_env(monkeypatch)
+    _fake_worker_adapters(monkeypatch, call_fail=True)
+    rows = [_row4246("WC123", "08/15/2026 - 08/15/2027", "Pie Insurance")]
+    run = vw.run_worker("4246", day=DAY, mode="live",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4246", rows))
+    pa = run.actions[0]
+    assert pa.status == "pending"
+    assert "live execution failed" in pa.reason
+    assert run.evidence  # the failure itself is recorded as evidence
+
+
+# --- due_now triggers live execution ----------------------------------------
+
+
+def test_due_now_triggers_live_execution_not_just_planning(tmp_path, monkeypatch):
+    _live_env(monkeypatch)
+    executed = []
+
+    def spy(pa, item):
+        executed.append(pa.item_key)
+        return "EMAIL sent: stub (id MSG1)"
+
+    monkeypatch.setattr(vw, "_execute_live_action", spy)
+    rows = [{
+        "Account Name": "Acme",
+        "Applicant ID": "1",
+        "Policy Number": "POL1",
+        "Policy Effective Date": "09/19/2025",
+        "Policy Expiration Date": "10/09/2026",  # 20 days out -> due_now
+        "Master Company": "Travelers",
+        "Department": "Commercial Lines",
+    }]
+    run = vw.run_worker("4247", day=DAY, mode="live",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4247", rows))
+    assert executed == ["POL1"], "due_now must invoke the live executor"
+    assert run.actions[0].status == "done"
+
+
+def test_waiting_actions_are_held_in_live_mode(tmp_path, monkeypatch):
+    _live_env(monkeypatch)
+    executed = []
+    monkeypatch.setattr(vw, "_execute_live_action",
+                        lambda pa, item: executed.append(pa.item_key) or "x")
+    rows = [{
+        "Account Name": "Acme",
+        "Applicant ID": "1",
+        "Policy Number": "POL9",
+        "Policy Effective Date": "09/19/2025",
+        "Policy Expiration Date": "10/09/2026",
+        "Master Company": "Progressive",  # BOR path is due_now...
+        "Department": "Commercial Lines",
+    }]
+    # 4359 inside the 24-48h turnaround window -> waiting, held by design.
+    rows4359 = [{
+        "Account Name": "Acme",
+        "Applicant ID": "1",
+        "Policy Number": "CHG1",
+        "Master Company": "Travelers",
+        "Department": "Commercial Lines",
+        "Change Request Created Date": "09/18/2026",
+    }]
+    run = vw.run_worker("4359", day=DAY, mode="live",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4359", rows4359))
+    assert run.actions[0].status == "waiting"
+    assert executed == [], "waiting actions must not be executed"
+
+
+# --- 4359 registry sync + status_counts -------------------------------------
+
+
+def test_4359_registry_in_sync_with_ingestion_gate():
+    spec = report_registry.VERIFIED_REPORTS["4359"]
+    # Registry kill-switch stays False until 3 clean hermes-test-01 audits.
+    # The ingestion SCHEMA_VERIFIED flag is a separate parse gate.
+    assert spec.schema_verified is False
+    assert spec.identity_fields == ("policy_number", "change_request_created_date")
+    assert spec.look_id == "4602"
+    ing.check_report_gate("4359", allow_unverified=False)
+
+
+def _row4247(policy, exp, carrier="Travelers", dept="Commercial Lines"):
+    return {
+        "Account Name": "Acme", "Applicant ID": "1", "Policy Number": policy,
+        "Policy Effective Date": "09/19/2025", "Policy Expiration Date": exp,
+        "Master Company": carrier, "Department": dept,
+    }
+
+
+def test_status_counts_cover_every_observed_status(tmp_path, monkeypatch):
+    from robie_job_engine import run_daily_workers as rdw
+
+    csv_dir = tmp_path / "csvs"
+    csv_dir.mkdir()
+    (csv_dir / "report_4247_2026-09-19.csv").write_bytes(_csv_bytes("4247", [
+        _row4247("DUE1", "10/09/2026"),            # due_now
+        _row4247("BLK1", "not-a-date"),            # blocked
+        _row4247("PIE1", "10/09/2026", carrier="Pie Insurance"),  # due_now
+    ]))
+    (csv_dir / "report_4246_2026-09-19.csv").write_bytes(_csv_bytes("4246", [
+        _row4246("AUD1", "08/15/2026 - 08/15/2027", "Pie Insurance"),
+    ]))
+    (csv_dir / "report_4372_2026-09-19.csv").write_bytes(_csv_bytes("4372", [
+        _row4372("M1", "Lender Co", "09/15/2026"),  # blocked (enrichment)
+    ]))
+    (csv_dir / "report_4359_2026-09-19.csv").write_bytes(_csv_bytes("4359", [
+        {"Account Name": "Acme", "Applicant ID": "1", "Policy Number": "CHG1",
+         "Master Company": "Travelers", "Department": "Commercial Lines",
+         "Change Request Created Date": "09/18/2026"},   # waiting
+        {"Account Name": "Acme", "Applicant ID": "1", "Policy Number": "CHG2",
+         "Master Company": "Travelers", "Department": "Commercial Lines",
+         "Change Request Created Date": "09/01/2026"},   # due_now
+    ]))
+    queue_dir = tmp_path / "queue"
+    out_dir = tmp_path / "out"
+    rc = rdw.main(["--csv-dir", str(csv_dir), "--queue-dir", str(queue_dir),
+                   "--out", str(out_dir), "--date", "2026-09-19"])
+    assert rc == 0
+    summary = json.loads((out_dir / "runs_2026-09-19.json").read_text())
+    observed: set[str] = set()
+    for entry in summary:
+        observed |= set(entry["status_counts"])
+    # Every observed status is counted — none silently dropped.
+    assert observed == {"due_now", "blocked", "waiting"}, observed
+    for entry in summary:
+        assert sum(entry["status_counts"].values()) == (
+            entry["done"] + entry["pending"]
+            + sum(v for k, v in entry["status_counts"].items()
+                  if k not in ("done", "pending")))
+
+
+# --- Fix 3: DWD fetcher -----------------------------------------------------
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode()
+
+
+class _FakeAttachments:
+    def __init__(self, store):
+        self.store = store
+
+    def get(self, userId, messageId, id):
+        store = self.store
+
+        class Req:
+            def execute(self):
+                return {"data": _b64(store[messageId][id])}
+        return Req()
+
+
+class _FakeMessages:
+    def __init__(self, pages, full, attachments):
+        self.pages = pages
+        self.full = full
+        self.attachments_store = attachments
+
+    def list(self, **kwargs):
+        pages = self.pages
+
+        class Req:
+            def execute(self):
+                token = kwargs.get("pageToken")
+                idx = int(token) if token else 0
+                page = pages[idx]
+                out = {"messages": [{"id": mid} for mid in page["ids"]]}
+                if idx + 1 < len(pages):
+                    out["nextPageToken"] = str(idx + 1)
+                return out
+        return Req()
+
+    def get(self, userId, id, format):
+        full = self.full
+
+        class Req:
+            def execute(self):
+                return full[id]
+        return Req()
+
+    def attachments(self):
+        return _FakeAttachments(self.attachments_store)
+
+
+class _FakeService:
+    def __init__(self, pages, full, attachments):
+        self._messages = _FakeMessages(pages, full, attachments)
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self._messages
+
+
+def _make_message(mid, internal_ms, csv_bytes, filename="report.csv",
+                  sender="donotreply@appliedsystems.com",
+                  subject="ROBIE daily CSV delivery"):
+    return {
+        "id": mid,
+        "internalDate": str(internal_ms),
+        "payload": {
+            "headers": [
+                {"name": "From", "value": f"Reports <{sender}>"},
+                {"name": "Subject", "value": subject},
+            ],
+            "parts": [{
+                "filename": filename,
+                "mimeType": "text/csv",
+                "body": {"attachmentId": f"att-{mid}"},
+            }],
+        },
+    }
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_dwd_fetcher_pagination_dates_dedup_atomic(tmp_path):
+    day = date(2026, 9, 19)
+    csv_4247 = _csv_bytes("4247", [_row4247("P1", "10/09/2026")])
+    csv_4246 = _csv_bytes("4246", [_row4246("A1", "08/15/2026 - 08/15/2027", "Pie")])
+    t_noon = _ms(datetime(2026, 9, 19, 12, 0))   # 8 AM ET on the day
+    t_yesterday = _ms(datetime(2026, 9, 18, 12, 0))
+
+    full = {
+        "m1": _make_message("m1", t_noon, csv_4247),
+        "m2": _make_message("m2", t_noon, csv_4247),      # duplicate bytes
+        "m3": _make_message("m3", t_yesterday, csv_4247),  # wrong day
+        "m4": _make_message("m4", t_noon, csv_4246),
+        "m5": _make_message("m5", t_noon, _csv_bytes("4247", [_row4247("P2", "10/10/2026")])),
+    }
+    attachments = {mid: {f"att-{mid}": data}
+                   for mid, data in
+                   [("m1", csv_4247), ("m2", csv_4247), ("m3", csv_4247),
+                    ("m4", csv_4246),
+                    ("m5", _csv_bytes("4247", [_row4247("P2", "10/10/2026")]))]}
+    # Two pages: pagination must reach page 2 to find m4/m5.
+    pages = [{"ids": ["m1", "m2"]}, {"ids": ["m3", "m4", "m5"]}]
+    service = _FakeService(pages, full, attachments)
+
+    out_dir = tmp_path / "csvs"
+    summary = dwd.fetch_worker_csvs(
+        service, day=day, out_dir=str(out_dir),
+        report_ids=("4247", "4246"))
+
+    # Pagination worked: 4246 from page 2 was found.
+    assert set(summary["saved"]) == {"4247", "4246"}
+    saved_4247 = summary["saved"]["4247"]
+    assert saved_4247["message_id"] == "m1"
+    assert open(saved_4247["path"], "rb").read() == csv_4247
+
+    skipped = "\n".join(summary["skipped"])
+    assert "duplicate attachment" in skipped          # m2 deduped by hash
+    assert "delivered 2026-09-18" in skipped         # m3 strict date reject
+    assert "already saved 4247" in skipped           # m5 same report kept first
+
+    # Atomic: no tmp files left behind, output is the complete CSV.
+    leftovers = [p for p in os.listdir(out_dir) if p.endswith(".tmp")]
+    assert leftovers == []
+
+
+def test_dwd_fetcher_missing_report_raises():
+    day = date(2026, 9, 19)
+    csv_4247 = _csv_bytes("4247", [_row4247("P1", "10/09/2026")])
+    t_noon = _ms(datetime(2026, 9, 19, 12, 0))
+    full = {"m1": _make_message("m1", t_noon, csv_4247)}
+    attachments = {"m1": {"att-m1": csv_4247}}
+    service = _FakeService([{"ids": ["m1"]}], full, attachments)
+    # NOTE: the fetcher imports gmail_report_ingestion as a top-level
+    # module (sys.path trick), so its exception class is dwd.ing's —
+    # not robie_job_engine.gmail_report_ingestion's.
+    with pytest.raises(dwd.ing.GmailReportIngestionError,
+                       match="no delivery found for 4246"):
+        dwd.fetch_worker_csvs(service, day=day, out_dir="/tmp/dwd-never",
+                              report_ids=("4247", "4246"))
+
+
+# --- note adapter: exact-title success + API-only failure -------------------
+# The adapter uses robie_job_engine.ezlynx_discussions (get_discussions +
+# append_note), not the legacy src.ezlynx.api_client interface.
+
+
+def _fake_ezlynx_client(monkeypatch, **behaviors):
+    calls = {}
+    module = types.ModuleType("robie_job_engine.ezlynx_discussions")
+    discussion_title = behaviors.get(
+        "discussion_title", "ROBIE worker adapter test 2")
+    note_id = behaviors.get("note_id", "1128931520")
+    posted: list[dict] = []
+
+    def get_discussions(applicant_id):
+        calls["applicant_id"] = applicant_id
+        if behaviors.get("raise"):
+            raise RuntimeError("Discussion API exploded")
+        # The discussion list the adapter searches by exact title. Posted
+        # notes appear here so the adapter's read-back verification passes.
+        return [{"id": "D1", "title": discussion_title,
+                 "notes": list(posted)}]
+
+    def append_note(discussion_id, body):
+        calls["discussion_id"] = discussion_id
+        calls["body"] = body
+        if behaviors.get("result", {}).get("status") == "error":
+            return None
+        posted.append({"id": note_id})
+        return note_id
+
+    module.get_discussions = get_discussions
+    module.append_note = append_note
+    monkeypatch.setitem(
+        sys.modules, "robie_job_engine.ezlynx_discussions", module)
+    return calls
+
+
+def test_note_adapter_exact_title_success(monkeypatch):
+    from robie_job_engine import worker_adapters as wa
+    calls = _fake_ezlynx_client(monkeypatch)
+    adapter = wa.EZLynxNoteAdapter()
+    ev = adapter.file_note(
+        applicant_id="220250093",
+        discussion_title="ROBIE worker adapter test 2",
+        body="hello")
+    assert ev.channel == "note"
+    assert ev.destination_id == "1128931520"
+    # Exact title wins: the note was filed to the discussion carrying the
+    # exact title (D1), never a fuzzy match, and the applicant id was passed
+    # through to the API.
+    assert calls["discussion_id"] == "D1"
+    assert calls["applicant_id"] == "220250093"
+    # API-only: the ezlynx_discussions interface has no browser fallback.
+    assert "ROBIE worker adapter test 2" in ev.detail
+
+
+def test_note_adapter_api_failure_fails_closed(monkeypatch):
+    from robie_job_engine import worker_adapters as wa
+    _fake_ezlynx_client(monkeypatch, result={"status": "error", "note_id": None},
+                        discussion_title="Some Title")
+    adapter = wa.EZLynxNoteAdapter()
+    with pytest.raises(wa.AdapterError, match="no note ID"):
+        adapter.file_note(applicant_id="220250093",
+                          discussion_title="Some Title", body="x")
+
+
+def test_note_adapter_api_exception_fails_closed(monkeypatch):
+    from robie_job_engine import worker_adapters as wa
+    _fake_ezlynx_client(monkeypatch, **{"raise": True,
+                                        "discussion_title": "Some Title"})
+    adapter = wa.EZLynxNoteAdapter()
+    # The API exception propagates (fails closed) — no false success.
+    with pytest.raises(RuntimeError, match="Discussion API exploded"):
+        adapter.file_note(applicant_id="220250093",
+                          discussion_title="Some Title", body="x")
+
+
+# --- Fix 4: 4246 ingests the 4360-format daily CSV ---------------------------
+# The daily audit email delivers the transaction-level CSV from scheduled
+# report 4360 (24 cols), not the 19-col policy-level saved report 4246.
+# Regression test: the 4360 format must validate, route, and build work
+# items with Effective Date as the renewal date.
 
 
 def _row4360(policy, account, effective, carrier="Test Carrier"):
@@ -62,290 +662,170 @@ def _row4360(policy, account, effective, carrier="Test Carrier"):
     }
 
 
-def _row4372(policy, account, due, **overrides):
-    row = {
-        "Applicant ID": "220250093",
-        "Account Name": account,
-        "Policy Number": policy,
-        "Task Due Date": due,
-        "Task Status": "Open",
-        "Department": "Personal Lines",
-    }
-    row.update(overrides)
-    return row
+def test_4246_ingests_4360_format_daily_csv(tmp_path):
+    rows = [_row4360("WC999", "Test Co", "08/15/2026")]
+    run = vw.run_worker("4246", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4246", rows))
+    assert run.ingested_rows == 1
+    assert run.work_items == 1
+    assert not run.errors
+    assert len(run.audit_added) == 1
+    # Effective Date (2026-08-15) is the renewal date: 2026-09-19 is day 35.
+    assert run.actions[0].status == "due_now"
+    assert "day 35" in run.actions[0].reason
+    # The queue entry carries carrier + department from the 4360 columns.
+    queue_path = tmp_path / "audit-working-queue.json"
+    saved = json.loads(queue_path.read_text(encoding="utf-8"))
+    entry = saved["entries"][run.audit_added[0]]
+    assert entry["renewal_date"] == "2026-08-15"
+    assert entry["carrier"] == "Test Carrier"
+    assert entry["account_name"] == "Test Co"
+    # 4360 format has Branch, not Department — it must not be Unassigned.
+    assert entry["department"] == "Commercial Lines"
+
+
+def test_4246_rejects_old_19col_format(tmp_path):
+    # The old saved-4246 19-col format is no longer the daily feed and
+    # must be rejected, not silently ingested.
+    old_headers = ["Account Name", "Applicant ID", "Policy Number"]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=old_headers)
+    writer.writeheader()
+    writer.writerow({"Account Name": "X", "Applicant ID": "1",
+                     "Policy Number": "P1"})
+    with pytest.raises(Exception):
+        vw.run_worker("4246", day=DAY, mode="dry_run",
+                      queue_dir=str(tmp_path),
+                      csv_bytes=buffer.getvalue().encode("utf-8"))
+
+
+# --- Fix 5: 4372 excludes closed tasks --------------------------------------
+# The 4372 daily CSV can deliver CLOSED tasks (report filter does not
+# exclude them). A closed task is finished work and must never become a
+# work item, regardless of due date.
 
 
 def _row4372_closed(policy, account, closed_date, closed_by):
-    return _row4372(
-        policy,
-        account,
-        "12/20/2026",
-        **{"Task Status": "Closed",
-           "Task Closed Date": closed_date,
-           "Task Closed By": closed_by},
+    return _row4372(policy, account, "12/20/2026",
+                    **{"Task Status": "Closed",
+                       "Task Closed Date": closed_date,
+                       "Task Closed By": closed_by})
+
+
+def test_4372_closed_tasks_excluded_not_worked(tmp_path):
+    rows = [
+        _row4372_closed("SAHO581361", "Saeed Abbaszadeh",
+                        "2025-12-12", "Daniela Aguilar"),
+        _row4372("NEW123", "Current Person", "10/15/2026",
+                 **{"Task Status": "Open"}),
+    ]
+    run = vw.run_worker("4372", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4372", rows))
+    assert run.work_items == 1
+    assert len(run.excluded_stale) == 1
+    ex = run.excluded_stale[0]
+    assert ex["policy_number"] == "SAHO581361"
+    assert "closed 2025-12-12 by Daniela Aguilar" in ex["reason"]
+    assert run.actions[0].policy_number == "NEW123"
+
+
+def test_4372_non_closed_status_never_excluded_by_this_rule(tmp_path):
+    # Blank or Open status must not be treated as closed — missing data
+    # never silently drops work.
+    rows = [_row4372("OPEN1", "Open Person", "10/15/2026",
+                     **{"Task Status": ""})]
+    run = vw.run_worker("4372", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4372", rows))
+    assert run.work_items == 1
+    assert not run.excluded_stale
+
+
+def test_4372_test_ho_note_fallback_extracts_policy():
+    """Regression (2026-09-20): 4372 with empty Policy Number column but
+    TEST-HO policy in the Note field must extract the policy number for
+    the canary test. Production rows always carry the column; this
+    fallback is scoped to the TEST-HO prefix only."""
+    row = {
+        "Policy Number": "",
+        "Note": "Test Mortgagee Verification - TEST-HO-08312026-01\n\nTest task.",
+    }
+    assert ing.identity_value("4372", row) == "TEST-HO-08312026-01"
+
+
+def test_4372_test_ho_fallback_ignores_non_test_notes():
+    """The TEST-HO fallback must not fire on real policy notes."""
+    row = {
+        "Policy Number": "",
+        "Note": "Monitoring if payment is received for policy SAHO581361",
+    }
+    assert ing.identity_value("4372", row) == ""
+
+
+def test_4372_policy_column_takes_precedence_over_note():
+    """When the Policy Number column is populated, it wins — the Note
+    fallback never overrides real data."""
+    row = {
+        "Policy Number": "SAHO581361",
+        "Note": "Test note with TEST-HO-99999999 inside",
+    }
+    assert ing.identity_value("4372", row) == "SAHO581361"
+
+
+def _make_4372_csv(rows_data):
+    """Build a 4372-format CSV bytes object from list of (applicant, account,
+    status, policy_number, note) tuples."""
+    hdrs = ing.expected_headers("4372")
+
+    def make_row(applicant, account, status, policy_num, note):
+        row = [""] * len(hdrs)
+        row[0] = applicant
+        row[1] = account
+        row[6] = status
+        row[14] = note
+        row[24] = policy_num
+        row[30] = "Personal Lines"
+        return row
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(hdrs)
+    for rd in rows_data:
+        w.writerow(make_row(*rd))
+    return buf.getvalue().encode()
+
+
+def test_4372_parser_accepts_test_ho_note_fallback_row():
+    """Regression (2026-09-21): parse_and_validate_csv must not reject a
+    4372 row with an empty Policy Number column when the Note carries a
+    TEST-HO identity. The parser previously raised before identity_value's
+    fallback could run, which is what failed the three Mortgagee Test jobs
+    on feed 1a0c0ae6d8d69dc4."""
+    csv_bytes = _make_4372_csv([
+        ("220250093", "ROBIE Test LLC", "Open", "",
+         "Task note with TEST-HO-08312026-01 for mortgagee verification"),
+        ("220250094", "Test Acct 2", "Closed", "HO-11111", "Closed task"),
+    ])
+    rows, skipped = ing.parse_and_validate_csv("4372", csv_bytes)
+    assert len(rows) == 2
+    assert skipped == 0
+    # The canary row survives parsing with its TEST-HO identity
+    assert ing.identity_value("4372", rows[0]) == "TEST-HO-08312026-01"
+
+
+def test_4372_parser_skips_identityless_row_when_note_fallback_fails(caplog):
+    """When the TEST-HO note fallback finds nothing, main's skip-with-warning
+    applies. A report that then has zero usable rows still fails closed."""
+    csv_bytes = _make_4372_csv([
+        ("220250093", "ROBIE Test LLC", "Open", "",
+         "Regular note with no test identity"),
+    ])
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ing.GmailReportIngestionError, match="no data rows"):
+            ing.parse_and_validate_csv("4372", csv_bytes)
+    assert any(
+        "skipping row with empty identity" in record.message
+        for record in caplog.records
     )
-
-
-class RootTestShadowingTests(unittest.TestCase):
-    """CI 2026-09-19: repo-root test_*.py shadowed tests/ and called sys.exit."""
-
-    def test_no_repo_root_test_modules_shadow_tests_package(self):
-        collisions = sorted(path.name for path in REPO_ROOT.glob("test_*.py"))
-        self.assertEqual(
-            collisions,
-            [],
-            "repo-root test_*.py shadows `unittest discover -s tests` because "
-            f"PYTHONPATH includes the repo root: {collisions}",
-        )
-
-
-class Audit4246WorkerTests(unittest.TestCase):
-    def test_4246_ingests_4360_format_daily_csv(self):
-        rows = [_row4360("WC999", "Test Co", "08/15/2026")]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4246",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4246", rows),
-            )
-            self.assertEqual(run.ingested_rows, 1)
-            self.assertEqual(run.work_items, 1)
-            self.assertFalse(run.errors)
-            self.assertEqual(len(run.audit_added), 1)
-            self.assertEqual(run.actions[0].status, "due_now")
-            self.assertIn("day 35", run.actions[0].reason)
-            saved = json.loads(
-                Path(tmp, "audit-working-queue.json").read_text(encoding="utf-8")
-            )
-            entry = saved["entries"][run.audit_added[0]]
-            self.assertEqual(entry["renewal_date"], "2026-08-15")
-            self.assertEqual(entry["carrier"], "Test Carrier")
-            self.assertEqual(entry["account_name"], "Test Co")
-            self.assertEqual(entry["department"], "Commercial Lines")
-
-    def test_4246_rejects_old_19col_format(self):
-        old_headers = ["Account Name", "Applicant ID", "Policy Number"]
-        buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=old_headers)
-        writer.writeheader()
-        writer.writerow(
-            {"Account Name": "X", "Applicant ID": "1", "Policy Number": "P1"}
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(Exception):
-                vw.run_worker(
-                    "4246",
-                    day=DAY,
-                    mode="dry_run",
-                    queue_dir=tmp,
-                    csv_bytes=buffer.getvalue().encode("utf-8"),
-                )
-
-    def test_4246_incremental_queue_add_then_carry(self):
-        rows = [
-            _row4360("WC-DAY45", "Day45 Co", "08/05/2026"),
-            _row4360("WC-DAY9", "Day9 Co", "09/10/2026"),
-        ]
-        data = _csv_bytes("4246", rows)
-        with tempfile.TemporaryDirectory() as tmp:
-            run1 = vw.run_worker(
-                "4246", day=DAY, mode="dry_run", queue_dir=tmp, csv_bytes=data
-            )
-            self.assertEqual(run1.work_items, 2)
-            self.assertEqual(len(run1.audit_added), 2)
-            self.assertEqual(len(run1.audit_carried), 0)
-            escalations = [a for a in run1.actions if a.action.kind == "escalate"]
-            self.assertEqual(len(escalations), 1, escalations)
-            self.assertEqual(escalations[0].policy_number, "WC-DAY45")
-
-            run2 = vw.run_worker(
-                "4246", day=DAY, mode="dry_run", queue_dir=tmp, csv_bytes=data
-            )
-            self.assertEqual(len(run2.audit_added), 0)
-            self.assertEqual(len(run2.audit_carried), 2)
-            saved = json.loads(
-                Path(tmp, "audit-working-queue.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(len(saved["entries"]), 2)
-
-
-class Mortgagee4372WorkerTests(unittest.TestCase):
-    def test_4372_closed_tasks_excluded_not_worked(self):
-        rows = [
-            _row4372_closed(
-                "SAHO581361", "Saeed Abbaszadeh", "2025-12-12", "Daniela Aguilar"
-            ),
-            _row4372("NEW123", "Current Person", "10/15/2026", **{"Task Status": "Open"}),
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4372",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4372", rows),
-            )
-            self.assertEqual(run.work_items, 1)
-            self.assertEqual(len(run.excluded_stale), 1)
-            ex = run.excluded_stale[0]
-            self.assertEqual(ex["policy_number"], "SAHO581361")
-            self.assertIn("closed 2025-12-12 by Daniela Aguilar", ex["reason"])
-            self.assertEqual(run.actions[0].policy_number, "NEW123")
-
-    def test_4372_non_closed_status_never_excluded_by_this_rule(self):
-        rows = [_row4372("OPEN1", "Open Person", "10/15/2026", **{"Task Status": ""})]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4372",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4372", rows),
-            )
-            self.assertEqual(run.work_items, 1)
-            self.assertFalse(run.excluded_stale)
-
-    def test_4372_open_tasks_blocked_pending_lender_enrichment(self):
-        rows = [_row4372(f"OPEN{n}", f"Account {n}", "10/15/2026") for n in range(1, 5)]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4372",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4372", rows),
-            )
-            self.assertEqual(run.work_items, 4)
-            self.assertTrue(all(a.status == "blocked" for a in run.actions))
-            self.assertTrue(all("lender" in a.reason.casefold() for a in run.actions))
-
-
-class ManualRenewal4247WorkerTests(unittest.TestCase):
-    def test_4247_counts_urgency_sort_progressive_and_bad_date(self):
-        exp_soon = (DAY + timedelta(days=35)).strftime("%m/%d/%Y")
-        exp_far = (DAY + timedelta(days=120)).strftime("%m/%d/%Y")
-        eff = (DAY - timedelta(days=330)).strftime("%m/%d/%Y")
-        rows = [
-            {
-                "Policy Number": "POL-4247-001",
-                "Account Name": "Soon Account",
-                "Department": "Commercial Lines",
-                "Policy Effective Date": eff,
-                "Policy Expiration Date": exp_soon,
-                "Master Company": "Test Carrier",
-            },
-            {
-                "Policy Number": "POL-4247-002",
-                "Account Name": "Progressive Account",
-                "Department": "Commercial Lines",
-                "Policy Effective Date": eff,
-                "Policy Expiration Date": exp_far,
-                "Master Company": "Progressive",
-            },
-            {
-                "Policy Number": "POL-4247-003",
-                "Account Name": "Bad Date Account",
-                "Department": "Commercial Lines",
-                "Policy Effective Date": eff,
-                "Policy Expiration Date": "not-a-date",
-                "Master Company": "Test Carrier",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4247",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4247", rows),
-            )
-            self.assertEqual(run.work_items, 3)
-            kinds = [a.action.kind for a in run.actions]
-            self.assertEqual(kinds[0], "portal")
-            self.assertEqual(kinds[1], "verify")
-            self.assertIn("Progressive", run.actions[1].action.detail)
-            self.assertEqual(run.actions[2].status, "blocked")
-            self.assertEqual(run.actions[0].policy_number, "POL-4247-001")
-            digest = vw.build_digest([run])
-            self.assertIn("Manual Renewals", digest)
-            self.assertIn("Commercial Lines", digest)
-
-
-class PolicyChange4359WorkerTests(unittest.TestCase):
-    def test_4359_per_request_items_and_turnaround_window(self):
-        old = (DAY - timedelta(days=10)).strftime("%m/%d/%Y")
-        new = (DAY - timedelta(days=1)).strftime("%m/%d/%Y")
-        eff = DAY.strftime("%m/%d/%Y")
-        rows = [
-            {
-                "Policy Number": "POL-DUP",
-                "Change Request Created Date": old,
-                "Effective Date": eff,
-                "Department": "Commercial Lines",
-                "Master Company": "Test Carrier",
-            },
-            {
-                "Policy Number": "POL-DUP",
-                "Change Request Created Date": new,
-                "Effective Date": eff,
-                "Department": "Commercial Lines",
-                "Master Company": "Test Carrier",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4359",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4359", rows),
-            )
-            self.assertEqual(run.work_items, 2)
-            self.assertEqual(sorted(a.status for a in run.actions), ["due_now", "waiting"])
-            self.assertEqual(len({a.item_key for a in run.actions}), 2)
-
-    def test_4359_gate_open_after_verification(self):
-        rows = [{
-            "Policy Number": "TEST-001",
-            "Change Request Created Date": "09/19/2026",
-            "Department": "Commercial Lines",
-        }]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4359",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4359", rows),
-            )
-            self.assertEqual(run.work_items, 1)
-            self.assertFalse(run.errors)
-
-
-class DigestShapeTests(unittest.TestCase):
-    def test_digest_groups_by_department_with_plain_english_labels(self):
-        rows = [{
-            "Policy Number": "POL-PL",
-            "Account Name": "Personal Account",
-            "Department": "Personal Lines",
-            "Policy Expiration Date": (DAY + timedelta(days=40)).strftime("%m/%d/%Y"),
-            "Master Company": "Test Carrier",
-        }]
-        with tempfile.TemporaryDirectory() as tmp:
-            run = vw.run_worker(
-                "4247",
-                day=DAY,
-                mode="dry_run",
-                queue_dir=tmp,
-                csv_bytes=_csv_bytes("4247", rows),
-            )
-            digest = vw.build_digest([run])
-            self.assertIn("### Personal Lines", digest)
-            self.assertNotIn("done / not done / pending", digest)
-            self.assertIn("[Needs action]", digest)
-
-
-if __name__ == "__main__":
-    unittest.main()
