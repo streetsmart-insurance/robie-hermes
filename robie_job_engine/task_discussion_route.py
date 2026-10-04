@@ -10,6 +10,9 @@ Rules, each tested:
   must agree with the environment's own ``ROBIE_EZLYNX_DISCUSSION_API`` switch (live iff ``live``).
 - The secret that is read is chosen by the route alone and the host in it must match the route. Any
   failure refuses; it never tries the other secret, never falls back and never guesses.
+- The authentication endpoint and API origin must be EXACTLY the approved HTTPS pair for the route
+  (no substring checks); every request is re-checked against it and redirects are never followed.
+- The client reads and attaches NO browser cookies unless a caller explicitly asks (``browser_session``).
 - The task flow never uses the shared SSRobie username/password: the token request carries no
   password, so it is the vendor integration grant only. (The note tool's live route is separate.)
 - The client carries a ``route_record`` (route, host, secret resource name, grant), never a secret value.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib import request
 from urllib.parse import urlparse
 
 from .ezlynx_api import EzlynxApiConfigurationError, load_ezlynx_api_config
@@ -25,6 +29,13 @@ from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 
 ROUTE_ENV = "ROBIE_TASK_DISCUSSION_ROUTE"
 ROUTES = ("uat", "live")
+# EXACT approved HTTPS pairs (authentication endpoint + API origin), from the repo's own constants.
+# No substring matching: scheme, host, port, userinfo, path, query and fragment must all be exact.
+APPROVED = {
+    "live": {"host": "app.ezlynx.com", "token": "https://app.ezlynx.com/auth/connect/token"},
+    "uat": {"host": "app.uatezlynx.com", "token": "https://app.uatezlynx.com/auth/connect/token"},
+}
+DOCUMENT_PATHS = ("/DocumentApi", "/DocumentApi/")
 
 
 class DiscussionRouteRefused(EzlynxApiConfigurationError):
@@ -57,7 +68,58 @@ def resolve_route(environ: dict[str, str] | None = None) -> str:
     return declared
 
 
-def build_task_discussion_client(*, accessor: Any = None) -> Any:
+class _NoRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # a 3xx is an error, never followed
+        return None
+
+
+def no_redirect_urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int,
+                        _allow_insecure_test_origin: bool = False):
+    """urlopen that refuses non-HTTPS URLs and never follows a redirect (so a token cannot be forwarded)."""
+    parsed = urlparse(url)
+    local_test = _allow_insecure_test_origin and parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
+    if parsed.scheme != "https" and not local_test:
+        raise DiscussionRouteRefused("only HTTPS requests are allowed")
+    opener = request.build_opener(_NoRedirect)
+    req = request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+    return opener.open(req, timeout=timeout)
+
+
+def _static_headers(url: str) -> dict[str, str]:
+    """No browser session, no cookies, no portal headers: identity and content type only."""
+    from .ezlynx_discussions import _CHROME_USER_AGENT
+
+    return {"User-Agent": _CHROME_USER_AGENT, "Accept": "application/json"}
+
+
+def _check_pair(route: str, api: Any) -> str:
+    approved = APPROVED[route]
+    token = str(api.token_endpoint or "")
+    base = urlparse(str(api.document_base_url or ""))
+    if token != approved["token"]:
+        raise DiscussionRouteRefused(f"the {route} route's authentication endpoint is not the approved HTTPS endpoint; refusing")
+    if (base.scheme != "https" or base.netloc != approved["host"] or base.path not in DOCUMENT_PATHS
+            or base.params or base.query or base.fragment):
+        raise DiscussionRouteRefused(f"the {route} route's API origin is not the approved HTTPS origin; refusing")
+    return approved["host"]
+
+
+def _guarded(route_host: str, token_url: str, inner: Any) -> Any:
+    def send(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int) -> Any:
+        parsed = urlparse(str(url))
+        ok = (parsed.scheme == "https" and parsed.netloc == route_host and not parsed.fragment
+              and (str(url) == token_url or parsed.path.startswith("/DiscussionApi/")))
+        if not ok:
+            raise DiscussionRouteRefused("request refused: not the approved HTTPS origin")
+        return inner(url, data=data, headers=headers, timeout=timeout)
+
+    return send
+
+
+def build_task_discussion_client(*, accessor: Any = None, urlopen: Any = None, browser_session: bool = False) -> Any:
+    """``browser_session`` is False by default: the client never reads or attaches Chrome cookies. It is
+    True only where a caller explicitly keeps the legacy behaviour (the intake and canary wrappers); it is
+    recorded in ``route_record`` and the read-only inspection and lookup refuse a client with it on."""
     from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
 
     route = resolve_route()
@@ -68,17 +130,14 @@ def build_task_discussion_client(*, accessor: Any = None) -> Any:
         raise
     except Exception as exc:  # noqa: BLE001 - reason only, never secret text; no fallback to the other secret
         raise DiscussionRouteRefused(f"the {route} route's secret is unavailable ({type(exc).__name__}); not falling back") from exc
-    host = (urlparse(str(api.token_endpoint)).hostname or "").casefold()
-    doc_host = (urlparse(str(api.document_base_url)).hostname or "").casefold()
-    is_uat = "uatezlynx" in host or "uatezlynx" in doc_host
-    if (route == "uat") != is_uat:
-        raise DiscussionRouteRefused(f"the {route} route's secret points at {host or 'an unknown host'}; refusing")
-    parsed = urlparse(str(api.document_base_url or api.token_endpoint))
-    client = DiscussionApiClient(DiscussionApiConfig(
-        discussion_base_url=f"{parsed.scheme}://{parsed.netloc}/DiscussionApi/",
-        token_endpoint=str(api.token_endpoint), client_id=str(api.client_id), client_secret=str(api.client_secret),
-        username=str(api.username), integration_group_id=str(api.integration_group_id),
-        scope="DiscussionApi openid", password=""))
+    host = _check_pair(route, api)
+    client = DiscussionApiClient(
+        DiscussionApiConfig(
+            discussion_base_url=f"https://{host}/DiscussionApi/", token_endpoint=str(api.token_endpoint),
+            client_id=str(api.client_id), client_secret=str(api.client_secret), username=str(api.username),
+            integration_group_id=str(api.integration_group_id), scope="DiscussionApi openid", password=""),
+        urlopen=_guarded(host, APPROVED[route]["token"], urlopen or no_redirect_urlopen),
+        session_headers=None if browser_session else _static_headers)
     client.route_record = {"route": route, "host": host, "secret_ref": str(os.environ.get(secret_env) or ""),
-                           "password_grant": False}
+                           "password_grant": False, "browser_cookies": bool(browser_session)}
     return client

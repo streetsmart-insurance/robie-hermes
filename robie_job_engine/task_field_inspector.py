@@ -470,6 +470,8 @@ def run_api_inspection(*, client: Any, task_id: str, applicant_id: str, discussi
         raise InspectionRefused(
             f"the client's Discussion API route is {route.get('route') if isinstance(route, dict) else 'unknown'!r}, "
             f"not the expected {expected_route!r}; nothing was read")
+    if route.get("browser_cookies") is not False:
+        raise InspectionRefused("the client can read browser cookies; the read-only inspection requires a cookie-free client; nothing was read")
     lookup = getattr(client, "get_discussion_ids", None)
     if lookup is None:
         raise InspectionRefused("the client cannot verify which discussions belong to the applicant; nothing was read")

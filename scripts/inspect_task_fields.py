@@ -44,10 +44,10 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--discussion-id is required for api")
             if not args.api_route:
                 parser.error("--api-route is required for api (uat or live); there is no default")
-            from robie_job_engine.ezlynx_task_intake import _build_discussion_client
+            from robie_job_engine.task_discussion_route import build_task_discussion_client
 
             inspector.run_api_inspection(
-                client=_build_discussion_client(), task_id=args.task_id, applicant_id=args.applicant_id,
+                client=build_task_discussion_client(), task_id=args.task_id, applicant_id=args.applicant_id,
                 discussion_id=args.discussion_id, output_path=args.output, operator=args.operator,
                 expected_route=args.api_route,
                 include_approved_values=args.include_approved_values)

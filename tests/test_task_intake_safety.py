@@ -1941,7 +1941,7 @@ def test_credential_and_hidden_classification_is_decided_before_any_value_is_req
 class _ApiClient:
     def __init__(self, ids=("849945654",), ids_error=None, no_lookup=False):
         self.reads, self.ids, self.ids_error = [], list(ids), ids_error
-        self.route_record = {"route": "live", "host": "app.ezlynx.com", "secret_ref": "r", "password_grant": False}
+        self.route_record = {"route": "live", "host": "app.ezlynx.com", "secret_ref": "r", "password_grant": False, "browser_cookies": False}
         if not no_lookup:
             self.get_discussion_ids = self._ids
     def _ids(self, applicant_id):

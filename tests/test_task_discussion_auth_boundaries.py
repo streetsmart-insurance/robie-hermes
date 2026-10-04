@@ -51,7 +51,7 @@ def _live(env):
 
 
 def _uat(env):
-    env.setenv("ROBIE_ENV", "TEST"); env.setenv("ROBIE_TASK_DISCUSSION_ROUTE", "uat")
+    env.setenv("ROBIE_ENV", "TEST"); env.setenv("ROBIE_TASK_DISCUSSION_ROUTE", "uat"); env.delenv("ROBIE_EZLYNX_DISCUSSION_API", raising=False)
 
 
 def _build(accessor, **kw):
@@ -304,8 +304,10 @@ def test_the_lookup_refuses_any_host_but_the_test_vm(monkeypatch):
     assert module.main(["--applicant-id", "220250093"], client=FakeApi()) == 2
 
 
-def test_the_lookup_source_has_no_write_call_no_cookie_and_no_other_host():
-    import pathlib, re
-    source = (pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lookup_applicant_discussions.py").read_text()
-    for forbidden in ("append_note", "_post", "create_task", "save", "reassign", "cookie", "load_discussion_api_config", "open(", "write("):
-        assert forbidden not in source.lower() or forbidden in ("save",) and "save" not in re.sub(r"saved?", "", source.lower()), forbidden
+def test_the_lookup_source_has_no_write_call_no_cookie_no_credential_loader_and_no_file_io():
+    import pathlib
+    source = (pathlib.Path(__file__).resolve().parent.parent / "scripts" / "lookup_applicant_discussions.py").read_text().lower()
+    source = source.replace("browser_cookies", "").replace("password_grant", "").replace("no password", "")  # flag names / prose
+    for forbidden in ("append_note", "_post", "create_task", "reassign", "cookie", "load_discussion_api_config",
+                      "password", "open(", "write(", "urlopen", "import requests", "http.client", "subprocess"):
+        assert forbidden not in source, forbidden

@@ -197,7 +197,9 @@ def _build_discussion_client():
     """DiscussionApiClient on the explicit, fail-closed route (see task_discussion_route)."""
     from .task_discussion_route import build_task_discussion_client
 
-    return build_task_discussion_client()
+    # browser_session=True keeps this flow's existing session behaviour unchanged; the read-only
+    # inspection and lookup never use it.
+    return build_task_discussion_client(browser_session=True)
 
 
 def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):

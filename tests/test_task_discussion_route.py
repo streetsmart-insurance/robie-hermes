@@ -21,7 +21,7 @@ PASS_REF = "projects/p/secrets/ezlynx-password/versions/latest"
 def _payload(host):
     return json.dumps({"client_id": "id", "client_secret": "S3CRET-VALUE", "username": "vendor",
                        "integration_group_id": "g", "scope": "s",
-                       "token_endpoint": f"https://{host}/connect/token",
+                       "token_endpoint": f"https://{host}/auth/connect/token",
                        "document_base_url": f"https://{host}/DocumentApi"})
 
 
@@ -201,7 +201,7 @@ def test_the_route_record_never_contains_a_secret_value(env):
 
 class _Api:
     def __init__(self, route):
-        self.route_record = {"route": route, "host": "h", "secret_ref": "r", "password_grant": False}
+        self.route_record = {"route": route, "host": "h", "secret_ref": "r", "password_grant": False, "browser_cookies": False}
         self.calls = []
 
     def get_discussion_ids(self, applicant):
@@ -248,7 +248,7 @@ def test_the_inspector_refuses_a_client_that_cannot_state_its_route(api_env, tmp
 
 def test_the_inspector_records_the_route_it_used(api_env, tmp_path):
     record = insp.run_api_inspection(**_api_args(tmp_path, _Api("live"), expected_route="live"))
-    assert record["discussion_route"] == {"route": "live", "host": "h", "secret_ref": "r", "password_grant": False}
+    assert record["discussion_route"] == {"route": "live", "host": "h", "secret_ref": "r", "password_grant": False, "browser_cookies": False}
 
 
 def test_the_cli_requires_an_explicit_route_and_has_no_default():
