@@ -313,6 +313,9 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     )
     assert "Email subject:" not in detail["note_text"]
     assert "Insured:" not in detail["note_text"]
+    assert "Ascend program" not in detail["note_text"]
+    assert "prog-1" not in detail["note_text"]
+    assert detail["program_uuid"] == "prog-1"
     assert driver.ROBIE_WAS_HERE in detail["note_text"]
     assert detail["task_payload"]["task_title"].startswith("Ascend cancellation notice")
     assert detail["label"]["status"] == "label_skipped_by_policy"
@@ -330,6 +333,7 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert entry["policy_number"] == "HO-998877"
     assert entry["applicant_id"] == ALLOWED_APPLICANT
     assert entry["csr_login"] == "KarlaSS"
+    assert entry["program_uuid"] == "prog-1"
     assert summary["would_file_if_write_scope_allowed_count"] == 0
     assert summary["would_file_if_write_scope_allowed"] == []
     assert summary["breakdown"]["would_file_if_write_scope_allowed"] == 0
@@ -497,7 +501,14 @@ def test_phone_number_in_note_text_is_rejected(no_zap_fire):
         "The coverage policy for Stafford 603-769-3995 LLC has been "
         "canceled due to non-payment"
     )
-    notice = make_notice(subject=subject)
+    notice = make_notice(
+        subject=subject,
+        body=(
+            "Policy ID HO-998877 Effective 01/01/2026\n"
+            "Insured: Stafford 603-769-3995 LLC\n"
+            "Amount due: $412.10\n"
+        ),
+    )
     ctx, discussion_client = make_ctx(
         notices=[notice], policy_rows={"HO-998877": [policy_row()]}
     )

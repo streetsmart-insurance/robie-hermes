@@ -997,6 +997,17 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     triaged = triage.triage_notice(ctx.ascend_client, notice.subject, notice.body)
     notice_type = str(triaged.get("notice_type") or "")
     result.detail["notice_type"] = notice_type
+    # Program id stays out of the EZLynx note. It is logged and kept on the
+    # job summary so a reviewer can still trace the Ascend program.
+    program_uuid = str(triaged.get("program_uuid") or "").strip()
+    if program_uuid:
+        result.detail["program_uuid"] = program_uuid
+        logger.info(
+            "ascend notice %s type %s program %s",
+            notice.message_id,
+            notice_type or "unclassified",
+            program_uuid,
+        )
     if notice_type in triage.IGNORE_TYPES or triaged.get("ignored"):
         result.status = "ignored"
         result.reason = "ignored"
@@ -1238,6 +1249,8 @@ def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, An
     }
     if entry["notice_type"] == triage.CANCELLATION:
         entry["csr_login"] = str(detail.get("csr_username") or "")
+    if detail.get("program_uuid"):
+        entry["program_uuid"] = str(detail["program_uuid"])
     if "existing_note_duplicate" in detail:
         entry["existing_note_duplicate"] = bool(detail.get("existing_note_duplicate"))
     if "existing_note_read" in detail:

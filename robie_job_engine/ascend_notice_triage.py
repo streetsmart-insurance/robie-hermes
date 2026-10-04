@@ -28,6 +28,7 @@ types return before any API call.
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 from uuid import UUID
 
@@ -138,7 +139,6 @@ _POLICY_ID_RE = re.compile(
     r"(?=Effective\b|[^A-Za-z0-9\-/]|$)"
 )
 _MONEY_RE = re.compile(r"\$\s?([\d,]+\.\d{2})")
-_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 _CANCEL_EFFECTIVE_RE = re.compile(
     r"canceled effective\s*(\d{2}/\d{2}/\d{4})",
     re.IGNORECASE,
@@ -183,39 +183,147 @@ def extract_policy_numbers(body: str) -> list[str]:
     return seen
 
 
+_SUBJECT_INSURED_RES = (
+    re.compile(r"Past due payment for (.+)$", re.IGNORECASE),
+    re.compile(r"Payment failed for (.+)$", re.IGNORECASE),
+    re.compile(r"Return premium received for (.+)$", re.IGNORECASE),
+    re.compile(r"Processing payment for (.+)$", re.IGNORECASE),
+    re.compile(r"Programs ready for (.+)$", re.IGNORECASE),
+    re.compile(
+        r"(?:Underwriting request|A counteroffer to your underwriting request) for (.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"A refund(?: has been initiated)? for (.+)$", re.IGNORECASE),
+    re.compile(r"A refund to your customer,\s*(.+?),", re.IGNORECASE),
+    re.compile(r"Disputed charge for (.+)$", re.IGNORECASE),
+    re.compile(r"reinstatement request has been approved for (.+)$", re.IGNORECASE),
+    re.compile(r"coverage policy for (.+?) has been canceled", re.IGNORECASE),
+    re.compile(r"coverage policy for (.+?) has been paid off", re.IGNORECASE),
+    re.compile(r"\[URGENT\]\s+(.+?)\s+-\s+", re.IGNORECASE),
+    re.compile(r"^(.+?)\s+Policy\(s\)\s+Payment Confirmation\s*$", re.IGNORECASE),
+)
+
+
+def _clean_party_name(value: str | None) -> str | None:
+    """Drop a field label that got jammed onto the name (``Policy``, ``Reference``)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    # Labels in these emails are often jammed onto the name with no space
+    # ("LLCPolicy", "LLCReference"). Split on the label even then.
+    text = re.split(
+        r"(?:Policy|Reference|Identifier|Email|Effective)",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    text = text.strip(" \t.,-:")
+    return text or None
+
+
 def extract_insured_name(subject: str, body: str) -> str | None:
-    """Best-effort insured name from the subject or body."""
+    """Best-effort insured name from the customer block, then the subject."""
+    body_text = body or ""
+    for pattern in (
+        r"^Customer\s*([^\n\r]+)",
+        r"^Insured\s*([^\n\r]+)",
+        r"your customer,\s*([^,\n]+)",
+        r"loan for your customer\s+(.+?)\s+has been",
+        r"coverage policy for (.+?) has been canceled",
+    ):
+        match = re.search(pattern, body_text, re.IGNORECASE | re.MULTILINE)
+        cleaned = _clean_party_name(match.group(1) if match else None)
+        if cleaned:
+            return cleaned
     subject_text = subject or ""
-    match = re.search(r"Past due payment for (.+)$", subject_text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    match = re.search(
-        r"[Cc]overage policy for (.+?) has been canceled", subject_text, re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
-    match = re.search(
-        r"coverage policy for (.+?) has been canceled", body or "", re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"^Customer\s*([^\n\r]+)", body or "", re.IGNORECASE | re.MULTILINE)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"^Insured\s*([^\n\r]+)", body or "", re.IGNORECASE | re.MULTILINE)
-    if match:
-        return match.group(1).strip()
+    for pattern in _SUBJECT_INSURED_RES:
+        match = pattern.search(subject_text)
+        cleaned = _clean_party_name(match.group(1) if match else None)
+        if cleaned:
+            return cleaned
     return None
+
+
+def format_money_amount(raw: str | None) -> str | None:
+    """Render a dollar amount as short US currency, with cents.
+
+    ``$0,241.00`` and ``0,241.00`` become ``$241.00``. Amounts of
+    ``$1,000`` and up keep a thousands separator. Cents are always two
+    digits.
+    """
+    text = str(raw or "").strip().replace("$", "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not amount.is_finite():
+        return None
+    amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"${amount:,.2f}"
 
 
 def _first_money(body: str) -> str | None:
     match = _MONEY_RE.search(body or "")
-    return f"${match.group(1)}" if match else None
+    if not match:
+        return None
+    return format_money_amount(match.group(1))
 
 
-def _first_date(body: str) -> str | None:
-    match = _DATE_RE.search(body or "")
+def _money_matching(body: str, pattern: str) -> str | None:
+    match = re.search(pattern, body or "", re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return format_money_amount(match.group(1))
+
+
+_DUE_ON_RE = re.compile(
+    r"(?:which was due on|was due on|due on)\s+(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_FUTURE_CANCEL_RE = re.compile(
+    r"(?:cancelation of your coverage on|no payment is received by)\s+(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_PAYMENT_FAILED_RE = re.compile(
+    r"payment failed|couldn'?t process your payment|could not process your payment",
+    re.IGNORECASE,
+)
+
+
+def _due_on_date(body: str) -> str | None:
+    """The payment due date. Policy effective dates are not due dates."""
+    match = _DUE_ON_RE.search(body or "")
     return match.group(1) if match else None
+
+
+def _future_cancel_date(body: str) -> str | None:
+    """The date coverage will cancel if the intent-to-cancel stays unpaid."""
+    match = _FUTURE_CANCEL_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def _payment_failed(subject: str, body: str) -> bool:
+    return _PAYMENT_FAILED_RE.search(f"{subject or ''}\n{body or ''}") is not None
+
+
+_NOTICE_HEADINGS = {
+    LATE_PAYMENT: "LATE PAYMENT",
+    INTENT_TO_CANCEL: "INTENT TO CANCEL",
+    RETURN_PREMIUM: "RETURN PREMIUM",
+    NEW_PROGRAM: "NEW PROGRAM",
+    PROCESSING_PAYMENT: "PROCESSING PAYMENT",
+    PAYMENT_CONFIRMATION: "PAYMENT CONFIRMATION",
+    REFUND: "REFUND",
+    POTENTIAL_POLICIES: "POTENTIAL POLICIES",
+    PROGRAMS_READY: "PROGRAMS READY",
+    UNDERWRITING: "UNDERWRITING",
+    PAID_OFF: "LOAN PAID OFF",
+    SIGN_IN: "SIGN IN",
+    MSA: "MSA",
+    UNKNOWN: "UNRECOGNIZED",
+}
 
 
 def cancel_effective_date(body: str) -> str | None:
@@ -266,6 +374,183 @@ def build_cancellation_note(
     elif amount:
         lines.append(f"The overdue balance is {amount}.")
     lines.append("The loan was canceled because the payment was not made.")
+    return "\n".join(lines)
+
+
+def _past_due_sentence(policy_phrase: str, amount: str | None, due: str | None) -> str:
+    if amount and due:
+        return f"{policy_phrase} is past due: {amount} was due {due}."
+    if amount:
+        return f"{policy_phrase} is past due: {amount}."
+    if due:
+        return f"{policy_phrase} is past due. The payment was due {due}."
+    return f"{policy_phrase} is past due."
+
+
+def _failed_payment_sentence(policy_phrase: str, amount: str | None) -> str:
+    if amount:
+        return f"{policy_phrase} payment failed: {amount} could not be processed."
+    return f"{policy_phrase} payment failed."
+
+
+def _intent_sentence(
+    policy_phrase: str,
+    amount: str | None,
+    due: str | None,
+    cancels_on: str | None,
+) -> str:
+    parts = [f"{policy_phrase} is at risk of cancellation."]
+    if amount and due:
+        parts.append(f"{amount} was due {due}.")
+    elif amount:
+        parts.append(f"{amount} is overdue.")
+    elif due:
+        parts.append(f"The payment was due {due}.")
+    if cancels_on:
+        parts.append(f"Coverage cancels on {cancels_on} if it stays unpaid.")
+    return " ".join(parts)
+
+
+def _with_policy(policy_phrase: str, statement: str) -> str:
+    if policy_phrase == "The policy":
+        return statement
+    return f"{policy_phrase}. {statement}"
+
+
+def _notice_detail(
+    notice_type: str,
+    subject: str,
+    body: str,
+    policy_numbers: list[str],
+) -> str:
+    """One plain-English sentence. No field names and no program id."""
+    policy_phrase = _policy_phrase(policy_numbers)
+    text = f"{subject or ''}\n{body or ''}"
+    if notice_type == LATE_PAYMENT and _payment_failed(subject, body):
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            # The failed total is on its own line under "Failed because".
+            # The earlier sentence uses the same words, then the subtotal.
+            amount = _money_matching(
+                body,
+                r"Failed because of[^\n]*\n+\s*\$\s?([\d,]+\.\d{2})",
+            )
+        if amount is None:
+            amount = _first_money(body)
+        return _failed_payment_sentence(policy_phrase, amount)
+    if notice_type == LATE_PAYMENT:
+        amount = _money_matching(body, r"past-due payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        return _past_due_sentence(policy_phrase, amount, _due_on_date(body))
+    if notice_type == INTENT_TO_CANCEL:
+        amount = _money_matching(
+            body,
+            r"(?:loan payment|overdue payment|past-due payment) of\s+\$\s?([\d,]+\.\d{2})",
+        )
+        if amount is None:
+            amount = _first_money(body)
+        return _intent_sentence(
+            policy_phrase, amount, _due_on_date(body), _future_cancel_date(body)
+        )
+    if notice_type == RETURN_PREMIUM:
+        amount = _money_matching(body, r"return premium of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"Ascend received {amount} to apply to the loan."
+        else:
+            statement = "Ascend received a return premium to apply to the loan."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == NEW_PROGRAM:
+        return _with_policy(
+            policy_phrase,
+            "Ascend opened a new premium finance program.",
+        )
+    if notice_type == PAYMENT_CONFIRMATION:
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"Payment of {amount} was received."
+        else:
+            statement = "A payment was received."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == PROCESSING_PAYMENT:
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"A payment of {amount} is processing."
+        else:
+            statement = "A payment is processing."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == REFUND:
+        amount = _money_matching(
+            body, r"(?:refund of|Amount)\s+\$\s?([\d,]+\.\d{2})"
+        )
+        if amount is None:
+            amount = _first_money(body)
+        stopped = re.search(r"has been stopped", body or "", re.IGNORECASE)
+        if amount and stopped:
+            statement = f"A refund of {amount} was stopped."
+        elif amount:
+            statement = f"A refund of {amount} was issued."
+        elif stopped:
+            statement = "A refund was stopped."
+        else:
+            statement = "A refund was issued."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == POTENTIAL_POLICIES:
+        return "Some policies produced recently have not been purchased."
+    if notice_type == PROGRAMS_READY:
+        return "Coverage will end within 90 days and can be renewed."
+    if notice_type == UNDERWRITING:
+        if re.search(r"counteroffer", text, re.IGNORECASE):
+            return "A counteroffer was approved on an underwriting request."
+        return "An underwriting request is in review."
+    if notice_type == PAID_OFF:
+        return _with_policy(policy_phrase, "The loan is paid in full.")
+    if notice_type == SIGN_IN:
+        return "This is a sign-in message."
+    if notice_type == MSA:
+        return "This is a master service agreement message."
+    if re.search(r"disputed", text, re.IGNORECASE):
+        amount = _first_money(body)
+        if amount:
+            return f"A customer disputed a payment of {amount}."
+        return "A customer disputed a payment."
+    if re.search(r"reinstatement", text, re.IGNORECASE):
+        return "A reinstatement was requested. The carrier still has to accept it."
+    return "A person needs to read this message."
+
+
+def build_staff_note(
+    notice_type: str,
+    subject: str,
+    body: str,
+    policy_numbers: list[str],
+    insured_name: str | None,
+) -> str:
+    """Staff-facing note for every notice type. Plain sentences only.
+
+    The program id is not included. Callers that need it for traceability
+    keep it on the triage result, the driver log, or the job summary.
+    """
+    if notice_type == CANCELLATION:
+        return build_cancellation_note(
+            body=body,
+            policy_numbers=policy_numbers,
+            insured_name=insured_name,
+            amount=_first_money(body),
+        )
+    heading = _NOTICE_HEADINGS.get(notice_type, "UNRECOGNIZED")
+    detail = _notice_detail(notice_type, subject, body, policy_numbers)
+    lines = [f"{heading} notice from Ascend. {detail}"]
+    insured = str(insured_name or "").strip()
+    # A list mail names several insureds. One name on the next line would be wrong.
+    if insured and notice_type != POTENTIAL_POLICIES:
+        lines.append(f"{insured}.")
     return "\n".join(lines)
 
 
@@ -384,6 +669,14 @@ def triage_notice(
         "review_reason": "",
     }
 
+    # The note is the email in plain English. It does not wait on the
+    # program read, and it never includes the program id or status code.
+    # Ignored and unrecognized mail still get a note for the record. The
+    # driver does not file those.
+    result["note_text"] = build_staff_note(
+        notice_type, subject, body, policy_numbers, insured_name
+    )
+
     if notice_type in IGNORE_TYPES:
         result["ignored"] = True
         result["needs_human_review"] = False
@@ -421,35 +714,6 @@ def triage_notice(
         return result
 
     result["program"] = program
-
-    amount = _first_money(body)
-    if notice_type == CANCELLATION:
-        result["note_text"] = build_cancellation_note(
-            body=body,
-            policy_numbers=policy_numbers,
-            insured_name=insured_name,
-            amount=amount,
-        )
-        return result
-    date = _first_date(body)
-    lines = [
-        f"Ascend notice: {notice_type.replace('_', ' ')}.",
-        f"Email subject: {(subject or '').strip()}",
-    ]
-    if insured_name:
-        lines.append(f"Insured: {insured_name}")
-    if policy_numbers:
-        lines.append(f"Policies: {', '.join(policy_numbers)}")
-    if amount:
-        lines.append(f"Amount: {amount}")
-    if date:
-        lines.append(f"Date: {date}")
-    if program_uuid:
-        lines.append(f"Ascend program: {program_uuid}")
-    program_status = program.get("status")
-    if program_status:
-        lines.append(f"Ascend program status: {program_status}")
-    result["note_text"] = "\n".join(lines)
     return result
 
 

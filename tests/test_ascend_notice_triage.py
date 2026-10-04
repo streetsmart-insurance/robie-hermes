@@ -112,6 +112,27 @@ def test_extract_insured_name_from_subject():
     )
 
 
+def test_format_money_amount_under_over_and_cents():
+    # Under $1,000, including the leading-zero bug "$0,241.00".
+    assert triage.format_money_amount("0,241.00") == "$241.00"
+    assert triage.format_money_amount("$0,241.00") == "$241.00"
+    assert triage.format_money_amount("241.00") == "$241.00"
+    assert triage.format_money_amount("$83.62") == "$83.62"
+    # Over $1,000 keeps the thousands separator.
+    assert triage.format_money_amount("3,528.22") == "$3,528.22"
+    assert triage.format_money_amount("1000.50") == "$1,000.50"
+    assert triage.format_money_amount("$8,155.52") == "$8,155.52"
+    # Cents stay two digits.
+    assert triage.format_money_amount("12.50") == "$12.50"
+    assert triage.format_money_amount("1,234.56") == "$1,234.56"
+    assert triage.format_money_amount("241") == "$241.00"
+    assert triage._first_money("past-due payment of $0,241.00, due on 10/01/2026") == (
+        "$241.00"
+    )
+    assert triage.format_money_amount("") is None
+    assert triage.format_money_amount("not-money") is None
+
+
 # ---------------------------------------------------------------------------
 # find_program_by_policy error semantics (regression: never swallow failures)
 # ---------------------------------------------------------------------------
@@ -185,8 +206,16 @@ def test_triage_late_payment_resolves_by_uuid():
     assert result["lookup_method"] == "program_uuid_from_email"
     assert result["needs_human_review"] is False
     assert result["recommendation"]["ezlynx_workflow"] == "Ascend NOC"
-    assert "past_due" in result["note_text"]
-    assert "$3,528.22" in result["note_text"]
+    assert result["note_text"] == (
+        "LATE PAYMENT notice from Ascend. "
+        "Policy MXL0446256 is past due: $3,528.22 was due 09/11/2026.\n"
+        "Shoreline Builders LLC."
+    )
+    assert "past_due" not in result["note_text"]
+    assert "Email subject:" not in result["note_text"]
+    assert "Ascend program" not in result["note_text"]
+    assert SAMPLE_UUID not in result["note_text"]
+    assert result["program_uuid"] == SAMPLE_UUID
 
 
 def test_triage_api_failure_flags_human_review():
