@@ -5,12 +5,16 @@ import unittest
 from unittest.mock import patch
 
 from robie_job_engine.ezlynx_session import (
+    NAVIGATION_SETTLE_DELAY_SECONDS,
     InteractiveAuthenticationRequired,
+    PlaywrightEzlynxSession,
     SessionVerificationFailed,
     SessionState,
     authenticated_app_evidence,
+    classify_page_snapshot,
     ensure_ezlynx_session,
     wait_for_post_login_state,
+    wait_for_settled_session,
 )
 from robie_job_engine.secret_manager import EzlynxCredentials, load_ezlynx_credentials
 
@@ -132,6 +136,127 @@ class EzlynxSessionTests(unittest.TestCase):
         )
         self.assertEqual(state, SessionState.INTERACTIVE_AUTH_REQUIRED)
         self.assertEqual(delays, [])
+
+    def test_unsettled_app_url_is_not_a_decision(self):
+        self.assertIsNone(classify_page_snapshot(
+            "https://app.ezlynx.com/web/dashboard",
+            "",
+            internal_web_links=0,
+            login_controls=0,
+        ))
+
+    def test_settled_wait_returns_logged_out_after_spa_redirect(self):
+        snapshots = iter([
+            {
+                "url": "https://app.ezlynx.com/web/dashboard",
+                "body": "",
+                "internal_web_links": 0,
+                "login_controls": 0,
+            },
+            {
+                "url": "https://app.ezlynx.com/auth/account/login",
+                "body": "Login",
+                "internal_web_links": 0,
+                "login_controls": 2,
+            },
+        ])
+        delays = []
+        state = wait_for_settled_session(
+            lambda: next(snapshots),
+            attempts=4,
+            delay_seconds=1,
+            sleeper=delays.append,
+        )
+        self.assertEqual(state, SessionState.LOGIN_REQUIRED)
+        self.assertEqual(delays, [1])
+
+    def test_settled_wait_returns_dashboard_without_calling_it_unverified(self):
+        snapshots = iter([
+            {
+                "url": "https://app.ezlynx.com/web/",
+                "body": "loading",
+                "internal_web_links": 0,
+                "login_controls": 0,
+            },
+            {
+                "url": "https://app.ezlynx.com/web/dashboard",
+                "body": "Dashboard",
+                "internal_web_links": 4,
+                "login_controls": 0,
+            },
+        ])
+        delays = []
+        state = wait_for_settled_session(
+            lambda: next(snapshots),
+            attempts=4,
+            delay_seconds=1,
+            sleeper=delays.append,
+        )
+        self.assertEqual(state, SessionState.SIGNED_IN)
+        self.assertEqual(delays, [1])
+
+    def test_settled_wait_gives_up_as_unverified(self):
+        delays = []
+        state = wait_for_settled_session(
+            lambda: {
+                "url": "https://app.ezlynx.com/web/dashboard",
+                "body": "",
+                "internal_web_links": 0,
+                "login_controls": 0,
+            },
+            attempts=3,
+            delay_seconds=0.5,
+            sleeper=delays.append,
+        )
+        self.assertEqual(state, SessionState.UNVERIFIED)
+        self.assertEqual(delays, [0.5, 0.5])
+
+    def test_state_waits_for_login_redirect_instead_of_unverified(self):
+        session = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
+        session._page = type("Page", (), {"goto": lambda *args, **kwargs: None})()
+        snapshots = iter([
+            {
+                "url": "https://app.ezlynx.com/web/dashboard",
+                "body": "",
+                "internal_web_links": 0,
+                "login_controls": 0,
+            },
+            {
+                "url": "https://app.ezlynx.com/auth/account/login",
+                "body": "Login",
+                "internal_web_links": 0,
+                "login_controls": 3,
+            },
+        ])
+        delays = []
+        with patch(
+            "robie_job_engine.ezlynx_session.read_playwright_snapshot",
+            side_effect=lambda _page: next(snapshots),
+        ), patch(
+            "robie_job_engine.ezlynx_session.time.sleep",
+            side_effect=delays.append,
+        ):
+            state = session.state()
+        self.assertEqual(state, SessionState.LOGIN_REQUIRED)
+        self.assertEqual(delays, [NAVIGATION_SETTLE_DELAY_SECONDS])
+
+    def test_state_navigation_failure_is_unverified_without_waiting(self):
+        session = PlaywrightEzlynxSession.__new__(PlaywrightEzlynxSession)
+
+        class _Page:
+            def goto(self, *args, **kwargs):
+                raise TimeoutError("navigation")
+
+        session._page = _Page()
+        with patch(
+            "robie_job_engine.ezlynx_session.read_playwright_snapshot",
+            side_effect=AssertionError("read"),
+        ), patch(
+            "robie_job_engine.ezlynx_session.time.sleep",
+            side_effect=AssertionError("sleep"),
+        ):
+            state = session.state()
+        self.assertEqual(state, SessionState.UNVERIFIED)
 
     def test_missing_secret_references_fail_before_access(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(RuntimeError):
