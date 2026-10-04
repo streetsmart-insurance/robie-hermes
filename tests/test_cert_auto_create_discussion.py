@@ -84,12 +84,17 @@ class FakeWithNoteClient:
             raise self.post_error
         resp = (self.post_response(path, payload)
                 if callable(self.post_response) else self.post_response)
-        if path == "v8/discussions/with-note" and isinstance(resp, dict):
-            did = str(resp.get("DiscussionId") or
-                      resp.get("discussionId") or "").strip()
+        if path == "v8/discussions/with-note":
+            if isinstance(resp, dict):
+                did = str(resp.get("DiscussionId") or
+                          resp.get("discussionId") or "").strip()
+            elif isinstance(resp, int) and not isinstance(resp, bool):
+                did = str(resp)
+            else:
+                did = ""
             if did:
                 self._rows.append({"id": did,
-                                   "title": payload.get("title", ""),
+                                   "title": (payload.get("discussion") or {}).get("title", ""),
                                    "noteCount": 1,
                                    "mostRecentNoteId": "n-first"})
         return resp
@@ -236,7 +241,7 @@ def success_client(rows=(), new_id="d-new"):
     title_holder = {}
 
     def post_response(path, payload):
-        title_holder["title"] = payload["title"]
+        title_holder["title"] = payload["discussion"]["title"]
         return {"DiscussionId": new_id}
 
     def get_response(discussion_id):
@@ -254,11 +259,21 @@ def success_client(rows=(), new_id="d-new"):
 def test_with_note_payload_exact_shape():
     payload = build_with_note_payload(220250093, "COI Request — X — 2026-09-26",
                                       "the note")
+    # EZLynx Postman "Create a discussion with one note": integer applicantId,
+    # title nested under discussion. Proven 2026-10-04 (discussion 850001255).
     assert payload == {
-        "applicantId": "220250093",
-        "title": "COI Request — X — 2026-09-26",
+        "applicantId": 220250093,
+        "discussion": {"title": "COI Request — X — 2026-09-26"},
         "note": {"type": "Note", "body": "the note"},
     }
+    assert "title" not in payload
+    assert build_with_note_payload("220250093", "T", "b")["applicantId"] == 220250093
+
+
+def test_with_note_payload_rejects_non_numeric_applicant():
+    for bad in ("22025OO93", "abc", "-5", "0", "２２０"):
+        with pytest.raises(DiscussionApiError):
+            build_with_note_payload(bad, "Title", "body")
 
 
 def test_with_note_payload_rejects_untitled_and_empty():
@@ -305,9 +320,43 @@ def test_create_success_read_back_proves_title_and_note_count():
     assert result["read_back"] is True
     path, payload = client.posts[0]
     assert path == "v8/discussions/with-note"
-    assert payload["title"] == title
+    assert payload["discussion"]["title"] == title
+    assert "title" not in payload
+    assert payload["applicantId"] == APP
     assert payload["note"]["body"] == "filing note"
     assert client.gets == ["d-42"]
+
+
+def test_create_accepts_bare_integer_discussion_id():
+    """EZLynx answers with-note with the bare integer DiscussionId."""
+    title = "COI Request — Buster Brown — 2026-10-04"
+    client = FakeWithNoteClient(
+        post_response=850001255,
+        get_response=lambda did: {"id": did, "title": title, "noteCount": 1,
+                                  "mostRecentNoteId": "n-1"})
+    result = create_discussion_with_note(client, APP, title, "filing note")
+    assert result["status"] == "created"
+    assert result["discussion_id"] == "850001255"
+    assert client.gets == ["850001255"]
+
+
+def test_create_accepts_digit_string_discussion_id():
+    title = "COI Request — X — 2026-10-04"
+    client = FakeWithNoteClient(
+        post_response="850001255",
+        get_response=lambda did: {"id": did, "title": title, "noteCount": 1})
+    result = create_discussion_with_note(client, APP, title, "body")
+    assert result["discussion_id"] == "850001255"
+
+
+def test_create_refuses_boolean_or_zero_response():
+    for bad in (True, 0, -1, "", "abc", None):
+        client = FakeWithNoteClient(post_response=bad,
+                                    get_response={"id": "x", "title": "t",
+                                                  "noteCount": 1})
+        with pytest.raises(DiscussionApiError):
+            create_discussion_with_note(client, APP, "COI Request — X", "body")
+        assert client.gets == []
 
 
 def test_create_missing_discussion_id_raises():
@@ -403,7 +452,7 @@ def test_no_discussion_auto_creates_with_filing_note(tmp_path):
     assert len(client.posts) == 1
     path, payload = client.posts[0]
     assert path == "v8/discussions/with-note"
-    assert payload["title"] == "COI Request — Big Client Inc — 2026-09-26"
+    assert payload["discussion"]["title"] == "COI Request — Big Client Inc — 2026-09-26"
     # the filing note is the first note: it names the filed email PDF
     assert "Certificate request" in payload["note"]["body"]
     assert "attachment(s) saved to the file" in payload["note"]["body"]
@@ -555,7 +604,7 @@ def test_different_holder_creates_new_discussion(tmp_path):
     res2 = _file(rec2, deps)
     assert res2.status == FILED, res2.hold_reasons
     assert len(client.posts) == 2
-    titles = [p[1]["title"] for p in client.posts]
+    titles = [p[1]["discussion"]["title"] for p in client.posts]
     assert titles[0] == "COI Request — Big Client Inc — 2026-09-26"
     assert titles[1] == "COI Request — Other Corp — 2026-09-26"
 
