@@ -5,7 +5,12 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from robie_job_engine.task_intake_health import RECOVERY_LINE, check_task_intake, main
+from robie_job_engine.task_intake_health import (
+    LEASE_RECOVERY_LINE,
+    RECOVERY_LINE,
+    check_task_intake,
+    main,
+)
 
 NY = ZoneInfo("America/New_York")
 
@@ -268,6 +273,129 @@ def test_driver_lease_not_with_production_is_red_during_business_hours(monkeypat
         now=_at(5, 10), heartbeats=[fresh], driver_reader=reader("PRODUCTION"),
     )
     assert held_by_production == []
+
+
+def test_driver_lease_alerts_once_then_one_recovery_line(monkeypatch):
+    import json
+
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_GATE_REQUIRED", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_HOLDER", "PRODUCTION")
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    episode: dict = {}
+
+    def reader(holder: str):
+        def _read() -> str:
+            return json.dumps({
+                "version": 1,
+                "state": "IN",
+                "holder": holder,
+                "expires_at": "2027-01-01T00:00:00+00:00",
+            })
+        return _read
+
+    moment = _at(5, 10)
+    first = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert first == ["driver lease not with PRODUCTION"]
+    assert episode["lease_open"] is True
+    second = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert second == []
+    sunday = check_task_intake(
+        now=_at(4, 12), heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert sunday == []
+    assert episode["lease_open"] is True
+    back = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("PRODUCTION"), episode=episode,
+    )
+    assert back == [LEASE_RECOVERY_LINE]
+    assert episode["lease_open"] is False
+    quiet = check_task_intake(
+        now=moment, heartbeats=[fresh],
+        driver_reader=reader("PRODUCTION"), episode=episode,
+    )
+    assert quiet == []
+
+
+def test_lease_episode_is_remembered_across_probe_runs(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_GATE_REQUIRED", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_HOLDER", "PRODUCTION")
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE ezlynx_task_intake_heartbeats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT, status TEXT, message_id TEXT, digest TEXT,
+            newest_created_et TEXT, row_count INTEGER, error TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO ezlynx_task_intake_heartbeats
+           (created_at, status, message_id, digest, newest_created_et, row_count, error)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("2026-10-05T14:00:00+00:00", "ok", "m", "d", "2026-10-05T09:50:00-04:00", 1, ""),
+    )
+    conn.commit()
+    conn.close()
+
+    def reader(holder: str):
+        def _read() -> str:
+            return json.dumps({
+                "version": 1,
+                "state": "IN",
+                "holder": holder,
+                "expires_at": "2027-01-01T00:00:00+00:00",
+            })
+        return _read
+
+    moment = _at(5, 10)
+    first = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("TEST"))
+    assert first == ["driver lease not with PRODUCTION"]
+    second = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("TEST"))
+    assert second == []
+    back = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("PRODUCTION"))
+    assert back == [LEASE_RECOVERY_LINE]
+    quiet = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("PRODUCTION"))
+    assert quiet == []
+
+
+def test_environment_file_that_sets_scope_or_playground_is_red(tmp_path):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    env_file = tmp_path / "override.env"
+    env_file.write_text(
+        "# ROBIE_PLAYGROUND=1\n# ROBIE_EZLYNX_WRITE_SCOPE=all\nOTHER=1\n",
+        encoding="utf-8",
+    )
+    shown = f"EnvironmentFiles={env_file} (ignore_errors)"
+    quiet = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+    )
+    assert quiet == []
+    env_file.write_text("export ROBIE_PLAYGROUND=0\n", encoding="utf-8")
+    red = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+    )
+    assert any(
+        "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
+        for item in red
+    )
 
 
 def test_effective_environment_must_name_the_all_clients_scope():

@@ -104,6 +104,7 @@ RELIABILITY CONTRACT (rock solid):
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -1381,21 +1382,34 @@ def _build_voicemail_message(instruction: str, producer_name: str = "") -> str:
 # Writeback (API-only, allowlist-gated, no phone numbers in notes)
 # ---------------------------------------------------------------------------
 
+# The task's Discussion ID, pinned for the outcome note. WRITE_SCOPE=all
+# still has to find that discussion on this applicant before anything is posted.
+_outcome_discussion_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "robie_outcome_discussion_id", default="",
+)
+
+
 def _writeback_outcome_note(
     discussion_client: Any,
     applicant_id: str,
     body: str,
     title_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Append the outcome note via the repo-standard fail-closed path."""
+    """Append the outcome note via the repo-standard fail-closed path.
+
+    The discussion id from the task is passed through. ``file_note_to_existing_discussion``
+    lists the applicant's discussions and posts only when that id is one of them.
+    """
     from .ezlynx_discussions import file_note_to_existing_discussion
 
+    pinned = _outcome_discussion_id.get().strip()
     try:
         return file_note_to_existing_discussion(
             discussion_client,
             applicant_id,
             body[:MAX_NOTE_CHARS],
             title_hint=title_hint,
+            discussion_id=pinned or None,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced in result dict
         logger.error("writeback failed for applicant %s: %s", applicant_id, exc)
@@ -1471,21 +1485,107 @@ def _writeback_once(
     return result
 
 
-def _outcome_topic(instruction: str) -> str:
-    """The subject of the call, without the 'please call … about' wrapper.
+_TOPIC_WORD_CAP = 12
+# "Please call …", "reach out to …", "phone the client …". The words after
+# the verb are the callee and the reason, not the note's opening.
+_CALL_PREFIX_RE = re.compile(
+    r"(?i)^(?:(?:please|pls)\s+)?"
+    r"(?:reach\s+out\s+to|call|contact|phone|ring)\b[\s,]*"
+)
+_CONNECTOR_RE = re.compile(r"(?i)^(to|about|regarding|re|and)\b[\s,:;-]*")
+_GENERIC_CALLEE_RE = re.compile(
+    r"(?i)^the\s+(?:client|insured|customer)\b[\s,]*"
+)
+# One to three name words, and only when a connector follows. Without the
+# connector the leftover ("John Smith at" versus "John Smith at phone")
+# stays, so two tasks do not file the same sentence.
+_NAME_BEFORE_CONNECTOR_RE = re.compile(
+    r"(?i)^(?!(?:to|about|regarding|re|and)\b)"
+    r"[A-Za-z][\w'.-]*"
+    r"(?:\s+(?!(?:to|about|regarding|re|and)\b)[A-Za-z][\w'.-]*){0,2}"
+    r"\s+(?=(?:to|about|regarding|re|and)\b)"
+)
+_DEFINITE_MISS_STATUSES = {
+    "no-answer", "no_answer", "no answer",
+    "busy", "failed", "canceled", "cancelled",
+}
 
-    A note that says "about Please call the client…." is the wrapper pasted
-    on twice. When the task has an about-clause, only that clause is kept.
-    Otherwise the scrubbed instruction stays, so two different tasks do not
-    file the same sentence. Trailing periods are removed; the caller adds one.
+
+def _clean_topic_text(instruction: str) -> str:
+    """Phones and [placeholders] never belong in the note."""
+    text = _scrub_phones(instruction or "")
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    text = re.sub(
+        r"(?i)\bat\s+(?=(?:to|about|regarding|re|and)\b)",
+        " ",
+        text,
+    )
+    return re.sub(r"\s+", " ", text).strip(" .")
+
+
+def _cap_words(text: str, limit: int = _TOPIC_WORD_CAP) -> str:
+    words = text.split()
+    return " ".join(words[:limit]).strip(" .")
+
+
+def _outcome_clause(instruction: str) -> tuple:
+    """(connector, topic) for the first sentence of an outcome note.
+
+    A leading call instruction is removed: please/pls, then call/contact/
+    reach out to/phone/ring, then the client/insured/customer, a name, or
+    a phone number, then to/about/regarding/re/and. What remains is capped
+    at about a dozen words. An empty description is "about this task". A
+    description with no call verb is "about" that description.
     """
-    text = re.sub(r"\s+", " ", _scrub_phones(instruction or "")).strip(" .")
+    text = _clean_topic_text(instruction)
     if not text:
-        return ""
-    match = re.search(r"(?i)\babout\s+(.+)$", text)
-    if match:
-        text = match.group(1).strip(" .")
-    return text
+        return "about", "this task"
+    stripped = _CALL_PREFIX_RE.sub("", text, count=1).strip()
+    had_verb = stripped != text
+    if not stripped:
+        return "about", "this task"
+    connector = "about"
+    topic = stripped
+    if had_verb:
+        match = _CONNECTOR_RE.match(stripped)
+        callee = _GENERIC_CALLEE_RE.match(stripped) or _NAME_BEFORE_CONNECTOR_RE.match(stripped)
+        if match:
+            connector = match.group(1).lower()
+            topic = stripped[match.end():].strip()
+        elif callee:
+            rest = stripped[callee.end():].strip()
+            follow = _CONNECTOR_RE.match(rest)
+            if follow:
+                connector = follow.group(1).lower()
+                topic = rest[follow.end():].strip()
+    topic = _cap_words(topic)
+    if not topic:
+        return "about", "this task"
+    return connector, topic
+
+
+def _outcome_opening(who: str, behalf: str, instruction: str, *, dry_run: bool) -> str:
+    """'Called X for Y to confirm the new vehicle.' One trailing period."""
+    connector, topic = _outcome_clause(instruction)
+    if dry_run:
+        head = "DRY RUN: no call was placed"
+    else:
+        head = f"Called {who}"
+    if behalf:
+        head += f" for {behalf}"
+    return f"{head} {connector} {topic}."
+
+
+def _is_definite_no_answer(attempts: List[Dict[str, Any]]) -> bool:
+    """Bland named a miss: no-answer, busy, failed, or canceled."""
+    for attempt in attempts:
+        final = attempt.get("final_status") or {}
+        for key in ("status", "answered_by"):
+            status = str(final.get(key) or "").strip().lower()
+            folded = status.replace("_", " ").replace("-", " ")
+            if status in _DEFINITE_MISS_STATUSES or folded in _DEFINITE_MISS_STATUSES:
+                return True
+    return False
 
 
 def _format_outcome_note(
@@ -1509,8 +1609,7 @@ def _format_outcome_note(
     who = (called_party or "").strip() or applicant_name or "the client"
     client = applicant_name or "the client"
     behalf = (producer_name or "").strip()
-    behalf_bit = f" on behalf of {behalf}" if behalf else ""
-    topic = _outcome_topic(instruction)
+    opened = _outcome_opening(who, behalf, instruction, dry_run=False)
 
     # Verdict: did the call verifiably happen? A completed call with
     # duration connected, even if answered_by is "unknown" (we know it
@@ -1541,14 +1640,9 @@ def _format_outcome_note(
     )
 
     if call.get("dry_run"):
-        if topic:
-            return f"DRY RUN: no call was placed{behalf_bit} about {topic}."
-        return f"DRY RUN: no call was placed{behalf_bit}."
+        return _outcome_opening(who, behalf, instruction, dry_run=True)
 
-    if topic:
-        opened = f"Called {who}{behalf_bit} about {topic}."
-    else:
-        opened = f"Called {who}{behalf_bit}."
+    disclose = False
     if connected:
         vm_hit = bool(call.get("voicemail_hit"))
         redialed = bool(call.get("redialed"))
@@ -1568,18 +1662,20 @@ def _format_outcome_note(
         )
         if answered == "human":
             happened = "They answered and I talked to them."
+            disclose = True
         elif answered == "voicemail" or vm_hit:
-            happened = (
-                "No answer, left a voicemail."
-                if message_left else "No answer, no message."
-            )
+            if message_left:
+                happened = "No answer, left a voicemail."
+                disclose = True
+            else:
+                happened = "No answer, no message."
         else:
             happened = (
                 "The call connected, but I couldn't confirm whether it "
                 "reached the person or voicemail."
             )
         lines = [opened, happened]
-    elif unknown:
+    elif unknown and not _is_definite_no_answer(attempts):
         lines = [
             opened,
             "No answer, no message.",
@@ -1606,7 +1702,10 @@ def _format_outcome_note(
                      f"applicant on file is {client} — please check the right "
                      f"person was reached.")
 
-    lines.append(_identity_line(behalf))
+    # The AI disclosure is for a conversation: someone answered, or a
+    # voicemail was left. A miss is just the outcome.
+    if disclose:
+        lines.append(_identity_line(behalf))
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
@@ -1696,6 +1795,7 @@ def _handle_call_task(
     applicant_id = _pick(task, "applicant_id")
     applicant_name = _pick(task, "applicant_name")
     assigned_by = _pick(task, "assigned_by")
+    _outcome_discussion_id.set(_pick(task, "discussion_id") or "")
     log = logging.LoggerAdapter(logger, {"task_id": task_id, "applicant_id": applicant_id})
 
     def fail(error: str, **extra: Any) -> Dict[str, Any]:

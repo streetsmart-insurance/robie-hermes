@@ -277,7 +277,8 @@ class Discussions:
         self.id_lookups.append(applicant_id)
         return list(self.ids)
 
-    def append_note(self, discussion_id, body, applicant_id=""):
+    def append_note(self, discussion_id, body, applicant_id=None, **kwargs):
+        del applicant_id, kwargs
         self.posts.append((discussion_id, body))
         self.latest = f"note-{len(self.posts)}"
         self.notes.append(self.latest)
@@ -401,7 +402,7 @@ def test_applicant_outside_write_allowlist_blocks_every_write(store):
 def test_unprovable_discussion_ownership_blocks_every_write(store):
     class NoLookup:
         posts = []
-        def append_note(self, *a): self.posts.append(a); return {"note_id": "n"}
+        def append_note(self, *a, **k): self.posts.append(a); return {"note_id": "n"}
         def get_discussion(self, *a): return {}
     client, owners = NoLookup(), Owners()
     result = _work(store, _worker(client, owners), make_task())
@@ -430,11 +431,11 @@ def test_reassigner_refuses_non_allowlisted_applicant_before_browser(monkeypatch
 def test_resume_after_question_posts_new_step_note_and_reassigns_once(store):
     disc, owners = Discussions(), Owners()
     first = _work(store, _worker(disc, None), make_task())
-    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and len(disc.posts) == 1
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and disc.posts == []
     store.resume(first["id"])
     second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
     assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
-    assert len(disc.posts) == 2 and owners.calls == ["Carlo Ferrara"]
+    assert len(disc.posts) == 1 and owners.calls == ["Carlo Ferrara"]
     assert _verify(store, first["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
 
 
@@ -640,13 +641,10 @@ def test_stale_running_job_is_recovered_and_a_fresh_one_is_not(store):
 
 def _wire_intake(monkeypatch, report, disc, owners, gate):
     # Main wires Bland into the intake; these tests are about task handoff, so keep calls out.
-    # These tests exercise job creation on a post-baseline store: the merged
-    # intake baselines (and creates no jobs for) every task when the seen
-    # store is empty, which is covered by test_task_intake_review_blockers.
+    # Production intake leaves unlabeled tasks untouched. These tests opt in.
+    monkeypatch.setattr(intake, "_include_unlabeled_tasks", lambda: True)
     monkeypatch.setattr("robie_job_engine.bland_prod_wiring.build_call_dependencies",
                         lambda: (None, None, None, True))
-    monkeypatch.setattr("robie_job_engine.ezlynx_seen_tasks.SeenTaskStore.is_empty",
-                        lambda self: False)
     monkeypatch.setattr("robie_job_engine.report_email_source.build_default_gmail_service", lambda: object())
     monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: report)
     monkeypatch.setattr(intake, "_build_discussion_client", lambda: disc)
@@ -1029,8 +1027,9 @@ def test_a_late_worker_cannot_write_a_note_record_after_losing_its_lease(store):
     disc, state = Discussions(), {}
     original_append = disc.append_note
 
-    def append_then_lose_lease(discussion_id, body, **kwargs):
-        original_append(discussion_id, body, **kwargs)
+    def append_then_lose_lease(discussion_id, body, applicant_id=None, **kwargs):
+        del applicant_id, kwargs
+        original_append(discussion_id, body)
         _lapse(store, state["job_id"])
         intake.recover_stale_running(store)
         raise TimeoutError("accepted, then the worker lost its lease")

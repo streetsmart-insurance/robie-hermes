@@ -14,9 +14,11 @@ health Chat when:
   does not page.
 - N consecutive reports hash the same (default 3)
 - the dry-run drop-in is still installed while live calls are on
-- the EZLynx driver lease is not held by PRODUCTION
+- the EZLynx driver lease is not held by PRODUCTION. That pages once
+  per outage, then one line when the lease is back with PRODUCTION
 - the intake unit's effective environment is missing
-  ROBIE_EZLYNX_WRITE_SCOPE=all
+  ROBIE_EZLYNX_WRITE_SCOPE=all, or an EnvironmentFile sets
+  ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND
 
 Outside those hours the probe stays quiet, except for a leftover dry-run
 drop-in while live. ``--simulate-failure --no-chat`` prints a failure and
@@ -27,7 +29,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -43,6 +47,10 @@ DEFAULT_SAME_DIGEST_LIMIT = 3
 STALL_QUIET_UNTIL = time(10, 30)
 DEFAULT_DROPIN_DIR = "/etc/systemd/system/robie-task-intake.service.d"
 RECOVERY_LINE = "the newest Created Date is moving again"
+LEASE_RECOVERY_LINE = "the driver lease is back with PRODUCTION"
+_ENV_FILE_ASSIGN_RE = re.compile(
+    r"^(?:export\s+)?(?:ROBIE_EZLYNX_WRITE_SCOPE|ROBIE_PLAYGROUND)="
+)
 
 
 def default_db_path() -> str:
@@ -157,13 +165,13 @@ def _dry_run_while_live(dropin_dir: str | None) -> str | None:
 
 
 def _load_episode(db_path: str) -> dict:
-    episode = {"stall_open": False}
+    episode = {"stall_open": False, "lease_open": False}
     if not os.path.exists(db_path):
         return episode
     try:
         conn = sqlite3.connect(db_path, timeout=5)
     except sqlite3.Error:
-        logger.warning("stall episode could not be read")
+        logger.warning("health episode could not be read")
         return episode
     try:
         conn.execute(
@@ -172,12 +180,15 @@ def _load_episode(db_path: str) -> dict:
                 value TEXT NOT NULL
             )"""
         )
-        row = conn.execute(
-            "SELECT value FROM ezlynx_task_intake_health_state WHERE key='stall_open'"
-        ).fetchone()
-        episode["stall_open"] = row is not None and str(row[0]) == "1"
+        rows = conn.execute(
+            "SELECT key, value FROM ezlynx_task_intake_health_state "
+            "WHERE key IN ('stall_open', 'lease_open')"
+        ).fetchall()
+        flags = {str(key): str(value) == "1" for key, value in rows}
+        episode["stall_open"] = flags.get("stall_open", False)
+        episode["lease_open"] = flags.get("lease_open", False)
     except sqlite3.Error:
-        logger.warning("stall episode could not be read")
+        logger.warning("health episode could not be read")
     finally:
         conn.close()
     return episode
@@ -189,7 +200,7 @@ def _save_episode(db_path: str, episode: dict) -> None:
     try:
         conn = sqlite3.connect(db_path, timeout=5)
     except sqlite3.Error:
-        logger.warning("stall episode could not be saved")
+        logger.warning("health episode could not be saved")
         return
     try:
         conn.execute(
@@ -198,58 +209,120 @@ def _save_episode(db_path: str, episode: dict) -> None:
                 value TEXT NOT NULL
             )"""
         )
-        conn.execute(
-            """INSERT INTO ezlynx_task_intake_health_state (key, value)
-               VALUES ('stall_open', ?)
-               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-            ("1" if episode.get("stall_open") else "0",),
-        )
+        for key in ("stall_open", "lease_open"):
+            conn.execute(
+                """INSERT INTO ezlynx_task_intake_health_state (key, value)
+                   VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (key, "1" if episode.get(key) else "0"),
+            )
         conn.commit()
     except sqlite3.Error:
-        logger.warning("stall episode could not be saved")
+        logger.warning("health episode could not be saved")
     finally:
         conn.close()
 
 
-def _driver_lease_problem(*, reader=None) -> str:
-    """Red during business hours when PRODUCTION does not hold the lease."""
+def _driver_lease_line(episode: dict, *, reader=None) -> str:
+    """Once per outage, then one line when the lease returns to PRODUCTION.
+
+    A repeat probe during the same outage stays quiet. Hours outside the
+    business window never reach this, so a weekend does not clear the episode.
+    """
     from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, production_driver_refused
 
     if production_driver_refused(reader=reader):
+        if episode.get("lease_open"):
+            return ""
+        episode["lease_open"] = True
         return LEASE_NOT_WITH_PRODUCTION
+    if episode.get("lease_open"):
+        episode["lease_open"] = False
+        return LEASE_RECOVERY_LINE
     return ""
 
 
-def _effective_scope_problem(effective_environment: str | None) -> str:
+def _environment_file_paths(shown: str) -> list[str]:
+    """Absolute paths from ``systemctl show -p EnvironmentFiles``.
+
+    The line looks like ``EnvironmentFiles=/etc/robie.env (ignore_errors)``.
+    The parenthetical flag is not a path.
+    """
+    text = shown or ""
+    if "EnvironmentFiles=" in text:
+        text = text.split("EnvironmentFiles=", 1)[1]
+    return [token for token in text.split() if token.startswith("/")]
+
+
+def _file_assigns_scope_or_playground(text: str) -> bool:
+    """True when a non-comment line assigns either key. Any value counts."""
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if _ENV_FILE_ASSIGN_RE.match(line):
+            return True
+    return False
+
+
+def _environment_file_override(shown: str | None) -> str:
+    """EnvironmentFile= overrides Environment=, so a file that sets either key is red."""
+    if not shown:
+        return ""
+    for path in _environment_file_paths(shown):
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            logger.warning("could not read EnvironmentFile %s", path)
+            continue
+        if _file_assigns_scope_or_playground(text):
+            return (
+                "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND"
+            )
+    return ""
+
+
+def _effective_scope_problem(
+    effective_environment: str | None,
+    environment_files: str | None = None,
+) -> str:
     """The intake unit's effective env must contain the all-clients scope.
 
     ``systemctl show -p Environment`` is the effective value. EnvironmentFile=
-    overrides Environment= regardless of order, so the unit text alone is
-    not proof. The check stays off unless a caller passes the show output
-    or ROBIE_TASK_INTAKE_CHECK_EFFECTIVE_ENV=1.
+    overrides Environment= regardless of order, so every file from
+    ``systemctl show -p EnvironmentFiles`` is read too. A file that assigns
+    ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND is red. The check stays off
+    unless a caller passes the show output or
+    ROBIE_TASK_INTAKE_CHECK_EFFECTIVE_ENV=1.
     """
     text = effective_environment
-    if text is None:
+    files = environment_files
+    if text is None and files is None:
         if os.environ.get("ROBIE_TASK_INTAKE_CHECK_EFFECTIVE_ENV", "").strip() != "1":
             return ""
-        text = _systemctl_environment()
-    if "ROBIE_EZLYNX_WRITE_SCOPE=all" in (text or ""):
-        return ""
-    return "effective environment is missing ROBIE_EZLYNX_WRITE_SCOPE=all"
+        text = _systemctl_show("Environment")
+        files = _systemctl_show("EnvironmentFiles")
+    missing = ""
+    if "ROBIE_EZLYNX_WRITE_SCOPE=all" not in (text or ""):
+        missing = "effective environment is missing ROBIE_EZLYNX_WRITE_SCOPE=all"
+    override = _environment_file_override(files)
+    if missing and override:
+        return f"{missing}; {override}"
+    return missing or override
 
 
-def _systemctl_environment() -> str:
-    import subprocess
-
+def _systemctl_show(prop: str) -> str:
     binary = os.environ.get("ROBIE_SYSTEMCTL", "systemctl")
     try:
         proc = subprocess.run(
-            [binary, "show", "robie-task-intake.service", "-p", "Environment", "--no-pager"],
+            [binary, "show", "robie-task-intake.service", "-p", prop, "--no-pager"],
             check=False, capture_output=True, text=True, timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return proc.stdout or ""
+
+
+def _systemctl_environment() -> str:
+    return _systemctl_show("Environment")
 
 
 def check_task_intake(
@@ -264,6 +337,7 @@ def check_task_intake(
     dropin_dir: str | None = None,
     driver_reader=None,
     effective_environment: str | None = None,
+    environment_files: str | None = None,
 ) -> list[str]:
     """Problems to alert on. Empty means quiet.
 
@@ -271,7 +345,9 @@ def check_task_intake(
     leftover dry-run drop-in while live calls are enabled. A newest-row
     stall pages once per episode and stays quiet until that row is fresh
     again. It does not page before 10:30 AM ET. A driver lease that is
-    not held by PRODUCTION is a red during business hours.
+    not held by PRODUCTION pages once per outage, then one recovery line
+    when the lease is back. An EnvironmentFile that sets the write scope
+    or the playground flag is red, because that file overrides Environment=.
     """
     moment = as_eastern_clock(now or datetime.now(timezone.utc))
     dropin_problem = _dry_run_while_live(dropin_dir)
@@ -279,10 +355,10 @@ def check_task_intake(
         return [dropin_problem] if dropin_problem else []
 
     def _with_runtime(problems: list[str]) -> list[str]:
-        lease = _driver_lease_problem(reader=driver_reader)
+        lease = _driver_lease_line(episode, reader=driver_reader)
         if lease:
             problems.append(lease)
-        scope = _effective_scope_problem(effective_environment)
+        scope = _effective_scope_problem(effective_environment, environment_files)
         if scope:
             problems.append(scope)
         return problems
@@ -305,9 +381,10 @@ def check_task_intake(
         )
         if dropin_problem:
             problems.append(dropin_problem)
+        problems = _with_runtime(problems)
         if persist:
             _save_episode(path, episode)
-        return _with_runtime(problems)
+        return problems
 
     latest = rows[0]
     status = str(latest.get("status") or "")
@@ -359,9 +436,10 @@ def check_task_intake(
         )
     if dropin_problem:
         problems.append(dropin_problem)
+    problems = _with_runtime(problems)
     if persist:
         _save_episode(path, episode)
-    return _with_runtime(problems)
+    return problems
 
 
 def format_alert(problems: list[str]) -> str:
