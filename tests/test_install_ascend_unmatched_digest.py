@@ -112,6 +112,11 @@ class InstallAscendUnmatchedDigestTests(unittest.TestCase):
             self.assertIn("/opt/streetsmart-hermes/venv/bin/python", unit)
             self.assertIn("User=streetsmart-hermes", unit)
             self.assertNotIn("ASCEND_UNMATCHED_DIGEST_LIVE=", unit)
+            self.assertIn(
+                "ASCEND_UNMATCHED_DIGEST_TO=hello@streetsmart.insurance",
+                unit,
+            )
+            self.assertNotIn("accounting@streetsmart.insurance", unit)
             timer = (prefix / "etc" / "systemd" / "system" / TIMER).read_text(encoding="utf-8")
             self.assertIn("08:30:00 America/New_York", timer)
             live = prefix / "etc" / "systemd" / "system" / f"{UNIT}.d" / "30-live.conf"

@@ -1,7 +1,7 @@
 """Daily plain-English list of Ascend notices that matched no single EZLynx client.
 
 The 15-minute poll upserts each unmatched notice into the API store. This
-module turns the open rows into one weekday email for the accounting team.
+module turns the open rows into one weekday email to hello@streetsmart.insurance.
 Dry-run is the default: the email is printed to the journal unless
 ``ASCEND_UNMATCHED_DIGEST_LIVE=1``. An empty list sends nothing.
 
@@ -26,7 +26,9 @@ the 20-minute budget. A short page is not treated as the end unless an
 empty page follows or ``totalSize`` is already covered. A missing
 ``totalSize`` never counts as a complete book on a guess. Rows that lack
 a policy number or client id still count toward ``totalSize``; only
-usable rows are stored for suggestions. HTTP 429 and 5xx back off. One
+usable rows are stored for suggestions. HTTP 429, 5xx, and a dropped
+read (a short response, a broken connection, or a timeout) back off and
+try that same page again. One
 401 clears the cached token and grants again. Each page otherwise waits
 0.25 seconds. A 38,000-policy book at 100 rows a page is 380 read-only
 calls, once on a weekday morning when the saved index is older than 20
@@ -39,6 +41,7 @@ exactly one EZLynx policy one character off whose client name also matches.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import logging
 import os
@@ -89,8 +92,9 @@ LIVE_ENV = "ASCEND_UNMATCHED_DIGEST_LIVE"
 STATE_ENV = "ASCEND_UNMATCHED_DIGEST_STATE"
 DB_ENV = "ASCEND_UNMATCHED_DIGEST_DB"
 MARKER_ENV = "ASCEND_UNMATCHED_DIGEST_MARKER"
+TO_ENV = "ASCEND_UNMATCHED_DIGEST_TO"
 TIMER_UNIT = "robie-ascend-unmatched-digest.timer"
-ACCOUNTING_TO = "accounting@streetsmart.insurance"
+DIGEST_TO = "hello@streetsmart.insurance"
 EASTERN = ZoneInfo("America/New_York")
 WINDOW = timedelta(days=14)
 INDEX_STALE = timedelta(hours=20)
@@ -158,12 +162,20 @@ _NOTICE_WORDS = {
 }
 
 _POLICY_IGNORABLE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014]+")
+_INTRO = (
+    "Robie couldn't match these Ascend notices to an EZLynx client by policy number. "
+    "To have one filed automatically, update the policy number in Ascend or EZLynx so they match."
+)
+_UNMATCHED_ASK = (
+    "Update the policy number in Ascend or EZLynx so they match, and Robie will file it."
+)
+_TYPO_CHECK = "Check whether the policy number is a typo in Ascend or EZLynx."
 _FIX_LINE_CHECKED = (
-    "Fix the policy number in EZLynx or Ascend and it drops off this list "
+    "Fix the policy number in Ascend or EZLynx and it drops off this list "
     "once Robie matches it and files the note."
 )
 _FIX_LINE_AS_SHOWN = (
-    "Fix the policy number in EZLynx and it drops off this list "
+    "Fix the policy number in Ascend or EZLynx and it drops off this list "
     "once Robie matches it and files the note. "
     "The policy number is as Ascend sent it."
 )
@@ -182,6 +194,12 @@ MAYBE_NOTE_LIMIT_LINE = (
 # A poll older than this is not evidence that notes are on.
 POLL_FRESHNESS = timedelta(hours=2)
 _POLICY_ID_LINE = re.compile(r"(?i)^policy id\s+\S+")
+
+
+def digest_recipient() -> str:
+    """Who receives the weekday email. hello@ unless the env names someone else."""
+    override = str(os.environ.get(TO_ENV) or "").strip()
+    return override or DIGEST_TO
 
 
 def live_enabled() -> bool:
@@ -778,11 +796,11 @@ def item_line(item: dict[str, Any]) -> str:
         str(item.get("reason") or ""),
         "Robie could not match this notice to one client.",
     )
-    sentence = ", ".join(parts) + ". " + reason
+    sentence = ", ".join(parts) + ". " + reason + " " + _UNMATCHED_ASK
     client = str(item.get("suggestion_client") or "").strip()
     policy = str(item.get("suggestion_policy") or "").strip()
     if client and policy:
-        sentence += f" Did you mean {client} (policy {policy})?"
+        sentence += f" Did you mean {client} (policy {policy})? " + _TYPO_CHECK
     return sentence
 
 
@@ -807,13 +825,16 @@ def render_digest(
         return None
     count = len(current) if current else len(aged)
     subject = digest_subject(count, when or _now())
-    lines = [item_line(item) for item in current]
+    lines = [_INTRO]
+    lines.extend(item_line(item) for item in current)
     if aged:
         bits = []
         for item in aged:
             name = str(item.get("insured_name") or "").strip() or "An insured"
             bits.append(f"{name}, {notice_words(str(item.get('notice_type') or ''))}")
-        lines.append("Still unmatched after 14 days: " + "; ".join(bits) + ".")
+        lines.append(
+            "Still unmatched after 14 days: " + "; ".join(bits) + ". " + _UNMATCHED_ASK
+        )
     lines.append(_FIX_LINE_CHECKED if policy_rechecked else _FIX_LINE_AS_SHOWN)
     return subject, "\n".join(lines)
 
@@ -968,6 +989,37 @@ def page_signature(payload: Any) -> tuple[tuple[str, str], ...]:
     return tuple(signature)
 
 
+def _dropped_read_types() -> tuple[type[BaseException], ...]:
+    """Short reads and broken connections. ChunkedEncodingError arrived in 3.13."""
+    found: list[type[BaseException]] = [
+        http.client.IncompleteRead,
+        ConnectionError,
+        TimeoutError,
+    ]
+    chunked = getattr(http.client, "ChunkedEncodingError", None)
+    if isinstance(chunked, type):
+        found.append(chunked)
+    return tuple(found)
+
+
+def _policy_read_dropped(exc: BaseException) -> bool:
+    """True for a short read, a broken connection, a timeout, or HTTP 5xx.
+
+    A wrong policy number is not this. The page loop retries the same page.
+    """
+    if isinstance(exc, _dropped_read_types()):
+        return True
+    # 3.12 raises IncompleteRead for a broken chunked body. Newer Pythons
+    # and some HTTP libraries raise ChunkedEncodingError instead.
+    if type(exc).__name__ == "ChunkedEncodingError":
+        return True
+    status = getattr(exc, "status", None)
+    if status == 429 or (isinstance(status, int) and status >= 500):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return "timeout" in text or "timed out" in text
+
+
 def call_with_policy_backoff(
     client: Any,
     call: Callable[[], Any],
@@ -976,11 +1028,12 @@ def call_with_policy_backoff(
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
 ) -> tuple[Any, int]:
-    """One PolicyApi call. Back off on 429/5xx. Re-grant once on 401.
+    """One PolicyApi call. Back off on 429/5xx and a dropped read. Re-grant once on 401.
 
-    Index paging and the digest re-check both use this. No policy is written.
-    ``clear_cached_token`` is the only other client method. A passed
-    ``deadline`` (monotonic) stops the wait instead of running long.
+    Index paging and the digest re-check both use this. A failed page is
+    tried again by itself. No policy is written. ``clear_cached_token`` is
+    the only other client method. A passed ``deadline`` (monotonic) stops
+    the wait instead of running long.
     """
     ticks = clock or time.monotonic
     reauthed = False
@@ -996,9 +1049,7 @@ def call_with_policy_backoff(
             raise
         except Exception as exc:
             status = getattr(exc, "status", None)
-            retryable = bool(getattr(exc, "retryable", False)) or status == 429 or (
-                isinstance(status, int) and status >= 500
-            )
+            retryable = _policy_read_dropped(exc) or bool(getattr(exc, "retryable", False))
             if status == 401 and not reauthed and _clear_cached_token(client):
                 reauthed = True
                 continue
@@ -1031,8 +1082,9 @@ def fetch_policy_page(
 ) -> tuple[Any, int]:
     """One PolicyApi page and how many GETs it took.
 
-    Back off on 429/5xx. Re-grant once on 401. The only client methods used
-    are ``search_policy_page`` and ``clear_cached_token``. No policy is written.
+    Back off on 429/5xx and a dropped read, and try this page again. Re-grant
+    once on 401. The only client methods used are ``search_policy_page`` and
+    ``clear_cached_token``. No policy is written.
     """
     search = getattr(client, "search_policy_page", None)
     if search is None:
@@ -1274,13 +1326,15 @@ def run_digest(
                     clock=ticks,
                     deadline=deadline,
                 )
-            except Exception as exc:  # noqa: BLE001 - the email still goes out
-                logger.warning("policy index refresh failed: %s", type(exc).__name__)
+            except Exception:  # noqa: BLE001 - the email still goes out
+                logger.warning(
+                    "The EZLynx policy list could not be read. This email has no suggestions."
+                )
                 index_report = {
                     "calls": 0,
                     "complete": False,
                     "saved": False,
-                    "stopped": type(exc).__name__,
+                    "stopped": "read_failed",
                 }
     index_rows, meta, _store = best_policy_index(opened)
     index_complete = int(meta.get("complete") or 0) == 1
@@ -1345,7 +1399,7 @@ def run_digest(
         return result
     sender = mailer or default_mailer
     try:
-        sender(to=[ACCOUNTING_TO], subject=subject, text_body=body)
+        sender(to=[digest_recipient()], subject=subject, text_body=body)
     except Exception as exc:  # noqa: BLE001 - refused and failed sends both alert
         result["error"] = type(exc).__name__
         result["sent"] = False
@@ -1548,7 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
     parser = argparse.ArgumentParser(
         description=(
-            "Email accounting the open unmatched Ascend notices. "
+            "Email hello@ the open unmatched Ascend notices. "
             "Dry-run unless ASCEND_UNMATCHED_DIGEST_LIVE=1."
         )
     )

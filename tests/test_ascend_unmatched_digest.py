@@ -5,9 +5,11 @@ Synthetic fixtures only. No network, no EZLynx write, no email send.
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import io
 import json
+import logging
 import os
 from urllib import error as urlerror
 from datetime import datetime, timedelta, timezone
@@ -414,22 +416,72 @@ def test_aged_items_are_mentioned_once_and_only_after_a_live_send(tmp_path, caps
 def test_sample_digest_is_plain_english():
     subject, body = digest.sample_digest()
     assert subject == "Ascend notices Robie couldn't match (3) for October 5, 2026"
+    assert body.startswith(digest._INTRO)
     assert "Fixture Hauling LLC, past-due payment, $412.10, policy HO-998877." in body
     assert "That policy number is not in EZLynx." in body
     assert "Did you mean Fixture Hauling (policy HO-998878)?" in body
+    assert digest._TYPO_CHECK in body
     assert "Northwind Trucking Inc, cancellation, $1,200.00, policy CA-100200." in body
     assert "More than one EZLynx client matched." in body
     assert "Bare Insured, intent to cancel." in body
     assert "Ascend did not include a policy number." in body
+    assert "Robie couldn't match this Ascend notice" not in body
+    assert body.count(digest._UNMATCHED_ASK) == 4
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
-        "Fix the policy number in EZLynx and it drops off this list once Robie matches it and files the note. "
+        "Fix the policy number in Ascend or EZLynx and it drops off this list once Robie matches it and files the note. "
         "The policy number is as Ascend sent it."
     )
     assert "or Ascend" not in body
     for forbidden in ("event_key", "program_id", "late_payment", "applicant_id", "unmatched_reason"):
         assert forbidden not in subject
         assert forbidden not in body
+
+
+def test_the_digest_goes_only_to_hello_unless_the_env_names_another_address(tmp_path, monkeypatch):
+    assert digest.DIGEST_TO == "hello@streetsmart.insurance"
+    assert digest.digest_recipient() == "hello@streetsmart.insurance"
+    monkeypatch.setenv(digest.TO_ENV, "ops@example.test")
+    assert digest.digest_recipient() == "ops@example.test"
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    notice = source._invoice_notice(
+        {
+            "id": HELPERS._iid(11),
+            "program_id": HELPERS._pid(1),
+            "status": "overdue",
+            "invoice_number": "INV-3003",
+            "policy_number": HELPERS.POLICY,
+            "total_amount_cents": 41210,
+        },
+        HELPERS._program(1, "payment_overdue", "2026-10-05T13:50:00Z"),
+    )
+    assert notice is not None
+    store.upsert_unmatched(
+        notice,
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-05T13:50:00Z",
+        suggestion_client="Fixture Hauling",
+        suggestion_policy="HO-998878",
+        update_suggestion=True,
+    )
+    sent: list[list[str]] = []
+
+    def _mailer(*, to, subject, text_body):
+        sent.append(list(to))
+        assert digest._TYPO_CHECK in text_body
+        assert "will file this on the next Ascend run" not in text_body
+        return {"kind": "gmail", "message_id": "m1"}
+
+    digest.run_digest(stores=[store], now=NOW, live=True, mailer=_mailer, refresh=False)
+    assert sent == [["ops@example.test"]]
+    unit = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "robie-ascend-unmatched-digest.service"
+    ).read_text(encoding="utf-8")
+    assert "ASCEND_UNMATCHED_DIGEST_TO=hello@streetsmart.insurance" in unit
+    assert "accounting@streetsmart.insurance" not in unit
 
 
 def test_store_permissions_stay_on_the_ascend_api_folder(tmp_path):
@@ -656,14 +708,16 @@ def test_live_digest_sends_once_through_the_mailer(tmp_path):
 
     def _mailer(*, to, subject, text_body):
         sent.append(to[0])
-        assert to == [digest.ACCOUNTING_TO]
+        assert to == [digest.DIGEST_TO]
+        assert to == ["hello@streetsmart.insurance"]
         assert subject == "Ascend notices Robie couldn't match (1) for October 5, 2026"
         assert "More than one EZLynx client matched." in text_body
+        assert digest._UNMATCHED_ASK in text_body
         return {"kind": "gmail", "message_id": "m1"}
 
     result = digest.run_digest(stores=[store], now=NOW, live=True, mailer=_mailer, refresh=False)
     assert result["sent"] is True
-    assert sent == [digest.ACCOUNTING_TO]
+    assert sent == ["hello@streetsmart.insurance"]
 
 
 def _page(rows, total=None):
@@ -797,6 +851,187 @@ def test_policy_paging_backs_off_and_reauths_once(tmp_path):
             sleep=lambda _s: None,
         )
     assert fresh.policy_index()[0] == []
+
+
+def test_a_dropped_policy_page_is_retried_in_place(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    waits: list[float] = []
+
+    class DropOnce:
+        def __init__(self, error):
+            self.error = error
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 2 and self.calls.count(2) == 1:
+                raise self.error
+            row = {
+                "PolicyNumber": f"HO-{page_index}",
+                "ApplicantId": str(page_index),
+                "ApplicantName": "Fixture Hauling",
+            }
+            return _page([row], total=2)
+
+    dropped = DropOnce(http.client.IncompleteRead(b"partial"))
+    report = digest.refresh_policy_index(
+        dropped,
+        [store],
+        now=NOW,
+        page_size=1,
+        max_pages=4,
+        pause_s=0,
+        sleep=waits.append,
+    )
+    assert dropped.calls == [1, 2, 2]
+    assert waits == [1.0]
+    assert report["complete"] is True
+    assert report["saved"] is True
+    assert report["pages"] == 2
+    saved = {row["policy_number"] for row in store.policy_index()[0]}
+    assert saved == {"HO-1", "HO-2"}
+
+
+class ChunkedEncodingError(Exception):
+    """Same name as http.client.ChunkedEncodingError, which 3.12 does not ship."""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http.client.IncompleteRead(b"partial"),
+        ChunkedEncodingError("short"),
+        ConnectionError("reset"),
+        TimeoutError("timed out"),
+        EzlynxApiError(503, "down"),
+    ],
+)
+def test_a_policy_page_that_keeps_dropping_is_not_saved(tmp_path, error):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.save_policy_index(
+        [
+            {
+                "policy_key": "ho1",
+                "policy_number": "HO-OLD",
+                "applicant_name": "Old Book",
+                "applicant_id": "1",
+            }
+        ],
+        built_at="2026-10-01T00:00:00Z",
+        calls=1,
+        total_size=1,
+        pages=1,
+    )
+    waits: list[float] = []
+
+    class KeepsDropping:
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 1:
+                return _page(
+                    [{"PolicyNumber": "HO-1", "ApplicantId": "9", "ApplicantName": "New"}],
+                    total=2,
+                )
+            raise error
+
+    client = KeepsDropping()
+    with pytest.raises(type(error)):
+        digest.refresh_policy_index(
+            client,
+            [store],
+            now=NOW,
+            page_size=1,
+            max_pages=4,
+            pause_s=0,
+            sleep=waits.append,
+        )
+    assert client.calls == [1, 2, 2, 2, 2]
+    assert waits == [1.0, 2.0, 4.0]
+    rows, meta = store.policy_index()
+    assert [row["policy_number"] for row in rows] == ["HO-OLD"]
+    assert int(meta["complete"]) == 1
+
+
+def test_a_page_retry_stops_at_the_time_budget(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+
+    class LateDrop:
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def search_policy_page(self, page_index, page_size):
+            self.calls.append(page_index)
+            if page_index == 2:
+                clock.now = 9.5
+                raise http.client.IncompleteRead(b"partial")
+            return _page(
+                [{"PolicyNumber": "HO-1", "ApplicantId": "1", "ApplicantName": "One"}],
+                total=2,
+            )
+
+    client = LateDrop()
+    report = digest.refresh_policy_index(
+        client,
+        [store],
+        now=NOW,
+        page_size=1,
+        max_pages=5,
+        pause_s=0,
+        sleep=lambda _s: None,
+        budget_s=10,
+        clock=clock,
+    )
+    assert client.calls == [1, 2]
+    assert report["complete"] is False
+    assert report["saved"] is False
+    assert report["stopped"] == "time_budget"
+    assert store.policy_index()[0] == []
+
+
+def test_a_dropped_policy_list_still_sends_the_email(tmp_path, caplog):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    _open_unmatched(store, key="open-1", policy="HO-998877", name="Fixture Hauling LLC")
+
+    class Down:
+        def search_policy_page(self, page_index, page_size):
+            raise http.client.IncompleteRead(b"partial")
+
+        def search_policy_by_number(self, number):
+            return {"data": [], "totalSize": 0}
+
+    caplog.set_level(logging.WARNING, logger=digest.logger.name)
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=False,
+        ezlynx_client=Down(),
+        refresh=True,
+        pause_s=0,
+        sleep=lambda _s: None,
+    )
+    assert "Fixture Hauling LLC" in result["body"]
+    assert "Did you mean" not in result["body"]
+    assert store.policy_index()[0] == []
+    notes = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == digest.logger.name and record.levelno >= logging.WARNING
+    ]
+    assert notes == [
+        "The EZLynx policy list could not be read. This email has no suggestions."
+    ]
 
 
 def test_index_stops_at_the_time_budget(tmp_path):
@@ -1559,7 +1794,8 @@ def test_recheck_reads_the_policy_number_from_ascend(tmp_path, monkeypatch):
     assert "Policy ID HO-NEW" in row["body"]
     assert "HO-OLD" not in row["body"]
     assert "HO-NEW" in result["body"]
-    assert "or Ascend" in result["body"]
+    assert "Fix the policy number in Ascend or EZLynx" in result["body"]
+    assert "The policy number is as Ascend sent it." not in result["body"]
     assert os.environ.get(source.LIVE_ENV) != "1"
 
     class Spent:
@@ -2724,7 +2960,8 @@ def test_dry_run_does_not_store_the_reread_policy_number(tmp_path, monkeypatch):
     assert json.loads(row["program_json"])["policy_number"] == "HO-OLD"
     assert row["ready_at"] in (None, "")
     assert "HO-NEW" in result["body"]
-    assert "or Ascend" in result["body"]
+    assert "Fix the policy number in Ascend or EZLynx" in result["body"]
+    assert "The policy number is as Ascend sent it." not in result["body"]
 
 
 def test_production_digest_uses_the_poll_read_client(tmp_path, monkeypatch, capsys):
@@ -2796,8 +3033,8 @@ def test_production_digest_uses_the_poll_read_client(tmp_path, monkeypatch, caps
     assert code == 0
     assert calls["configured"] == 0
     assert calls["gets"] == ["/v1/programs/prog-1"]
+    assert "Fix the policy number in Ascend or EZLynx" in printed
     assert "The policy number is as Ascend sent it." in printed
-    assert "or Ascend" not in printed
     row = store.list_unmatched()[0]
     assert row["policy_numbers"] == ["HO-998877"]
 
