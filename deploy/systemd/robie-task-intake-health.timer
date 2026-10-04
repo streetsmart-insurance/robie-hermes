@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Task Check-In intake health every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+AccuracySec=60s
+Unit=robie-task-intake-health.service
+
+[Install]
+WantedBy=timers.target

@@ -21,7 +21,16 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from dataclasses import dataclass
+from datetime import datetime
+
+from .report_clock import report_created_et
+
+logger = logging.getLogger("ezlynx_task_report")
+
+# Looker caps the export at 500 data rows, newest first.
+REPORT_ROW_CAP = 500
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,8 @@ class AssignedTask:
     assigned_producer: str = ""  # Assigned Producer (reassignment fallback 2)
     csr: str = ""              # CSR (reassignment fallback 3)
     activity_labels: str = ""  # Activity Labels (Robie Call / workflow labels)
+    created_at: str = ""       # Created Date, naive America/Chicago
+    created_at_et: str = ""    # Created Date converted to America/New_York
 
 
 class TaskReportParseError(ValueError):
@@ -71,7 +82,19 @@ REQUIRED_HEADERS = [
 ROBIE_ASSIGNEE = "Robie AI"
 
 
+@dataclass(frozen=True)
+class TaskReportParse:
+    tasks: list[AssignedTask]
+    row_count: int
+    newest_created_et: str = ""
+
+
 def parse_task_report(csv_content: str) -> list[AssignedTask]:
+    """Parse a task report CSV into AssignedTask records."""
+    return parse_task_report_detail(csv_content).tasks
+
+
+def parse_task_report_detail(csv_content: str) -> TaskReportParse:
     """Parse a task report CSV into AssignedTask records.
 
     Filters to tasks assigned to Robie AI (the report contains all
@@ -81,6 +104,9 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
     missing headers, or ragged rows. Returns empty list (not error)
     when no tasks are assigned to Robie AI — that is a healthy,
     quiet outcome.
+
+    Created Date is America/Chicago and is stored again as Eastern.
+    Exactly 500 data rows logs a truncation warning.
     """
     if not csv_content or not csv_content.strip():
         raise TaskReportParseError("Empty CSV content")
@@ -96,12 +122,22 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
         )
 
     tasks: list[AssignedTask] = []
+    row_count = 0
+    newest_et: datetime | None = None
     for line_no, row in enumerate(reader, start=2):
+        row_count += 1
         # Fail-closed on ragged rows
         if None in row.values():
             raise TaskReportParseError(
                 f"Ragged row at line {line_no}: {row}"
             )
+
+        row_created = report_created_et(
+            (row.get("Created Date") or "").strip()
+            or (row.get("Task Created Date") or "").strip()
+        )
+        if row_created is not None and (newest_et is None or row_created > newest_et):
+            newest_et = row_created
 
         assigned_to = (row.get("Task Assigned To") or "").strip()
         if assigned_to != ROBIE_ASSIGNEE:
@@ -113,6 +149,9 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
                 f"Row {line_no} assigned to Robie AI has no Task ID"
             )
 
+        created_at = (row.get("Created Date") or "").strip()
+        created_date = (row.get("Task Created Date") or "").strip()
+        created_et = report_created_et(created_at or created_date)
         tasks.append(AssignedTask(
             task_id=task_id,
             title=(row.get("Activity Type") or "").strip(),
@@ -122,7 +161,7 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
             assigned_to=assigned_to,
             due_date=(row.get("Task Due Date") or "").strip(),
             priority=(row.get("Task Priority") or "").strip(),
-            created_date=(row.get("Task Created Date") or "").strip(),
+            created_date=created_date,
             status=(row.get("Task Status") or "").strip(),
             discussion_id=(row.get("Discussion ID") or "").strip(),
             last_modified=(row.get("Task Last Modified Date") or "").strip(),
@@ -132,6 +171,19 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
             assigned_producer=(row.get("Assigned Producer") or "").strip(),
             csr=(row.get("CSR") or "").strip(),
             activity_labels=(row.get("Activity Labels") or "").strip(),
+            created_at=created_at,
+            created_at_et=created_et.isoformat() if created_et else "",
         ))
 
-    return tasks
+    if row_count == REPORT_ROW_CAP:
+        logger.warning(
+            "task report has exactly %s rows, newest first; older rows may "
+            "have been truncated",
+            REPORT_ROW_CAP,
+        )
+
+    return TaskReportParse(
+        tasks=tasks,
+        row_count=row_count,
+        newest_created_et=newest_et.isoformat() if newest_et else "",
+    )

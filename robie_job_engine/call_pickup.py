@@ -15,8 +15,11 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-_LEAD_LABELS = ("robie lead follow up", "robie call follow up")
-_ROBIE_CALL = "robie call"
+# Exact keys after case-folding and stripping hyphens, spaces, and
+# underscores. "Robie Call" must not match as a prefix of
+# "Robie Call Follow Up".
+_LEAD_KEYS = frozenset({"robieleadfollowup", "robiecallfollowup"})
+_CALL_KEY = "robiecall"
 LEAD_WORKFLOW_ID = "lead_follow_up"
 
 
@@ -27,12 +30,6 @@ class CallPickup:
     reason: str = ""
 
 
-def _phrase_present(text: str, phrase: str) -> bool:
-    return re.search(
-        r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text, re.IGNORECASE,
-    ) is not None
-
-
 def _label_parts(activity_labels: str) -> list[str]:
     return [
         part.strip()
@@ -41,30 +38,28 @@ def _label_parts(activity_labels: str) -> list[str]:
     ]
 
 
-def _normalize_label(value: str) -> str:
-    text = (value or "").casefold().replace("-", " ")
-    return re.sub(r"\s+", " ", text).strip()
+def label_key(value: str) -> str:
+    """Case-fold and drop hyphens, spaces, and underscores."""
+    return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
 
 
-def classify_call_request(activity_labels: str, note_text: str) -> CallPickup:
+def classify_call_request(activity_labels: str, note_text: str = "") -> CallPickup:
     """Resolve a check-in row to a lead script, a free-form call, or neither.
 
-    "Robie Lead Follow Up" and "Robie Call Follow Up" are the lead script.
-    A Robie Call label with no lead label is free-form: Eva follows the
-    task description. Audit, sales, winback, and the other Splice names
-    do not start a call.
+    The live label is "Robie lead follow-up". "Robie Lead Follow Up" and
+    "Robie Call Follow Up" are the same lead script. A label matches only
+    when the full normalized text is exactly that label, so "Robie Call"
+    does not swallow "Robie Call Follow Up". Audit, sales, winback, and
+    the other Splice names do not start a call.
+
+    ``note_text`` is ignored. A title or description that says "call",
+    "Do not call", or "[CALLBACK REQUIRED]" does not dial.
     """
-    labels = [_normalize_label(part) for part in _label_parts(activity_labels)]
-    note = _normalize_label(note_text)
-    lead = any(label in _LEAD_LABELS for label in labels) or any(
-        _phrase_present(note, phrase) for phrase in _LEAD_LABELS
-    )
-    if lead:
+    del note_text
+    keys = [label_key(part) for part in _label_parts(activity_labels)]
+    if any(key in _LEAD_KEYS for key in keys):
         return CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
-    robie_call = any(label == _ROBIE_CALL for label in labels) or _phrase_present(
-        note, _ROBIE_CALL,
-    )
-    if robie_call:
+    if any(key == _CALL_KEY for key in keys):
         return CallPickup("freeform")
     return CallPickup("not_labeled")
 
@@ -78,6 +73,12 @@ def note_dedupe_key(
 
 
 def calling_day(moment: datetime) -> str:
+    """Eastern calendar day.
+
+    ``moment`` is the call clock or a Created Date that has already been
+    converted from America/Chicago. A naive value is Eastern, not Central.
+    Report strings go through report_created_et before they reach here.
+    """
     zone = ZoneInfo("America/New_York")
     if moment.tzinfo is None:
         current = moment.replace(tzinfo=zone)
