@@ -74,3 +74,19 @@ Browser assertions and recordings are evidence, not completion authority. The
 Job Engine must independently reread the destination through its registered
 verifier. A run may become `COMPLETE` only after that verification succeeds and
 every required recording segment has a stored Drive link.
+
+## Carrier browser runtime policy — Hartford is sandbox-only (permanent, 2026-09-18)
+
+Hartford (`thehartford.com`, EBC agent portal) is unreachable from the ROBIE
+servers — proven by curl probes on hermes-poc-01 on 2026-09-18 (direct, via the
+residential proxy, and via proxy forced HTTP/1.1 all fail; independently
+re-proven by Dusty the same day). The sandbox browser reaches it fine.
+
+- Never start a Hartford portal / EBC Playwright job on a hermes-* server. The
+  job engine refuses it fail-closed with a plain-English reason; see
+  `robie_job_engine/carrier_browser_policy.py`, which owns the rule.
+- Run Hartford browser work in the sandbox browser, or get the documents by
+  email / IVANS.
+- Do not debug proxy or stealth settings for Hartford on the servers — that
+  path is dead.
+- All other carriers keep the designed stealth+proxy browser path unchanged.

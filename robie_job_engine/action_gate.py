@@ -25,6 +25,7 @@ from typing import Any
 
 from .models import TERMINAL_STATUSES, JobStatus
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
+from .carrier_browser_policy import hartford_playwright_refusal
 from .store import JobStore
 from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id, requested_message_applicant
 
@@ -345,6 +346,15 @@ def hold_reason_for_job(
     code: str | None = None,
 ) -> str | None:
     """The one function the Chat worker / engine / Playwright start must pass."""
+    # Permanent carrier rule first: Hartford portal / EBC browser jobs can never
+    # run on a hermes-* server (site unreachable from the fleet, proven
+    # 2026-09-18). Fail closed with the plain-English reason before any other
+    # classification. See robie_job_engine/carrier_browser_policy.py.
+    hartford_refusal = hartford_playwright_refusal(
+        text=text, job=job, code=str(code or "")
+    )
+    if hartford_refusal:
+        return hartford_refusal
     job = dict(job or {})
     payload = dict(job.get("payload") or {})
     action_id = classify_action(
