@@ -1938,6 +1938,19 @@ def test_credential_and_hidden_classification_is_decided_before_any_value_is_req
 
 # ---- 2. API discovery: keys/types only, with verified ownership --------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_ambient_job_context(monkeypatch):
+    """Other code and tests set ROBIE_JOB_ID in-process; discovery refuses a job context, so be hermetic."""
+    from robie_job_engine import live_turn_guard
+    monkeypatch.delenv("ROBIE_JOB_ID", raising=False)
+    monkeypatch.delenv("JOB_ID", raising=False)
+    monkeypatch.setattr(live_turn_guard, "_BOUND_RESUME", {}, raising=False)
+    token = live_turn_guard._TURN_JOB.set("")
+    yield
+    live_turn_guard._TURN_JOB.reset(token)
+
+
+
 class _ApiClient:
     def __init__(self, ids=("849945654",), ids_error=None, no_lookup=False):
         self.reads, self.ids, self.ids_error = [], list(ids), ids_error

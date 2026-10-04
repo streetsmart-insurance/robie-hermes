@@ -37,6 +37,19 @@ class Accessor:
         return _payload(self.hosts[ref])
 
 
+
+@pytest.fixture(autouse=True)
+def _no_ambient_job_context(monkeypatch):
+    """Other code and tests set ROBIE_JOB_ID in-process; discovery refuses a job context, so be hermetic."""
+    from robie_job_engine import live_turn_guard
+    monkeypatch.delenv("ROBIE_JOB_ID", raising=False)
+    monkeypatch.delenv("JOB_ID", raising=False)
+    monkeypatch.setattr(live_turn_guard, "_BOUND_RESUME", {}, raising=False)
+    token = live_turn_guard._TURN_JOB.set("")
+    yield
+    live_turn_guard._TURN_JOB.reset(token)
+
+
 @pytest.fixture
 def env(monkeypatch):
     for name in ("ROBIE_ENV", "ROBIE_TASK_DISCUSSION_ROUTE", "ROBIE_EZLYNX_DISCUSSION_API",
