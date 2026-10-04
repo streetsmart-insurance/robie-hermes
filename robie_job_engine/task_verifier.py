@@ -13,8 +13,11 @@ Carlo-approved design (2026-09-27):
      and that is also alerted. Never silently pass.
 
 Two producers, one verifier:
-  - phone-watchdog: ingested from its processed_calls table
-    (ezlynx_task_status='delivered'). No changes to that repo needed.
+  - phone-watchdog: ingested from its processed_calls table when
+    ezlynx_task_status is 'delivered' (Zapier returned HTTP 200) or
+    'sent_to_relay' (handed to the relay). Both are queued PENDING and
+    checked against a fresh EZLynx report. 'sent_to_relay' is not proof
+    the task landed in EZLynx. No changes to that repo needed.
   - certificates: CertZapier.create_task() calls record_pending() directly.
 
 The EZLynx task report (task title, assignee, applicant/account, created
@@ -34,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("task_verifier")
 
@@ -62,6 +66,34 @@ PHONE_WATCHDOG_DB = os.environ.get(
     "ROBIE_PHONE_WATCHDOG_DB",
     "/opt/streetsmart-phone-watchdog/data/phone_alerts.db",
 )
+
+# Hand-off statuses to queue for verification. Neither one proves the task
+# exists in EZLynx:
+#   delivered — Zapier webhook returned HTTP 200
+#   sent_to_relay — watchdog handed the task to the relay
+PHONE_WATCHDOG_TRACK_STATUSES = ("delivered", "sent_to_relay")
+
+# Box-local timezone. Producers (phone-watchdog processed_at, cert sweep)
+# write naive wall-clock timestamps in this zone; the verifier must interpret
+# them as such. Comparing naive local strings against UTC-aware cutoffs as
+# plain strings silently defeats the VERIFY_AFTER_MINUTES grace period
+# (2026-10-03: a task fired 9 min earlier was checked as "older than 40 min"
+# because "10:06" < "13:35" lexicographically) — hence the normalization
+# helpers below.
+LOCAL_TZ = ZoneInfo("America/New_York")
+
+
+def _parse_ts(s: str) -> datetime:
+    """Parse a timestamp string; naive values are box-local (LOCAL_TZ)."""
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt
+
+
+def _utc_iso(s: str) -> str:
+    """Normalize any timestamp string to UTC ISO-8601 with offset."""
+    return _parse_ts(s).astimezone(timezone.utc).isoformat()
 
 
 @dataclass
@@ -122,9 +154,13 @@ class TaskVerificationStore:
         assignee: str,
         fired_at: str | None = None,
     ) -> int:
-        """Record an expected task. Idempotent — dupes are ignored."""
+        """Record an expected task. Idempotent — dupes are ignored.
+
+        fired_at is normalized to UTC ISO at write time so that later
+        string comparisons in due_for_verification() are correct.
+        """
         now = datetime.now(timezone.utc).isoformat()
-        fired = fired_at or now
+        fired = _utc_iso(fired_at) if fired_at else now
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT OR IGNORE INTO pending_tasks
@@ -194,49 +230,97 @@ def ingest_phone_watchdog(
     db_path: str = PHONE_WATCHDOG_DB,
     since_hours: int = 6,
 ) -> int:
-    """Pull newly 'delivered' phone-watchdog tasks into the pending queue.
+    """Queue phone-watchdog handoffs whose EZLynx landing is still unproven.
 
-    The watchdog's processed_calls table records ezlynx_task_status='delivered'
-    when the Zapier webhook returns HTTP 200. Those are exactly the tasks whose
-    EZLynx-side existence is UNVERIFIED — this ingests them as PENDING.
-    Returns the number of rows ingested.
+    processed_calls.ezlynx_task_status is 'delivered' when the Zapier webhook
+    returns HTTP 200, and 'sent_to_relay' when the watchdog handed the task
+    to the relay. Both are ingested as PENDING so a later run can match them
+    to a fresh EZLynx task report. 'sent_to_relay' is not itself evidence the
+    task exists in EZLynx — verification still has to find it in the report.
+    Other statuses are ignored.
+
+    Returns the number of rows newly queued. A second ingest of the same
+    applicant, title, and fired_at is a no-op (the pending-task unique key).
     """
     if not os.path.exists(db_path):
         logger.warning("phone-watchdog DB not found: %s", db_path)
         return 0
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+    now_utc = datetime.now(timezone.utc)
+    # Coarse pre-filter in SQL only: processed_at is naive box-local, so a
+    # plain string compare against a UTC cutoff is tz-wrong. Use a wide
+    # buffer here and apply the precise tz-aware filter in Python below.
+    coarse_cutoff = (now_utc - timedelta(hours=since_hours + 6)).isoformat()
+    precise_cutoff = now_utc - timedelta(hours=since_hours)
+    status_marks = ", ".join("?" for _ in PHONE_WATCHDOG_TRACK_STATUSES)
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            """SELECT message_id, ams_account_id, account_name, assigned_user,
-                      processed_at
-               FROM processed_calls
-               WHERE ezlynx_task_status='delivered'
-                 AND processed_at >= ?
-               ORDER BY processed_at""",
-            (cutoff,),
+            f"""SELECT message_id, ams_account_id, account_name, assigned_user,
+                       processed_at
+                FROM processed_calls
+                WHERE ezlynx_task_status IN ({status_marks})
+                  AND processed_at >= ?
+                ORDER BY processed_at""",
+            (*PHONE_WATCHDOG_TRACK_STATUSES, coarse_cutoff),
         ).fetchall()
     finally:
         conn.close()
 
-    n = 0
+    n_new = 0
+    n_seen = 0
     for r in rows:
+        try:
+            if _parse_ts(str(r["processed_at"] or "")) < precise_cutoff:
+                continue
+        except ValueError:
+            continue
         # Reconstruct the expected task title the same way the watchdog builds
         # it (see ezlynx_phone_task_sync.build_task_payload). The report match
         # uses applicant + assignee + title-substring, so an approximate title
         # is enough; the applicant/assignee carry the identity.
         title = f"[AFTER-HOURS CALLBACK] {r['account_name'] or r['message_id']}"
+        applicant_id = str(r["ams_account_id"] or "")
+        fired_at = str(r["processed_at"] or "")
+        already = _phone_task_queued(store, applicant_id, title, fired_at)
         store.record_pending(
             producer="phone-watchdog",
-            applicant_id=str(r["ams_account_id"] or ""),
+            applicant_id=applicant_id,
             title=title,
             assignee=str(r["assigned_user"] or ""),
-            fired_at=str(r["processed_at"] or ""),
+            fired_at=fired_at,
         )
-        n += 1
-    logger.info("ingested %d phone-watchdog delivered tasks", n)
-    return n
+        n_seen += 1
+        if not already:
+            n_new += 1
+    logger.info(
+        "ingested %d new phone-watchdog tasks "
+        "(%d delivered/sent_to_relay rows in window; "
+        "sent_to_relay is tracked for report verification, not EZLynx proof)",
+        n_new,
+        n_seen,
+    )
+    return n_new
+
+
+def _phone_task_queued(
+    store: TaskVerificationStore, applicant_id: str, title: str, fired_at: str
+) -> bool:
+    """True when this handoff is already in the pending queue.
+
+    fired_at is compared after the same UTC normalization record_pending uses,
+    so a repeat ingest does not count as a new row.
+    """
+    if not fired_at:
+        return False
+    with store._connect() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM pending_tasks
+               WHERE producer='phone-watchdog' AND applicant_id=?
+                 AND title=? AND fired_at=?""",
+            (applicant_id, title, _utc_iso(fired_at)),
+        ).fetchone()
+    return row is not None
 
 
 def parse_task_report_csv(content: bytes) -> list[dict[str, str]]:
@@ -311,9 +395,7 @@ def match_task(
       - report created timestamp is within [fired_at, fired_at + 40min + 15min
         grace] — the task cannot predate its firing.
     """
-    fired = datetime.fromisoformat(pending.fired_at)
-    if fired.tzinfo is None:
-        fired = fired.replace(tzinfo=timezone.utc)
+    fired = _parse_ts(pending.fired_at)
     window_end = fired + timedelta(minutes=VERIFY_AFTER_MINUTES + 15)
 
     for row in report_rows:
@@ -332,9 +414,9 @@ def match_task(
         created_raw = _row_field(row, "created date", "task created date", "created")
         if created_raw:
             try:
-                created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
+                # Naive report timestamps are agency-local (America/New_York),
+                # same convention as the producers.
+                created = _parse_ts(created_raw.replace("Z", "+00:00"))
                 if not (fired <= created <= window_end):
                     continue
             except ValueError:

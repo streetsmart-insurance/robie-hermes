@@ -10,7 +10,8 @@ Fail-closed throughout: missing email, duplicate emails for one
 report/day, missing/multiple CSV attachments, header mismatch, ragged
 rows, or zero data rows all RAISE GmailReportIngestionError. Rows with
 a blank identity are skipped and logged (they no longer fail the whole
-report). Never returns partial or empty data silently.
+report), except a 4372 mortgagee row whose Note carries a TEST-HO policy
+number — that row is kept. Never returns partial or empty data silently.
 
 PROVENANCE of expected headers: the REAL CSV attachments received
 2026-09-19 (test sends triggered ~07:13-07:17 ET from the four
@@ -406,8 +407,20 @@ def identity_value(report_id: str, row: Mapping[str, str]) -> str:
     request's created date (the export has no request-ID column). A 4359
     row with a blank created date RAISES — the requests could not be told
     apart, and silently merging two requests is worse than failing closed.
+
+    TEST-ONLY fallback (2026-09-20): for 4372, if the Policy Number column
+    is empty, extract a TEST-HO policy number from the Note field. This
+    supports the mortgagee canary test where the test policy exists only
+    in the note text. Production rows always carry the Policy Number
+    column; this fallback is scoped to the TEST-HO prefix and never fires
+    on real policy numbers.
     """
     policy = str(row.get(identity_column(report_id), "")).strip()
+    if not policy and report_id == "4372":
+        note = str(row.get("Note", "")).strip()
+        match = re.search(r"TEST-HO-[0-9-]+", note)
+        if match:
+            policy = match.group(0)
     if report_id == "4359":
         created = str(row.get(IDENTITY_4359_CREATED_COLUMN, "")).strip()
         if not created:
@@ -578,7 +591,10 @@ def parse_and_validate_csv(
       and counts them; skips (and logs) rows with a blank identity
       carrying data in non-total columns instead of failing the whole
       report — one bad row (e.g. a closed test task) must not block the
-      other rows. Still raises on zero usable data rows after skipping.
+      other rows. The one exception is 4372: an empty Policy Number is
+      kept when the Note contains a TEST-HO policy number. If that
+      fallback finds nothing, the row is skipped with the same warning.
+      Still raises on zero usable data rows after skipping.
     Returns (rows, skipped_totals_rows). Rows are dicts keyed by the exact
     header names.
     """
@@ -617,18 +633,19 @@ def parse_and_validate_csv(
             if _is_totals_row(row, id_col):
                 skipped += 1
                 continue
-            # Empty identity on a row carrying data: skip and record
-            # instead of failing the whole report. A single bad row
-            # (e.g. a closed test task with no policy number) must not
-            # block the other rows. Still fail-closed at the report
-            # level: zero usable rows after skipping raises below.
-            logger.warning(
-                "report %s %s line %d: skipping row with empty identity "
-                "column %r carrying data",
-                report_id, source_label, lineno, id_col,
-            )
-            skipped += 1
-            continue
+            # 4372 mortgagee TEST-HO canary: recover the policy number
+            # from the Note. Every other report, and a 4372 row whose
+            # fallback finds nothing, is skipped with a warning (#579).
+            # A single bad row must not block the other rows. Zero usable
+            # rows after skipping still raises below.
+            if not (report_id == "4372" and identity_value(report_id, row)):
+                logger.warning(
+                    "report %s %s line %d: skipping row with empty identity "
+                    "column %r carrying data",
+                    report_id, source_label, lineno, id_col,
+                )
+                skipped += 1
+                continue
         # Validates the work-item key (4359: raises on blank created date).
         identity_value(report_id, row)
         rows.append(row)

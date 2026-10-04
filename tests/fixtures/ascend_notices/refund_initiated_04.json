@@ -1,0 +1,11 @@
+{
+  "family": "refund_initiated",
+  "from": "support@useascend.com",
+  "subject": "A refund has been initiated for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (486b)",
+    "  text/html (20543b)"
+  ],
+  "text_plain": "Hi Taylor,\r\n\r\nA refund of $63.97 has been issued for Fixture Insured A LLC, via card to •••• 0000.\r\n\r\nThis refund was initiated due to funds returned on the coverage:\r\n\r\nPolicyGeneral Liability (Risk Placement Services, Inc.)Policy IDWS362630Effective date10/31/2025 \r\n\r\nView refund details ( https://dashboard.useascend.com/programs/74d1c541-bab0-4339-ac6f-5a0c6ba78423?refund_id=499f0f7f-4e96-4801-abb2-c341ae4d28a8 )\r\n\r\nPowered by AscendAscend"
+}

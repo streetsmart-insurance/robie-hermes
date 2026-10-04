@@ -42,6 +42,8 @@ _FIELD_LABELS = {
 }
 
 _NEW_INTENT_PREFIXES = (
+    "new request:",
+    "new request ",
     "what ",
     "when ",
     "where ",

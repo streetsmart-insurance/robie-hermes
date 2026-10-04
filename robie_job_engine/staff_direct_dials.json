@@ -1,0 +1,167 @@
+{
+  "source": "Ported from phone-watchdog staff_direct_dials.json. Verified against live RingCentral 2026-09-16 and 2026-09-21 with zero mismatches. Keyed by staff name.",
+  "updated": "2026-09-21",
+  "keyed_by": "staff name",
+  "staff": {
+    "Alejandro Zelaya": {
+      "did": "+18484446278",
+      "extension": "9013",
+      "department": ""
+    },
+    "Amber Voigt": {
+      "did": "+17329943593",
+      "extension": "9059",
+      "department": "Personal Lines"
+    },
+    "Ana Flores": {
+      "did": "+18484446341",
+      "extension": "9038",
+      "department": "Personal Lines"
+    },
+    "Andrea Illanes": {
+      "did": "+17324901157",
+      "extension": "9057",
+      "department": "Commercial Lines"
+    },
+    "Andrea Martinez": {
+      "did": "+17325541081",
+      "extension": "9062",
+      "department": "Trucking and Transportation"
+    },
+    "Angie Valladarez": {
+      "did": "+18482073502",
+      "extension": "9041",
+      "department": "Commercial Lines"
+    },
+    "Ashley Huntley": {
+      "did": "+16402526623",
+      "extension": "9030",
+      "department": "Personal Lines"
+    },
+    "Audrey Ariola": {
+      "did": "+17323877619",
+      "extension": "9047",
+      "department": ""
+    },
+    "Carlo Ferrara": {
+      "did": "+17324622360",
+      "extension": "101",
+      "department": ""
+    },
+    "Daniela Aguilar": {
+      "did": "+18484446321",
+      "extension": "9039",
+      "department": "Personal Lines"
+    },
+    "Diana Cabrera": {
+      "did": "+18484446273",
+      "extension": "9012",
+      "department": "Trucking and Transportation"
+    },
+    "Eimy Ramos": {
+      "did": "+17322986607",
+      "extension": "9056",
+      "department": "Commercial Lines"
+    },
+    "Erika Palacios": {
+      "did": "+18484446265",
+      "extension": "9011",
+      "department": "Commercial Lines"
+    },
+    "Eunice Iraheta": {
+      "did": "+17324812853",
+      "extension": "105",
+      "department": ""
+    },
+    "Gabriela Chutin": {
+      "did": "+17326599108",
+      "extension": "1009",
+      "department": "Trucking and Transportation"
+    },
+    "Jackie Arriola": {
+      "did": "+18484446345",
+      "extension": "9042",
+      "department": "Trucking and Transportation"
+    },
+    "Jake Ferrara": {
+      "did": "+17324812520",
+      "extension": "102",
+      "department": "Trucking and Transportation"
+    },
+    "Jazmin Molina": {
+      "did": "+17329265976",
+      "extension": "9034",
+      "department": "Personal Lines"
+    },
+    "Jose Cabrera": {
+      "did": "+17324901041",
+      "extension": "120",
+      "department": ""
+    },
+    "Karla Brown": {
+      "did": "+17329440812",
+      "extension": "1004",
+      "department": "Personal Lines"
+    },
+    "Lenin Perdomo": {
+      "did": "+17324167850",
+      "extension": "9052",
+      "department": "Commercial Lines"
+    },
+    "Maria Bara": {
+      "did": "+18484446358",
+      "extension": "9015",
+      "department": "Trucking and Transportation"
+    },
+    "Matthew Mancina": {
+      "did": "+18484446256",
+      "extension": "9061",
+      "department": "Personal Lines"
+    },
+    "Mike Sosa": {
+      "did": "+17326540947",
+      "extension": "1002",
+      "department": "Commercial Lines"
+    },
+    "Mitchell Slagle": {
+      "did": "+16402526667",
+      "extension": "9060",
+      "department": "Personal Lines"
+    },
+    "Nelson Maldonado": {
+      "did": "+17329174458",
+      "extension": "9054",
+      "department": ""
+    },
+    "Nicole Segovia": {
+      "did": "+17329440115",
+      "extension": "9028",
+      "department": ""
+    },
+    "Ricardo Aguilar": {
+      "did": "+18484446261",
+      "extension": "9009",
+      "department": "Trucking and Transportation"
+    },
+    "Sandy Santana": {
+      "did": "+17328067987",
+      "extension": "107",
+      "department": "Commercial Lines"
+    },
+    "Steffany Canales": {
+      "did": "+18484446293",
+      "extension": "9036",
+      "department": "Operations"
+    },
+    "Taylor Cimei": {
+      "did": "+18484446385",
+      "extension": "9043",
+      "department": "Commercial Lines"
+    },
+    "Zeus Quezada": {
+      "did": "+18484446280",
+      "extension": "9014",
+      "department": "Commercial Lines"
+    }
+  }
+}

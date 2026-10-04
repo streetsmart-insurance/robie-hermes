@@ -531,6 +531,12 @@ class EzlynxApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
+
+                assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             raw = resp.read()
         except error.HTTPError as exc:
@@ -564,7 +570,12 @@ class EzlynxApiClient:
         Added for the verified writers (discussion notes). ``path`` is
         relative to the API origin, e.g. ``"/DiscussionApi/discussions/v1/notes"``.
         Fail-closed: transport and HTTP errors raise EzlynxApiError.
+        The driver lease is checked here so a patched caller cannot skip it.
         """
+        from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+        assert_write_checks_intact()
+        driver_gate_for_write()
         url = self._origin() + "/" + str(path or "").lstrip("/")
         data = json.dumps(payload).encode("utf-8")
         headers = {
@@ -614,6 +625,12 @@ class EzlynxApiClient:
         raises EzlynxApiError as before (status is in the exception).
         """
         try:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"} and url != self._config.token_endpoint:
+                from .chat_write_boundary import assert_chat_write_allowed
+                from .chat_write_go import permit_chat_http_write
+
+                assert_chat_write_allowed()
+                permit_chat_http_write()
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
             http_status = None
             status_source = None
@@ -717,6 +734,59 @@ class EzlynxApiClient:
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
+
+    def search_applicants_by_name_and_email(self, name: str, email: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured name and email.
+
+        Both values are required. The caller accepts the page only when it
+        is complete and every row matches both fields on exactly one
+        applicant. A page that ignores the filters fails that check.
+        """
+        applicant_name = str(name or "").strip()
+        applicant_email = str(email or "").strip()
+        if not applicant_name or "@" not in applicant_email:
+            raise EzlynxApiError(None, "insured name and email are required")
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode({"ApplicantName": applicant_name, "Email": applicant_email})
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
+    def _search_policy_api(self, query: dict[str, str]) -> dict[str, Any]:
+        """Read-only GET /PolicyApi/policy/v1/search. ``data`` stays None."""
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode(query)
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
+    def search_applicants_by_name(self, name: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured name."""
+        applicant_name = str(name or "").strip()
+        if not applicant_name:
+            raise EzlynxApiError(None, "insured name is required")
+        return self._search_policy_api({"ApplicantName": applicant_name})
+
+    def search_applicants_by_email(self, email: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured email."""
+        applicant_email = str(email or "").strip()
+        if "@" not in applicant_email:
+            raise EzlynxApiError(None, "insured email is required")
+        return self._search_policy_api({"Email": applicant_email})
+
+    def search_applicants_by_phone(self, phone: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured phone."""
+        applicant_phone = str(phone or "").strip()
+        digits = "".join(ch for ch in applicant_phone if ch.isdigit())
+        if len(digits) < 10:
+            raise EzlynxApiError(None, "insured phone is required")
+        return self._search_policy_api({"PhoneNumber": applicant_phone})
 
     def create_policy(
         self,
@@ -940,6 +1010,11 @@ class EzlynxApiClient:
         Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
         200 body is a numeric document id. Never uploads to a live applicant.
         """
+        from .chat_write_boundary import assert_chat_applicant
+        from .live_turn_guard import assert_live_write_allowed
+
+        assert_chat_applicant(applicant_id)
+        assert_live_write_allowed()
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
         if not name:

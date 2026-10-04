@@ -495,8 +495,8 @@ class FilingGateTests(unittest.TestCase):
         self.assertEqual(deps.notes[0]["document_id"], "501")
         self.assertEqual(deps.sheets.writes, [])
 
-    def test_stable_live_note_is_filed_and_writes_the_status_row(self):
-        """A metadata-only +1 is filed, so the FAO status row is not skipped."""
+    def test_textless_stable_note_holds_and_skips_the_status_row(self):
+        """A metadata-only +1 is not a receipt, so the FAO status row is skipped."""
 
         import tempfile
 
@@ -560,13 +560,14 @@ class FilingGateTests(unittest.TestCase):
             deps.add_note = add_note
             result = file_with(deps, [memo_item()])
         row = result["results"][0]
-        self.assertEqual(row["status"], "filed", result)
-        self.assertEqual(row["note_id"], "701")
+        self.assertEqual(row["status"], "document_filed_note_held", result)
+        self.assertNotIn("note_id", row)
+        self.assertIn("could not be told apart", row["reason"])
+        self.assertIn("not sent again", row["reason"])
+        self.assertEqual(deps.notes[0]["status"], "held")
         self.assertEqual(client.posts, 1)
         self.assertEqual(client.note_lists, 0)
-        comment = nicole_status_comment(PROGRESSIVE_MEMO_RULE)
-        written = [values for _row, values in deps.sheets.writes]
-        self.assertTrue(any(values[6] == comment for values in written), written)
+        self.assertEqual(deps.sheets.writes, [])
 
     def test_upload_without_read_back_does_not_claim_success(self):
         deps = FakeDeps()

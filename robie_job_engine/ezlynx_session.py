@@ -19,7 +19,7 @@ import os
 import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from .ezlynx_session_lock import EzlynxSessionLockTimeout, exclusive_session
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -168,6 +168,13 @@ class SessionVerificationFailed(RuntimeError):
 POST_LOGIN_STATE_ATTEMPTS = 10
 POST_LOGIN_STATE_DELAY_SECONDS = 3.0
 
+# A logged-out browser stays on the app URL until the SPA client-redirects
+# to /auth/account/login. domcontentloaded fires before that redirect, so
+# one immediate read is UNVERIFIED (CLI exit 3) instead of logged out.
+# Bound the wait: login URL, or a dashboard-ready shell, or give up.
+NAVIGATION_SETTLE_ATTEMPTS = 8
+NAVIGATION_SETTLE_DELAY_SECONDS = 1.0
+
 
 def wait_for_post_login_state(
     read_state: Callable[[], SessionState],
@@ -190,6 +197,95 @@ def wait_for_post_login_state(
         pause(delay_seconds)
         state = read_state()
     return state
+
+
+def classify_page_snapshot(
+    url: str,
+    body: str,
+    *,
+    internal_web_links: int,
+    login_controls: int,
+) -> SessionState | None:
+    """Decide from one page read, or None while navigation has not settled.
+
+    None means the URL is not the login page and the dashboard shell is not
+    ready yet. Callers poll until a login URL, a dashboard-ready signal, an
+    MFA challenge, or the attempt budget.
+    """
+    normalized_url = (url or "").casefold()
+    normalized_body = (body or "").casefold()
+    if (
+        "captcha" in normalized_body
+        or "verification code" in normalized_body
+        or "multi-factor" in normalized_body
+    ):
+        return SessionState.INTERACTIVE_AUTH_REQUIRED
+    if "limited to 2 active sessions" in normalized_body and (
+        "log out the session" in normalized_body or "continue will log out" in normalized_body
+    ):
+        return SessionState.LOGIN_REQUIRED
+    if "/auth/account/login" in normalized_url or "/auth/account/logout" in normalized_url:
+        return SessionState.LOGIN_REQUIRED
+    if authenticated_app_evidence(
+        url,
+        internal_web_links=internal_web_links,
+        login_controls=login_controls,
+    ):
+        return SessionState.SIGNED_IN
+    return None
+
+
+def wait_for_settled_session(
+    read_snapshot: Callable[[], dict[str, Any] | None],
+    *,
+    attempts: int = NAVIGATION_SETTLE_ATTEMPTS,
+    delay_seconds: float = NAVIGATION_SETTLE_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> SessionState:
+    """Poll until login, dashboard-ready, or the bounded attempt budget ends.
+
+    A snapshot that cannot be read counts as not settled and is retried.
+    The budget ending without a login URL or a dashboard signal is UNVERIFIED.
+    """
+    pause = sleeper or time.sleep
+    total = max(1, int(attempts))
+    for index in range(total):
+        snapshot = read_snapshot()
+        if snapshot is not None:
+            state = classify_page_snapshot(
+                str(snapshot.get("url") or ""),
+                str(snapshot.get("body") or ""),
+                internal_web_links=int(snapshot.get("internal_web_links") or 0),
+                login_controls=int(snapshot.get("login_controls") or 0),
+            )
+            if state is not None:
+                return state
+        if index < total - 1:
+            pause(delay_seconds)
+    return SessionState.UNVERIFIED
+
+
+def read_playwright_snapshot(page: Any) -> dict[str, Any] | None:
+    """Read URL, body text, and the two counts state() decides from."""
+    try:
+        url = str(page.url or "")
+    except Exception:
+        return None
+    try:
+        body = page.locator("body").inner_text(timeout=3_000)
+    except Exception:
+        body = ""
+    try:
+        internal_web_links = page.locator('a[href*="/web/"]').count()
+        login_controls = page.locator("#txtUserName,#txtPassword,#btnLogin").count()
+    except Exception:
+        return None
+    return {
+        "url": url,
+        "body": str(body or ""),
+        "internal_web_links": int(internal_web_links),
+        "login_controls": int(login_controls),
+    }
 
 
 def authenticated_app_evidence(
@@ -232,32 +328,22 @@ class PlaywrightEzlynxSession:
             self._page.goto(APP_URL, wait_until="domcontentloaded")
 
     def state(self) -> SessionState:
-        """Judge the session on the app page, not on a blank login tab."""
+        """Judge the session after the SPA redirect has had time to finish.
+
+        ``domcontentloaded`` on ``/web/`` returns before a logged-out browser
+        is redirected to ``/auth/account/login``. Waiting for that URL, or for
+        a dashboard-ready shell, is what distinguishes LOGIN_REQUIRED (logged
+        out) from UNVERIFIED (exit 3).
+        """
         try:
             self._page.goto(APP_WEB_URL, wait_until="domcontentloaded")
         except Exception:
             return SessionState.UNVERIFIED
-        url = self._page.url.casefold()
-        try:
-            body = self._page.locator("body").inner_text(timeout=10_000).casefold()
-        except Exception:
-            body = ""
-        if "captcha" in body or "verification code" in body or "multi-factor" in body:
-            return SessionState.INTERACTIVE_AUTH_REQUIRED
-        try:
-            internal_web_links = self._page.locator('a[href*="/web/"]').count()
-            login_controls = self._page.locator("#txtUserName,#txtPassword,#btnLogin").count()
-        except Exception:
-            return SessionState.UNVERIFIED
-        if authenticated_app_evidence(
-            url,
-            internal_web_links=internal_web_links,
-            login_controls=login_controls,
-        ):
-            return SessionState.SIGNED_IN
-        if "/auth/account/login" in url or "/auth/account/logout" in url:
-            return SessionState.LOGIN_REQUIRED
-        return SessionState.UNVERIFIED
+        return wait_for_settled_session(
+            lambda: read_playwright_snapshot(self._page),
+            attempts=NAVIGATION_SETTLE_ATTEMPTS,
+            delay_seconds=NAVIGATION_SETTLE_DELAY_SECONDS,
+        )
 
     def _wait_for_login_form(self) -> None:
         """A blank login page has no form until it reloads."""
@@ -269,8 +355,46 @@ class PlaywrightEzlynxSession:
             self._page.reload(wait_until="domcontentloaded")
         field.wait_for(state="visible", timeout=15_000)
 
+    def _continue_two_session(self, username: str, password: str) -> SessionState:
+        """The login helper's one-Continue path. Same fill, same proof, same rc."""
+        from ezlynx_login_bootstrap import (
+            SESSION_LIMIT_LOGIN_FAILED,
+            SESSION_LIMIT_REFUSED,
+            handle_two_session_prompt,
+        )
+        from robie_job_engine.ezlynx_driver_gate import (
+            EzlynxDriverGateRefused,
+            require_driver_in,
+        )
+
+        code = handle_two_session_prompt(
+            self._page,
+            gate=require_driver_in,
+            username=username,
+            password=password,
+        )
+        if code == 0:
+            return SessionState.SIGNED_IN
+        if code == SESSION_LIMIT_REFUSED:
+            raise EzlynxDriverGateRefused(
+                "This environment does not hold the EZLynx driver, so Continue was not pressed."
+            )
+        if code == SESSION_LIMIT_LOGIN_FAILED:
+            raise SessionVerificationFailed(
+                "EZLynx did not confirm login after one Continue. "
+                "The other session is still active."
+            )
+        raise SessionVerificationFailed(
+            "EZLynx two-session prompt did not reach the app page."
+        )
+
     def login(self, username: str, password: str) -> SessionState:
+        from ezlynx_login_bootstrap import begin_login_run, session_limit_on
+
+        begin_login_run()
         self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
         try:
             self._wait_for_login_form()
             self._page.locator("#txtUserName").fill(username)
@@ -279,6 +403,8 @@ class PlaywrightEzlynxSession:
             self._page.wait_for_load_state("domcontentloaded", timeout=20_000)
         except Exception as exc:
             raise RuntimeError("EZLynx login interaction failed") from exc
+        if session_limit_on(self._page):
+            return self._continue_two_session(username, password)
         return wait_for_post_login_state(self.state)
 
 
@@ -312,24 +438,34 @@ def ensure_ezlynx_session(
 
 
 def main() -> None:
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
     parser = argparse.ArgumentParser(description="Ensure the Hermes EZLynx session is authenticated")
     parser.add_argument(
         "--cdp-url",
         default=os.environ.get("ROBIE_BROWSER_CDP_URL", "http://127.0.0.1:9222"),
     )
     args = parser.parse_args()
-    browser = PlaywrightEzlynxSession(args.cdp_url)
     try:
-        state = ensure_ezlynx_session(browser)
-        print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+        with exclusive_session():
+            browser = PlaywrightEzlynxSession(args.cdp_url)
+            try:
+                state = ensure_ezlynx_session(browser)
+                print(json.dumps({"ezlynx_session": state.value}, sort_keys=True))
+            finally:
+                browser.close()
+    except EzlynxDriverGateRefused as exc:
+        print(json.dumps({"ezlynx_session": "DRIVER_NOT_IN", "error": str(exc)}, sort_keys=True))
+        raise SystemExit(4)
+    except EzlynxSessionLockTimeout:
+        print(json.dumps({"ezlynx_session": "LOCK_TIMEOUT"}, sort_keys=True))
+        raise SystemExit(5)
     except InteractiveAuthenticationRequired:
         print(json.dumps({"ezlynx_session": SessionState.INTERACTIVE_AUTH_REQUIRED.value}, sort_keys=True))
         raise SystemExit(2)
     except SessionVerificationFailed as exc:
         print(json.dumps({"ezlynx_session": SessionState.UNVERIFIED.value, "error": str(exc)}, sort_keys=True))
         raise SystemExit(3)
-    finally:
-        browser.close()
 
 
 if __name__ == "__main__":

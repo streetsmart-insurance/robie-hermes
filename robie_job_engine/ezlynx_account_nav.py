@@ -206,10 +206,29 @@ def is_direct_account_url(url: str, account_id: str | None = None) -> bool:
     return page not in GUESS_PAGES
 
 
+def is_applicant_search_url(url: str) -> bool:
+    """Name-search routes. These are not Summary/Details/Index guesses.
+
+    A john smith lookup opens ``/web/applicant/search`` or
+    ``/applicantportal/Search/Index``. Those pages are the search. Refusing
+    them as unknown-account guesses parked the lookup.
+    """
+    segments = _path_segments(url)
+    if not segments:
+        return False
+    if "search" not in segments:
+        return False
+    if "web" in segments and "applicant" in segments:
+        return True
+    return "applicantportal" in segments
+
+
 def is_account_url_guess(url: str) -> bool:
     """True for Summary/Details/Index (and sibling) applicant URL guesses."""
     raw = str(url or "").strip()
     if not raw:
+        return False
+    if is_applicant_search_url(raw):
         return False
     segments = _path_segments(raw)
     if not segments:
@@ -394,19 +413,26 @@ def account_nav_contract_lines(
 
 def _refuse_untrusted_named_lookup(url: object) -> str | None:
     """A named-client job may open only this search or the user's own id."""
-    job_id = os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
-    db_path = os.environ.get("ROBIE_JOB_DB") or ""
+    from .live_turn_guard import acting_db_path, acting_job_id, refuse_untrusted_applicant
+
+    job_id = acting_job_id()
+    db_path = acting_db_path()
     if not job_id or not db_path:
         return None
     try:
         from .client_name_lookup import refuse_named_lookup_navigation
+        from .ezlynx_write_scope import applicant_id_from_ezlynx_url
         from .store import JobStore
 
         store = JobStore(db_path)
         job = store.get_job(job_id)
     except Exception:
         return None
-    return refuse_named_lookup_navigation(store, job, str(url or ""))
+    named = refuse_named_lookup_navigation(store, job, str(url or ""))
+    if named:
+        return named
+    applicant = str(applicant_id_from_ezlynx_url(str(url or "")) or "").strip()
+    return refuse_untrusted_applicant(store, job, applicant)
 
 
 def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
@@ -431,8 +457,24 @@ def install_account_nav_guard(scope: dict[str, Any]) -> dict[str, Any]:
             attempted_urls=attempted,
             known_account_id=known or scope.get("_robie_known_account_id"),
         )
+        from .ezlynx_discussions import (
+            arm_discussion_api_call,
+            note_discussion_api_success,
+            record_discussion_api_miss,
+            response_status,
+        )
+
+        # A DiscussionApi 404/405 is recorded. The next guessed path raises
+        # here, before the browser asks for it.
+        arm_discussion_api_call(str(url or ""))
         attempted.append(str(url or ""))
-        return original(self, url, *args, **kwargs)
+        result = original(self, url, *args, **kwargs)
+        status = response_status(result)
+        if status in {404, 405}:
+            record_discussion_api_miss(str(url or ""), status)
+        elif status is not None and 200 <= status < 400:
+            note_discussion_api_success(str(url or ""))
+        return result
 
     wrapped.__name__ = getattr(original, "__name__", "goto")
     wrapped.__qualname__ = getattr(original, "__qualname__", "goto")

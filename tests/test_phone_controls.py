@@ -1,0 +1,195 @@
+"""Synthetic safety proof. No vendor/network credentials or actual notes."""
+import unittest,tempfile
+from pathlib import Path
+from datetime import datetime,timedelta,timezone
+from dataclasses import replace
+from unittest.mock import Mock
+from robie_job_engine.phone_controls import *
+
+class Safety(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory(dir=Path.home(),prefix='phone-proof-');self.root=Path(self.temp.name);self.root.chmod(0o700)
+  self.now=datetime(2026,10,1,15,tzinfo=timezone.utc)
+  self.plan=Plan('SYN-CAMPAIGN','+15555550123','carrier','SYN-DIR','SYN-SCRIPT','','SYN-APP','SYN-DISC','+15555550124','SYN-VOICE',1,2)
+  self.grant=Grant('SYN-USER-MESSAGE',self.plan.digest(),self.now+timedelta(hours=2))
+  self.approvals=Mock();self.approvals.resolve.side_effect=lambda _:self.grant
+  self.directory=Mock();self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
+  self.dispatch=Mock(side_effect=[{'call_id':'SYN-CALL-1'},{'call_id':'SYN-CALL-2'}]);self.notes=Mock()
+  self.c=Controls(self.root/'calls.sqlite',Window('America/New_York',9,17),self.approvals,self.directory,self.dispatch,self.notes,lambda:self.now)
+ def tearDown(self):self.temp.cleanup()
+ def start(self):return self.c.start(self.plan,'SYN-GRANT')
+ def detail(self):return {'call_id':'SYN-CALL-1','ended_at':self.now.isoformat(),'outcome':'voicemail_no_message'}
+ def note(self):
+  detail=self.detail()
+  self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'SYN-NOTE'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'SYN-NOTE','noteCount':1,'lastModified':self.now.isoformat()}
+  return self.c.finish(self.plan,'SYN-CALL-1',detail)
+ def test_exact_script_gate(self):
+  self.grant=replace(self.grant,plan_digest='WRONG')
+  with self.assertRaises(Refused):self.start()
+  self.dispatch.assert_not_called()
+ def test_expired_approval(self):
+  self.grant=replace(self.grant,expires=self.now)
+  with self.assertRaises(Refused):self.start()
+ def test_recipient_and_voicemail_changes_invalidate(self):
+  for p in [replace(self.plan,target='+15555550125'),replace(self.plan,voicemail_script='changed'),replace(self.plan,script='changed')]:
+   with self.assertRaises(Refused):self.c.start(p,'SYN-GRANT')
+ def test_weekend_and_hours(self):
+  for dt in [datetime(2026,10,3,15,tzinfo=timezone.utc),datetime(2026,10,1,22,tzinfo=timezone.utc)]:
+   self.now=dt
+   with self.assertRaises(Refused):self.start()
+ def test_reviewed_unrestricted_hours_still_requires_approval(self):
+  self.plan=replace(self.plan,unrestricted_hours=True)
+  with self.assertRaises(Refused):self.start()
+  self.now=datetime(2026,10,3,23,tzinfo=timezone.utc);self.grant=replace(self.grant,plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.start()
+ def test_unrestricted_hours_cannot_remove_cooldown(self):
+  self.plan=replace(self.plan,unrestricted_hours=True);self.grant=replace(self.grant,plan_digest=self.plan.digest());self.start();self.plan=replace(self.plan,campaign="SYN-2");self.grant=replace(self.grant,evidence_id="SYN-2",plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,"cooldown"):self.start()
+ def test_window_timezone(self):
+  self.c.window=Window('America/Los_Angeles',9,17)
+  with self.assertRaises(Refused):self.start()
+ def test_cooldown_new_campaign(self):
+  self.start();self.now+=timedelta(hours=1);self.plan=replace(self.plan,campaign='SYN-SECOND');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,'cooldown'):self.start()
+ def test_24h_boundary(self):
+  self.start();self.note();self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-SECOND');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.start();self.assertEqual(2,self.dispatch.call_count)
+ def test_finance_exact_directory(self):
+  self.plan=replace(self.plan,audience='finance');self.grant=replace(self.grant,plan_digest=self.plan.digest());self.directory.resolve.return_value={'audience':'finance','phone':self.plan.target};self.start()
+ def test_unbound_finance_rejected(self):
+  self.plan=replace(self.plan,audience='finance');self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaises(Refused):self.start()
+ def test_client_requires_one_call_exception(self):
+  self.plan=replace(self.plan,audience='client',max_attempts=1);self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaises(Refused):self.start()
+  self.grant=replace(self.grant,allow_client=True);self.start();self.directory.resolve.assert_not_called()
+ def test_client_redial_rejected(self):
+  self.plan=replace(self.plan,audience='client');self.grant=replace(self.grant,allow_client=True,plan_digest=self.plan.digest())
+  with self.assertRaises(Refused):self.start()
+ def test_one_call_lift_consumed(self):
+  self.start();self.start();self.assertEqual(1,self.dispatch.call_count)
+ def test_lift_reuse_other_campaign(self):
+  self.start();self.note();self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2');self.grant=replace(self.grant,plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1))
+  with self.assertRaises(sqlite3.IntegrityError):self.start()
+ def test_unknown_dispatch_not_retried(self):
+  self.dispatch.side_effect=TimeoutError();r=self.start();self.assertEqual('unknown',r['status']);self.start();self.assertEqual(1,self.dispatch.call_count)
+ def test_missing_call_id_not_retried(self):
+  self.dispatch.side_effect=[{}];self.start();self.start();self.assertEqual(1,self.dispatch.call_count)
+ def test_redial_once_hangup_by_default(self):
+  self.start();detail=self.detail();self.now+=timedelta(seconds=10);self.c.redial(self.plan,'SYN-GRANT',detail);self.c.redial(self.plan,'SYN-GRANT',detail)
+  self.assertEqual(2,self.dispatch.call_count);self.assertEqual({'action':'hangup'},self.dispatch.call_args.args[0]['voicemail'])
+ def test_approved_voicemail_script_only_second(self):
+  self.plan=replace(self.plan,voicemail_script='SYN-APPROVED-VM');self.grant=replace(self.grant,plan_digest=self.plan.digest());self.start();detail=self.detail();self.now+=timedelta(seconds=10);self.c.redial(self.plan,'SYN-GRANT',detail)
+  self.assertEqual({'action':'hangup'},self.dispatch.call_args_list[0].args[0]['voicemail']);self.assertEqual('SYN-APPROVED-VM',self.dispatch.call_args.args[0]['voicemail']['message'])
+ def test_redial_delay_and_expired_window(self):
+  self.start();d=self.detail()
+  with self.assertRaises(Refused):self.c.redial(self.plan,'SYN-GRANT',d)
+  self.now+=timedelta(seconds=181)
+  with self.assertRaises(Refused):self.c.redial(self.plan,'SYN-GRANT',d)
+ def test_redial_human_rejected(self):
+  self.start();d=self.detail();d['outcome']='human_reached';self.now+=timedelta(seconds=10)
+  with self.assertRaises(Refused):self.c.redial(self.plan,'SYN-GRANT',d)
+ def test_dated_bound_note_readback(self):
+  self.start();self.assertEqual('verified',self.note()['status']);self.assertIn('2026-10-01',self.notes.append.call_args.args[2])
+  self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
+ def test_note_unknown_not_posted_twice(self):
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.return_value={};self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
+ def test_note_destination_changed_rejected(self):
+  self.start()
+  with self.assertRaises(Refused):self.c.finish(replace(self.plan,applicant_id='WRONG'),'SYN-CALL-1',self.detail())
+ def test_note_readback_mismatch(self):
+  self.start();self.notes.find.return_value='SYN-NOTE';self.notes.lookup_discussion.return_value={'LastNoteId':'OTHER','noteCount':1,'lastModified':self.now.isoformat()}
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+ def test_note_id_matches_fresh_discussion_without_requiring_text(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'42'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'42','NoteCount':4,'LastModified':'2026-10-01T15:00:00Z'}
+  self.notes.list_notes.side_effect=AssertionError('HTTP 405')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'42'},result)
+  self.notes.list_notes.assert_not_called();self.notes.read.assert_not_called()
+ def test_note_text_is_compared_only_when_the_lookup_has_it(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'42','body':'different'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'42','noteCount':1,'lastModified':self.now.isoformat()}
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+ def test_dry_run_note_is_plain_english_and_not_a_call(self):
+  self.notes.find.return_value=None;self.notes.append.return_value={'noteId':'SYN-NOTE'}
+  self.notes.lookup_discussion.return_value={'LastNoteId':'SYN-NOTE','noteCount':1,'lastModified':self.now.isoformat()}
+  result=self.c.finish(self.plan,None,{'outcome':'dry_run','test_id':'dry-2026-10-01'})
+  body=self.notes.append.call_args.args[2]
+  self.assertEqual('Robie phone Test: dry run only, no call placed. Ref: dry-2026-10-01.',body)
+  self.assertNotIn('Call ended',body);self.assertNotIn('Call ID',body)
+  self.assertEqual('SYN-NOTE',result['note_id']);self.dispatch.assert_not_called()
+ def test_call_ended_note_requires_an_accepted_dispatch(self):
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-FAKE',self.detail())
+  self.notes.append.assert_not_called()
+ def test_unresolved_note_holds_new_campaign(self):
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.return_value={};self.notes.append.side_effect=TimeoutError();self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.now+=timedelta(hours=24);self.plan=replace(self.plan,campaign='SYN-2',target='+15555550125');self.grant=replace(self.grant,evidence_id='SYN-2',plan_digest=self.plan.digest(),expires=self.now+timedelta(hours=1));self.directory.resolve.return_value={'audience':'carrier','phone':self.plan.target}
+  with self.assertRaisesRegex(Refused,'note'):self.start()
+ def _live_discussion(self, latest, count, modified, title='Renewal', applicant='SYN-APP'):
+  # Shape read from discussion 848144863: numeric latest id and note count.
+  return {'discussionId':'848144863','applicantId':applicant,'title':title,'LastNoteId':latest,'mostRecentNoteId':latest,'noteCount':count,'lastModified':modified}
+ def test_live_numeric_ids_confirm_when_the_write_has_no_id(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');after=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z')
+  seen=[]
+  def lookup(*args):
+   seen.append('lookup');return (before,after,dict(after))[seen.count('lookup')-1]
+  def append(*args):
+   seen.append('append');return {}
+  self.notes.find.return_value=None;self.notes.lookup_discussion.side_effect=lookup;self.notes.append.side_effect=append
+  self.notes.list_notes.side_effect=AssertionError('HTTP 405')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'1134251172'},result)
+  self.assertEqual(['lookup','append','lookup','lookup'],seen)
+  self.notes.list_notes.assert_not_called()
+ def test_live_numeric_write_id_matches_numeric_latest_note(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'noteId':1134251172}
+  self.notes.lookup_discussion.return_value=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z')
+  result=self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual({'status':'verified','note_id':'1134251172'},result)
+ def test_string_write_id_matches_numeric_latest_note(self):
+  self.start();self.notes.find.return_value=None;self.notes.append.return_value={'NoteId':'1134251172'}
+  self.notes.lookup_discussion.return_value={'mostRecentNoteId':1134251172,'noteCount':3,'lastModified':'2026-10-01T15:00:00Z'}
+  self.assertEqual('1134251172',self.c.finish(self.plan,'SYN-CALL-1',self.detail())['note_id'])
+ def test_bool_note_id_is_not_a_note_id_and_does_not_post(self):
+  self.start();self.notes.find.return_value={'noteId':True};self.notes.lookup_discussion.return_value={'LastNoteId':True,'noteCount':2}
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.notes.append.assert_not_called()
+ def test_missing_write_id_does_not_post_when_the_discussion_cannot_be_read(self):
+  self.start();self.notes.find.return_value=None;self.notes.lookup_discussion.side_effect=TimeoutError()
+  with self.assertRaisesRegex(Refused,'before the note was sent'):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.notes.append.assert_not_called()
+ def test_missing_write_id_refuses_without_a_second_post_when_the_count_does_not_gain_one(self):
+  self.start();stuck=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.return_value=stuck
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.c.finish(self.plan,'SYN-CALL-1',self.detail());self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_title_changes(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');changed=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z',title='Other')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,changed,dict(changed)]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_applicant_changes(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');changed=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z',applicant='OTHER')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,changed,dict(changed)]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
+ def test_missing_write_id_refuses_when_the_second_read_disagrees(self):
+  self.start();before=self._live_discussion(1134251171,2,'2026-10-01T14:00:00Z');after=self._live_discussion(1134251172,3,'2026-10-01T15:00:00Z');moved=self._live_discussion(1134251199,4,'2026-10-01T15:00:01Z')
+  self.notes.find.return_value=None;self.notes.append.return_value={};self.notes.lookup_discussion.side_effect=[before,after,moved]
+  with self.assertRaises(Refused):self.c.finish(self.plan,'SYN-CALL-1',self.detail())
+  self.assertEqual(1,self.notes.append.call_count)
+ def test_blank_voice_refused_without_default(self):
+  self.plan=replace(self.plan,voice_id='  ');self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,'voice'):self.start()
+  self.dispatch.assert_not_called()
+ def test_duration_over_one_minute_refused(self):
+  self.plan=replace(self.plan,max_duration_minutes=30);self.grant=replace(self.grant,plan_digest=self.plan.digest())
+  with self.assertRaisesRegex(Refused,'duration'):self.start()
+  self.dispatch.assert_not_called()
+ def test_send_body_carries_reviewed_voice_and_one_minute_cap(self):
+  self.start();body=self.dispatch.call_args.args[0]
+  self.assertEqual('SYN-VOICE',body['voice']);self.assertEqual(1,body['max_duration'])
+ def test_private_directory(self):
+  self.root.chmod(0o755)
+  with self.assertRaises(Refused):Controls(self.root/'another.sqlite',self.c.window,self.approvals,self.directory,self.dispatch,self.notes,lambda:self.now)
+
+if __name__=='__main__':unittest.main()

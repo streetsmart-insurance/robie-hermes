@@ -1,0 +1,13 @@
+{
+  "family": "return_premium_received",
+  "from": "accounting@useascend.com",
+  "subject": "Return premium received for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (606b)",
+    "    text/html (23805b)",
+    "  application/pdf (108309b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "Hi StreetSmart Insurance Agency,\r\n\r\nAscend has received a return premium of $6,717.50 from XPT Partners due to a cancelation on the following policy:\r\n\r\nInsuredFixture Insured B LLCPolicyVacant (XPT Partners)Policy IDPAV1425221\r\n\r\nThese funds will be applied toward the loan associated with this policy.\r\n\r\nGo to program ( https://dashboard.useascend.com/programs/28e81a38-0fd0-4d7d-acb9-e9e3a331773a?endorsement_request_id=73699f4c-d293-45ae-a3f0-c812181bac50 )\r\n\r\nThanks,\r\nThe Ascend Team\r\n\r\nPlease don't hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nPowered by AscendAscend"
+}

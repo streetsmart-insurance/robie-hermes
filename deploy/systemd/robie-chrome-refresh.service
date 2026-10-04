@@ -4,4 +4,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION
+ExecCondition=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
 ExecStart=/usr/bin/python3 /opt/streetsmart-hermes/releases/current/scripts/chrome_refresh_if_idle.py

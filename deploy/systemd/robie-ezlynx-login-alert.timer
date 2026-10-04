@@ -1,0 +1,12 @@
+[Unit]
+Description=Check ROBIE Production EZLynx login-page duration every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=robie-ezlynx-login-alert.service
+
+[Install]
+WantedBy=timers.target

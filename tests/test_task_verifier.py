@@ -9,13 +9,16 @@ No live credentials, no network, no box access — everything is local.
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from robie_job_engine.task_verifier import (
     TaskVerificationStore,
     format_missing_alert,
+    ingest_phone_watchdog,
     match_task,
     parse_task_report_csv,
     verify_due_tasks,
@@ -170,6 +173,113 @@ class VerifyDueTest(unittest.TestCase):
         s = _db()
         out = verify_due_tasks(s, [], True)
         self.assertEqual(out, {"verified": [], "missing": [], "unverified": []})
+
+
+def _naive_ny(dt_utc: datetime) -> str:
+    """Box-local wall clock, the form phone_alerts.processed_at is stored in."""
+    local = dt_utc.astimezone(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    return local.isoformat(timespec="seconds")
+
+
+def _phone_db(rows: list[tuple]) -> str:
+    path = os.path.join(tempfile.mkdtemp(), "phone_alerts.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE processed_calls (
+            message_id TEXT,
+            ams_account_id TEXT,
+            account_name TEXT,
+            assigned_user TEXT,
+            processed_at TEXT,
+            ezlynx_task_status TEXT
+        )"""
+    )
+    conn.executemany(
+        """INSERT INTO processed_calls
+           (message_id, ams_account_id, account_name, assigned_user,
+            processed_at, ezlynx_task_status)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+class PhoneWatchdogIngestTest(unittest.TestCase):
+    def test_ingests_delivered_and_sent_to_relay_once(self):
+        """Both handoff statuses are queued; other statuses and repeats are not.
+
+        processed_at is naive America/New_York. A row 3 hours old is inside
+        the 6-hour window, but its wall-clock string sorts before a UTC
+        cutoff of (now - 6h). The tz-aware filter must still ingest it.
+        A row 6.5 hours old is inside the coarse SQL buffer and must be
+        dropped by that same filter.
+        """
+        now = datetime.now(timezone.utc)
+        recent = _naive_ny(now - timedelta(hours=3))
+        just_outside = _naive_ny(now - timedelta(hours=6, minutes=30))
+        stale = _naive_ny(now - timedelta(hours=30))
+        db = _phone_db([
+            ("m-del", "111", "Jayshri Dixit", "Ricardo Aguilar", recent, "delivered"),
+            ("m-relay", "222", "Ada Lovelace", "SCanales", recent, "sent_to_relay"),
+            ("m-fail", "333", "Skip Fail", "A", recent, "failed"),
+            ("m-pend", "444", "Skip Pending", "A", recent, "pending"),
+            ("m-err", "555", "Skip Error", "A", recent, "error"),
+            ("m-blank", "666", "Skip Blank", "A", recent, ""),
+            ("m-sent", "999", "Skip Sent", "A", recent, "sent"),
+            ("m-old-del", "777", "Old Delivered", "A", just_outside, "delivered"),
+            ("m-stale-relay", "888", "Stale Relay", "A", stale, "sent_to_relay"),
+        ])
+        store = _db()
+        first = ingest_phone_watchdog(store, db, since_hours=6)
+        self.assertEqual(first, 2)
+
+        queued = {t.applicant_id: t for t in store.due_for_verification(now)}
+        self.assertEqual(set(queued), {"111", "222"})
+        self.assertEqual(queued["111"].status, "PENDING")
+        self.assertEqual(queued["111"].producer, "phone-watchdog")
+        self.assertEqual(queued["111"].title, "[AFTER-HOURS CALLBACK] Jayshri Dixit")
+        self.assertEqual(queued["111"].assignee, "Ricardo Aguilar")
+        self.assertEqual(queued["222"].status, "PENDING")
+        self.assertEqual(queued["222"].title, "[AFTER-HOURS CALLBACK] Ada Lovelace")
+        self.assertEqual(store.counts(), {"PENDING": 2})
+
+        # Same rows again: the unique key (producer, applicant, title, fired_at)
+        # keeps the queue at one task per handoff.
+        second = ingest_phone_watchdog(store, db, since_hours=6)
+        self.assertEqual(second, 0)
+        self.assertEqual(store.counts(), {"PENDING": 2})
+        self.assertEqual(len(store.due_for_verification(now)), 2)
+
+    def test_sent_to_relay_is_not_ezlynx_delivery_proof(self):
+        """sent_to_relay only queues the task. The report still has to match."""
+        now = datetime.now(timezone.utc)
+        recent = _naive_ny(now - timedelta(hours=3))
+        db = _phone_db([
+            ("m-relay", "222", "Ada Lovelace", "SCanales", recent, "sent_to_relay"),
+        ])
+        store = _db()
+        self.assertEqual(ingest_phone_watchdog(store, db, since_hours=6), 1)
+
+        unmatched = verify_due_tasks(store, [], True)
+        self.assertEqual(unmatched["verified"], [])
+        self.assertEqual(len(unmatched["missing"]), 1)
+        self.assertEqual(unmatched["missing"][0].applicant_id, "222")
+        self.assertEqual(store.counts(), {"MISSING": 1})
+
+        matched_store = _db()
+        self.assertEqual(ingest_phone_watchdog(matched_store, db, since_hours=6), 1)
+        created = _iso(now - timedelta(hours=2, minutes=30))
+        rows = parse_task_report_csv(
+            b"Task Title,Assignee,Applicant ID,Created\n"
+            b"[AFTER-HOURS CALLBACK] Ada Lovelace,Steffany Canales,222,"
+            + created.encode() + b"\n"
+        )
+        matched = verify_due_tasks(matched_store, rows, True)
+        self.assertEqual(len(matched["verified"]), 1)
+        self.assertEqual(matched["missing"], [])
+        self.assertEqual(matched_store.counts(), {"VERIFIED": 1})
 
 
 class AlertFormatTest(unittest.TestCase):
