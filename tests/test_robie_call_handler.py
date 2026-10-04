@@ -639,21 +639,23 @@ class TestCallRequestRound(unittest.TestCase):
         text = ports.bland.calls[0]["task_text"]
         self.assertIn("do not transfer", text)
         self.assertIn("Take a message", text)
+        self.assertIn("732-462-8343", text)
         self.assertNotIn("17324622360", text)
         self.assertIsNone(ports.bland.calls[0]["metadata"]["transfer_to"])
 
     def test_resolved_transfer_number_is_offered(self):
         class Lookup:
             def get_transfer_number(self, name):
-                return "+15559876543" if name == "carlo1" else None
+                return "+15559876543" if name == "Jane Producer" else None
 
         ports = make_ports(transfer_lookup=Lookup())
         handle_robie_call_task(make_task(), live_config(), ports)
         text = ports.bland.calls[0]["task_text"]
         self.assertIn("transfer the call", text)
-        self.assertIn("carlo1", text)
+        self.assertIn("Jane Producer", text)
         self.assertIn("+15559876543", text)
-        self.assertEqual(ports.bland.calls[0]["metadata"]["transfer_to"], "carlo1")
+        self.assertEqual(ports.bland.calls[0]["metadata"]["transfer_to"], "Jane Producer")
+        self.assertNotIn("17324622360", text)
 
     def test_dry_run_writes_nothing_and_not_a_lost_outcome(self):
         ports = make_ports()

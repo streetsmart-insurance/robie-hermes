@@ -22,7 +22,7 @@ INTEGRATION (for the task worker / Job Engine):
     #        dict {"phone": str|None, "ambiguous": bool, "candidates":
     #        [{"label": "Cell"}, ...]} when the applicant has several
     #        numbers and no clear best — the handler fails closed.
-    #      - BlandCallPort: HTTP POST https://api.bland.ai/v1/calls with the
+    #      - BlandCallPort: the Bland transport posts /v1/calls with the
     #        Jake-spec payload (see robie_job_engine.bland_config).
     #        Required get_call_status(call_id) lets the handler VERIFY the
     #        outcome instead of trusting the placement ack; without a
@@ -115,6 +115,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 from zoneinfo import ZoneInfo
 
 from .bland_config import (
+    CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
     CALLER_ID,
     KAREN_VOICE_ID,
@@ -1329,7 +1330,8 @@ def _build_eva_task(instruction: str, applicant_name: str, *,
     else:
         transfer_bit = (
             " If the person gets frustrated or asks for a human, do not "
-            "transfer the call. Take a message and say the agency will follow up."
+            "transfer the call. Take a message and ask them to call "
+            f"{CALLBACK_NUMBER}."
         )
     return (
         f"{policy.build_intro(instruction.strip())}{name_bit}{behalf_bit} "
@@ -2110,13 +2112,13 @@ def _handle_call_task(
         )
     # Transfer target only when a lookup resolves one. Otherwise Eva takes
     # a message. There is no placeholder transfer number.
-    transfer_number = _resolve_transfer_number(ports, assigned_by) or ""
+    transfer_number = _resolve_transfer_number(ports, producer_name) or ""
     eva_task = _build_eva_task(
         instruction, applicant_name,
         on_behalf_of=on_behalf_of,
         called_party=called_party,
         producer_name=producer_name,
-        transfer_to_name=assigned_by if transfer_number else "",
+        transfer_to_name=producer_name if transfer_number else "",
         transfer_number=transfer_number,
     )
     first_sentence = _normalize_spoken(
@@ -2124,7 +2126,7 @@ def _handle_call_task(
     voicemail_message = _normalize_spoken(
         _build_voicemail_message(instruction, producer_name))
     metadata = {"task_id": task_id, "applicant_id": applicant_id, "source": "robie-call-task",
-                "transfer_to": assigned_by if transfer_number else None,
+                "transfer_to": producer_name if transfer_number else None,
                 "on_behalf_of": on_behalf_of,
                 "called_party": called_party or applicant_name or None,
                 "on_behalf_of_producer": producer_name}

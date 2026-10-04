@@ -17,6 +17,18 @@ from typing import Any, Callable
 HOST = "https://api.bland.ai"
 CALLS_PATH = "/v1/calls"
 TEST_HOST = "hermes-test-01"
+PROD_HOST = "hermes-poc-01"
+ALLOWED_HOSTS_ENV = "ROBIE_BLAND_ALLOWED_HOSTS"
+ALLOWED_ENVS_ENV = "ROBIE_BLAND_ALLOWED_ENVS"
+MAX_DURATION_ENV = "ROBIE_BLAND_MAX_DURATION_MINUTES"
+KILL_SWITCH_ENV = "ROBIE_BLAND_KILL_SWITCH"
+KILL_SWITCH_SECRET = "bland-dispatcher-kill-switch"
+BLAND_KEY_SECRET_PROD = "bland-api-key"
+BLAND_KEY_SECRET_TEST = "robie-test-bland-api-key"
+DEFAULT_ALLOWED_HOSTS = (TEST_HOST,)
+DEFAULT_ALLOWED_ENVS = ("TEST",)
+DEFAULT_MAX_DURATION_MINUTES = 1
+MAX_CONFIGURABLE_DURATION_MINUTES = 12
 _TIMEOUT_S = 30
 
 
@@ -44,7 +56,7 @@ def post_call(
 ) -> dict:
     """POST /v1/calls once. Refuses unless every Test gate passes."""
     _authorize(execute=execute, env=env, hostname=hostname)
-    payload = _require_post_body(body)
+    payload = _require_post_body(body, env)
     return _send(
         "POST",
         CALLS_PATH,
@@ -85,35 +97,113 @@ def authorize_live_call(
     _authorize(execute=execute, env=env, hostname=hostname)
 
 
+def _source(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    return os.environ if env is None else env
+
+
+def _csv_tuple(source: Mapping[str, str], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = str(source.get(key) or "").strip()
+    if not raw:
+        return default
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def allowed_hosts(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Hosts that may open a Bland socket. Default is the Test VM only."""
+    return _csv_tuple(_source(env), ALLOWED_HOSTS_ENV, DEFAULT_ALLOWED_HOSTS)
+
+
+def allowed_envs(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """ROBIE_ENV values that may dial. Default is TEST only."""
+    return _csv_tuple(_source(env), ALLOWED_ENVS_ENV, DEFAULT_ALLOWED_ENVS)
+
+
+def max_duration_minutes(env: Mapping[str, str] | None = None) -> float:
+    """Bland max_duration cap in minutes. Default is 1. Garbage config stays at 1."""
+    raw = str(_source(env).get(MAX_DURATION_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_DURATION_MINUTES
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_DURATION_MINUTES
+    if isinstance(value, bool) or value <= 0 or value > MAX_CONFIGURABLE_DURATION_MINUTES:
+        return DEFAULT_MAX_DURATION_MINUTES
+    return value
+
+
+def bland_api_key_secret(env: Mapping[str, str] | None = None) -> str:
+    """Secret name for the Bland key. Prod and Test use different secrets."""
+    if _source(env).get("ROBIE_ENV") == "PRODUCTION":
+        return BLAND_KEY_SECRET_PROD
+    return BLAND_KEY_SECRET_TEST
+
+
+def kill_switch_engaged(
+    env: Mapping[str, str] | None = None,
+    secret_reader: Callable[[str], str] | None = None,
+) -> bool:
+    """True when the dispatcher kill switch says not to dial.
+
+    The env flag is enough to halt. When a secret reader is supplied, an
+    unreadable bland-dispatcher-kill-switch also halts. The reader is not
+    called unless the caller passes one. The secret value is never logged.
+    """
+    source = _source(env)
+    if source.get(KILL_SWITCH_ENV) == "1":
+        return True
+    if secret_reader is None:
+        return False
+    try:
+        raw = secret_reader(KILL_SWITCH_SECRET)
+    except Exception:
+        return True
+    return str(raw or "").strip().lower() in {"1", "true", "on", "halt", "stopped", "kill"}
+
+
 def _authorize(*, execute: bool, env: Mapping[str, str] | None, hostname: str | None) -> None:
     if execute is not True:
         raise BlandTransportRefused("execute must be true")
-    source = os.environ if env is None else env
-    if source.get("ROBIE_ENV") != "TEST":
-        raise BlandTransportRefused("ROBIE_ENV must be TEST")
+    source = _source(env)
+    if kill_switch_engaged(source):
+        raise BlandTransportRefused("bland-dispatcher-kill-switch is engaged")
+    envs = allowed_envs(source)
+    if source.get("ROBIE_ENV") not in envs:
+        if envs == DEFAULT_ALLOWED_ENVS:
+            raise BlandTransportRefused("ROBIE_ENV must be TEST")
+        raise BlandTransportRefused("ROBIE_ENV is not an allowed Bland environment")
     host = socket.gethostname() if hostname is None else hostname
-    if not isinstance(host, str) or host.split(".")[0] != TEST_HOST:
-        raise BlandTransportRefused("Test host hermes-test-01 required")
+    short = host.split(".")[0] if isinstance(host, str) else ""
+    hosts = allowed_hosts(source)
+    if short not in hosts:
+        if hosts == DEFAULT_ALLOWED_HOSTS:
+            raise BlandTransportRefused("Test host hermes-test-01 required")
+        raise BlandTransportRefused("host is not an allowed Bland host")
     if source.get("ROBIE_PHONE_LIVE_CALLS") != "1":
         raise BlandTransportRefused("ROBIE_PHONE_LIVE_CALLS must be 1")
 
 
-def _require_post_body(body) -> dict:
+def _require_post_body(body, env: Mapping[str, str] | None = None) -> dict:
     if not isinstance(body, dict):
         raise BlandTransportRefused("call body must be an object")
     voice = body.get("voice")
     if not isinstance(voice, str) or not voice.strip():
         raise BlandTransportRefused("voice required")
-    if "max_duration" not in body or not _duration_allowed(body.get("max_duration")):
-        raise BlandTransportRefused("max_duration must be present and at most 1 minute")
+    cap = max_duration_minutes(env)
+    if "max_duration" not in body or not _duration_allowed(body.get("max_duration"), cap):
+        if cap == DEFAULT_MAX_DURATION_MINUTES:
+            raise BlandTransportRefused("max_duration must be present and at most 1 minute")
+        raise BlandTransportRefused(
+            f"max_duration must be present and at most {cap:g} minutes"
+        )
     return body
 
 
-def _duration_allowed(value) -> bool:
-    # Bland max_duration is minutes. Test cap is 60 seconds, which is 1.
+def _duration_allowed(value, cap: float = DEFAULT_MAX_DURATION_MINUTES) -> bool:
+    # Bland max_duration is minutes. The default cap is 1 minute.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return 0 < value <= 1
+    return 0 < value <= cap
 
 
 def _require_call_id(call_id) -> str:

@@ -203,6 +203,7 @@ class TaskAssignmentWorker:
         phone_lookup: Any | None = None,
         bland_client: Any | None = None,
         call_dry_run: bool = True,
+        transfer_lookup: Any | None = None,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
@@ -215,6 +216,7 @@ class TaskAssignmentWorker:
         self.phone_lookup = phone_lookup
         self.bland_client = bland_client
         self.call_dry_run = call_dry_run
+        self.transfer_lookup = transfer_lookup
 
     # -- job lifecycle -------------------------------------------------
 
@@ -406,6 +408,7 @@ class TaskAssignmentWorker:
             bland=self.bland_client,
             discussion_client=self.client,
             task_reassign=reassign_port,
+            transfer_lookup=self.transfer_lookup,
         )
         config = rch.RobieCallConfig(dry_run=self.call_dry_run)
         result = rch.handle_robie_call_task(task_dict, config, ports)

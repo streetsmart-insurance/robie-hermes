@@ -216,10 +216,17 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     else:
         logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
 
+    from .bland_prod_wiring import build_call_dependencies
+
+    phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
     worker = TaskAssignmentWorker(
         discussion_client=discussion_client,
         task_reassigner=reassigner,
         reassign_enabled=reassign_enabled(),
+        phone_lookup=phone_lookup,
+        bland_client=bland_client,
+        call_dry_run=call_dry_run,
+        transfer_lookup=transfer_lookup,
     )
     verifier = TaskIntakeVerifier(
         discussion_client=discussion_client, task_reassigner=reassigner

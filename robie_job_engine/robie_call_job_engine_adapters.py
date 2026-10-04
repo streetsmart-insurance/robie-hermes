@@ -129,6 +129,7 @@ def build_robie_call_ports(
     task_reassign: Any = None,
     recording_upload: Any = None,
     chat_alert: Any = None,
+    transfer_lookup: Any = None,
 ) -> Any:
     """Build RobieCallPorts with real Job Engine checkpoint/status adapters.
 
@@ -148,4 +149,5 @@ def build_robie_call_ports(
         chat_alert=chat_alert,
         job_checkpoint=JobEngineCheckpointAdapter(store),
         task_status=JobEngineTaskStatusAdapter(store),
+        transfer_lookup=transfer_lookup,
     )
