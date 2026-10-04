@@ -2295,6 +2295,8 @@ class _FlakyNotePost:
             "landed",
             "absent",
             "unavailable",
+            "landed_unreadable",
+            "unreadable_before_post",
             "no_count",
             "nested_count",
             "total_count",
@@ -2344,6 +2346,11 @@ class _FlakyNotePost:
     def _with_notes(self, url):
         if self.mode == "unavailable":
             raise urlerror.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"missing"))
+        if self.mode == "unreadable_before_post":
+            raise urlerror.HTTPError(url, 503, "Unavailable", {}, io.BytesIO(b"down"))
+        if self.mode == "landed_unreadable" and self.posted_body:
+            # The POST already returned HTTP 500. Later reads cannot see bodies.
+            raise urlerror.HTTPError(url, 503, "Unavailable", {}, io.BytesIO(b"down"))
         other = {"noteId": "n-page", "body": "A different note that is not this bill."}
         if self.mode == "landed":
             body = self.posted_body or "A note from before this bill."
@@ -2495,6 +2502,93 @@ def test_a_retry_does_not_post_when_with_notes_is_unavailable(tmp_path, monkeypa
     _poll_ready(store, ctx, NOW + timedelta(minutes=15))
     assert poster.posts_to("/notes") == []
     assert store.list_unmatched()[0]["resolved_at"] in (None, "")
+
+
+def _digest_body(store, monkeypatch, when):
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    mailed = digest.run_digest(stores=[store], now=when, live=False, refresh=False)
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    return mailed["body"]
+
+
+def test_a_landed_post_that_returns_500_keeps_the_warning_when_with_notes_stays_down(
+    tmp_path, monkeypatch
+):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "landed_unreadable")
+    _poll_ready(store, ctx, NOW)
+    parked = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(parked["file_attempts"] or 0) == 0
+    assert parked["file_failure"] == digest.MAYBE_NOTE_LINE
+    body = _digest_body(store, monkeypatch, NOW + timedelta(minutes=30))
+    assert digest.MAYBE_NOTE_LINE in body
+    assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+    assert "will file this on the next Ascend run" not in body
+    assert "The note was not filed." not in body
+
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
+    retried = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(retried["file_attempts"] or 0) == 0
+    assert int(retried["transient_retry_used"] or 0) == 1
+    assert retried["file_failure"] == digest.MAYBE_NOTE_LINE
+    body = _digest_body(store, monkeypatch, NOW + timedelta(hours=2, minutes=30))
+    assert digest.MAYBE_NOTE_LINE in body
+    assert "will file this on the next Ascend run" not in body
+    assert "The note was not filed." not in body
+
+    for step in range(1, 6):
+        when = NOW + timedelta(hours=2, minutes=15 * step)
+        _poll_ready(store, ctx, when)
+        row = store.list_unmatched()[0]
+        assert len(poster.posts_to("/notes")) == 1
+        assert int(row["file_attempts"] or 0) == step
+        assert row["file_failure"] == digest.MAYBE_NOTE_LINE
+        body = _digest_body(store, monkeypatch, when + timedelta(minutes=30))
+        assert "will file this on the next Ascend run" not in body
+        assert "The note was not filed." not in body
+        if step < 5:
+            assert digest.MAYBE_NOTE_LINE in body
+            assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+        else:
+            assert digest.MAYBE_NOTE_LIMIT_LINE in body
+            assert digest.MAYBE_NOTE_LINE not in body
+            assert "couldn't file it" not in body
+            assert "please file by hand" not in body
+
+
+def test_a_with_notes_503_before_any_post_still_asks_for_a_hand_file(tmp_path, monkeypatch):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "unreadable_before_post")
+    _poll_ready(store, ctx, NOW)
+    held = store.list_unmatched()[0]
+    assert poster.posts_to("/notes") == []
+    assert int(held["file_attempts"] or 0) == 0
+    assert held["file_failure"] != digest.MAYBE_NOTE_LINE
+
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
+    spent = store.list_unmatched()[0]
+    assert poster.posts_to("/notes") == []
+    assert int(spent["file_attempts"] or 0) == 0
+    assert int(spent["transient_retry_used"] or 0) == 1
+    assert spent["file_failure"] != digest.MAYBE_NOTE_LINE
+
+    for step in range(1, 6):
+        when = NOW + timedelta(hours=2, minutes=15 * step)
+        _poll_ready(store, ctx, when)
+        row = store.list_unmatched()[0]
+        assert poster.posts_to("/notes") == []
+        assert int(row["file_attempts"] or 0) == step
+        assert row["file_failure"] == "The note was not filed."
+        body = _digest_body(store, monkeypatch, when + timedelta(minutes=30))
+        assert digest.MAYBE_NOTE_LINE not in body
+        assert digest.MAYBE_NOTE_LIMIT_LINE not in body
+        if step < 5:
+            assert "will file this on the next Ascend run" in body
+        else:
+            assert "couldn't file it" in body
+            assert "please file by hand" in body
+            assert "The note was not filed." in body
+            assert "will file this on the next Ascend run" not in body
 
 
 @pytest.mark.parametrize("mode", ["no_count", "nested_count", "total_count", "bare_list"])

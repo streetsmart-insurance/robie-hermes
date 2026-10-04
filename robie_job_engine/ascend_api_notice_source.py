@@ -1416,8 +1416,10 @@ def _record_ready_miss(
 
     A later HTTP 5xx does not start another free pause. The free retry is
     marked used whatever came back, including a refusal that is not a 5xx
-    and a with-notes uncertainty. That uncertainty line is stored for the
-    email and does not, by itself, spend an attempt.
+    and a with-notes uncertainty. A note POST that returns 5xx or times out
+    may already be in EZLynx, so the maybe-already-filed warning is stored
+    on that pause and kept afterward. A with-notes failure before any POST
+    did not send a note, so it does not get that warning.
     """
     from .ascend_unmatched_digest import MAYBE_NOTE_LINE
 
@@ -1425,11 +1427,12 @@ def _record_ready_miss(
     transient = _is_transient_failure(text)
     used = _retry_was_used(row)
     held = _hold_is_set(row)
-    # The unconfirmed-note guard, or a row already carrying that warning,
-    # keeps the warning. A later refusal must not replace it with
-    # "The note was not filed."
+    # The unconfirmed-note guard, a note POST that may have landed, or a
+    # row already carrying that warning, keeps the warning. A later refusal
+    # must not replace it with "The note was not filed."
     keep_maybe = (
         maybe_note
+        or _note_post_may_have_landed(text)
         or "couldn't confirm that note was added" in text.lower()
         or str(row.get("file_failure") or "").strip() == MAYBE_NOTE_LINE
     )
@@ -1440,6 +1443,8 @@ def _record_ready_miss(
         return
     if not used and not held and transient:
         _hold_transient(store, event_key, seen_at)
+        if keep_maybe:
+            store.note_file_failure(event_key, MAYBE_NOTE_LINE)
         return
     stored = MAYBE_NOTE_LINE if keep_maybe else plain_file_failure(text)
     store.note_ready_attempt(event_key, seen_at, stored)
@@ -1457,6 +1462,21 @@ def _is_transient_failure(reason: str) -> bool:
     if "timeout" in text or "timed out" in text:
         return True
     return re.search(r"http\s*5\d\d", text) is not None
+
+
+def _note_post_may_have_landed(reason: str) -> bool:
+    """True when a note POST returned 5xx or timed out.
+
+    The server may have stored the note before the client saw the error.
+    A with-notes GET that fails before any POST is not this case.
+    """
+    text = str(reason or "")
+    if not _is_transient_failure(text):
+        return False
+    lowered = text.lower()
+    if "existing_note_unreadable" in lowered:
+        return False
+    return re.search(r"\bpost (?:failed|transport)\b", lowered) is not None
 
 
 def _poll_will_file(live: bool) -> bool:
