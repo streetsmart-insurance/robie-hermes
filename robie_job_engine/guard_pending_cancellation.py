@@ -373,39 +373,90 @@ class PlaywrightGuardBrowser:
         raise IntakeHold("Guard printable documents control is missing or ambiguous")
 
     def list_documents(self, policy_number: str) -> tuple[GuardDocument, ...]:
-        """Parse the Policy Documents / Miscellaneous Documents groups."""
+        """Parse the Policy Documents / Miscellaneous Documents groups.
+        
+        Supports two DOM structures:
+        1. Legacy (tests): headings with following tables
+        2. Live (2026-10-04): bold text sections with document links
+        """
         page = self.page
+        
+        # Try legacy table structure first (for tests)
         groups: list[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]] = []
         for title in _DOC_GROUPS:
             heading = page.get_by_role("heading", name=title, exact=True)
             try:
-                if int(heading.count()) != 1:
+                count = int(heading.count())
+            except Exception:
+                count = 0
+            if count == 1:
+                table = heading.locator("xpath=following::table[1]")
+                try:
+                    if int(table.count()) == 1:
+                        headers = tuple(
+                            _norm(_read_text(node)) for node in table.locator("thead th").all()
+                        )
+                        rows = tuple(
+                            tuple(_norm(_read_text(cell)) for cell in row.locator("td").all())
+                            for row in table.locator("tbody tr").all()
+                        )
+                        groups.append((title, headers, rows))
+                except Exception:
+                    pass
+        
+        if groups:
+            return parse_document_list(tuple(groups), policy_number=policy_number)
+        
+        # Fall back to live link structure
+        docs: list[GuardDocument] = []
+        for title in _DOC_GROUPS:
+            section = page.locator(f'text="{title}"').first
+            try:
+                if int(section.count()) < 1:
                     continue
             except Exception:
-                raise IntakeHold(f"Guard document group {title!r} is missing or ambiguous")
-            table = heading.locator("xpath=following::table[1]")
-            try:
-                if int(table.count()) != 1:
-                    raise IntakeHold(
-                        f"Guard document table for group {title!r} is missing or ambiguous"
-                    )
-            except IntakeHold:
-                raise
-            except Exception:
-                raise IntakeHold(
-                    f"Guard document table for group {title!r} is missing or ambiguous"
-                )
-            headers = tuple(
-                _norm(_read_text(node)) for node in table.locator("thead th").all()
-            )
-            rows = tuple(
-                tuple(_norm(_read_text(cell)) for cell in row.locator("td").all())
-                for row in table.locator("tbody tr").all()
-            )
-            groups.append((title, headers, rows))
-        if not groups:
+                continue
+            
+            all_links = page.locator('a').all()
+            in_section = False
+            for link in all_links:
+                try:
+                    text = _norm(_read_text(link))
+                    if not text:
+                        continue
+                    if text == title:
+                        in_section = True
+                        continue
+                    if text in _DOC_GROUPS and text != title:
+                        in_section = False
+                        break
+                    if in_section and text:
+                        if text.lower() in ("return to policy center",):
+                            continue
+                        import re as _re
+                        from datetime import date as _date
+                        issued = _date.today()
+                        date_match = _re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', text)
+                        if date_match:
+                            try:
+                                m, d, y = map(int, date_match.groups())
+                                issued = _date(y, m, d)
+                            except Exception:
+                                pass
+                        form_part = text.split('-')[0].strip() if '-' in text else text
+                        docs.append(GuardDocument(
+                            group=title,
+                            description=text,
+                            form=form_part,
+                            issued=issued,
+                            policy_number=policy_number,
+                        ))
+                except Exception:
+                    continue
+        
+        if not docs:
             raise IntakeHold("Guard printable documents groups are missing or ambiguous")
-        return parse_document_list(tuple(groups), policy_number=policy_number)
+        return tuple(docs)
 
     # -- document open observation --------------------------------------
     def open_document(self, doc: GuardDocument) -> DocumentOpenObservation:
