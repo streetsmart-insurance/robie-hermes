@@ -144,6 +144,11 @@ class FakeReassigner:
         self.read_calls.append((task_id, applicant_id, description))
         return self.assignee
 
+    def read_task_state(self, task_id: str, applicant_id: str, description: str = "") -> dict:
+        """The live pre-Save state the worker must prove before any Save (Robie still owns it)."""
+        return {"assignee": "Robie AI", "description": description, "created_by": "Carlo Ferrara",
+                "assigned_producer": "", "csr": "", "activity_labels": ""}
+
 
 @pytest.fixture()
 def store():

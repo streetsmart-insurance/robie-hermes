@@ -36,6 +36,13 @@ def post(client, store, job):
         store, job, "849945654", "one intent")
 
 
+def _live_state(**changes):
+    state = {"assignee": "Robie AI", "description": "Please call the client about their quote.",
+             "created_by": "Carlo Ferrara", "assigned_producer": "", "csr": "", "activity_labels": ""}
+    state.update(changes)
+    return state
+
+
 @pytest.mark.parametrize("applicant", ["", " ", "PROSPECT", "prospect", "0"])
 def test_invalid_applicant_not_sent(applicant):
     port = Mock()
@@ -53,6 +60,7 @@ def test_adapter_bound_original_identity_and_description():
     port = Mock()
     port.reassign.return_value = "Carlo Ferrara"
     port.read_assignee.return_value = "Carlo Ferrara"
+    port.read_task_state.return_value = _live_state()
     task = make_task()
     adapter = _WorkerReassignPortAdapter(port, task)
     assert adapter.reassign_task(task.task_id, "Carlo Ferrara", "completion note")["ok"]
@@ -67,6 +75,7 @@ def test_relay_200_without_destination_proof_is_not_delivered():
     port = Mock()
     port.reassign.return_value = {"status": 200, "accepted": True}
     port.read_assignee.return_value = "Robie AI"
+    port.read_task_state.return_value = _live_state()
     result = _WorkerReassignPortAdapter(port, make_task()).reassign_task("63429523", "Carlo Ferrara")
     assert result["ok"] is False
     assert result["sent"] is None
@@ -139,7 +148,8 @@ def test_foreign_applicant_refused(where):
     assert page.panel.children[("button", "Save")].clicks == 0
 
 
-def test_changed_assignee_never_overwritten(monkeypatch):
+def test_changed_assignee_never_overwritten(monkeypatch, tmp_path):
+    _contract_file(tmp_path, monkeypatch)
     page = dom()
     page.panel.children[("label", "Assign this task")].value = "Other Producer"
     @contextmanager
@@ -533,6 +543,7 @@ def test_unknown_save_with_owner_changed_by_someone_else_pauses_no_save(store):
 
 def test_unresolvable_first_owner_falls_through_in_order(store):
     disc, owners = Discussions(), Owners(unresolved={"Carlo Ferrara"})
+    owners.live_fields = {"assigned_producer": "Mike Sosa", "csr": "Jazmin Molina"}
     task = make_task(assigned_producer="Mike Sosa", csr="Jazmin Molina")
     job = _work(store, _worker(disc, owners), task)
     assert job["status"] == JobStatus.VERIFYING.value, job.get("last_error")
@@ -542,6 +553,7 @@ def test_unresolvable_first_owner_falls_through_in_order(store):
 
 def test_robie_is_never_its_own_return_target(store):
     disc, owners = Discussions(), Owners()
+    owners.live_fields = {"created_by": "Robie AI", "assigned_producer": "Mike Sosa"}
     task = make_task(created_by="Robie AI", assigned_producer="Mike Sosa")
     job = _work(store, _worker(disc, owners), task)
     assert owners.calls == ["Mike Sosa"] and job["status"] == JobStatus.VERIFYING.value
@@ -549,6 +561,7 @@ def test_robie_is_never_its_own_return_target(store):
 
 def test_verifier_rejects_a_return_owner_that_skipped_precedence(store):
     disc, owners = Discussions(), Owners()
+    owners.live_fields = {"assigned_producer": "Mike Sosa", "csr": "Jazmin Molina"}
     task = make_task(assigned_producer="Mike Sosa", csr="Jazmin Molina")
     job = _work(store, _worker(disc, owners), task)
     action = store.get_checkpoint(job["id"], "action")
@@ -1344,14 +1357,6 @@ class _Panel:
     def get_by_label(self, name, exact): return self.fields.get(name, _Field("", count=0))
 
 
-def test_the_task_description_is_read_from_exactly_one_labelled_field():
-    assert cdp._read_task_description(_Panel({"Description": _Field("  Send the  dec page ")})) == "Send the dec page"
-    with pytest.raises(cdp.ReassignError):
-        cdp._read_task_description(_Panel({}))
-    with pytest.raises(cdp.ReassignError):
-        cdp._read_task_description(_Panel({"Description": _Field("a", count=2)}))
-
-
 # ---- 2. the Test task restriction covers stale recovery and the manual resume command --------------
 
 def test_stale_recovery_skips_jobs_the_restriction_excludes(store, monkeypatch):
@@ -1446,6 +1451,7 @@ def test_an_older_report_naming_the_previous_producer_cannot_hand_the_task_back_
     db = str(tmp_path / "jobs.db")
     original = make_task(created_by="", assigned_producer="Mike Sosa", csr="")
     disc, owners = Discussions(), Owners()
+    owners.live_fields = {"created_by": "", "assigned_producer": "Mike Sosa", "csr": ""}
     holder = {"report": _report(original, message_id="m1")}
     _wire_intake(monkeypatch, None, disc, owners, {"on": True})
     monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
@@ -1516,31 +1522,6 @@ class _Scope:
     """A page or dialog whose labelled fields are known; anything else has no match."""
     def __init__(self, fields): self.fields = fields
     def get_by_label(self, name, exact): return self.fields.get(name, _Field("", count=0))
-
-
-def test_all_consequential_fields_are_read_from_exactly_one_labelled_field_each():
-    panel = _Scope({"Description": _Field("Send  the dec page"), "Created by": _Field("Carlo Ferrara"),
-                    "Labels": _Field("")})
-    page = _Scope({"Producer": _Field("Mike Sosa"), "CSR": _Field("")})
-    state = cdp._read_consequential_fields(panel, page)
-    assert state == {"description": "Send the dec page", "created_by": "Carlo Ferrara",
-                     "assigned_producer": "Mike Sosa", "csr": "", "activity_labels": ""}
-
-
-def test_a_missing_or_ambiguous_consequential_field_raises_instead_of_guessing():
-    page = _Scope({"Producer": _Field("Mike Sosa"), "CSR": _Field("")})
-    with pytest.raises(cdp.ReassignError, match="created_by"):
-        cdp._read_consequential_fields(_Scope({"Description": _Field("x"), "Labels": _Field("")}), page)
-    with pytest.raises(cdp.ReassignError, match="ambiguous|Ambiguous"):
-        cdp._read_consequential_fields(
-            _Scope({"Description": _Field("x"), "Created by": _Field("a", count=2), "Labels": _Field("")}), page)
-
-
-def test_the_guessed_dom_labels_are_published_as_unverified():
-    contract = cdp.unverified_dom_contract()
-    assert set(contract["fields"]) == {"description", "created_by", "assigned_producer", "csr", "activity_labels"}
-    assert contract["status"] == "UNVERIFIED"
-    assert all(contract["fields"][name] for name in contract["fields"])
 
 
 # ---------------------------------------------------------------------------
@@ -1851,3 +1832,10 @@ def test_the_api_inspection_reads_only_and_summarizes_the_note_shape(monkeypatch
     assert "type" in record["note_keys"] and "createdDate" in record["note_keys"]
     assert "task.assignedUserId" in record["note_keys"]
     assert record["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
+
+
+def test_the_save_method_itself_refuses_until_the_contract_is_established(monkeypatch):
+    monkeypatch.delenv(cdp.CONTRACT_PATH_ENV, raising=False)
+    monkeypatch.setenv(cdp.REASSIGN_GATE_ENV, "1")
+    with pytest.raises(cdp.FieldContractNotEstablished):  # a browser use would AssertionError
+        cdp.PlaywrightTaskReassigner().reassign("63429523", "220250093", "Carlo Ferrara")

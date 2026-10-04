@@ -100,6 +100,11 @@ class FakeReassigner:
     def read_assignee(self, task_id, applicant_id, description=""):
         return self.current
 
+    def read_task_state(self, task_id, applicant_id, description=""):
+        """The live pre-Save state the worker must prove before any Save."""
+        return {"assignee": self.current, "description": description, "created_by": "Jane Producer",
+                "assigned_producer": "Jane Producer", "csr": "", "activity_labels": ""}
+
 
 class OwnsDiscussion:
     """Proves D-200 belongs to the applicant (the worker refuses writes otherwise)."""

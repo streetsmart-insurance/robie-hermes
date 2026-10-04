@@ -93,6 +93,54 @@ HUMAN_ANSWER_PREFIX = "human-answer:"
 LEASE_SECONDS = 900
 
 
+# Everything a handback depends on. The stored report row and the LIVE task must agree on ALL of
+# these immediately before a Save, or the row is an old snapshot: a human may have changed the
+# Producer, CSR, creator, labels or instructions since it was generated.
+CONSEQUENTIAL_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
+
+
+def routing_proof_problem(state: dict[str, Any], task: AssignedTask, *, expected_assignee: str) -> str | None:
+    """Why the live task state does NOT prove the stored row is current; None when it does.
+
+    A field the live read could not return is unproven, never assumed to match or to be blank.
+    """
+    def norm(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    live_owner = str(state.get("assignee") or "").strip()
+    if live_owner.casefold() != (expected_assignee or "").strip().casefold():
+        return f"the live owner is {live_owner or 'unknown'!r}, not {expected_assignee!r}"
+    for name in CONSEQUENTIAL_FIELDS:
+        if name not in state or state[name] is None:
+            return f"{name} could not be read live, so it is unproven"
+        if norm(state[name]) != norm(getattr(task, name)):
+            return f"the live {name} differs from the report row (an old snapshot)"
+    if not norm(state["description"]):
+        return "the live instructions are empty"
+    return None
+
+
+def prove_fresh_routing(reassigner: Any, task: AssignedTask, *, expected_assignee: str) -> None:
+    """Live proof that the stored routing is current. Required immediately before EVERY Save.
+
+    Raises NeedsHuman (no Save) when the live read is unavailable, unreadable, or disagrees.
+    """
+    reader = getattr(reassigner, "read_task_state", None)
+    if reader is None:
+        raise NeedsHuman(f"Task {task.task_id}: routing cannot be read live, so no Save was sent.")
+    try:
+        state = reader(task.task_id, task.applicant_id, description=task.description)
+    except Exception as exc:  # noqa: BLE001 — an unreadable or uncontracted field is unproven
+        raise NeedsHuman(
+            f"Task {task.task_id}: routing could not be proven live ({type(exc).__name__}: {str(exc)[:200]}); "
+            "no Save was sent."
+        ) from exc
+    problem = routing_proof_problem(state, task, expected_assignee=expected_assignee)
+    if problem:
+        raise NeedsHuman(f"Task {task.task_id}: {problem}; no Save was sent. "
+                         "Wait for a newer report, then resume.")
+
+
 def human_answer_kind(round_no: int) -> str:
     """A human's answer belongs to one round of one task; a later round asks again."""
     return f"{HUMAN_ANSWER_PREFIX}{round_no}"
@@ -322,6 +370,8 @@ class _WorkerReassignPortAdapter:
             validate_identity(task_id, self._task.applicant_id)
             if task_id != self._task.task_id:
                 raise ValueError("Foreign task identity; reassignment not sent")
+            prove_fresh_routing(self._reassigner, self._task,
+                                expected_assignee=(self._task.assigned_to or ROBIE_NAME))
             attempted = True
             verified = self._reassigner.reassign(
                 task_id, self._task.applicant_id, new_assignee,
@@ -702,6 +752,12 @@ class TaskAssignmentWorker:
                         f"Task {task.task_id}: the assignee is {current!r}, not {expected!r} "
                         f"or {prior!r}; nothing was sent. A human must look at the task."
                     )
+            if field != "human_choice":
+                # Immediately before every Save, including the first round and any retry, prove
+                # the routing that produced this target is current. Done BEFORE the intent so a
+                # refusal is certainly not an unknown Save. A person's explicit choice does not
+                # depend on report routing; the Save's own owner check still applies.
+                prove_fresh_routing(self.reassigner, task, expected_assignee=expected)
             attempt += 1
             save("attempting", name)
             self._fence()

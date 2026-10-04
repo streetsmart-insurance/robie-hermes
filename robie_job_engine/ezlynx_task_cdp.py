@@ -190,70 +190,97 @@ def _cancel_dialog(panel) -> None:
     _unique(panel.get_by_role("button", name="Cancel", exact=True), "task Cancel").click()
 
 
-# UNVERIFIED DOM CONTRACT. These labels are GUESSES: nothing in this repo has observed the
-# real EZLynx page. Test must observe each field read-only and correct the label BEFORE a
-# new round can open. A field that is not found exactly once makes the live read raise, so
-# an unconfirmed label means "unproven" and nothing proceeds (fail closed); it never means
-# "assume it matches". Task-level fields are looked for in the Edit Task dialog first,
-# account-level fields (Producer, CSR) on the account page first.
-TASK_DESCRIPTION_LABELS = ("Description", "Task description", "Task note", "Note")
-CONSEQUENTIAL_FIELD_LABELS = {
-    "description": TASK_DESCRIPTION_LABELS,
-    "created_by": ("Created by", "Created By", "Task created by"),
-    "assigned_producer": ("Producer", "Assigned Producer"),
-    "csr": ("CSR", "Customer Service Rep", "Account Manager"),
-    "activity_labels": ("Labels", "Activity Labels"),
-}
-_ACCOUNT_LEVEL_FIELDS = ("assigned_producer", "csr")
+# ENFORCED FIELD CONTRACT. Nothing here guesses a selector. The page labels, scope and read
+# method for each consequential field are declared in `deploy/ezlynx_task_field_contract.json`,
+# only after a reviewed read-only Test inspection (docs/EZLYNX_TASK_FIELD_DISCOVERY.md), each with
+# an observation record. A field with no valid declaration cannot be read, and the live read refuses
+# BEFORE any browser use, so task reassignment stays disabled until every required field is declared.
+CONTRACT_PATH_ENV = "ROBIE_TASK_FIELD_CONTRACT_PATH"
+REQUIRED_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
+_SCOPES = ("dialog", "page")
+_READ_METHODS = ("input_value", "text_content")
 
 
-def unverified_dom_contract() -> dict:
-    """Everything this module GUESSES about the page, for Test to confirm one by one."""
-    return {"status": "UNVERIFIED",
-            "fields": {name: list(labels) for name, labels in CONSEQUENTIAL_FIELD_LABELS.items()},
-            "note": "Labels are guesses; confirm each read-only on Test before any new round."}
+class FieldContractNotEstablished(ReassignError):
+    """A required field has no verified declaration, so it must not be read or relied on."""
 
 
-def _field_text(field) -> str:
-    text = ""
+def default_contract_path() -> str:
+    import pathlib
+
+    return os.environ.get(CONTRACT_PATH_ENV) or str(
+        pathlib.Path(__file__).resolve().parents[1] / "deploy" / "ezlynx_task_field_contract.json")
+
+
+def _valid_entry(entry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("scope") not in _SCOPES or entry.get("read") not in _READ_METHODS:
+        return False
+    if not all(str(entry.get(key) or "").strip() for key in ("label", "meaning", "report_column")):
+        return False
+    observed = entry.get("verified")
+    return (isinstance(observed, dict) and observed.get("environment") in ("TEST", "PRODUCTION")
+            and all(str(observed.get(key) or "").strip()
+                    for key in ("applicant_id", "observed_on", "observed_by", "evidence")))
+
+
+def load_field_contract(path: str | None = None) -> dict:
+    """The VALID declarations only; anything malformed or unobserved is treated as undeclared."""
+    import json
+
     try:
-        text = field.input_value() or ""
-    except Exception:
-        pass
-    if not text.strip():
-        try:
-            text = field.text_content() or ""
-        except Exception:
-            text = ""
-    return " ".join(text.split())
+        with open(path or default_contract_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    fields = data.get("fields") if isinstance(data, dict) else None
+    if not isinstance(fields, dict):
+        return {}
+    return {name: entry for name, entry in fields.items() if name in REQUIRED_FIELDS and _valid_entry(entry)}
 
 
-def _read_one_field(name: str, scopes) -> str:
-    for scope in scopes:
-        for label in CONSEQUENTIAL_FIELD_LABELS[name]:
-            field = scope.get_by_label(label, exact=True)
-            found = field.count()
-            if found == 0:
-                continue
-            if found != 1:
-                raise ReassignError(f"Ambiguous {name} field {label!r}; request not verifiable")
-            return _field_text(field)
-    raise ReassignError(f"{name} field not found; the live request cannot be verified "
-                        "(label is an UNVERIFIED guess)")
+def field_contract_status(path: str | None = None) -> dict:
+    declared = load_field_contract(path)
+    missing = [name for name in REQUIRED_FIELDS if name not in declared]
+    return {"established": not missing, "missing": missing, "path": path or default_contract_path()}
 
 
-def _read_consequential_fields(panel, page) -> dict:
-    """Every field the handback depends on, each read from exactly one labelled field."""
+def require_field_contract(path: str | None = None) -> dict:
+    status = field_contract_status(path)
+    if not status["established"]:
+        raise FieldContractNotEstablished(
+            f"the EZLynx task field contract is not established (undeclared: {', '.join(status['missing'])}); "
+            "reassignment stays disabled until a reviewed read-only Test inspection fills it")
+    return load_field_contract(path)
+
+
+def _read_value(name: str, field, method: str) -> str:
+    """The field's text. A failed read raises; only a successful read of nothing is blank."""
+    try:
+        value = field.input_value() if method == "input_value" else field.text_content()
+    except Exception as exc:  # noqa: BLE001
+        raise ReassignError(f"could not read {name}: {type(exc).__name__}: {exc}") from exc
+    if value is None:
+        raise ReassignError(f"could not read {name}: the page returned no value")
+    return " ".join(str(value).split())
+
+
+def _read_consequential_fields(panel, page, contract: dict | None = None) -> dict:
+    """Every field the handback depends on, each through its declared selector and read method."""
+    declared = contract if contract is not None else require_field_contract()
     state = {}
-    for name in CONSEQUENTIAL_FIELD_LABELS:
-        scopes = (page, panel) if name in _ACCOUNT_LEVEL_FIELDS else (panel, page)
-        state[name] = _read_one_field(name, scopes)
+    for name in REQUIRED_FIELDS:
+        entry = declared.get(name)
+        if entry is None:
+            raise FieldContractNotEstablished(f"{name} has no verified declaration")
+        scope = panel if entry["scope"] == "dialog" else page
+        field = scope.get_by_label(entry["label"], exact=True)
+        found = field.count()
+        if found != 1:
+            raise ReassignError(f"{name}: expected exactly one field labelled {entry['label']!r}, found {found}")
+        state[name] = _read_value(name, field, entry["read"])
     return state
-
-
-def _read_task_description(panel) -> str:
-    """The task's CURRENT instructions from the Edit Task dialog, whitespace-normalized."""
-    return _read_one_field("description", (panel,))
 
 
 class PlaywrightTaskReassigner:
@@ -266,14 +293,15 @@ class PlaywrightTaskReassigner:
 
         Used to prove a handed-back task is really back with Robie, under the same
         instructions and routing the report claims, before a new round opens. The page
-        labels it relies on are UNVERIFIED guesses (see `unverified_dom_contract`).
+        selectors it uses come only from the verified field contract.
         """
         validate_identity(task_id, applicant_id)
+        contract = require_field_contract()  # refuses BEFORE any browser use
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
             panel = _search_and_open_edit(page, task_id, applicant_id)
             assignee = _read_assignee_value(_assignee_field(panel))
-            state = _read_consequential_fields(panel, page)
+            state = _read_consequential_fields(panel, page, contract)
             _cancel_dialog(panel)
         if not assignee:
             raise ReassignError(f"Could not read assignee for task {task_id}")
@@ -308,6 +336,7 @@ class PlaywrightTaskReassigner:
         from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
         require_allowed_ezlynx_write_applicant(applicant_id)
+        require_field_contract()  # one boundary: no Save, from any caller, until the contract is established
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
             panel = _search_and_open_edit(page, task_id, applicant_id)

@@ -78,6 +78,7 @@ from .task_assignment_worker import (
     ROBIE_NAME,
     human_answer_kind,
     job_round,
+    routing_proof_problem,
     TaskAssignmentWorker,
     TaskIntakeVerifier,
 )
@@ -409,19 +410,12 @@ def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str
     return found
 
 
-# Everything the handback depends on. The report row and the live task must agree on ALL of
-# them, or the row is an old snapshot: a human may have changed the Producer (or CSR, creator,
-# labels, instructions) since it was generated, and the handback would go to the wrong person.
-CONSEQUENTIAL_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
-
-
 def _confirm_returned(task: AssignedTask) -> bool:
     """Live, read-only: is the task back with Robie, under the request the report describes?
 
-    Robie owning the task now is not enough, and neither is a matching description: a delayed
-    report can carry an OLD snapshot of the routing (creator, producer, CSR) or labels after a
-    human returned the task with changes. Every consequential field must be read live and equal
-    the report row's. A field the live read cannot return is unproven, never assumed to match.
+    The same proof that gates every Save: Robie must own it now and EVERY consequential field
+    (instructions, Created By, Producer, CSR, labels) must match the report row, each actually
+    read live. A field the read cannot return is unproven, never assumed to match or be blank.
     """
     try:
         state = PlaywrightTaskReassigner().read_task_state(
@@ -429,21 +423,9 @@ def _confirm_returned(task: AssignedTask) -> bool:
     except Exception as e:  # noqa: BLE001 — unreadable is unproven
         logger.warning(f"Live return check failed for {task.task_id}: {e}")
         return False
-    if str(state.get("assignee") or "").strip().casefold() != ROBIE_NAME.casefold():
-        return False
-
-    def norm(value: Any) -> str:
-        return " ".join(str(value or "").split()).casefold()
-
-    for name in CONSEQUENTIAL_FIELDS:
-        if name not in state or state[name] is None:
-            logger.info(f"Task {task.task_id}: {name} could not be read live; return not proven")
-            return False
-        if norm(state[name]) != norm(getattr(task, name)):
-            logger.info(f"Task {task.task_id}: the report's {name} is not the live one "
-                        "(old snapshot); no new round from this report")
-            return False
-    if not norm(state["description"]):
+    problem = routing_proof_problem(state, task, expected_assignee=ROBIE_NAME)
+    if problem:
+        logger.info(f"Task {task.task_id}: {problem}; no new round from this report")
         return False
     return True
 
