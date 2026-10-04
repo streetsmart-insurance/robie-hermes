@@ -940,7 +940,7 @@ def test_digest_recheck_keeps_a_match_on_the_email_until_it_is_filed(tmp_path, m
     assert result["ready_count"] == 0
     assert result["resolved_count"] == 0
     assert "Fixture Hauling LLC" in result["body"]
-    assert "Ready, will file once Robie's Ascend notes are on." in result["body"]
+    assert "Robie's Ascend notes haven't run recently." in result["body"]
     assert "Northwind Trucking Inc" in result["body"]
     assert "files the note." in result["body"]
     assert client.calls == ["HO-998877", "CA-100200"]
@@ -960,7 +960,7 @@ def test_digest_recheck_keeps_a_match_on_the_email_until_it_is_filed(tmp_path, m
     assert rows["matched"]["ready_at"]
     assert rows["matched"]["resolved_at"] in (None, "")
     assert not str(rows["still-open"].get("ready_at") or "").strip()
-    assert "Ready, will file once Robie's Ascend notes are on." in live["body"]
+    assert "Robie's Ascend notes haven't run recently." in live["body"]
 
 
 def test_digest_recheck_leaves_two_candidates_and_a_failed_search_open(tmp_path):
@@ -1016,7 +1016,7 @@ def test_digest_recheck_uses_a_complete_index_and_ignores_a_zero_search(tmp_path
     assert rows["two-index"]["resolved_at"] in (None, "")
     assert from_index["ready_count"] == 0
     assert "Fixture Hauling LLC" in from_index["body"]
-    assert "Ready, will file once Robie's Ascend notes are on." in from_index["body"]
+    assert "Robie's Ascend notes haven't run recently." in from_index["body"]
 
     missed = source.EventKeyStore(tmp_path / "ascend-api" / "missed.db")
     _open_unmatched(missed, key="stale", policy="HO-998877", name="Fixture Hauling LLC")
@@ -1063,7 +1063,7 @@ def test_recheck_backs_off_on_429_and_regrants_once_on_401(tmp_path, monkeypatch
     )
     assert slow.calls == 2
     assert waits == [1.0]
-    assert "Ready, will file once Robie's Ascend notes are on." in slowed["body"]
+    assert "Robie's Ascend notes haven't run recently." in slowed["body"]
     assert not str(store.list_unmatched()[0].get("ready_at") or "").strip()
 
     second = source.EventKeyStore(tmp_path / "ascend-api" / "reauth.db")
@@ -1094,7 +1094,7 @@ def test_recheck_backs_off_on_429_and_regrants_once_on_401(tmp_path, monkeypatch
     )
     assert expired.cleared == 1
     assert expired.calls == 3
-    assert continued["body"].count("Ready, will file once Robie's Ascend notes are on.") == 2
+    assert continued["body"].count("Robie's Ascend notes haven't run recently.") == 2
     assert all(not str(row.get("ready_at") or "").strip() for row in second.list_unmatched())
     assert all(not str(row.get("resolved_at") or "").strip() for row in second.list_unmatched())
 
@@ -1129,8 +1129,11 @@ def test_recheck_stops_when_the_shared_deadline_is_already_spent(tmp_path):
 
 
 def test_live_api_source_keeps_a_ready_row_on_the_email_until_the_poll_files_it(tmp_path, monkeypatch):
-    monkeypatch.setenv(source.LIVE_ENV, "1")
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
     store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.note_poll_result(
+        ok=True, error="", started_at="2026-10-05T13:00:00Z", live=True
+    )
     _open_unmatched(store, key="matched", policy="HO-998877", name="Fixture Hauling LLC")
     client = _PolicySearch({"HO-998877": _policy_hit("HO-998877", "220250093")})
     result = digest.run_digest(
@@ -1146,7 +1149,8 @@ def test_live_api_source_keeps_a_ready_row_on_the_email_until_the_poll_files_it(
     assert row["ready_at"]
     assert row["resolved_at"] in (None, "")
     assert "will file this on the next Ascend run." in result["body"]
-    assert "notes are on" not in result["body"]
+    assert "haven't run recently" not in result["body"]
+    assert os.environ.get(source.LIVE_ENV) != "1"
 
 
 def _empty_feeds():
@@ -1211,6 +1215,9 @@ def test_poll_does_not_resolve_a_ready_row_when_filing_fails(tmp_path, monkeypat
     row = store.list_unmatched()[0]
     assert row["resolved_at"] in (None, "")
     assert row["ready_at"]
+    assert row["file_attempts"] == 1
+    assert row["last_attempt_at"]
+    assert row["file_failure"] == "The policy number still did not match one client."
     assert ctx.discussion_client._urlopen.posts_to("/notes") == []
 
 
@@ -1267,6 +1274,304 @@ def test_poll_files_at_most_25_ready_rows(tmp_path, monkeypatch):
     assert all(not str(row.get("resolved_at") or "").strip() for row in left.values())
 
 
+def test_a_duplicate_ready_row_is_recorded_as_filed(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    notice = source.ApiNotice(
+        event_key="dup-1",
+        event_type="late_payment",
+        program_id=HELPERS._pid(1),
+        anchor="2026-10-01T00:00:00Z",
+        occurred_at="2026-10-01T00:00:00Z",
+        policy_numbers=("HO-998877",),
+        insured_name="Fixture Hauling LLC",
+        subject="Past due payment for Fixture Hauling LLC",
+        body="Policy ID HO-998877\nCustomer Fixture Hauling LLC\n",
+        program={"id": HELPERS._pid(1), "policy_number": "HO-998877"},
+    )
+    store.upsert_unmatched(
+        notice,
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+    store.mark_ready_to_file("dup-1", "2026-10-05T14:00:00Z")
+
+    def _already(ctx, item):
+        return {
+            "event_key": item.event_key,
+            "event_type": item.event_type,
+            "status": "skipped",
+            "reason": "existing_note_duplicate: n7",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _already)
+    summary = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    row = store.list_unmatched()[0]
+    assert summary["ready_filed"] == 1
+    assert store.is_filed("dup-1")
+    assert row["resolved_at"]
+    assert int(row["file_attempts"] or 0) == 0
+    assert summary["ready_checked"] == 1
+
+
+def test_one_failing_ready_row_does_not_starve_the_rest(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    program = {"id": HELPERS._pid(1), "policy_number": "HO-0000"}
+    for index in range(26):
+        key = f"ready-{index:02d}"
+        notice = source.ApiNotice(
+            event_key=key,
+            event_type="late_payment",
+            program_id=HELPERS._pid(1),
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=(f"HO-{index:04d}",),
+            insured_name=f"Insured {index}",
+            subject=f"Past due payment for Insured {index}",
+            body=f"Policy ID HO-{index:04d}\nCustomer Insured {index}\n",
+            program=program,
+        )
+        store.upsert_unmatched(
+            notice,
+            reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+            seen_at="2026-10-01T00:00:00Z",
+        )
+        store.mark_ready_to_file(key, f"2026-10-05T14:00:{index:02d}Z")
+    batches: list[list[str]] = []
+
+    def _skip(ctx, notice):
+        batches[-1].append(notice.event_key)
+        return {
+            "event_key": notice.event_key,
+            "event_type": notice.event_type,
+            "status": "skipped",
+            "reason": "applicant_unresolved",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _skip)
+    batches.append([])
+    first = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert first["ready_checked"] == 25
+    assert "ready-25" not in batches[0]
+    batches.append([])
+    second = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(minutes=15),
+    )
+    assert second["ready_checked"] == 25
+    assert "ready-25" in batches[1]
+    assert "ready-24" not in batches[1]
+    left = {row["event_key"]: row for row in store.list_unmatched()}
+    assert int(left["ready-25"]["file_attempts"]) == 1
+    assert all(not str(row.get("resolved_at") or "").strip() for row in left.values())
+
+
+def test_five_failed_attempts_leave_the_row_for_a_person(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    notice = source.ApiNotice(
+        event_key="stuck",
+        event_type="late_payment",
+        program_id=HELPERS._pid(1),
+        anchor="2026-10-01T00:00:00Z",
+        occurred_at="2026-10-01T00:00:00Z",
+        policy_numbers=("HO-998877",),
+        insured_name="Fixture Hauling LLC",
+        subject="Past due payment for Fixture Hauling LLC",
+        body="Policy ID HO-998877\nCustomer Fixture Hauling LLC\n",
+        program={"id": HELPERS._pid(1)},
+    )
+    store.upsert_unmatched(
+        notice,
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+    store.mark_ready_to_file("stuck", "2026-10-05T14:00:00Z")
+    calls = {"n": 0}
+
+    def _skip(ctx, item):
+        calls["n"] += 1
+        return {
+            "event_key": item.event_key,
+            "event_type": item.event_type,
+            "status": "skipped",
+            "reason": "applicant_unresolved",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _skip)
+    for _ in range(5):
+        source.run_once(
+            client=HELPERS.FeedClient(_empty_feeds()),
+            store=store,
+            driver_ctx=HELPERS.driver_ctx(),
+            now=NOW,
+        )
+    assert calls["n"] == 5
+    row = store.list_unmatched()[0]
+    assert row["file_attempts"] == 5
+    assert row["resolved_at"] in (None, "")
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    quiet = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert quiet["ready_checked"] == 0
+    assert calls["n"] == 5
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    sixth = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(minutes=15),
+    )
+    assert sixth["ready_checked"] == 0
+    assert calls["n"] == 5
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    mailed = digest.run_digest(stores=[store], now=NOW, live=False, refresh=False)
+    assert "couldn't file it" in mailed["body"]
+    assert "please file by hand" in mailed["body"]
+    assert "The policy number still did not match one client." in mailed["body"]
+    assert os.environ.get(source.LIVE_ENV) != "1"
+
+
+def _discussion_with(note):
+    from robie_job_engine import ezlynx_discussions as discussions
+
+    routes = [
+        ("connect/token", {"access_token": "tok123", "expires_in": 3600}),
+        ("by-applicant", [{"discussionId": "d1", "title": "Ascend - Payments"}]),
+        ("/notes", {"noteId": "n-new"}),
+        (
+            "v8/discussions/",
+            {"discussionId": "d1", "title": "Ascend - Payments", "notes": [note]},
+        ),
+    ]
+    config = discussions.DiscussionApiConfig(
+        discussion_base_url="https://app.uatezlynx.com/DiscussionApi/",
+        token_endpoint="https://identity.example.com/connect/token",
+        client_id="street_smart_api",
+        client_secret="secret",
+        username="SSRobie",
+        integration_group_id="159",
+    )
+    return discussions.DiscussionApiClient(config, urlopen=HELPERS.FakeUrlopen(routes))
+
+
+def test_a_recent_same_notice_on_the_discussion_counts_as_filed(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        driver.zapier_tasks, "fire_task", lambda payload, *, dry_run=False: {"ok": True}
+    )
+    store, _summary = _run_unmatched(tmp_path, monkeypatch, TrapEzlynx())
+    saved = store.list_unmatched()[0]
+    store.mark_ready_to_file(saved["event_key"], "2026-10-05T14:00:00Z")
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
+    ctx.discussion_client = _discussion_with(
+        {
+            "noteId": "n-recent",
+            "body": "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due.",
+            "createdAt": "2026-09-20T00:00:00Z",
+        }
+    )
+    live = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW,
+    )
+    assert live["ready_filed"] == 1
+    assert store.is_filed(saved["event_key"])
+    assert store.list_unmatched()[0]["resolved_at"]
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_recheck_reads_the_policy_number_from_ascend(tmp_path, monkeypatch):
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key="moved",
+            event_type="late_payment",
+            program_id="prog-1",
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=("HO-OLD",),
+            insured_name="Fixture Hauling LLC",
+            subject="Past due payment for Fixture Hauling LLC",
+            body="Policy ID HO-OLD\nCustomer Fixture Hauling LLC\n",
+            program={"id": "prog-1", "policy_number": "HO-OLD"},
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+
+    class AscendRead:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def get_program(self, program_id):
+            self.calls.append(program_id)
+            return {"id": program_id, "policy_number": "HO-NEW"}
+
+    ascend = AscendRead()
+    ezlynx = _PolicySearch({"HO-NEW": _policy_hit("HO-NEW", "220250093")})
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=True,
+        mailer=lambda **_kwargs: {"kind": "gmail"},
+        ezlynx_client=ezlynx,
+        ascend_client=ascend,
+        refresh=False,
+    )
+    row = store.list_unmatched()[0]
+    assert ascend.calls == ["prog-1"]
+    assert ezlynx.calls == ["HO-NEW"]
+    assert row["ready_at"]
+    assert row["resolved_at"] in (None, "")
+    assert row["policy_numbers"] == ["HO-NEW"]
+    assert "Policy ID HO-NEW" in row["body"]
+    assert "HO-OLD" not in row["body"]
+    assert "HO-NEW" in result["body"]
+    assert os.environ.get(source.LIVE_ENV) != "1"
+
+    class Spent:
+        def get_program(self, program_id):
+            raise AssertionError("the deadline was already spent")
+
+    spent = source.EventKeyStore(tmp_path / "ascend-api" / "spent.db")
+    _open_unmatched(spent, key="matched", policy="HO-998877", name="Fixture Hauling LLC")
+    held = _PolicySearch({"HO-998877": _policy_hit("HO-998877", "220250093")})
+    mailed = digest.run_digest(
+        stores=[spent],
+        now=NOW,
+        live=True,
+        mailer=lambda **_kwargs: {"kind": "gmail"},
+        ezlynx_client=held,
+        ascend_client=Spent(),
+        refresh=False,
+        deadline_s=0,
+    )
+    assert mailed["sent"] is True
+    assert held.calls == []
+    assert "Fixture Hauling LLC" in mailed["body"]
+
+
 def test_health_stays_quiet_when_the_digest_is_not_installed(tmp_path, monkeypatch):
     monkeypatch.setattr(digest, "timer_is_enabled", lambda: False)
     marker = tmp_path / "unmatched-digest-installed"
@@ -1310,6 +1615,16 @@ def test_existing_database_gains_unmatched_tables(tmp_path):
     conn = sqlite3.connect(older)
     conn.execute(
         """
+        CREATE TABLE poll_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            ok INTEGER NOT NULL,
+            error TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE unmatched_notices (
             event_key TEXT PRIMARY KEY,
             insured_name TEXT NOT NULL DEFAULT '',
@@ -1335,5 +1650,15 @@ def test_existing_database_gains_unmatched_tables(tmp_path):
     assert upgraded.list_ready_to_file() == []
     conn = sqlite3.connect(older)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(unmatched_notices)")}
+    poll_columns = {row[1] for row in conn.execute("PRAGMA table_info(poll_runs)")}
     conn.close()
-    assert {"ready_at", "subject", "body", "program_json"} <= columns
+    assert {
+        "ready_at",
+        "subject",
+        "body",
+        "program_json",
+        "file_attempts",
+        "last_attempt_at",
+        "file_failure",
+    } <= columns
+    assert "live" in poll_columns

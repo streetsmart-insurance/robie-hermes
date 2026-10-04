@@ -252,6 +252,132 @@ def find_posted_note(
     return _match(applicant, discussion, document, fingerprint, _rows(ledger_path))
 
 
+def _compact_policy(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+
+
+@with_serialized_ledger
+def remember_notice_filing(
+    applicant_id: str,
+    discussion_id: str,
+    *,
+    policy_numbers: list[str],
+    notice_type: str,
+    note_id: str = "",
+    ledger_path: Path | str | None = None,
+    posted_at: str = "",
+) -> dict[str, Any] | None:
+    """Remember a posted Ascend note by policy number and notice type.
+
+    The discussion read does not return note text, so this row is how a
+    later ready-row filing can see that the email driver already posted it.
+    Does not call EZLynx.
+    """
+
+    applicant = str(applicant_id or "").strip()
+    discussion = str(discussion_id or "").strip()
+    kind = str(notice_type or "").strip()
+    numbers = [
+        _compact_policy(number)
+        for number in policy_numbers
+        if len(_compact_policy(number)) >= 4
+    ]
+    if not applicant or not discussion or not kind or not numbers:
+        return None
+    path = resolve_ledger_path(ledger_path)
+    payload = _read_file(path)
+    notes = [item for item in payload.get("notes") or [] if isinstance(item, dict)]
+    stamp = str(posted_at or "").strip() or _utc_now()
+    for row in notes:
+        if str(row.get("source") or "") != "notice-filing":
+            continue
+        if str(row.get("applicant_id") or "") != applicant:
+            continue
+        if str(row.get("discussion_id") or "") != discussion:
+            continue
+        if str(row.get("notice_type") or "") != kind:
+            continue
+        stored = {
+            _compact_policy(number)
+            for number in (row.get("policy_numbers") or [])
+            if _compact_policy(number)
+        }
+        if stored.intersection(numbers):
+            return dict(row)
+    row = {
+        "applicant_id": applicant,
+        "discussion_id": discussion,
+        "document_id": "",
+        "note_text_sha256": "",
+        "note_norm_sha256": "",
+        "note_id": str(note_id or "").strip(),
+        "posted_at": stamp,
+        "source": "notice-filing",
+        "confirmation": CONFIRMED,
+        "notice_type": kind,
+        "policy_numbers": numbers,
+    }
+    notes.append(row)
+    payload["version"] = LEDGER_VERSION
+    payload["notes"] = notes
+    _save_file(path, payload)
+    return row
+
+
+def find_recent_notice_filing(
+    applicant_id: str,
+    discussion_id: str,
+    policy_numbers: list[str],
+    notice_type: str,
+    *,
+    within_days: int = 30,
+    ledger_path: Path | str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """A notice Robie posted on this discussion in the window.
+
+    Matches the policy number and the Ascend notice type, not the full text.
+    """
+
+    applicant = str(applicant_id or "").strip()
+    discussion = str(discussion_id or "").strip()
+    kind = str(notice_type or "").strip()
+    wanted = {
+        _compact_policy(number)
+        for number in policy_numbers
+        if len(_compact_policy(number)) >= 4
+    }
+    if not applicant or not discussion or not kind or not wanted:
+        return None
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    window = timedelta(days=within_days)
+    for row in _rows(ledger_path):
+        if str(row.get("source") or "") != "notice-filing":
+            continue
+        if str(row.get("applicant_id") or "") != applicant:
+            continue
+        if str(row.get("discussion_id") or "") != discussion:
+            continue
+        if str(row.get("notice_type") or "") != kind:
+            continue
+        stored = {
+            _compact_policy(number)
+            for number in (row.get("policy_numbers") or [])
+            if _compact_policy(number)
+        }
+        if not stored.intersection(wanted):
+            continue
+        posted = _parse_stamp(row.get("posted_at"))
+        if posted is None:
+            continue
+        age = clock - posted
+        if timedelta(0) <= age <= window:
+            return dict(row)
+    return None
+
+
 def find_recent_same_text(
     applicant_id: str,
     discussion_id: str,

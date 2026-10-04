@@ -98,7 +98,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
@@ -1211,6 +1211,9 @@ class DriverContext:
     # (applicant id, canonical category title) -> discussion id, or a
     # planned-create token when this run has not created it yet.
     planned_category_discussions: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Set only while the API poll is filing a digest-matched ready row.
+    # The broader 30-day policy-and-type check applies to that path.
+    ready_row_filing: bool = False
 
 
 @dataclass
@@ -1657,6 +1660,132 @@ def _read_existing_note(
     return outcome
 
 
+_RECENT_NOTE_WINDOW = timedelta(days=30)
+_NOTE_TIME_KEYS = (
+    "createdAt",
+    "CreatedAt",
+    "createdDate",
+    "CreatedDate",
+    "postedAt",
+    "PostedAt",
+    "created",
+    "Created",
+    "date",
+    "Date",
+)
+
+
+def _compact_policy(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+
+
+def _note_posted_at(row: dict[str, Any]) -> datetime | None:
+    for key in _NOTE_TIME_KEYS:
+        raw = str(row.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _note_has_policy_and_type(body: str, policy_numbers: list[str], notice_type: str) -> bool:
+    """True when the note names this policy and this Ascend notice type."""
+    compact = _compact_policy(body)
+    named = False
+    for number in policy_numbers:
+        token = _compact_policy(number)
+        if len(token) >= 4 and token in compact:
+            named = True
+            break
+    if not named:
+        return False
+    folded = str(body or "").casefold()
+    if notice_type == triage.CANCELLATION:
+        return "non-pay cancellation" in folded
+    heading = str(triage._NOTICE_HEADINGS.get(notice_type) or "").casefold()
+    if not heading:
+        return False
+    return f"{heading} notice" in folded
+
+
+def recent_same_notice(
+    client: Any,
+    *,
+    applicant_id: str,
+    discussion_id: str,
+    policy_numbers: list[str],
+    notice_type: str,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """A note from the last 30 days with this policy number and notice type.
+
+    Discussion reads are checked first. The local ledger is the record of
+    notes Robie already posted when the discussion read has no note text.
+    """
+    from .discussion_note_ledger import find_recent_notice_filing
+
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    pinned = str(discussion_id or "").strip()
+    getter = getattr(client, "get_discussion", None)
+    if pinned and callable(getter):
+        detail = getter(pinned)
+        for row in discussions.iter_discussion_notes(detail):
+            if not isinstance(row, dict):
+                continue
+            posted = _note_posted_at(row)
+            if posted is None:
+                continue
+            age = moment - posted
+            if age < timedelta(0) or age > _RECENT_NOTE_WINDOW:
+                continue
+            body = discussions._note_body(row)
+            if _note_has_policy_and_type(body, policy_numbers, notice_type):
+                return {"note_id": _note_id_from(row), "source": "discussion"}
+    remembered = find_recent_notice_filing(
+        applicant_id,
+        pinned,
+        policy_numbers,
+        notice_type,
+        now=moment,
+    )
+    if remembered is None:
+        return None
+    return {
+        "note_id": str(remembered.get("note_id") or ""),
+        "source": "ledger",
+    }
+
+
+def _remember_notice_filing(
+    *,
+    applicant_id: str,
+    discussion_id: str,
+    policy_numbers: list[str],
+    notice_type: str,
+) -> None:
+    """Remember a note that was posted, so a later ready row does not post it again."""
+    from .discussion_note_ledger import DiscussionNoteLedgerError, remember_notice_filing
+
+    try:
+        remember_notice_filing(
+            applicant_id,
+            discussion_id,
+            policy_numbers=policy_numbers,
+            notice_type=notice_type,
+        )
+    except DiscussionNoteLedgerError as exc:
+        logger.warning("notice filing was not remembered: %s", exc)
+
+
 def signed_notice_note(note_text: str) -> str:
     """Append the agency signature without inventing LOB or bind steps."""
     text = str(note_text or "").strip()
@@ -2063,6 +2192,31 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     if note_match.get("reason") and not note_match.get("read"):
         result.detail["existing_note_read_reason"] = note_match["reason"]
 
+    # A ready row does not post again when this discussion already has the
+    # same policy and the same notice type from the last 30 days. That note
+    # is already in EZLynx. A failed read does not post.
+    if ctx.ready_row_filing and chosen_id:
+        try:
+            recent = recent_same_notice(
+                ctx.discussion_client,
+                applicant_id=resolution.applicant_id,
+                discussion_id=chosen_id,
+                policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
+                notice_type=notice_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - do not post when the check cannot finish
+            result.reason = f"discussion_error: {type(exc).__name__}"
+            return result
+        if recent:
+            note_id = str(recent.get("note_id") or "").strip()
+            result.reason = (
+                f"recent_same_notice: {note_id}" if note_id else "recent_same_notice"
+            )
+            result.detail["existing_note_duplicate"] = True
+            if note_id:
+                result.detail["existing_note_id"] = note_id
+            return result
+
     # Write scope before filing. A narrow allowlist must not hide a real match.
     scope_refusal = _write_scope_refusal_reason(resolution.applicant_id)
     if scope_refusal:
@@ -2322,6 +2476,13 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
+    if result.status == "done":
+        _remember_notice_filing(
+            applicant_id=resolution.applicant_id,
+            discussion_id=str(result.detail.get("discussion_id") or chosen_id),
+            policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
+            notice_type=notice_type,
+        )
     # The notice driver cannot write the API store. Its unit is
     # ProtectSystem=strict and ReadWritePaths covers only
     # /var/lib/robie-ascend-notice-driver. The digest marks a match ready

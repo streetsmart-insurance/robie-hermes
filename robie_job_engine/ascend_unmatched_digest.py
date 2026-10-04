@@ -53,6 +53,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .ascend_api_notice_source import (
+    FILE_ATTEMPT_LIMIT,
     EventKeyStore,
     _iso,
     _now,
@@ -60,8 +61,8 @@ from .ascend_api_notice_source import (
     db_path,
     dry_run_db_path,
     live_db_path,
-    live_enabled as api_source_live,
     parse_time,
+    policy_numbers_of,
 )
 from .ascend_notice_driver import (
     POLICY_OUTCOME_INCOMPLETE,
@@ -160,6 +161,13 @@ _READY_WHEN_NOTES_OFF = "Ready, will file once Robie's Ascend notes are on."
 _READY_WHEN_NOTES_ON = (
     "Robie matched one client and will file this on the next Ascend run."
 )
+_READY_WHEN_NOTES_ABSENT = "Robie's Ascend notes haven't run recently."
+_HANDED_BACK = (
+    "Robie matched this but couldn't file it — please file by hand."
+)
+# A poll older than this is not evidence that notes are on.
+POLL_FRESHNESS = timedelta(hours=2)
+_POLICY_ID_LINE = re.compile(r"(?i)^policy id\s+\S+")
 
 
 def live_enabled() -> bool:
@@ -431,10 +439,123 @@ class _BackoffPolicySearch:
         return ticks() >= self._deadline
 
 
+def notes_state_from_polls(
+    stores: list[EventKeyStore], now: datetime
+) -> str:
+    """``live``, ``dry``, or ``absent`` from the newest poll in the last 2 hours.
+
+    The digest unit does not receive ``ASCEND_API_SOURCE_LIVE``. The poll
+    writes the flag on each run. No recent run is treated as off.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    latest: dict[str, Any] | None = None
+    latest_at: datetime | None = None
+    for store in stores:
+        try:
+            row = store.latest_poll_run()
+        except Exception as exc:  # noqa: BLE001 - a bad store is not a recent run
+            logger.warning("digest could not read a poll run: %s", type(exc).__name__)
+            continue
+        if not row:
+            continue
+        started = parse_time(row.get("started_at"))
+        if started is None:
+            continue
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if latest_at is None or started > latest_at:
+            latest = row
+            latest_at = started
+    if latest is None or latest_at is None:
+        return "absent"
+    if latest_at < now - POLL_FRESHNESS or latest_at > now + timedelta(minutes=5):
+        return "absent"
+    return "live" if latest.get("live") else "dry"
+
+
+def _replace_policy_id_lines(body: str, numbers: list[str]) -> str:
+    """Put the policy numbers just read from Ascend on the stored notice."""
+    lines = str(body or "").splitlines()
+    rewritten: list[str] = []
+    inserted = False
+    for line in lines:
+        if _POLICY_ID_LINE.match(line.strip()):
+            if not inserted:
+                rewritten.extend(f"Policy ID {number}" for number in numbers)
+                inserted = True
+            continue
+        rewritten.append(line)
+    if not inserted:
+        rewritten = [f"Policy ID {number}" for number in numbers] + rewritten
+    return "\n".join(rewritten)
+
+
+def _read_program_policy_numbers(
+    row: dict[str, Any],
+    ascend_client: Any | None,
+    *,
+    deadline: float | None,
+    clock: Callable[[], float] | None,
+) -> list[str] | None:
+    """The program's current policy numbers. Read only. None keeps the saved ones.
+
+    Uses the same deadline as the EZLynx re-check. A failed read keeps the
+    numbers saved when the notice was first seen.
+    """
+    if ascend_client is None:
+        return None
+    program_id = str(row.get("program_id") or "").strip()
+    if not program_id:
+        return None
+    getter = getattr(ascend_client, "get_program", None)
+    if not callable(getter):
+        return None
+    ticks = clock or time.monotonic
+    if deadline is not None and ticks() >= deadline:
+        raise PolicyBudgetExpired()
+    try:
+        payload = getter(program_id)
+    except PolicyBudgetExpired:
+        raise
+    except Exception as exc:  # noqa: BLE001 - keep the saved number and continue
+        logger.warning(
+            "digest recheck could not read Ascend program %s: %s",
+            program_id,
+            type(exc).__name__,
+        )
+        return None
+    record = payload
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        record = payload["data"]
+    if not isinstance(record, dict):
+        return None
+    numbers = [str(number).strip() for number in policy_numbers_of(record) if str(number).strip()]
+    if not numbers:
+        return None
+    row["policy_numbers"] = numbers
+    body = _replace_policy_id_lines(str(row.get("body") or ""), numbers)
+    row["body"] = body
+    encoded = json.dumps(record, default=str)
+    row["program_json"] = encoded
+    store = row.get("_store")
+    key = str(row.get("event_key") or "").strip()
+    if isinstance(store, EventKeyStore) and key:
+        try:
+            store.refresh_unmatched_policy(key, numbers, body, encoded)
+        except Exception as exc:  # noqa: BLE001 - the search can still use the new numbers
+            logger.warning(
+                "digest recheck could not store the Ascend policy number: %s",
+                type(exc).__name__,
+            )
+    return numbers
+
+
 def _resolve_open_row(
     row: dict[str, Any],
     *,
     ezlynx_client: Any | None,
+    ascend_client: Any | None,
     index_rows: list[dict[str, Any]],
     index_complete: bool,
     pause: Callable[[float], None],
@@ -448,7 +569,10 @@ def _resolve_open_row(
     the saved index. With no client, only a complete index can match the
     row. Nothing here files a note or writes a policy.
     """
-    numbers = _policy_numbers_of(row)
+    fresh = _read_program_policy_numbers(
+        row, ascend_client, deadline=deadline, clock=clock
+    )
+    numbers = fresh if fresh else _policy_numbers_of(row)
     if not numbers:
         return False
     if ezlynx_client is not None:
@@ -480,10 +604,11 @@ def recheck_open_unmatched(
     index_complete: bool,
     now: datetime,
     persist: bool,
-    notes_on: bool,
+    notes_state: str,
     pause: Callable[[float], None] | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
+    ascend_client: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Mark an exact one-client match ready to file. Leave every row open.
 
@@ -506,6 +631,7 @@ def recheck_open_unmatched(
             matched = _resolve_open_row(
                 row,
                 ezlynx_client=ezlynx_client,
+                ascend_client=ascend_client,
                 index_rows=index_rows,
                 index_complete=index_complete,
                 pause=sleeper,
@@ -520,7 +646,8 @@ def recheck_open_unmatched(
             still_open.append(row)
             continue
         row["ready_to_file"] = True
-        row["api_notes_live"] = notes_on
+        row["notes_state"] = notes_state
+        row["api_notes_live"] = notes_state == "live"
         if not persist:
             still_open.append(row)
             continue
@@ -572,8 +699,19 @@ def item_line(item: dict[str, Any]) -> str:
     phrase = _policy_phrase(list(item.get("policy_numbers") or []))
     if phrase:
         parts.append(phrase)
+    if int(item.get("file_attempts") or 0) >= FILE_ATTEMPT_LIMIT:
+        reason = str(item.get("file_failure") or "").strip() or "The note was not filed."
+        return ", ".join(parts) + ". " + _HANDED_BACK + " " + reason
     if item.get("ready_to_file") or str(item.get("ready_at") or "").strip():
-        waiting = _READY_WHEN_NOTES_ON if item.get("api_notes_live") else _READY_WHEN_NOTES_OFF
+        state = str(item.get("notes_state") or "")
+        if not state:
+            state = "live" if item.get("api_notes_live") else "absent"
+        if state == "live":
+            waiting = _READY_WHEN_NOTES_ON
+        elif state == "dry":
+            waiting = _READY_WHEN_NOTES_OFF
+        else:
+            waiting = _READY_WHEN_NOTES_ABSENT
         return ", ".join(parts) + ". " + waiting
     reason = _REASON_WORDS.get(
         str(item.get("reason") or ""),
@@ -1043,6 +1181,7 @@ def run_digest(
     live: bool | None = None,
     mailer: Callable[..., dict[str, Any]] | None = None,
     ezlynx_client: Any | None = None,
+    ascend_client: Any | None = None,
     refresh: bool = True,
     pause_s: float = INDEX_PAUSE_S,
     sleep: Callable[[float], None] | None = None,
@@ -1054,11 +1193,11 @@ def run_digest(
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     sending = live_enabled() if live is None else live
-    notes_on = api_source_live()
     ticks = clock or time.monotonic
     deadline = ticks() + (RUN_DEADLINE_S if deadline_s is None else deadline_s)
     pause = sleep or time.sleep
     opened = stores if stores is not None else open_digest_stores()
+    notes_state = notes_state_from_polls(opened, moment)
     index_report: dict[str, Any] | None = None
     if refresh and ezlynx_client is not None and opened:
         _rows, meta, _store = best_policy_index(opened)
@@ -1091,15 +1230,17 @@ def run_digest(
         index_complete=index_complete,
         now=moment,
         persist=sending,
-        notes_on=notes_on,
+        notes_state=notes_state,
         pause=pause,
         deadline=deadline,
         clock=ticks,
+        ascend_client=ascend_client,
     )
     for row in open_rows:
+        row["notes_state"] = notes_state
         if row.get("ready_to_file") or str(row.get("ready_at") or "").strip():
             row["ready_to_file"] = True
-            row["api_notes_live"] = notes_on
+            row["api_notes_live"] = notes_state == "live"
     apply_suggestions(
         open_rows,
         index_rows,
@@ -1353,7 +1494,20 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # noqa: BLE001 - email still runs without an index
                 logger.warning("policy index client unavailable: %s", type(exc).__name__)
                 client = None
-        result = run_digest(now=moment, ezlynx_client=client, refresh=client is not None)
+        ascend_client = None
+        try:
+            from .ascend_api import configured_client
+
+            ascend_client = configured_client()
+        except Exception as exc:  # noqa: BLE001 - the saved policy number still works
+            logger.warning("Ascend program client unavailable: %s", type(exc).__name__)
+            ascend_client = None
+        result = run_digest(
+            now=moment,
+            ezlynx_client=client,
+            ascend_client=ascend_client,
+            refresh=client is not None,
+        )
     except Exception as exc:  # noqa: BLE001 - the health file is the alert signal
         logger.warning("unmatched digest failed: %s", type(exc).__name__)
         write_last_run(

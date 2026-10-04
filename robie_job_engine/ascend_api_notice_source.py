@@ -65,6 +65,8 @@ logger = logging.getLogger(__name__)
 LIVE_ENV = "ASCEND_API_SOURCE_LIVE"
 # Ready-to-file rows the digest has matched. One poll files at most this many.
 READY_FILE_LIMIT = 25
+# A ready row that fails this many times leaves the queue for a person to file.
+FILE_ATTEMPT_LIMIT = 5
 REMITTANCE_APPLICANT_ENV = "ASCEND_API_REMITTANCE_APPLICANT_ID"
 DB_ENV = "ASCEND_API_NOTICE_DB"
 DRY_RUN_DB_ENV = "ASCEND_API_NOTICE_DRY_RUN_DB"
@@ -639,7 +641,8 @@ class EventKeyStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at TEXT NOT NULL,
                     ok INTEGER NOT NULL,
-                    error TEXT NOT NULL DEFAULT ''
+                    error TEXT NOT NULL DEFAULT '',
+                    live INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS cursors (
                     name TEXT PRIMARY KEY,
@@ -657,6 +660,7 @@ class EventKeyStore:
                 """
             )
             _ensure_filed_identity_columns(conn)
+            _ensure_poll_columns(conn)
             try:
                 _ensure_unmatched_tables(conn)
             except sqlite3.Error as exc:
@@ -843,13 +847,22 @@ class EventKeyStore:
                 (_iso(moment),),
             )
 
-    def note_poll_result(self, *, ok: bool, error: str, started_at: str) -> int:
-        """Record the run and return the consecutive-failure streak."""
+    def note_poll_result(
+        self, *, ok: bool, error: str, started_at: str, live: bool = False
+    ) -> int:
+        """Record the run and return the consecutive-failure streak.
+
+        ``live`` is whether this process was filing notes. The digest reads
+        the newest row. It does not read ``ASCEND_API_SOURCE_LIVE`` itself.
+        """
         cleaned = redact_text(str(error or ""))[:500]
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO poll_runs (started_at, ok, error) VALUES (?, ?, ?)",
-                (started_at, 1 if ok else 0, cleaned),
+                """
+                INSERT INTO poll_runs (started_at, ok, error, live)
+                VALUES (?, ?, ?, ?)
+                """,
+                (started_at, 1 if ok else 0, cleaned, 1 if live else 0),
             )
             rows = conn.execute(
                 "SELECT ok FROM poll_runs ORDER BY id DESC LIMIT ?",
@@ -863,6 +876,29 @@ class EventKeyStore:
                 break
             streak += 1
         return streak
+
+    def latest_poll_run(self) -> dict[str, Any] | None:
+        """The newest poll record, including ones older than the digest window."""
+        with self._connect() as conn:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT id, started_at, ok, live
+                    FROM poll_runs
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if row is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "started_at": str(row["started_at"] or ""),
+            "ok": bool(row["ok"]),
+            "live": bool(row["live"]),
+        }
 
     def upsert_unmatched(
         self,
@@ -906,6 +942,9 @@ class EventKeyStore:
                     reason=excluded.reason,
                     resolved_at=NULL,
                     ready_at=NULL,
+                    file_attempts=0,
+                    last_attempt_at=NULL,
+                    file_failure='',
                     subject=excluded.subject,
                     body=excluded.body,
                     program_json=excluded.program_json,
@@ -985,7 +1024,13 @@ class EventKeyStore:
             )
 
     def list_ready_to_file(self, limit: int = READY_FILE_LIMIT) -> list[dict[str, Any]]:
-        """Open rows the digest matched, oldest first. At most ``limit``."""
+        """Open rows the digest matched. Never-tried rows come first.
+
+        A row that has already failed sorts after every row that has not
+        been tried, then by the oldest attempt, then by ``ready_at``. After
+        ``FILE_ATTEMPT_LIMIT`` failures the row stays on the email and is
+        not picked again. At most ``limit`` rows.
+        """
         cap = max(0, int(limit))
         if cap == 0:
             return []
@@ -997,14 +1042,72 @@ class EventKeyStore:
                     WHERE (resolved_at IS NULL OR resolved_at='')
                       AND ready_at IS NOT NULL AND ready_at != ''
                       AND subject != '' AND body != ''
-                    ORDER BY ready_at, event_key
+                      AND COALESCE(file_attempts, 0) < ?
+                    ORDER BY CASE
+                        WHEN last_attempt_at IS NULL OR last_attempt_at = '' THEN 0
+                        ELSE 1
+                    END,
+                    last_attempt_at,
+                    ready_at,
+                    event_key
                     LIMIT ?
                     """,
-                    (cap,),
+                    (FILE_ATTEMPT_LIMIT, cap),
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
         return [_unmatched_row(row) for row in fetched]
+
+    def note_ready_attempt(self, event_key: str, attempted_at: str, plain_reason: str) -> int:
+        """Count one failed filing. Returns the new attempt count, or 0 if the row is gone."""
+        key = str(event_key or "").strip()
+        moment = str(attempted_at or "").strip()
+        reason = str(plain_reason or "").strip() or "The note was not filed."
+        if not key or not moment:
+            return 0
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET file_attempts = COALESCE(file_attempts, 0) + 1,
+                    last_attempt_at = ?,
+                    file_failure = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (moment, reason, key),
+            )
+            row = conn.execute(
+                "SELECT file_attempts FROM unmatched_notices WHERE event_key=?",
+                (key,),
+            ).fetchone()
+        if row is None or row["file_attempts"] is None:
+            return 0
+        return int(row["file_attempts"])
+
+    def refresh_unmatched_policy(
+        self,
+        event_key: str,
+        policy_numbers: list[str],
+        body: str,
+        program_json: str,
+    ) -> None:
+        """Store the policy number just read from Ascend. Does not file or resolve."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        numbers = [str(number).strip() for number in policy_numbers if str(number or "").strip()]
+        if not numbers:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET policy_numbers=?, body=?, program_json=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (json.dumps(numbers), str(body or ""), str(program_json or "{}"), key),
+            )
 
     def mark_aged_out_notified(self, event_keys: list[str], notified_at: str) -> None:
         moment = str(notified_at or "").strip()
@@ -1125,7 +1228,10 @@ def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
             ready_at TEXT,
             subject TEXT NOT NULL DEFAULT '',
             body TEXT NOT NULL DEFAULT '',
-            program_json TEXT NOT NULL DEFAULT '{}'
+            program_json TEXT NOT NULL DEFAULT '{}',
+            file_attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            file_failure TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
             policy_key TEXT NOT NULL,
@@ -1156,10 +1262,51 @@ def _ensure_unmatched_columns(conn: sqlite3.Connection) -> None:
         ("subject", "TEXT NOT NULL DEFAULT ''"),
         ("body", "TEXT NOT NULL DEFAULT ''"),
         ("program_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("file_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_attempt_at", "TEXT"),
+        ("file_failure", "TEXT NOT NULL DEFAULT ''"),
     )
     for name, ddl in additions:
         if name not in have:
             conn.execute(f"ALTER TABLE unmatched_notices ADD COLUMN {name} {ddl}")
+
+
+def _ensure_poll_columns(conn: sqlite3.Connection) -> None:
+    """Remember whether a poll was filing. Old stores gain the column once."""
+    have = {str(row[1]) for row in conn.execute("PRAGMA table_info(poll_runs)")}
+    if "live" not in have:
+        conn.execute("ALTER TABLE poll_runs ADD COLUMN live INTEGER NOT NULL DEFAULT 0")
+
+
+def plain_file_failure(reason: str) -> str:
+    """One sentence for the accounting email. No field names and no code labels."""
+    text = str(reason or "").strip().lower()
+    if text.startswith("applicant_unresolved") or "policy_outcome" in text:
+        return "The policy number still did not match one client."
+    if text.startswith("write_scope_refused"):
+        return "That client is outside the accounts Robie is allowed to write."
+    if text.startswith("driver_gate_refused"):
+        return "Robie is not allowed to write notes right now."
+    if text.startswith("discussion_error"):
+        return "The EZLynx discussion could not be read."
+    if text.startswith("task_not") or "task_not_created" in text:
+        return "The follow-up task was not created."
+    return "The note was not filed."
+
+
+def _already_in_ezlynx(outcome: dict[str, Any]) -> bool:
+    """True when the note is already in EZLynx, so the row should be resolved."""
+    if str(outcome.get("status") or "") == "done":
+        return True
+    reason = str(outcome.get("reason") or "")
+    if reason == "api_already_filed" or reason.startswith(
+        ("existing_note_duplicate", "recent_same_notice")
+    ):
+        return True
+    detail = outcome.get("detail")
+    if isinstance(detail, dict) and detail.get("existing_note_duplicate"):
+        return True
+    return False
 
 
 def _unmatched_row(row: Any) -> dict[str, Any]:
@@ -2448,6 +2595,7 @@ def run_once(
         ok=ok,
         error="; ".join(errors),
         started_at=started,
+        live=live,
     )
     alerted = False
     if streak >= STALL_RUNS:
@@ -2669,9 +2817,11 @@ def _file_ready_unmatched(
     """File digest matches through the same path as a notice from the feed.
 
     Live only. The caller must not invoke this while the API source is
-    dry-run. At most ``limit`` rows. A row is resolved only after filing
-    returns done. Write scope, dedupe, and discussion ownership stay inside
-    ``_file_through_driver``.
+    dry-run. At most ``limit`` rows. A note that is already in EZLynx,
+    including an exact duplicate and a same policy and notice type from
+    the last 30 days, is recorded as filed and the row is resolved. Any
+    other result counts as one attempt. Write scope, dedupe, and
+    discussion ownership stay inside ``_file_through_driver``.
     """
     if not live_enabled():
         return []
@@ -2686,37 +2836,54 @@ def _file_ready_unmatched(
             extra.append(notice.program)
         queued.append((row, notice))
     ctx.ascend_client = _SnapshotPrograms([*extra, *programs])
+    previous = getattr(ctx, "ready_row_filing", False)
+    ctx.ready_row_filing = True
     filed: list[dict[str, Any]] = []
-    for _row, notice in queued:
-        try:
-            if store.is_filed(notice.event_key):
-                store.resolve_unmatched(notice.event_key, seen_at)
+    try:
+        for _row, notice in queued:
+            try:
+                if store.is_filed(notice.event_key):
+                    store.resolve_unmatched(notice.event_key, seen_at)
+                    filed.append(
+                        {
+                            "event_key": notice.event_key,
+                            "event_type": notice.event_type,
+                            "status": "done",
+                            "reason": "api_already_filed",
+                        }
+                    )
+                    continue
+                outcome = _file_through_driver(ctx, notice)
+                if _already_in_ezlynx(outcome):
+                    store.record_filed(notice)
+                    store.resolve_unmatched(notice.event_key, seen_at)
+                    outcome = {**outcome, "status": "done"}
+                else:
+                    store.note_ready_attempt(
+                        notice.event_key,
+                        seen_at,
+                        plain_file_failure(str(outcome.get("reason") or "")),
+                    )
+                filed.append(outcome)
+            except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
+                logger.warning(
+                    "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
+                )
+                store.note_ready_attempt(
+                    notice.event_key,
+                    seen_at,
+                    plain_file_failure(f"error: {type(exc).__name__}"),
+                )
                 filed.append(
                     {
                         "event_key": notice.event_key,
                         "event_type": notice.event_type,
                         "status": "skipped",
-                        "reason": "api_already_filed",
+                        "reason": f"error: {type(exc).__name__}",
                     }
                 )
-                continue
-            outcome = _file_through_driver(ctx, notice)
-            filed.append(outcome)
-            if outcome.get("status") == "done":
-                store.record_filed(notice)
-                store.resolve_unmatched(notice.event_key, seen_at)
-        except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
-            logger.warning(
-                "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
-            )
-            filed.append(
-                {
-                    "event_key": notice.event_key,
-                    "event_type": notice.event_type,
-                    "status": "skipped",
-                    "reason": f"error: {type(exc).__name__}",
-                }
-            )
+    finally:
+        ctx.ready_row_filing = previous
     return filed
 
 
@@ -3009,6 +3176,7 @@ def main(argv: list[str] | None = None) -> int:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc}",
                 started_at=_iso(_now()),
+                live=live,
             )
             if streak >= STALL_RUNS:
                 _alert(
