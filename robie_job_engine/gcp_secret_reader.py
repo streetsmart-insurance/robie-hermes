@@ -85,7 +85,7 @@ def get_secret(name: str, *, project: str = DEFAULT_PROJECT) -> str:
     _refuse_key_files()
 
     try:
-        from google.cloud import secret_manager
+        from google.cloud import secretmanager as secret_manager
     except ImportError as exc:
         raise SecretManagerAccessError(
             "NEEDS_AUTH: google-cloud-secret-manager is not installed in this "
