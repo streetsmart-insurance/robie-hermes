@@ -109,9 +109,14 @@ class WatcherHookTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(result["detail"]["notice_type"], triage.CANCELLATION)
         self.assertIn(driver.ROBIE_WAS_HERE, result["detail"]["note_text"])
-        self.assertEqual(result["detail"]["label"]["label_name"], "Ascend NOC")
-        self.assertEqual(result["detail"]["label"]["status"], "dry_run")
+        self.assertTrue(
+            result["detail"]["note_text"].startswith("NON-PAY CANCELLATION notice from Ascend.")
+        )
+        self.assertEqual(result["reason"], "label_skipped_by_policy")
+        self.assertEqual(result["detail"]["label"]["status"], "label_skipped_by_policy")
+        self.assertNotIn("label_id", result["detail"]["label"])
         self.assertEqual(discussion_client._urlopen.posts_to("/notes"), [])
+        self.assertEqual(ctx.ezlynx_client.label_list_calls, 0)
         self.assertEqual(ctx.ezlynx_client.applied_labels, [])
 
     def test_live_success_requests_mark_read(self):
@@ -130,13 +135,11 @@ class WatcherHookTests(unittest.TestCase):
         self.assertTrue(result["consumed"])
         self.assertEqual(len(discussion_client._urlopen.posts_to("/notes")), 1)
         self.assertEqual(ctx.source.marked, ["m-live"])
-        self.assertEqual(result["detail"]["label"]["label_name"], "Ascend NOC")
-        self.assertEqual(result["detail"]["label"]["method"], "api")
-        self.assertEqual(result["detail"]["label"]["auth_path"], "cdp_session_cookie")
-        self.assertEqual(
-            ctx.ezlynx_client.applied_labels,
-            [{"note_id": "n7", "label_id": "noc-1"}],
-        )
+        self.assertEqual(result["reason"], "label_skipped_by_policy")
+        self.assertEqual(result["detail"]["label"]["status"], "label_skipped_by_policy")
+        self.assertNotIn("label_id", result["detail"]["label"])
+        self.assertEqual(ctx.ezlynx_client.label_list_calls, 0)
+        self.assertEqual(ctx.ezlynx_client.applied_labels, [])
 
     def test_fail_closed_is_consumed_but_left_unread(self):
         ctx, discussion_client = _ctx()
