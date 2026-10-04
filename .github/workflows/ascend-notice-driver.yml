@@ -21,8 +21,13 @@
 name: Ascend notice driver
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes; dry-run only (see below)
+  # Schedule DISABLED 2026-10-03: the driver fails closed at the Gmail step on
+  # every scheduled run because ROBIE_GMAIL_DELEGATION_SA was never supplied
+  # (see NOTE below) — the schedule produced nothing but failure emails.
+  # Re-enable the schedule once the delegation SA exists. Manual dispatch
+  # below still works for deliberate dry-runs.
+  # schedule:
+  #   - cron: "*/30 * * * *"   # every 30 minutes; dry-run only (see below)
   workflow_dispatch:
     inputs:
       live:
