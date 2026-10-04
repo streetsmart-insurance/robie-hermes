@@ -25,10 +25,12 @@ Record before starting, and keep with the evidence: the task ID, its discussion 
 - Reassignment (`EZLYNX_TASK_REASSIGN_ENABLED`) and live calls (`ROBIE_PHONE_LIVE_CALLS`) are not on.
 - A named `--operator`, who also passes `--confirm-browser-owner` and `--confirm-exclusive`.
 - The Test jobs database shows no RUNNING/VERIFYING job and no held lease (read-only look, as the Test deploy takes).
-- The browser is local to this VM, and no tab shows another client's account.
-- The repo's own browser ownership is then taken: the cross-VM driver lease must say this host is IN, and the persistent-profile lock is held for the run. If either is refused, nothing runs.
+- The browser is local to this VM, no tab shows another client's account, and the job inventory shows it idle (no RUNNING/VERIFYING job, no held lease).
+- **Test must ALREADY hold the valid shared driver lease** (state IN, holder TEST, unexpired), read through the repo's own gate; the result is recorded in the output. The inspection only **checks** that lease. It does not obtain or renew it, and `exclusive_session` does the same (it checks the lease and holds the profile lock for the run). If the lease is not already Test's, nothing runs.
 
 ## Manual confirmations the tool cannot see (the supervisor ticks each before the run)
+- [ ] Before the run, the operator confirms the lease on the Test VM (read-only; it changes nothing): `PYTHONPATH=. python -m robie_job_engine.ezlynx_driver_gate check` must print `ALLOWED holder=TEST reason=driver is IN`. Obtaining or renewing the lease is a separate step owned by whoever runs the driver coordinator, not part of this inspection.
+- [ ] The Test Chrome is idle: no job is running, nobody is using it.
 - [ ] The intake timer/service and every other scheduler are stopped or disabled on the Test VM.
 - [ ] No person is using the Test Chrome; it is signed in as the agency user.
 - [ ] Nothing is deploying or restarting; Chrome will not be restarted.
@@ -45,7 +47,8 @@ PYTHONPATH=. python scripts/inspect_task_fields.py api --task-id <TASK> --applic
 - Output files are created exclusively (never overwritten), mode 0600; Test-account data only; keep them with the Test evidence and do not commit them unreviewed.
 
 ## What is and is not captured
-- **Never read:** hidden or invisible controls, password/file/credential-like controls (including one-time codes, security answers, cards, tokens). They are excluded from metadata BEFORE any value is requested, so their values are never asked for.
+- **Never read:** hidden or invisible controls, password/file/credential-like controls (including one-time codes, security answers, cards, tokens). They are excluded from metadata BEFORE any value is requested. Because the page can change between the two stages, the second-stage script re-derives the ACTUAL element's identity, visibility and credential status first, and reads nothing if any check fails (counted as `revalidation_failed`).
+- **Never captured:** neighbouring or sibling elements. Only the approved element's own value (inputs) or visible text (other elements) is read.
 - **Values recorded only for** visible controls whose label matches an approved task-field pattern (instructions, created, producer, CSR, labels, assign). Those patterns decide what may be RECORDED; they are not selectors and never become the contract.
 - **Names only** (no values) for the other visible controls in the Edit dialog, unless `--approved-fields-only`. Nothing else on the account page is recorded.
 

@@ -11,15 +11,18 @@ READ-ONLY and NARROW, by construction:
 - DOM capture is two-phase. Phase 1 returns METADATA ONLY (label, role, type, visibility
   flags); it never reads a value. Python then excludes every hidden, invisible or credential-like
   control. Phase 2 reads values ONLY for controls whose label matches an approved task-field
-  pattern. Hidden and credential controls are never asked for a value.
+  pattern, and the page script re-derives the actual element's identity, visibility and
+  credential status BEFORE it touches any value; a changed element is rejected unread. No
+  neighbouring or sibling element is ever read.
 - Everything else is recorded as names only (dialog) or not at all (account page).
 - API discovery records key names and TYPES only by default, never values, and only after the
   discussion is verified to belong to the applicant.
 - It refuses unless it is supervised and exclusive: Test VM, ROBIE_ENV=TEST, applicant 220250093,
   exactly one task ID in ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS, reassignment and live calls off, no
   active jobs or leases, no other client's tab open, an operator named, browser ownership and
-  exclusivity confirmed by that operator, and the repo's own cross-VM driver lease and profile
-  lock taken. It STOPS on an unexpected page or a Cancel that cannot be verified.
+  exclusivity confirmed by that operator, and Test ALREADY holding a valid shared driver lease
+  (the repo's gate is only checked, never changed: it does not obtain or renew the lease). The
+  profile lock is held for the run. It STOPS on an unexpected page or a Cancel that cannot be verified.
 - The output file is created exclusively (never overwritten), mode 0600.
 
 It is NOT run by CI or by any scheduler. See docs/EZLYNX_TASK_FIELD_DISCOVERY.md.
@@ -94,20 +97,44 @@ _DESCRIBE_BODY = _COMMON + """
 """
 
 _READ_BODY = _COMMON + """
+  const CREDENTIAL = new RegExp(%(cred)s, 'i');
+  const CREDENTIAL_TYPES = %(types)s;
+  const CREDENTIAL_DESCENDANT = 'input[type="password"], input[type="file"], input[autocomplete="one-time-code"], input[autocomplete*="password"]';
   const wanted = Array.isArray(arg) ? arg : [];
+  // The second stage trusts nothing from the first. For the ACTUAL element at this index it
+  // re-derives identity, visibility and credential status from attributes and styles ONLY, and
+  // touches value / innerText / textContent only after every check has passed.
   return wanted.map((item) => {
+    const reject = (why) => ({ index: item.index, name: '', value: '', rejected: why });
     const el = els[item.index];
-    if (!el) return { index: item.index, name: '', value: '', next_sibling_text: '' };
+    if (!el) return reject('changed: element is gone');
     const tag = el.tagName.toLowerCase();
+    const type = el.getAttribute('type') || '';
+    const role = el.getAttribute('role') || '';
+    const name = nameOf(el);
+    if (name !== item.name || tag !== item.tag || type !== (item.type || '') || role !== (item.role || '')) {
+      return reject('changed: identity differs from the description stage');
+    }
+    const style = window.getComputedStyle(el);
+    const ancestorHidden = typeof el.closest === 'function' && !!el.closest('[aria-hidden="true"]');
+    if (type.toLowerCase() === 'hidden' || el.hidden === true || ancestorHidden
+        || (el.getAttribute('aria-hidden') || '').toLowerCase() === 'true'
+        || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+        || !(el.offsetParent !== null || el.getClientRects().length)) {
+      return reject('hidden_or_invisible');
+    }
+    const haystack = [name, el.id || '', (el.className && el.className.baseVal === undefined) ? String(el.className) : '',
+                      el.getAttribute('autocomplete') || '', type].join(' ');
+    if (CREDENTIAL_TYPES.includes(type.toLowerCase()) || CREDENTIAL.test(haystack)
+        || (tag !== 'input' && el.querySelector(CREDENTIAL_DESCENDANT))) {
+      return reject('credential_like');
+    }
     const isInput = ['input', 'textarea', 'select'].includes(tag);
-    const sib = el.nextElementSibling;
-    return {
-      index: item.index, name: nameOf(el),
-      value: (isInput ? String(el.value || '') : clean(el.textContent)).slice(0, %(max)d),
-      next_sibling_text: sib ? clean(sib.textContent).slice(0, %(max)d) : '',
-    };
+    const value = isInput ? String(el.value || '') : clean(el.innerText);
+    return { index: item.index, name, value: value.slice(0, %(max)d), rejected: '' };
   });
-""" % {"max": MAX_VALUE_CHARS}
+""" % {"max": MAX_VALUE_CHARS, "cred": json.dumps(CREDENTIAL_RE.pattern),
+       "types": json.dumps(sorted(CREDENTIAL_TYPES))}
 
 DESCRIBE_JS_PAGE = "(arg) => { const root = document; " + _DESCRIBE_BODY + " }"
 DESCRIBE_JS_ELEMENT = "(root, arg) => { " + _DESCRIBE_BODY + " }"
@@ -135,11 +162,19 @@ def _hostname() -> str:
 
 @contextmanager
 def _exclusive_session(**kwargs: Any):
-    """The repo's own browser ownership: cross-VM driver lease plus the profile lock."""
+    """The repo's profile lock. exclusive_session also CHECKS the driver lease; it does not obtain or renew it."""
     from .ezlynx_session_lock import exclusive_session
 
     with exclusive_session(**kwargs):
         yield
+
+
+def _driver_gate_status() -> dict[str, Any]:
+    """The shared driver lease as the repo's own gate reads it. READ ONLY: it never writes metadata."""
+    from .ezlynx_driver_gate import check_driver_gate
+
+    decision = check_driver_gate()
+    return {"allowed": bool(decision.allowed), "holder": decision.holder, "reason": decision.reason}
 
 
 def _job_db_path() -> str:
@@ -215,12 +250,17 @@ def preflight(*, task_id: str, applicant_id: str, operator: str, confirm_browser
         active = _job_inventory(jobs_db_path)
         if active:
             raise InspectionRefused(f"{len(active)} job(s) or lease(s) are active; the browser is not exclusive")
+        lease = _driver_gate_status()
+        if not (lease.get("allowed") is True and lease.get("holder") == "TEST" and lease.get("reason") == "driver is IN"):
+            raise InspectionRefused(
+                f"Test does not already hold a valid shared driver lease ({lease.get('reason')}; holder {lease.get('holder')}). "
+                "The inspection only checks the lease; it does not obtain or renew it")
         tabs = _list_browser_tabs()
         foreign = [t["url"] for t in tabs
                    if re.search(r"/web/account/(\d+)", t["url"]) and f"/web/account/{TEST_ACCOUNT}" not in t["url"]]
         if foreign:
             raise InspectionRefused(f"another client's account is open in the browser: {foreign}")
-        record.update({"active_jobs_or_leases": 0, "open_tabs": tabs,
+        record.update({"active_jobs_or_leases": 0, "open_tabs": tabs, "driver_lease": lease,
                        "browser_ownership_confirmed_by_operator": True,
                        "exclusive_use_confirmed_by_operator": True})
     return record
@@ -272,17 +312,18 @@ def _capture(scope: Any, scope_name: str, *, inventory: bool, excluded: dict[str
             excluded["unapproved_page_elements"] += 1
     fields: list[dict[str, Any]] = []
     if approved:
-        request = [{"index": item["meta"]["index"], "name": item["meta"].get("name")} for item in approved]
+        request = [{"index": item["meta"]["index"], "name": item["meta"].get("name"), "tag": item["meta"].get("tag"),
+                    "type": item["meta"].get("type"), "role": item["meta"].get("role")} for item in approved]
         rows = {row.get("index"): row for row in scope.evaluate(read, request)}
         for item in approved:
             meta, row = item["meta"], rows.get(item["meta"]["index"]) or {}
-            if row.get("name") != meta.get("name"):
-                excluded["changed_between_reads"] += 1  # the DOM moved between the two reads: do not trust it
+            if row.get("rejected") or row.get("name") != meta.get("name"):
+                # the page re-checked the live element and refused it (or it moved): nothing was read
+                excluded["revalidation_failed"] += 1
                 continue
             fields.append({"scope": scope_name, "field_hint": item["hint"], "name": meta.get("name"),
                            "role": meta.get("role"), "editable": meta.get("editable"),
-                           "value": str(row.get("value") or "")[:MAX_VALUE_CHARS],
-                           "next_sibling_text": str(row.get("next_sibling_text") or "")[:MAX_VALUE_CHARS]})
+                           "value": str(row.get("value") or "")[:MAX_VALUE_CHARS]})
     return controls, fields
 
 
@@ -337,7 +378,7 @@ def run_dom_inspection(*, task_id: str, applicant_id: str, output_path: Any, ope
                     confirm_browser_owner=confirm_browser_owner, confirm_exclusive=confirm_exclusive,
                     jobs_db_path=jobs_db_path, browser=True)
     excluded = {"hidden_or_invisible": 0, "credential_like": 0, "unapproved_page_elements": 0,
-                "changed_between_reads": 0}
+                "revalidation_failed": 0}
     record: dict[str, Any] = {
         "kind": "dom", "environment": "TEST", "applicant_id": str(applicant_id), "task_id": str(task_id),
         "observed_at": datetime.now(timezone.utc).isoformat(), "preflight": pre,
@@ -351,7 +392,7 @@ def run_dom_inspection(*, task_id: str, applicant_id: str, output_path: Any, ope
         try:
             stack.enter_context(_exclusive_session(timeout_seconds=30))
         except Exception as exc:  # noqa: BLE001 — a held lock or a driver lease we do not own
-            raise InspectionRefused(f"browser ownership or exclusivity could not be taken: {exc}") from exc
+            raise InspectionRefused(f"the profile lock or the driver-lease check refused: {exc}") from exc
         with stack:
             with cdp._browser_page() as page:
                 try:

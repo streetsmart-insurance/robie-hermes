@@ -1799,7 +1799,7 @@ class _Dialog:
             return [dict(m) for m in self.metas]
         self.log.append(("read", "dialog", [item["index"] for item in arg]))
         return [{"index": item["index"], "name": item.get("name_override", item["name"]),
-                 "value": self.values.get(item["index"], ""), "next_sibling_text": ""} for item in arg]
+                 "value": self.values.get(item["index"], ""), "rejected": ""} for item in arg]
 
 
 class _AccountPage:
@@ -1813,7 +1813,7 @@ class _AccountPage:
             return [dict(m) for m in self.metas]
         self.log.append(("read", "page", [item["index"] for item in arg]))
         return [{"index": item["index"], "name": item["name"], "value": self.values.get(item["index"], ""),
-                 "next_sibling_text": ""} for item in arg]
+                 "rejected": ""} for item in arg]
     def get_by_role(self, role, name, exact):
         outer = self
         class Loc:
@@ -1921,7 +1921,7 @@ def test_a_read_back_whose_name_changed_is_dropped(monkeypatch, tmp_path):
     monkeypatch.setattr(_Dialog, "evaluate", shifted)
     insp.run_dom_inspection(**kwargs)
     saved = json.loads((tmp_path / "observation.json").read_text())
-    assert saved["approved_fields"] == [] and saved["excluded"]["changed_between_reads"] == 1
+    assert saved["approved_fields"] == [] and saved["excluded"]["revalidation_failed"] == 1
 
 
 def test_credential_and_hidden_classification_is_decided_before_any_value_is_requested():
