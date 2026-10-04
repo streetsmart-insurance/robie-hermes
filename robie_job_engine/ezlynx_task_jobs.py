@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 ACTION_TYPE = "ezlynx.task_intake"
 
 
+def _workflow_id(task: AssignedTask) -> str:
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(task.activity_labels, task.description)
+    return decision.workflow_id if decision.action == "workflow" else ""
+
+
 def task_idempotency_key(task_id: str) -> str:
     """Stable idempotency key for one EZLynx task ID."""
     return f"ezlynx-task:{task_id.strip()}"
@@ -70,6 +77,8 @@ def job_payload_for_task(
         "task_created_by": task.created_by,
         "assigned_producer": task.assigned_producer,
         "csr": task.csr,
+        "activity_labels": task.activity_labels,
+        "workflow": _workflow_id(task),
         "report_message_id": report_message_id,
         "report_digest": report_digest,
     }

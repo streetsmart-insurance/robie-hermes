@@ -1,5 +1,5 @@
 [Unit]
-Description=ROBIE Ascend notice driver (manual; no timer)
+Description=ROBIE Ascend notice driver (dry-run unless ASCEND_DRIVER_LIVE=1)
 After=network-online.target
 Wants=network-online.target
 
@@ -23,10 +23,20 @@ Environment=ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-pro
 # The drop-in repeats these two lines so an EnvironmentFile cannot clear them.
 Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
 Environment=ROBIE_PLAYGROUND=1
-# No install section and no timer. The workflow schedule stays commented out.
-# A manual start is dry-run. Live mode is the workflow live=true input.
-ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ascend_notice_driver --due-days 2
+# Counts-only run log. The health check reads this file; it does not read
+# the journal. The driver sets the log to mode 0644 (this unit's umask is 0077).
+Environment=ASCEND_DRIVER_STATE_DIR=/var/lib/robie-ascend-notice-driver
+# streetsmart-hermes cannot exec the hermes-agent venv. /opt/streetsmart-hermes/.hermes
+# is 0700, owned by carlo_streetsmart_insurance. This venv is owned by
+# streetsmart-hermes and is the interpreter the driver imports on.
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0755 /var/lib/robie-ascend-notice-driver
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_notice_driver --due-days 2
+# Dry-run unless 30-live.conf sets ASCEND_DRIVER_LIVE=1. That drop-in is
+# shipped as 30-live.conf.example and is not installed by default.
+# The timer is robie-ascend-notice-driver.timer. The installer leaves it
+# stopped unless --enable-timer is passed.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/var/lib/robie-ascend-notice-driver

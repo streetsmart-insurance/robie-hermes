@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -65,6 +66,14 @@ REASSIGN_PRECEDENCE = (
 
 class NeedsHuman(Exception):
     """The worker needs a human answer before this job can proceed."""
+
+
+class CallQueued(Exception):
+    """The call is outside the calling window. Leave the job pending."""
+
+
+class CallHeld(Exception):
+    """The call was not placed and should be tried on a later pass."""
 
 
 class UnverifiedNoteError(Exception):
@@ -199,6 +208,10 @@ class TaskAssignmentWorker:
         phone_lookup: Any | None = None,
         bland_client: Any | None = None,
         call_dry_run: bool = True,
+        transfer_lookup: Any | None = None,
+        opt_out_store: Any | None = None,
+        opt_in_store: Any | None = None,
+        call_dedupe: Any | None = None,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
@@ -211,6 +224,10 @@ class TaskAssignmentWorker:
         self.phone_lookup = phone_lookup
         self.bland_client = bland_client
         self.call_dry_run = call_dry_run
+        self.transfer_lookup = transfer_lookup
+        self.opt_out_store = opt_out_store
+        self.opt_in_store = opt_in_store
+        self.call_dedupe = call_dedupe
 
     # -- job lifecycle -------------------------------------------------
 
@@ -224,6 +241,24 @@ class TaskAssignmentWorker:
         job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
         try:
             action = self._do_work(store, job)
+        except CallQueued as e:
+            logger.info("Job %s queued until the calling window: %s", job_id, e)
+            return store.transition(
+                job_id,
+                JobStatus.PENDING,
+                expected={JobStatus.RUNNING},
+                error=str(e)[:500],
+                release_lease=True,
+            )
+        except CallHeld as e:
+            logger.info("Job %s not dialed; left pending: %s", job_id, e)
+            return store.transition(
+                job_id,
+                JobStatus.PENDING,
+                expected={JobStatus.RUNNING},
+                error=str(e)[:500],
+                release_lease=True,
+            )
         except NeedsHuman as e:
             logger.warning(f"Job {job_id} needs a human: {e}")
             return store.transition(
@@ -377,10 +412,14 @@ class TaskAssignmentWorker:
             "Task Subject": task.title,
             "Task Description": task.description,
             "Applicant ID": task.applicant_id,
-            "Applicant Name": payload.get("account_name") or "",
+            "Applicant Name": payload.get("account_name") or task.applicant_name or "",
             "Task Created By": task.created_by,
+            "Assigned Producer": task.assigned_producer,
             "Assigned To": payload.get("assigned_to") or "Robie AI",
             "Task Due Date": task.due_date,
+            "Activity Labels": task.activity_labels,
+            "Discussion ID": task.discussion_id,
+            "Workflow": payload.get("workflow") or "",
         }
         reassign_port = (
             _WorkerReassignPortAdapter(self.reassigner, task)
@@ -392,9 +431,30 @@ class TaskAssignmentWorker:
             bland=self.bland_client,
             discussion_client=self.client,
             task_reassign=reassign_port,
+            transfer_lookup=self.transfer_lookup,
+            opt_out_store=self.opt_out_store,
+            opt_in_store=self.opt_in_store,
+            call_dedupe=self.call_dedupe,
         )
-        config = rch.RobieCallConfig(dry_run=self.call_dry_run)
+        config = rch.RobieCallConfig(
+            dry_run=self.call_dry_run,
+            sms_configured=os.environ.get("ROBIE_CALL_SMS_CONFIGURED") == "1",
+        )
         result = rch.handle_robie_call_task(task_dict, config, ports)
+        if result.get("skipped_opt_in"):
+            self._record(
+                task, "skipped",
+                "Marketing call skipped; no recorded opt-in.",
+                timestamp,
+            )
+            raise CallHeld(str(result.get("error") or "no recorded opt-in"))
+        if result.get("queued_for_calling_window"):
+            self._record(
+                task, "queued",
+                f"Robie Call queued: {result.get('error')}.",
+                timestamp,
+            )
+            raise CallQueued(str(result.get("error") or "outside calling window"))
 
         note = result.get("writeback") or {}
         action: dict[str, Any] = {
@@ -431,6 +491,11 @@ class TaskAssignmentWorker:
 
     def _categorize_task(self, task: AssignedTask) -> str:
         """Sort the request from its activity type and note text."""
+        from .call_pickup import classify_call_request
+
+        labeled = classify_call_request(task.activity_labels, task.description)
+        if labeled.action in ("workflow", "freeform"):
+            return "callback"
         text = f"{task.title} {task.description}".lower()
         if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
             return "callback"
@@ -546,6 +611,7 @@ def _task_from_payload(payload: dict[str, Any]) -> AssignedTask:
         created_by=str(payload.get("task_created_by") or ""),
         assigned_producer=str(payload.get("assigned_producer") or ""),
         csr=str(payload.get("csr") or ""),
+        activity_labels=str(payload.get("activity_labels") or ""),
     )
 
 

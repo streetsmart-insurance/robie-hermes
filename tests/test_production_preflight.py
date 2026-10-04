@@ -147,7 +147,7 @@ class CheckContractTests(unittest.TestCase):
     def test_systemd_units_match_scheduler_oneshot_and_daily_window(self):
         self.assertIn("Type=oneshot", SERVICE)
         self.assertIn(
-            "ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python "
+            "ExecStart=/opt/streetsmart-hermes/venv/bin/python "
             "-m robie_job_engine.production_preflight",
             SERVICE,
         )

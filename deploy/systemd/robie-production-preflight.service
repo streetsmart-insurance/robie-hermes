@@ -15,7 +15,8 @@ Environment=ROBIE_SECRET_PROJECT=streetsmart-hermes-poc
 Environment=ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78
 Environment=ROBIE_PREFLIGHT_FAIL_NOTIFY=carlo@streetsmart.insurance,jake@streetsmart.insurance
 Environment=ROBIE_CHAT_SA_KEY_FILE=/etc/streetsmart-hermes/robie-chat-sa-key.json
-ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.production_preflight
+# streetsmart-hermes cannot exec the hermes-agent venv: /opt/streetsmart-hermes/.hermes is 0700 carlo.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.production_preflight
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
