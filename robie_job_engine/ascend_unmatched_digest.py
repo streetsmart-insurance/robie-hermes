@@ -175,6 +175,7 @@ _READY_WHEN_NOTES_ABSENT = "Robie's Ascend notes haven't run recently."
 _HANDED_BACK = (
     "Robie matched this but couldn't file it — please file by hand."
 )
+MAYBE_NOTE_LINE = "Robie may have already added this note, please check by hand."
 # A poll older than this is not evidence that notes are on.
 POLL_FRESHNESS = timedelta(hours=2)
 _POLICY_ID_LINE = re.compile(r"(?i)^policy id\s+\S+")
@@ -753,6 +754,8 @@ def item_line(item: dict[str, Any]) -> str:
     if int(item.get("file_attempts") or 0) >= FILE_ATTEMPT_LIMIT:
         reason = str(item.get("file_failure") or "").strip() or "The note was not filed."
         return ", ".join(parts) + ". " + _HANDED_BACK + " " + reason
+    if str(item.get("file_failure") or "").strip() == MAYBE_NOTE_LINE:
+        return ", ".join(parts) + ". " + MAYBE_NOTE_LINE
     if item.get("ready_to_file") or str(item.get("ready_at") or "").strip():
         state = str(item.get("notes_state") or "")
         if not state:

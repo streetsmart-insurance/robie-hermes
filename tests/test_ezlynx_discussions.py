@@ -115,6 +115,42 @@ def test_get_discussion_by_id():
     assert record["discussionId"] == "d9"
 
 
+def test_get_discussion_with_notes_uses_the_with_notes_path():
+    client = make_client(token_routes([("with-notes", {"discussionId": "d9", "notes": []})]))
+    record = client.get_discussion_with_notes("d9")
+    assert record["discussionId"] == "d9"
+    urls = [call["url"] for call in client._urlopen.calls if "with-notes" in call["url"]]
+    assert urls and urls[0].endswith("/v8/discussions/d9/with-notes")
+
+
+def test_with_notes_read_is_complete_only_for_the_whole_list():
+    plain = {
+        "discussionId": "d1",
+        "title": "Ascend - Payments",
+        "noteCount": 1,
+        "mostRecentNoteId": "n1",
+    }
+    assert not disc.with_notes_read_is_complete(plain)
+    assert disc.with_notes_read_is_complete({"discussionId": "d1", "noteCount": 0, "notes": []})
+    assert disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 1, "notes": [{"noteId": "n1", "body": "hello"}]}
+    )
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 3, "notes": [{"noteId": "n1", "body": "hello"}]}
+    )
+    assert not disc.with_notes_read_is_complete(
+        {
+            "discussionId": "d1",
+            "noteCount": 1,
+            "next": "page-2",
+            "notes": [{"noteId": "n1", "body": "hello"}],
+        }
+    )
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 1, "notes": [{"noteId": "n1"}]}
+    )
+
+
 # ---------------------------------------------------------------------------
 # append
 

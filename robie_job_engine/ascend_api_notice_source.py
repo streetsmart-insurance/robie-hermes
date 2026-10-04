@@ -1119,6 +1119,40 @@ class EventKeyStore:
                 (moment, key),
             )
 
+    def mark_transient_retry_used(self, event_key: str) -> None:
+        """The unpaid retry after a 5xx has been taken. Later failures count."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET transient_retry_used = 1,
+                    transient_hold_until = ''
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (key,),
+            )
+
+    def note_file_failure(self, event_key: str, plain_reason: str) -> None:
+        """Remember a filing note for the email without using an attempt."""
+        key = str(event_key or "").strip()
+        reason = str(plain_reason or "").strip()
+        if not key or not reason:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET file_failure = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (reason, key),
+            )
+
     def refresh_unmatched_policy(
         self,
         event_key: str,
@@ -1266,7 +1300,8 @@ def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
             file_attempts INTEGER NOT NULL DEFAULT 0,
             last_attempt_at TEXT,
             file_failure TEXT NOT NULL DEFAULT '',
-            transient_hold_until TEXT
+            transient_hold_until TEXT,
+            transient_retry_used INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
             policy_key TEXT NOT NULL,
@@ -1301,6 +1336,7 @@ def _ensure_unmatched_columns(conn: sqlite3.Connection) -> None:
         ("last_attempt_at", "TEXT"),
         ("file_failure", "TEXT NOT NULL DEFAULT ''"),
         ("transient_hold_until", "TEXT"),
+        ("transient_retry_used", "INTEGER NOT NULL DEFAULT 0"),
     )
     for name, ddl in additions:
         if name not in have:
@@ -1358,17 +1394,45 @@ def _hold_transient(store: EventKeyStore, event_key: str, seen_at: str) -> None:
     store.note_transient_hold(event_key, _iso(moment + TRANSIENT_BACKOFF))
 
 
-def _unconfirmed_guard_after_transient(reason: str, row: dict[str, Any]) -> bool:
-    """The note-ledger guard after a 5xx is not a failed filing attempt.
+def _retry_was_used(row: dict[str, Any]) -> bool:
+    return int(row.get("transient_retry_used") or 0) == 1
 
-    The first post left a sent-unconfirmed row. The retry says the note
-    could not be confirmed. That refusal spends an attempt only when this
-    row was not already parked for a transient failure.
-    """
-    text = str(reason or "").lower()
-    if "couldn't confirm that note was added" not in text:
-        return False
+
+def _hold_is_set(row: dict[str, Any]) -> bool:
     return bool(str(row.get("transient_hold_until") or "").strip())
+
+
+def _record_ready_miss(
+    store: EventKeyStore,
+    row: dict[str, Any],
+    event_key: str,
+    seen_at: str,
+    reason: str,
+    *,
+    maybe_note: bool = False,
+) -> None:
+    """One unpaid pause, then one unpaid retry. After that, misses count.
+
+    A later HTTP 5xx does not start another free pause. The with-notes
+    uncertainty line is stored for the email and does not, by itself, spend
+    the free retry's attempt.
+    """
+    from .ascend_unmatched_digest import MAYBE_NOTE_LINE
+
+    text = str(reason or "")
+    guard = "couldn't confirm that note was added" in text.lower()
+    transient = _is_transient_failure(text)
+    used = _retry_was_used(row)
+    held = _hold_is_set(row)
+    if not used and not held and transient:
+        _hold_transient(store, event_key, seen_at)
+        return
+    if not used and held and (transient or guard or maybe_note):
+        store.mark_transient_retry_used(event_key)
+        if maybe_note:
+            store.note_file_failure(event_key, MAYBE_NOTE_LINE)
+        return
+    store.note_ready_attempt(event_key, seen_at, plain_file_failure(text))
 
 
 def _is_transient_failure(reason: str) -> bool:
@@ -2991,10 +3055,13 @@ def _file_ready_unmatched(
         queued.append((row, notice))
     ctx.ascend_client = _SnapshotPrograms([*extra, *programs])
     previous = getattr(ctx, "ready_row_filing", False)
+    previous_retry = getattr(ctx, "transient_note_retry", False)
     ctx.ready_row_filing = True
     filed: list[dict[str, Any]] = []
     try:
         for _row, notice in queued:
+            # Only a row parked by a 5xx or timeout may clear an unconfirmed note.
+            ctx.transient_note_retry = _hold_is_set(_row) and not _retry_was_used(_row)
             try:
                 if store.is_filed(notice.event_key):
                     store.resolve_unmatched(notice.event_key, seen_at)
@@ -3009,19 +3076,19 @@ def _file_ready_unmatched(
                     continue
                 outcome = _file_through_driver(ctx, notice)
                 reason = str(outcome.get("reason") or "")
+                detail = outcome.get("detail") if isinstance(outcome.get("detail"), dict) else {}
                 if _already_in_ezlynx(outcome):
                     store.record_filed(notice)
                     store.resolve_unmatched(notice.event_key, seen_at)
                     outcome = {**outcome, "status": "done"}
-                elif _is_transient_failure(reason) or _unconfirmed_guard_after_transient(
-                    reason, _row
-                ):
-                    _hold_transient(store, notice.event_key, seen_at)
                 else:
-                    store.note_ready_attempt(
+                    _record_ready_miss(
+                        store,
+                        _row,
                         notice.event_key,
                         seen_at,
-                        plain_file_failure(str(outcome.get("reason") or "")),
+                        reason,
+                        maybe_note=bool(detail.get("maybe_note")),
                     )
                 filed.append(outcome)
             except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
@@ -3029,15 +3096,13 @@ def _file_ready_unmatched(
                     "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
                 )
                 try:
-                    blown = f"error: {type(exc).__name__}: {exc}"
-                    if _is_transient_failure(blown):
-                        _hold_transient(store, notice.event_key, seen_at)
-                    else:
-                        store.note_ready_attempt(
-                            notice.event_key,
-                            seen_at,
-                            plain_file_failure(blown),
-                        )
+                    _record_ready_miss(
+                        store,
+                        _row,
+                        notice.event_key,
+                        seen_at,
+                        f"error: {type(exc).__name__}: {exc}",
+                    )
                 except Exception as record_exc:  # noqa: BLE001 - a locked store must not abort the poll
                     logger.warning(
                         "ready-to-file %s attempt was not recorded: %s",
@@ -3054,6 +3119,7 @@ def _file_ready_unmatched(
                 )
     finally:
         ctx.ready_row_filing = previous
+        ctx.transient_note_retry = previous_retry
     return filed
 
 

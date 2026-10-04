@@ -511,7 +511,11 @@ class DiscussionApiClient:
         return rows
 
     def get_discussion(self, discussion_id: str) -> dict[str, Any]:
-        """Single discussion by id (v8 discussions/:discussionId)."""
+        """Single discussion by id (v8 discussions/:discussionId).
+
+        This read has title, note count, and the latest note id. It does
+        not include note bodies.
+        """
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")
@@ -519,6 +523,22 @@ class DiscussionApiClient:
         if isinstance(parsed, dict):
             return parsed
         raise DiscussionApiError(None, "discussion lookup returned unexpected shape")
+
+    def get_discussion_with_notes(self, discussion_id: str) -> dict[str, Any]:
+        """GET v8/discussions/{id}/with-notes. This read includes note bodies.
+
+        The plain discussion read does not. A missing body on that plain
+        read is not proof the note is absent.
+        """
+        discussion = str(discussion_id or "").strip()
+        if not discussion:
+            raise DiscussionApiError(None, "discussion id is required")
+        parsed = self._get(
+            f"v8/discussions/{parse.quote(discussion, safe='')}/with-notes"
+        )
+        if isinstance(parsed, dict):
+            return parsed
+        raise DiscussionApiError(None, "discussion with-notes lookup returned unexpected shape")
 
     # -- append ----------------------------------------------------------
 
@@ -1095,6 +1115,39 @@ def iter_discussion_notes(record: Any):
 
 
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def with_notes_read_is_complete(record: Any) -> bool:
+    """True when a with-notes payload is the whole list and bodies are readable.
+
+    An empty ``notes`` list is complete: the body is absent. Notes that
+    carry bodies, with no next page and a matching count, are complete.
+    A plain discussion read, a short page, or notes with no body text is
+    not complete. Absence is only meaningful on a complete read.
+    """
+    if not isinstance(record, dict):
+        return False
+    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    for key in ("next", "Next", "hasMore", "HasMore", "nextPage", "NextPage"):
+        if record.get(key) or meta.get(key):
+            return False
+    notes = None
+    for key in ("notes", "Notes"):
+        if key in record and isinstance(record.get(key), list):
+            notes = record[key]
+            break
+    if notes is None:
+        return False
+    raw_count = record.get("noteCount", record.get("NoteCount"))
+    if isinstance(raw_count, bool):
+        raw_count = None
+    if isinstance(raw_count, str) and raw_count.strip().isdigit():
+        raw_count = int(raw_count.strip())
+    if isinstance(raw_count, int) and raw_count != len(notes):
+        return False
+    if notes and not _payload_has_note_bodies(record):
+        return False
+    return True
 
 
 def _payload_has_note_bodies(record: Any) -> bool:

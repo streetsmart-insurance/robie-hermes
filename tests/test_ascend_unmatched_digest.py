@@ -2083,18 +2083,69 @@ def test_the_unconfirmed_guard_after_a_timeout_does_not_spend_an_attempt(tmp_pat
         driver_ctx=HELPERS.driver_ctx(),
         now=NOW + timedelta(hours=2),
     )
-    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
-    assert store.list_unmatched()[0]["resolved_at"] in (None, "")
+    paused = store.list_unmatched()[0]
+    assert int(paused["file_attempts"] or 0) == 0
+    assert int(paused["transient_retry_used"] or 0) == 1
+    assert not str(paused.get("transient_hold_until") or "").strip()
+    assert paused["resolved_at"] in (None, "")
+
+    # The free retry is spent. A later 5xx counts, and does not park the row again.
+    calls = {"n": 0}
+
+    def _down_again(_ctx, item):
+        calls["n"] += 1
+        return _down(_ctx, item)
+
+    monkeypatch.setattr(source, "_file_through_driver", _down_again)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(hours=2, minutes=15),
+    )
+    counted = store.list_unmatched()[0]
+    assert calls["n"] == 1
+    assert int(counted["file_attempts"] or 0) == 1
+    assert not str(counted.get("transient_hold_until") or "").strip()
+
+    def _guard_again(_ctx, item):
+        calls["n"] += 1
+        return _guard(_ctx, item)
+
+    monkeypatch.setattr(source, "_file_through_driver", _guard_again)
+    for step in range(2, 6):
+        source.run_once(
+            client=HELPERS.FeedClient(_empty_feeds()),
+            store=store,
+            driver_ctx=HELPERS.driver_ctx(),
+            now=NOW + timedelta(hours=2, minutes=15 * step),
+        )
+    handed = store.list_unmatched()[0]
+    assert calls["n"] == 5
+    assert int(handed["file_attempts"] or 0) == 5
+    assert handed["resolved_at"] in (None, "")
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    mailed = digest.run_digest(stores=[store], now=NOW + timedelta(hours=4), live=False, refresh=False)
+    assert "couldn't file it" in mailed["body"]
+    assert "please file by hand" in mailed["body"]
 
 
 class _FlakyNotePost:
-    """The first note POST is HTTP 500. Later posts succeed."""
+    """The first note POST is HTTP 500. A later post succeeds.
 
-    def __init__(self, *, show_landed_body: bool):
+    The plain discussion read has a title, a note count, and the latest
+    note id. It has no note bodies. Bodies are returned only by with-notes.
+    """
+
+    def __init__(self, mode: str):
+        if mode not in {"landed", "absent", "unavailable", "truncated"}:
+            raise ValueError(mode)
+        self.mode = mode
         self.calls: list[dict] = []
         self.posted_body = ""
         self.failures_left = 1
-        self.show_landed_body = show_landed_body
+        self.note_count = 1
+        self.latest_id = "n-seed"
 
     def __call__(self, url, *, data=None, headers=None, timeout=None):
         self.calls.append({"url": url, "data": data})
@@ -2102,36 +2153,77 @@ class _FlakyNotePost:
             return HELPERS.FakeResponse({"access_token": "tok123", "expires_in": 3600})
         if "by-applicant" in url:
             return HELPERS.FakeResponse([{"discussionId": "d1", "title": "Ascend - Payments"}])
-        if data and "/notes" in url:
+        if data and "/notes" in url and "with-notes" not in url:
             self.posted_body = json.loads(data.decode("utf-8")).get("body") or ""
             if self.failures_left:
                 self.failures_left -= 1
                 raise urlerror.HTTPError(
                     url, 500, "Server Error", {}, io.BytesIO(b"down")
                 )
+            self.note_count += 1
+            self.latest_id = "n-retry"
             return HELPERS.FakeResponse({"noteId": "n-retry"})
+        if "with-notes" in url:
+            return self._with_notes(url)
         if "v8/discussions/" in url:
-            notes = []
-            if self.show_landed_body and self.posted_body:
-                notes.append({"noteId": "n-landed", "body": self.posted_body})
             return HELPERS.FakeResponse(
                 {
                     "discussionId": "d1",
                     "title": "Ascend - Payments",
-                    "mostRecentNoteId": "n-retry",
-                    "notes": notes,
+                    "noteCount": self.note_count,
+                    "mostRecentNoteId": self.latest_id,
                 }
             )
         raise AssertionError(url)
 
+    def _with_notes(self, url):
+        if self.mode == "unavailable":
+            raise urlerror.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"missing"))
+        other = {"noteId": "n-other", "body": "A different note that is not this bill."}
+        if self.mode == "landed":
+            notes = [{"noteId": "n-landed", "body": self.posted_body}]
+            count = 1
+            extra = {}
+        elif self.mode == "absent":
+            notes = [other]
+            count = 1
+            extra = {}
+        else:
+            notes = [other]
+            count = 4
+            extra = {"next": "page-2"}
+        return HELPERS.FakeResponse(
+            {
+                "discussionId": "d1",
+                "title": "Ascend - Payments",
+                "noteCount": count,
+                "notes": notes,
+                **extra,
+            }
+        )
+
     def posts_to(self, needle):
-        return [call for call in self.calls if needle in call["url"] and call["data"]]
+        return [
+            call
+            for call in self.calls
+            if needle in call["url"] and "with-notes" not in call["url"] and call["data"]
+        ]
+
+    def plain_reads(self):
+        return [
+            call
+            for call in self.calls
+            if "v8/discussions/" in call["url"]
+            and "with-notes" not in call["url"]
+            and "by-applicant" not in call["url"]
+            and not call["data"]
+        ]
 
 
-def _discussion_that_fails_the_first_note(show_landed_body: bool):
+def _discussion_that_fails_the_first_note(mode: str):
     from robie_job_engine import ezlynx_discussions as discussions
 
-    poster = _FlakyNotePost(show_landed_body=show_landed_body)
+    poster = _FlakyNotePost(mode)
     config = discussions.DiscussionApiConfig(
         discussion_base_url="https://app.uatezlynx.com/DiscussionApi/",
         token_endpoint="https://identity.example.com/connect/token",
@@ -2155,52 +2247,106 @@ def _ready_row(tmp_path, monkeypatch):
     return store
 
 
-def test_a_retry_marks_filed_when_the_note_body_is_already_there(tmp_path, monkeypatch):
+def _poll_ready(store, ctx, when):
+    return source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=when,
+    )
+
+
+def _ready_discussion(tmp_path, monkeypatch, mode: str):
     store = _ready_row(tmp_path, monkeypatch)
-    client, poster = _discussion_that_fails_the_first_note(True)
+    client, poster = _discussion_that_fails_the_first_note(mode)
     ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
     ctx.discussion_client = client
-    source.run_once(
-        client=HELPERS.FeedClient(_empty_feeds()),
-        store=store,
-        driver_ctx=ctx,
-        now=NOW,
-    )
+    return store, ctx, poster
+
+
+def test_a_retry_marks_filed_when_the_note_body_is_already_there(tmp_path, monkeypatch):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "landed")
+    _poll_ready(store, ctx, NOW)
     assert len(poster.posts_to("/notes")) == 1
+    assert poster.plain_reads()
     assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
-    source.run_once(
-        client=HELPERS.FeedClient(_empty_feeds()),
-        store=store,
-        driver_ctx=ctx,
-        now=NOW + timedelta(hours=2),
-    )
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
     assert len(poster.posts_to("/notes")) == 1
     assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
     assert store.list_unmatched()[0]["resolved_at"]
 
 
-def test_a_retry_posts_once_when_the_note_never_landed(tmp_path, monkeypatch):
-    store = _ready_row(tmp_path, monkeypatch)
-    client, poster = _discussion_that_fails_the_first_note(False)
-    ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
-    ctx.discussion_client = client
-    source.run_once(
-        client=HELPERS.FeedClient(_empty_feeds()),
-        store=store,
-        driver_ctx=ctx,
-        now=NOW,
-    )
+def test_a_retry_posts_once_when_with_notes_shows_the_body_is_absent(tmp_path, monkeypatch):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "absent")
+    _poll_ready(store, ctx, NOW)
     assert len(poster.posts_to("/notes")) == 1
+    assert poster.plain_reads()
     assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
-    source.run_once(
-        client=HELPERS.FeedClient(_empty_feeds()),
-        store=store,
-        driver_ctx=ctx,
-        now=NOW + timedelta(hours=2),
-    )
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
     assert len(poster.posts_to("/notes")) == 2
     assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
     assert store.list_unmatched()[0]["resolved_at"]
+    _poll_ready(store, ctx, NOW + timedelta(hours=2, minutes=15))
+    assert len(poster.posts_to("/notes")) == 2
+
+
+def test_a_retry_does_not_post_when_with_notes_is_unavailable(tmp_path, monkeypatch):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "unavailable")
+    _poll_ready(store, ctx, NOW)
+    assert len(poster.posts_to("/notes")) == 1
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
+    row = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert row["resolved_at"] in (None, "")
+    assert int(row["file_attempts"] or 0) == 0
+    assert int(row["transient_retry_used"] or 0) == 1
+    assert row["file_failure"] == digest.MAYBE_NOTE_LINE
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    mailed = digest.run_digest(
+        stores=[store], now=NOW + timedelta(hours=2), live=False, refresh=False
+    )
+    assert digest.MAYBE_NOTE_LINE in mailed["body"]
+    assert len(poster.posts_to("/notes")) == 1
+
+
+def test_a_short_with_notes_page_does_not_clear_the_unconfirmed_note(tmp_path, monkeypatch):
+    store, ctx, poster = _ready_discussion(tmp_path, monkeypatch, "truncated")
+    _poll_ready(store, ctx, NOW)
+    _poll_ready(store, ctx, NOW + timedelta(hours=2))
+    row = store.list_unmatched()[0]
+    assert len(poster.posts_to("/notes")) == 1
+    assert row["resolved_at"] in (None, "")
+    assert int(row["file_attempts"] or 0) == 0
+    assert row["file_failure"] == digest.MAYBE_NOTE_LINE
+
+
+def test_settle_keeps_the_guard_unless_this_row_is_on_its_free_retry():
+    filed = {
+        "status": "already_posted",
+        "reason": "I couldn't confirm that note was added.",
+    }
+
+    class Client:
+        def get_discussion_with_notes(self, discussion_id):
+            raise AssertionError(discussion_id)
+
+    kept = driver._settle_unconfirmed_note(
+        Client(), "220250093", "d1", "note text", filed, allow=False
+    )
+    assert kept is filed
+    assert "maybe_note" not in kept
+    jumped = {
+        "status": "already_posted",
+        "reason": (
+            "The note was sent, but the discussion did not show exactly one new note. "
+            "It was not sent again."
+        ),
+    }
+    still = driver._settle_unconfirmed_note(
+        Client(), "220250093", "d1", "note text", jumped, allow=True
+    )
+    assert still is jumped
+    assert "maybe_note" not in still
 
 
 def test_dry_run_does_not_store_the_reread_policy_number(tmp_path, monkeypatch):
@@ -2496,5 +2642,6 @@ def test_existing_database_gains_unmatched_tables(tmp_path):
         "last_attempt_at",
         "file_failure",
         "transient_hold_until",
+        "transient_retry_used",
     } <= columns
     assert "live" in poll_columns
