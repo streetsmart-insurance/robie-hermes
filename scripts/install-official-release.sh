@@ -45,6 +45,10 @@ fi
 
 PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONPATH
+# python -m puts the caller's cwd first on sys.path. A stray
+# robie_job_engine/ directory there hides this repo's package and the
+# deploy fails with "No module named robie_job_engine.deploy_truth".
+cd "${repo_root}"
 command="$1"
 if [[ "${command}" == "prove" || "${command}" == "install" ]]; then
   shift

@@ -853,7 +853,7 @@ def check_task_verifier_health() -> tuple[bool, str, dict]:
             # is required: strftime returns TEXT and SQLite sorts INTEGER
             # before TEXT, so an uncast comparison never matches.
             rows = conn.execute(
-                """SELECT COUNT(*), MAX(created_at) FROM pending_tasks
+                """SELECT COUNT(*), MIN(created_at) FROM pending_tasks
                    WHERE status IN ('PENDING', 'UNVERIFIED')
                      AND CAST(strftime('%s', created_at) AS INTEGER) < ?""",
                 (int(cutoff),),
@@ -950,7 +950,25 @@ def check_4359_tuesday_proof() -> tuple[bool, str, dict]:
 
     summary = ev.get("summary", {}) or {}
     detail = ev.get("detail", {}) or {}
-    sent = summary.get("sent", detail.get("sent", 0))
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(detail, dict):
+        detail = {}
+    # Live evidence (run_overdue_policy_change_reports) stores the Gmail
+    # receipt list at top-level "sent" and again as summary.delivery_receipts.
+    # It does not write summary.sent / detail.sent. Reading those fields
+    # reported 0 on 2026-09-29 after a run that sent 2 and confirmed them.
+    # An integer count is still accepted for older evidence and fixtures.
+    receipts = ev.get("sent") or summary.get("delivery_receipts") or []
+    if isinstance(receipts, list) and not receipts:
+        receipts = summary.get("sent", detail.get("sent", 0))
+    if isinstance(receipts, list):
+        sent = len(receipts)
+    else:
+        try:
+            sent = int(receipts or 0)
+        except (TypeError, ValueError):
+            sent = 0
     extra["sent"] = sent
     extra["succeeded"] = ev.get("succeeded")
     if not ev.get("succeeded", True):
