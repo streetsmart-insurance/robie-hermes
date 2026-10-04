@@ -11,7 +11,9 @@ WorkingDirectory=/opt/streetsmart-hermes/releases/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_CHAT_SA_KEY_FILE=/etc/streetsmart-hermes/robie-chat-sa-key.json
-ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/robie_health_check.py --daily-digest
+Environment=ASCEND_DRIVER_STATE_DIR=/var/lib/robie-ascend-notice-driver
+# streetsmart-hermes cannot exec the hermes-agent venv: /opt/streetsmart-hermes/.hermes is 0700 carlo.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/robie_health_check.py --daily-digest
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only

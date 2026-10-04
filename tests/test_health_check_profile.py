@@ -38,6 +38,7 @@ PROD_ONLY = {
     "tuesday_4359_proof",
     "chat_intake",
     "preflight_alert_delivery",
+    "ascend_driver_stall",
 }
 
 

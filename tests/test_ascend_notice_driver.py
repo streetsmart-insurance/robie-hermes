@@ -15,6 +15,7 @@ from urllib import parse
 
 import pytest
 
+from robie_job_engine import ascend_api_notice_source as api_notice_source
 from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import ezlynx_discussions as discussions
@@ -24,6 +25,14 @@ from robie_job_engine.gmail_accountability import (
     GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
 )
+
+
+@pytest.fixture(autouse=True)
+def _empty_ascend_api_notice_store(tmp_path, monkeypatch):
+    """An empty live store so API-owned notices are not skipped as missing."""
+    path = tmp_path / "api-notice" / "events.db"
+    api_notice_source.EventKeyStore(path)
+    monkeypatch.setenv(api_notice_source.DB_ENV, str(path))
 
 
 ALLOWED_APPLICANT = "220250093"
@@ -1294,7 +1303,7 @@ def test_driver_has_no_delete_surface():
 # ---------------------------------------------------------------------------
 
 
-def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
+def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys, tmp_path):
     """On a fatal fail-closed, stdout must parse as JSON (log lines go to
     stderr) because the driver workflow feeds stdout to json.tool."""
     monkeypatch.delenv("ROBIE_ENV", raising=False)
@@ -1302,6 +1311,7 @@ def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
     monkeypatch.delenv("ASCEND_DRIVER_MAILBOX", raising=False)
     monkeypatch.delenv("ASCEND_DRIVER_MAILBOXES", raising=False)
     monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
+    monkeypatch.setenv("ASCEND_DRIVER_STATE_DIR", str(tmp_path))
     rc = driver.main([])
     assert rc == 1
     out, _err = capsys.readouterr()
@@ -1581,6 +1591,360 @@ def test_two_candidate_rows_fail_closed():
     assert "2 candidate" in reason
 
 
+def test_name_and_email_matches_only_when_unique():
+    class IdentityClient:
+        def __init__(self, rows, total=None):
+            self.rows = rows
+            self.total = total
+
+        def search_policy_by_number(self, policy_number):
+            raise AssertionError("policy search is not the fallback")
+
+        def search_applicants_by_name(self, name):
+            payload = {"data": self.rows}
+            if self.total is not None:
+                payload["totalSize"] = self.total
+            return payload
+
+        def search_applicants_by_name_and_email(self, name, email):
+            payload = {"data": self.rows}
+            if self.total is not None:
+                payload["totalSize"] = self.total
+            return payload
+
+    one = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            }
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        one, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert resolution.via == "insured_name"
+
+    two = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": "111",
+            },
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": "222",
+            },
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        two, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+    name_only = IdentityClient(
+        [{"ApplicantName": "Fixture Hauling LLC", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(
+        name_only, [], "Fixture Hauling, LLC", None
+    )
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert resolution.via == "insured_name"
+
+    unfiltered = IdentityClient(
+        [
+            {"ApplicantName": "Someone Else LLC", "accountId": "111"},
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            },
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        unfiltered, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "ambiguous" in reason
+
+    incomplete = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            }
+        ],
+        total=40,
+    )
+    resolution, reason = driver.resolve_applicant(
+        incomplete, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "incomplete" in reason
+
+    resolution, reason = driver.resolve_applicant(
+        one, [], "Fixture Hauling LLC", None
+    )
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.via == "insured_name"
+
+
+def test_policy_numbers_that_disagree_do_not_guess():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "AAA111": [{"policyNumber": "AAA111", "accountId": "111"}],
+            "BBB222": [{"policyNumber": "BBB222", "accountId": "222"}],
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["AAA111", "BBB222"], "Fixture")
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_incomplete_policy_search_retries_once_then_uses_the_name():
+    class Client:
+        def __init__(self):
+            self.policy_calls = 0
+
+        def search_policy_by_number(self, policy_number):
+            self.policy_calls += 1
+            return {
+                "data": [{"policyNumber": policy_number, "accountId": "111"}],
+                "totalSize": 5,
+            }
+
+        def search_applicants_by_name(self, name):
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+    client = Client()
+    resolution, reason = driver.resolve_applicant(
+        client, ["HO-998877"], "Fixture Hauling LLC"
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert client.policy_calls == 2
+
+
+def test_ambiguous_policy_does_not_fall_through_to_name():
+    class Guard:
+        def search_policy_by_number(self, policy_number):
+            return {
+                "data": [
+                    {"policyNumber": policy_number, "accountId": "111"},
+                    {"policyNumber": policy_number, "accountId": "222"},
+                ],
+                "totalSize": 2,
+            }
+
+        def search_applicants_by_name(self, name):
+            raise AssertionError("ambiguous policy must not search by name")
+
+    resolution, reason = driver.resolve_applicant(
+        Guard(), ["HO-998877"], "Fixture Hauling LLC", "insured@example.test", "555-010-0199"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_zero_policy_hits_fall_through_to_normalized_name_email_and_phone():
+    class Cascade:
+        def __init__(self):
+            self.calls = []
+
+        def search_policy_by_number(self, policy_number):
+            self.calls.append(("policy", policy_number))
+            return {"data": [], "totalSize": 0}
+
+        def search_applicants_by_name(self, name):
+            self.calls.append(("name", name))
+            return {
+                "data": [
+                    {"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}
+                ],
+                "totalSize": 1,
+            }
+
+        def search_applicants_by_email(self, email):
+            raise AssertionError("unique name must stop the cascade")
+
+        def search_applicants_by_phone(self, phone):
+            raise AssertionError("unique name must stop the cascade")
+
+    client = Cascade()
+    resolution, reason = driver.resolve_applicant(
+        client,
+        ["HO-998877"],
+        "Fixture Hauling, LLC",
+        "insured@example.test",
+        "555-010-0199",
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert client.calls[0][0] == "policy"
+    assert client.calls[1][0] == "name"
+
+    ampersand = Cascade()
+    ampersand.search_applicants_by_name = lambda name: {
+        "data": [{"ApplicantName": "Smith and Sons", "accountId": ALLOWED_APPLICANT}],
+        "totalSize": 1,
+    }
+    resolution, reason = driver.resolve_applicant(
+        ampersand, [], "Smith & Sons, LLC", None
+    )
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+    dba = Cascade()
+    dba.search_applicants_by_name = lambda name: {
+        "data": [{"ApplicantName": "Fixture Transport", "accountId": ALLOWED_APPLICANT}],
+        "totalSize": 1,
+    }
+    resolution, reason = driver.resolve_applicant(
+        dba, [], "Fixture Hauling LLC DBA Fixture Transport", None
+    )
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+
+def test_email_then_phone_match_only_one_applicant():
+    class Identity:
+        def __init__(self, rows, total=None):
+            self.rows = rows
+            self.total = len(rows) if total is None else total
+
+        def _page(self):
+            return {"data": self.rows, "totalSize": self.total}
+
+        def search_applicants_by_email(self, email):
+            return self._page()
+
+        def search_applicants_by_phone(self, phone):
+            return self._page()
+
+    one = Identity(
+        [{"Email": "insured@example.test", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(
+        one, [], None, "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "email"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+    two = Identity(
+        [
+            {"Email": "insured@example.test", "accountId": "111"},
+            {"Email": "insured@example.test", "accountId": "222"},
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        two, [], None, "insured@example.test"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+    phone = Identity(
+        [{"PhoneNumber": "5550100199", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(phone, [], None, None, "(555) 010-0199")
+    assert reason == ""
+    assert resolution.via == "phone"
+
+    many = Identity(
+        [
+            {"PhoneNumber": "5550100199", "accountId": "111"},
+            {"PhoneNumber": "5550100199", "accountId": "222"},
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(many, [], None, None, "555-010-0199")
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_incomplete_search_is_retried_once_then_the_cascade_continues():
+    class Retry:
+        def __init__(self):
+            self.name_calls = 0
+            self.email_calls = 0
+
+        def search_applicants_by_name(self, name):
+            self.name_calls += 1
+            if self.name_calls == 1:
+                return {
+                    "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                    "totalSize": 40,
+                }
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+        def search_applicants_by_email(self, email):
+            raise AssertionError("a completed retry is a name match")
+
+    client = Retry()
+    resolution, reason = driver.resolve_applicant(
+        client, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert client.name_calls == 2
+
+    class StillIncomplete:
+        def __init__(self):
+            self.name_calls = 0
+
+        def search_applicants_by_name(self, name):
+            self.name_calls += 1
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": "111"}],
+                "totalSize": 40,
+            }
+
+        def search_applicants_by_email(self, email):
+            return {
+                "data": [{"Email": email, "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+    again = StillIncomplete()
+    resolution, reason = driver.resolve_applicant(
+        again, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "email"
+    assert again.name_calls == 2
+
+    class Never:
+        def search_applicants_by_name(self, name):
+            return {"data": [{"ApplicantName": name, "accountId": "111"}], "totalSize": 9}
+
+        def search_applicants_by_email(self, email):
+            return {"data": [], "totalSize": 4}
+
+    resolution, reason = driver.resolve_applicant(
+        Never(), [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "incomplete" in reason
+
+
 def test_matched_row_without_account_id_fails_closed():
     client = FakeEzlynxClient(
         rows_by_number={"ABC123": [{"policyNumber": "ABC123", "policyStatus": "Active"}]}
@@ -1695,21 +2059,19 @@ def test_default_query_and_mailboxes(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     assert driver.DEFAULT_QUERY == (
-        "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+        "is:unread newer_than:2d from:(no-reply@useascend.com OR "
+        "accounting@useascend.com OR support@useascend.com)"
     )
     assert driver.configured_query() == driver.DEFAULT_QUERY
-    assert driver.resolve_mailboxes() == [
-        "hello@streetsmart.insurance",
-        "mike@streetsmart.insurance",
-        "angie@streetsmart.insurance",
-        "eimy@streetsmart.insurance",
-        "sandy@streetsmart.insurance",
-        "zeus@streetsmart.insurance",
-        "taylor@streetsmart.insurance",
-        "jake@streetsmart.insurance",
-    ]
+    assert driver.resolve_mailboxes() == list(driver.DEFAULT_MAILBOXES)
+    assert len(driver.DEFAULT_MAILBOXES) == 25
+    assert "carlo@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
+    assert "certificates@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
+    assert "andrea@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
     monkeypatch.setenv("ASCEND_DRIVER_QUERY", "is:unread newer_than:1d")
-    assert driver.configured_query() == "is:unread newer_than:1d"
+    assert driver.configured_query() == (
+        "is:unread newer_than:1d " + driver.ascend_sender_filter()
+    )
     assert driver.configured_query("is:unread from:accounting@useascend.com") == (
         "is:unread from:accounting@useascend.com"
     )
@@ -1718,10 +2080,13 @@ def test_default_query_and_mailboxes(monkeypatch):
 def test_mailbox_outside_allowlist_is_refused(monkeypatch):
     monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
     with pytest.raises(driver.MailboxAllowlistError):
-        driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance")
-    monkeypatch.setenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", "1")
+        driver.resolve_mailboxes(mailbox="outsider@streetsmart.insurance")
     assert driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance") == [
         "robie@streetsmart.insurance"
+    ]
+    monkeypatch.setenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", "1")
+    assert driver.resolve_mailboxes(mailbox="outsider@streetsmart.insurance") == [
+        "outsider@streetsmart.insurance"
     ]
 
 
@@ -1737,6 +2102,8 @@ def test_workflow_sets_delegation_sa_and_prod_ascend_secret():
     assert "workflow_dispatch" in trigger
     assert "# schedule:" in text
     assert "ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com" in text
+    assert "/opt/streetsmart-hermes/venv/bin/python" in text
+    assert ".hermes/hermes-agent/venv/bin/python" not in text
     assert "secrets/ascend-prod-api-key/versions/latest" in text
     assert "secrets/ascend-api-key/versions/latest" not in text
     assert "ROBIE_EZLYNX_WRITE_SCOPE=all" in text
@@ -1754,7 +2121,20 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
     assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in drop_in
     assert "Environment=ROBIE_PLAYGROUND=1" in drop_in
     assert "\n[Install]\n" not in unit
-    assert not (root / "deploy/systemd/robie-ascend-notice-driver.timer").exists()
+    assert "ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_notice_driver --due-days 2" in unit
+    assert ".hermes/hermes-agent/venv/bin/python" not in unit
+    assert "Environment=ASCEND_DRIVER_LIVE" not in unit
+    assert "--live" not in unit
+    timer = (root / "deploy/systemd/robie-ascend-notice-driver.timer").read_text(encoding="utf-8")
+    assert "Persistent=true" in timer
+    assert "OnUnitActiveSec=15min" in timer
+    example = (
+        root / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf.example"
+    ).read_text(encoding="utf-8")
+    assert "Environment=ASCEND_DRIVER_LIVE=1" in example
+    assert not (
+        root / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf"
+    ).exists()
     scope_line = "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all"
     hits = []
     for folder in (root / "deploy/systemd", root / "systemd"):
@@ -1764,6 +2144,8 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
             if scope_line in path.read_text(encoding="utf-8"):
                 hits.append(path.relative_to(root).as_posix())
     assert sorted(hits) == [
+        "deploy/systemd/robie-ascend-api-notice.service",
+        "deploy/systemd/robie-ascend-api-notice.service.d/10-write-scope.conf",
         "deploy/systemd/robie-ascend-notice-driver.service",
         "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf",
     ]

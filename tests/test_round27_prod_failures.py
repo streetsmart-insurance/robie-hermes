@@ -10,6 +10,8 @@ applicant id. A cancelled job stayed an active conversation link.
 from __future__ import annotations
 
 import json
+
+import pytest
 import os
 import subprocess
 import sys
@@ -18,6 +20,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
+
+
+@pytest.fixture(autouse=True)
+def _empty_ascend_api_notice_store(tmp_path, monkeypatch):
+    from robie_job_engine import ascend_api_notice_source as source
+
+    path = tmp_path / "api-notice" / "events.db"
+    source.EventKeyStore(path)
+    monkeypatch.setenv(source.DB_ENV, str(path))
 
 from robie_job_engine.chat_guard import _chat_blocker_redirect
 from robie_job_engine.chat_queue import DurableChatEventQueue
