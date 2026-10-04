@@ -46,18 +46,32 @@ CANCELLATION_BODY = (
 # ---------------------------------------------------------------------------
 
 
+def _mapped_producer():
+    """Karla Brown maps to the EZLynx login KarlaSS. Not a shared mailbox."""
+    return {
+        "email": "karla@streetsmart.insurance",
+        "first_name": "Karla",
+        "last_name": "Brown",
+    }
+
+
 class FakeAscendClient:
     """Triage only needs get_program / find_program_by_policy."""
 
     def __init__(self, program=None):
         self.program = (
-            program if program is not None else {"status": "active"}
+            program
+            if program is not None
+            else {"status": "active", "producer": _mapped_producer()}
         )
+        self.calls = []
 
     def get_program(self, program_uuid):
+        self.calls.append(("get_program", program_uuid))
         return dict(self.program)
 
     def find_program_by_policy(self, policy_number):
+        self.calls.append(("find_program_by_policy", policy_number))
         return {"program": dict(self.program), "program_id": "prog-1"}
 
 
@@ -162,8 +176,20 @@ class FakeSource:
         self.marked.append(message_id)
 
 
-def make_notice(subject=CANCELLATION_SUBJECT, body=CANCELLATION_BODY, message_id="m1"):
-    return driver.EmailNotice(message_id=message_id, subject=subject, body=body)
+def make_notice(
+    subject=CANCELLATION_SUBJECT,
+    body=CANCELLATION_BODY,
+    message_id="m1",
+    mailbox="hello@streetsmart.insurance",
+    gmail_message_id="",
+):
+    return driver.EmailNotice(
+        message_id=message_id,
+        subject=subject,
+        body=body,
+        mailbox=mailbox,
+        gmail_message_id=gmail_message_id or message_id,
+    )
 
 
 def make_ctx(
@@ -239,13 +265,13 @@ def test_dry_run_writes_nothing(no_zap_fire):
     # The note was validated against the real discussion lookup but never posted.
     assert result["detail"]["discussion_id"] == "d1"
     assert discussion_client._urlopen.posts_to("/notes") == []
-    # The Zapier fire went through the dry-run validation path only.
-    assert len(no_zap_fire) == 1
-    assert no_zap_fire[0]["dry_run"] is True
-    payload = no_zap_fire[0]["payload"]
+    # Dry-run builds the task payload and does not call Zapier.
+    assert no_zap_fire == []
+    payload = result["detail"]["task_payload"]
     assert payload["applicant_id"] == ALLOWED_APPLICANT
     assert payload["assignee"] == "KarlaSS"
     assert payload["due_date"] == "2026-09-17"
+    assert result["detail"]["zapier_result"]["dry_run"] is True
     # Dry-run never marks mail read.
     assert ctx.source.marked == []
 
@@ -265,6 +291,16 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert detail["label"]["method"] == "api"
     assert detail["label"]["auth_path"] == "cdp_session_cookie"
     assert ctx.ezlynx_client.applied_labels == []
+    assert summary["would_file_count"] == 1
+    assert summary["breakdown"]["would_file"] == 1
+    assert summary["breakdown"]["by_notice_type"] == {triage.CANCELLATION: 1}
+    entry = summary["would_file"][0]
+    assert entry["gmail_message_id"] == "m1"
+    assert entry["mailbox"] == "hello@streetsmart.insurance"
+    assert entry["notice_type"] == triage.CANCELLATION
+    assert entry["policy_number"] == "HO-998877"
+    assert entry["applicant_id"] == ALLOWED_APPLICANT
+    assert entry["csr_login"] == "KarlaSS"
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +346,17 @@ def test_policy_search_failure_fails_closed(no_zap_fire):
 
 
 def test_missing_csr_fails_closed(no_zap_fire):
-    row = {"PolicyNumber": "HO-998877", "ApplicantId": ALLOWED_APPLICANT}
+    # PolicyApi has no CSR field. A cancellation with no Ascend producer
+    # or account_manager fails closed even when the row has an applicant.
+    row = {
+        "PolicyNumber": "HO-998877",
+        "ApplicantId": ALLOWED_APPLICANT,
+        "AssignedUsername": "KarlaSS",
+    }
     ctx, discussion_client = make_ctx(
-        notices=[make_notice()], policy_rows={"HO-998877": [row]}
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [row]},
+        ascend_client=FakeAscendClient(program={"status": "canceled"}),
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
@@ -320,34 +364,76 @@ def test_missing_csr_fails_closed(no_zap_fire):
     assert "csr_unresolved" in result["reason"]
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+    assert summary["skipped_by_reason"].get("csr_unresolved") == 1
 
 
-def test_display_name_csr_is_rejected_never_used(no_zap_fire):
-    # AssignedUser is a display name, not a login username: must fail closed.
-    row = {
-        "PolicyNumber": "HO-998877",
-        "ApplicantId": ALLOWED_APPLICANT,
-        "AssignedUser": "Karla Brown",
-        "ProducerName": "Karla Brown",
-    }
-    ctx, _ = make_ctx(notices=[make_notice()], policy_rows={"HO-998877": [row]})
-    summary = driver.run_driver(ctx)
-    result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert "csr_unresolved" in result["reason"]
-
-
-def test_csr_username_must_be_username_shaped(no_zap_fire):
-    for bad in ["Karla Brown", "karla@x", "", "a"]:
+def test_shared_mailbox_csr_fails_closed(no_zap_fire):
+    # hello@ / accounting@ / robie@ are shared. A policy-row username is ignored.
+    for email, first, last in (
+        ("hello@streetsmart.insurance", "Karla", "Brown"),
+        ("accounting@streetsmart.insurance", "Accounting", "Team"),
+        ("robie@streetsmart.insurance", "Robie", "AI"),
+    ):
         row = {
             "PolicyNumber": "HO-998877",
-            "ApplicantId": ALLOWED_APPLICANT,
-            "AssignedUsername": bad,
+            "accountId": ALLOWED_APPLICANT,
+            "AssignedUsername": "KarlaSS",
         }
-        ctx, _ = make_ctx(notices=[make_notice()], policy_rows={"HO-998877": [row]})
+        program = {
+            "status": "canceled",
+            "producer": {"email": email, "first_name": first, "last_name": last},
+            "account_manager": _mapped_producer(),
+        }
+        ctx, _ = make_ctx(
+            notices=[make_notice()],
+            policy_rows={"HO-998877": [row]},
+            ascend_client=FakeAscendClient(program=program),
+        )
         result = driver.run_driver(ctx)["results"][0]
-        assert result["status"] == "skipped", bad
-        assert "csr_unresolved" in result["reason"], bad
+        assert result["status"] == "skipped", email
+        assert "csr_unresolved" in result["reason"], email
+        assert "shared mailbox" in result["reason"], email
+        assert result["detail"].get("csr_username") in {None, ""}
+
+
+def test_unmapped_producer_fails_closed(no_zap_fire):
+    program = {
+        "status": "canceled",
+        "producer": {
+            "email": "somebody.nobody@example.com",
+            "first_name": "Somebody",
+            "last_name": "Nobody",
+        },
+    }
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        ascend_client=FakeAscendClient(program=program),
+    )
+    result = driver.run_driver(ctx)["results"][0]
+    assert result["status"] == "skipped"
+    assert "csr_unresolved" in result["reason"]
+    assert "unmapped" in result["reason"]
+
+
+def test_cancellation_csr_falls_back_to_account_manager(no_zap_fire):
+    program = {
+        "status": "canceled",
+        "account_manager": {
+            "email": "jake@streetsmart.insurance",
+            "first_name": "Jake",
+            "last_name": "Ferrara",
+        },
+    }
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row(csr_username="")]},
+        ascend_client=FakeAscendClient(program=program),
+    )
+    result = driver.run_driver(ctx)["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["csr_username"] == "jferrara3"
+    assert result["detail"]["task_payload"]["assignee"] == "jferrara3"
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +593,7 @@ def test_signed_notice_note_is_plain_and_idempotent():
     assert driver.signed_notice_note("") == ""
     assert driver.discussion_title_hint(triage.CANCELLATION) == "cancellation"
     assert driver.discussion_title_hint(triage.LATE_PAYMENT) == "noc"
+    assert driver.discussion_title_hint(triage.INTENT_TO_CANCEL) == "noc"
     assert driver.discussion_title_hint(triage.RETURN_PREMIUM) is None
 
 
@@ -539,18 +626,28 @@ def test_late_payment_files_note_but_skips_task(no_zap_fire):
         subject="Past due payment for Shoreline Builders LLC",
         body="Policy ID GL-112233 Effective 02/01/2026\nAmount due: $3,528.22\n",
     )
+    # No CSR on the policy row and no producer on the program. Late payment
+    # files from applicant_id alone.
+    row = {"policyNumber": "GL-112233", "accountId": ALLOWED_APPLICANT}
     ctx, discussion_client = make_ctx(
-        notices=[notice], policy_rows={"GL-112233": [policy_row(number="GL-112233")]}
+        notices=[notice],
+        policy_rows={"GL-112233": [row]},
+        ascend_client=FakeAscendClient(program={"status": "past_due"}),
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "dry_run"
     assert result["detail"]["notice_type"] == triage.LATE_PAYMENT
+    assert result["detail"]["applicant_id"] == ALLOWED_APPLICANT
+    assert "csr_username" not in result["detail"]
     assert discussion_client._urlopen.posts_to("/notes") == []  # dry-run: validated only
     assert no_zap_fire == []  # no task builder for late_payment
     assert "no task builder" in result["detail"]["task_skipped"]
     assert "label" not in result["detail"]
     assert ctx.ezlynx_client.applied_labels == []
+    entry = summary["would_file"][0]
+    assert entry["notice_type"] == triage.LATE_PAYMENT
+    assert "csr_login" not in entry
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +760,9 @@ def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
     stderr) because the driver workflow feeds stdout to json.tool."""
     monkeypatch.delenv("ROBIE_ENV", raising=False)
     monkeypatch.delenv("ASCEND_DRIVER_LIVE", raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_MAILBOX", raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_MAILBOXES", raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
     rc = driver.main([])
     assert rc == 1
     out, _err = capsys.readouterr()
@@ -787,7 +887,7 @@ def test_build_live_context_live_requests_modify(monkeypatch):
     assert ctx.source.requested_scopes == (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
 
 
-def test_gmail_modify_env_flag_requests_modify_in_dry_run(monkeypatch):
+def test_gmail_modify_env_flag_does_not_widen_dry_run(monkeypatch):
     _stub_live_clients(monkeypatch)
     monkeypatch.setenv("ASCEND_DRIVER_GMAIL_MODIFY", "1")
     ctx = driver.build_live_context(
@@ -796,7 +896,8 @@ def test_gmail_modify_env_flag_requests_modify_in_dry_run(monkeypatch):
         dry_run=True,
         due_days=2,
     )
-    assert ctx.source.allow_modify is True
+    assert ctx.source.allow_modify is False
+    assert ctx.source.requested_scopes == (GMAIL_READONLY_SCOPE,)
 
 
 class TestNoticeGmailScopeSelection(unittest.TestCase):
@@ -812,10 +913,213 @@ class TestNoticeGmailScopeSelection(unittest.TestCase):
         source = driver.GmailNoticeSource(allow_modify=True)
         self.assertIn(GMAIL_MODIFY_SCOPE, source.requested_scopes)
 
-    def test_modify_flag_follows_live_or_env(self):
+    def test_modify_flag_follows_live_not_dry_run(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ASCEND_DRIVER_GMAIL_MODIFY", None)
             self.assertFalse(driver._notice_allow_modify(dry_run=True))
             self.assertTrue(driver._notice_allow_modify(dry_run=False))
         with mock.patch.dict(os.environ, {"ASCEND_DRIVER_GMAIL_MODIFY": "1"}):
-            self.assertTrue(driver._notice_allow_modify(dry_run=True))
+            self.assertFalse(driver._notice_allow_modify(dry_run=True))
+            self.assertTrue(driver._notice_allow_modify(dry_run=False))
+
+
+# ---------------------------------------------------------------------------
+# policy match, CSR source, defaults, dry-run gate
+# ---------------------------------------------------------------------------
+
+
+def test_policy_suffix_matches_single_account_row():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123-00"], None)
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert resolution.csr_username == ""
+    assert resolution.policy_number == "ABC123-00"
+
+
+def test_spaced_policy_number_normalizes():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123": [{"policyNumber": "abc 123", "accountId": ALLOWED_APPLICANT}]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123"], None)
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+
+def test_two_candidate_rows_fail_closed():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123-00": [
+                {"policyNumber": "ABC123", "accountId": "111"},
+                {"policyNumber": "ABC123-01", "accountId": "222"},
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123-00"], "Fixture Insured")
+    assert resolution is None
+    assert reason.startswith("applicant_unresolved:")
+    assert "2 candidate" in reason
+
+
+def test_matched_row_without_account_id_fails_closed():
+    client = FakeEzlynxClient(
+        rows_by_number={"ABC123": [{"policyNumber": "ABC123", "policyStatus": "Active"}]}
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123"], None)
+    assert resolution is None
+    assert "1 candidate" in reason
+    assert "accountId" in reason
+
+
+def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire):
+    notice = make_notice(
+        subject=(
+            "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
+            "Policy(s) at risk for cancellation"
+        ),
+        body=(
+            "Please see the attached Notice of Intent to Cancel document. "
+            "Failure to pay will result in the cancelation of your coverage.\n"
+            "Policy ID ABC123-00\nEffective date 01/01/2026\n"
+        ),
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        },
+        discussion_rows=[
+            {"discussionId": "d-can", "title": "Service-Cancellation"},
+            {"discussionId": "d-noc", "title": "Ascend NOC"},
+        ],
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["notice_type"] == triage.INTENT_TO_CANCEL
+    assert result["detail"]["discussion_id"] == "d-noc"
+    assert "label" not in result["detail"]
+    assert "task_payload" not in result["detail"]
+    assert no_zap_fire == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
+    with pytest.raises(ValueError, match="cancellation"):
+        triage.build_cancellation_task_payload(
+            {"notice_type": triage.INTENT_TO_CANCEL},
+            applicant_id=ALLOWED_APPLICANT,
+            account_csr="KarlaSS",
+            due_date="2026-09-17",
+        )
+
+
+def test_informational_mail_is_ignored_not_skipped(no_zap_fire):
+    class _RaisingAscend:
+        def get_program(self, *_args, **_kwargs):
+            raise AssertionError("ignored mail must not call Ascend")
+
+        def find_program_by_policy(self, *_args, **_kwargs):
+            raise AssertionError("ignored mail must not call Ascend")
+
+    notice = make_notice(
+        subject="Processing payment for Fixture Insured A LLC",
+        body="Your customer has just initiated their payment.",
+        message_id="ign-1",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        ascend_client=_RaisingAscend(),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "ignored"
+    assert result["reason"] == "ignored"
+    assert "needs_human_review" not in result["reason"]
+    assert summary["ignored"] == 1
+    assert summary["skipped"] == 0
+    assert summary["would_file"] == []
+    assert summary["breakdown"]["ignored"] == 1
+    assert summary["breakdown"]["by_notice_type"]["processing_payment"] == 1
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.searched == []
+    assert no_zap_fire == []
+
+
+def test_dry_run_does_not_call_driver_gate(no_zap_fire, monkeypatch):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("dry-run called the write gate")
+
+    monkeypatch.setattr("robie_job_engine.safety_seal.driver_gate_for_write", _boom)
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_write_scope.require_allowed_ezlynx_write_applicant",
+        _boom,
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["results"][0]["status"] == "dry_run"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
+
+
+def test_default_query_and_mailboxes(monkeypatch):
+    for name in (
+        "ASCEND_DRIVER_QUERY",
+        "ASCEND_DRIVER_MAILBOX",
+        "ASCEND_DRIVER_MAILBOXES",
+        "ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert driver.DEFAULT_QUERY == (
+        "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+    )
+    assert driver.configured_query() == driver.DEFAULT_QUERY
+    assert driver.resolve_mailboxes() == [
+        "hello@streetsmart.insurance",
+        "mike@streetsmart.insurance",
+        "angie@streetsmart.insurance",
+        "eimy@streetsmart.insurance",
+        "sandy@streetsmart.insurance",
+        "zeus@streetsmart.insurance",
+        "taylor@streetsmart.insurance",
+        "jake@streetsmart.insurance",
+    ]
+    monkeypatch.setenv("ASCEND_DRIVER_QUERY", "is:unread newer_than:1d")
+    assert driver.configured_query() == "is:unread newer_than:1d"
+    assert driver.configured_query("is:unread from:accounting@useascend.com") == (
+        "is:unread from:accounting@useascend.com"
+    )
+
+
+def test_mailbox_outside_allowlist_is_refused(monkeypatch):
+    monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
+    with pytest.raises(driver.MailboxAllowlistError):
+        driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance")
+    monkeypatch.setenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", "1")
+    assert driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance") == [
+        "robie@streetsmart.insurance"
+    ]
+
+
+def test_workflow_sets_delegation_sa_and_prod_ascend_secret():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    text = (root / ".github/workflows/ascend-notice-driver.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    # PyYAML 1.1 reads the bare key "on" as boolean True.
+    trigger = workflow.get(True) or workflow.get("on") or {}
+    assert "schedule" not in trigger
+    assert "workflow_dispatch" in trigger
+    assert "ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com" in text
+    assert "secrets/ascend-prod-api-key/versions/latest" in text
+    assert "secrets/ascend-api-key/versions/latest" not in text

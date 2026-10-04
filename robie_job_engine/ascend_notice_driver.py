@@ -3,17 +3,17 @@
 This is the trigger PR #430 was missing. PR #430 put the engine on the box
 (read-only ``triage_notice()``, Discussion API v8 append to an EXISTING
 discussion, Zapier task firing with a required due date) but nothing ever
-called it. This driver watches the hello@ mailbox for unread Ascend notice
-emails and runs the chain once per email.
+called it. This driver watches the agency mailboxes for unread Ascend
+notice emails and runs the chain once per email.
 
 Pipeline per email::
 
-    Gmail (hello@streetsmart.insurance, unread)
+    Gmail (default staff mailboxes, unread, from no-reply@ or accounting@)
       -> triage_notice()                       (read-only classification)
-      -> resolve applicant_id                  (EZLynx PolicyApi, by policy number)
-      -> resolve CSR login username            (never a display name)
+      -> resolve applicant_id                  (EZLynx PolicyApi, normalized policy number)
+      -> resolve CSR login                    (cancellation only; Ascend producer)
       -> file_note_to_existing_discussion()    (EXISTING discussion only)
-      -> apply Ascend NOC on that note         (CDP session cookies; cancel only)
+      -> apply Ascend NOC on that note         (CDP session cookies; cancellation only)
       -> build_cancellation_task_payload()     (cancellation notices only)
       -> zapier_tasks.fire_task()              (Zapier catch-hook Zap)
 
@@ -22,23 +22,25 @@ Safety (non-negotiable):
 - DRY_RUN defaults ON. Live mode only with ``--live`` or
   ``ASCEND_DRIVER_LIVE=1``. Dry-run logs exactly what it would do
   (subject, applicant, CSR, note text, task payload) and writes nothing.
+  Dry-run requests ``gmail.readonly`` only: no mark-read, no notes, no
+  labels, no Zapier post, and no ``driver_gate_for_write`` call.
 - Fail closed per email: triage ``needs_human_review``, unresolved
-  applicant, missing/invalid CSR username, any API error, phone numbers in
-  the note text, or a write-scope refusal -> that email is skipped, logged,
-  and the driver continues with the rest.
+  applicant, missing/invalid CSR username on a cancellation, any API
+  error, phone numbers in the note text, or a write-scope refusal -> that
+  email is skipped, logged, and the driver continues with the rest.
+  Informational mail is ``ignored``, not a human-review skip.
 - Never deletes anything. Never invents an applicant_id or a CSR username.
-- The repo's write-scope guard (``ezlynx_write_scope``) is enforced inside
-  ``file_note_to_existing_discussion``; the driver does not bypass it. In
-  practice that means live note writes land only where the guard allows
-  (the Test allowlist, or the applicant bound to the active Production job).
-  Anything else is logged as ``write_scope_refused`` and skipped.
+- Live note writes go through ``file_note_to_existing_discussion``, which
+  enforces the EZLynx write-scope allowlist and the driver lease. Dry-run
+  checks the same allowlist and does not take the lease. Anything outside
+  the allowlist is logged as ``write_scope_refused`` and skipped.
 - Gmail is read-only except in LIVE mode, where a fully processed email is
   marked read (UNREAD label removed) so the next run does not re-file the
   same note. Dry-run never touches labels.
-- Delegated Gmail scopes: dry-run requests ``gmail.readonly`` (unread
-  search + body). ``gmail.metadata`` cannot use ``messages.list?q=``.
-  Live mark-read also requests ``gmail.modify``. Set
-  ``ASCEND_DRIVER_GMAIL_MODIFY=1`` to request modify without ``--live``.
+- Delegated Gmail scopes: dry-run requests ``gmail.readonly`` only
+  (unread search + body). ``gmail.metadata`` cannot use ``messages.list?q=``.
+  Live mark-read also requests ``gmail.modify``. Dry-run never requests
+  modify, even if ``ASCEND_DRIVER_GMAIL_MODIFY`` is set.
   Workspace Admin DWD client ``112650695780807418521`` must authorize
   those scopes for the delegation SA.
 
@@ -49,12 +51,14 @@ Known wiring gaps (documented, not silently worked around):
   ``ascend_sync.py`` imports a client from outside this repo). When an email
   has no policy number, the driver fails closed with
   ``applicant_unresolved`` instead of guessing.
-- CSR login username: the driver accepts only username-shaped values
-  (``^[A-Za-z0-9._-]+$``, no whitespace) from username-like policy-row
-  fields. Display names such as "Karla Brown" are rejected, never used.
-  There is no user-directory API in the repo to map display name -> login,
-  so if the PolicyApi row carries no username field the email fails closed
-  with ``csr_unresolved``.
+- CSR login username: PolicyApi rows carry no CSR field. A CSR is
+  required only for cancellation (the Zapier task). It comes from the
+  Ascend program producer (account_manager only when the producer is
+  missing), mapped through ``confirmation_notify.requester_login``.
+  Shared mailboxes (hello@, accounting@, robie@) and unmapped names fail
+  closed with ``csr_unresolved``. A username is never invented. Late
+  payment, intent-to-cancel, and return premium file the note with
+  ``applicant_id`` alone.
 """
 
 from __future__ import annotations
@@ -84,23 +88,38 @@ ROBIE_WAS_HERE = "Robie was here"
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAILBOX = "hello@streetsmart.insurance"
-DEFAULT_QUERY = "is:unread newer_than:2d"
+DEFAULT_QUERY = (
+    "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+)
 DEFAULT_DUE_DAYS = 2
+
+# Scanned when neither --mailbox nor ASCEND_DRIVER_MAILBOX / ASCEND_DRIVER_MAILBOXES
+# is set. Also the hard allowlist: any other mailbox is refused unless
+# ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1.
+DEFAULT_MAILBOXES: tuple[str, ...] = (
+    "hello@streetsmart.insurance",
+    "mike@streetsmart.insurance",
+    "angie@streetsmart.insurance",
+    "eimy@streetsmart.insurance",
+    "sandy@streetsmart.insurance",
+    "zeus@streetsmart.insurance",
+    "taylor@streetsmart.insurance",
+    "jake@streetsmart.insurance",
+)
+ALLOWED_MAILBOXES = frozenset(mailbox.casefold() for mailbox in DEFAULT_MAILBOXES)
 
 # A login username looks like KarlaSS / Carlo1: no whitespace, ever.
 # Display names ("Karla Brown") must never reach the Zap's assignee field.
 _LOGIN_USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{2,64}$")
 
-# Policy-row fields that may carry the assigned user's *login* username.
-# Checked in order; the first username-shaped value wins. Display-name
-# fields (AssignedUser, ProducerName, ...) are deliberately NOT listed.
-_CSR_USERNAME_KEYS = (
-    "AssignedUsername",
-    "CSRUsername",
-    "AssignedUserName",
-    "assigned_username",
-    "csr_username",
-)
+# Ascend producer / account_manager identities that are shared inboxes, not
+# a person. requester_login("robie") is a real login; using it would invent
+# an assignee. These fail closed.
+_SHARED_CSR_LOCAL_PARTS = frozenset({"hello", "accounting", "robie"})
+_SHARED_CSR_NAMES = frozenset({"hello", "accounting", "robie", "robie ai"})
+
+# Trailing term suffix on a policy number: -00, -01, -1.
+_TERM_SUFFIX_RE = re.compile(r"-\d{1,2}$")
 
 # Policy-row fields that may carry the bound applicant id.
 _APPLICANT_ID_KEYS = (
@@ -116,6 +135,77 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().casefold() in {"1", "true", "yes"}
 
 
+class MailboxAllowlistError(ValueError):
+    """A requested mailbox is outside the Ascend driver allowlist."""
+
+
+def parse_mailbox_list(raw: str) -> list[str]:
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+def enforce_mailbox_allowlist(mailboxes: list[str]) -> list[str]:
+    """Refuse mailboxes outside the default staff set unless explicitly allowed.
+
+    The override is ``ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1``. Shared or
+    unknown mailboxes are not scanned by default.
+    """
+    cleaned: list[str] = []
+    refused: list[str] = []
+    allow_extra = _truthy(os.environ.get("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES"))
+    for raw in mailboxes:
+        mailbox = str(raw or "").strip()
+        if not mailbox:
+            continue
+        if mailbox.casefold() not in ALLOWED_MAILBOXES and not allow_extra:
+            refused.append(mailbox)
+        cleaned.append(mailbox)
+    if refused:
+        raise MailboxAllowlistError(
+            "mailbox not on the Ascend driver allowlist: "
+            + ", ".join(refused)
+            + "; set ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1 to override"
+        )
+    if not cleaned:
+        raise MailboxAllowlistError("no mailboxes to scan")
+    return cleaned
+
+
+def resolve_mailboxes(
+    *,
+    mailbox: str | None = None,
+    mailboxes: str | None = None,
+) -> list[str]:
+    """Choose scan targets.
+
+    Precedence: ``--mailboxes``, then ``ASCEND_DRIVER_MAILBOXES``, then
+    ``--mailbox``, then ``ASCEND_DRIVER_MAILBOX``, then the default eight.
+    ``None`` means the flag was omitted. An explicit empty string falls
+    through the same way.
+    """
+    if mailboxes is not None and str(mailboxes).strip():
+        chosen = parse_mailbox_list(mailboxes)
+    else:
+        env_list = os.environ.get("ASCEND_DRIVER_MAILBOXES")
+        if mailboxes is None and env_list and str(env_list).strip():
+            chosen = parse_mailbox_list(env_list)
+        elif mailbox is not None and str(mailbox).strip():
+            chosen = parse_mailbox_list(mailbox)
+        else:
+            env_one = os.environ.get("ASCEND_DRIVER_MAILBOX")
+            if mailbox is None and env_one and str(env_one).strip():
+                chosen = [str(env_one).strip()]
+            else:
+                chosen = list(DEFAULT_MAILBOXES)
+    return enforce_mailbox_allowlist(chosen)
+
+
+def configured_query(cli_value: str | None = None) -> str:
+    """Gmail query. An explicit CLI value wins; otherwise the env, then the default."""
+    if cli_value is not None and str(cli_value).strip():
+        return str(cli_value)
+    return str(os.environ.get("ASCEND_DRIVER_QUERY") or DEFAULT_QUERY)
+
+
 # ---------------------------------------------------------------------------
 # Email source
 # ---------------------------------------------------------------------------
@@ -127,6 +217,8 @@ class EmailNotice:
     subject: str
     body: str
     internal_date: str = ""
+    mailbox: str = ""
+    gmail_message_id: str = ""
 
 
 class NoticeSource(Protocol):
@@ -244,16 +336,16 @@ class MultiMailboxNoticeSource:
                     for h in (full.get("payload", {}).get("headers") or [])
                     if isinstance(h, dict)
                 }
-                notice = EmailNotice(
-                    message_id=f"{mailbox}:{message_id}",
-                    subject=headers.get("subject", ""),
-                    body=_gmail_text_from_payload(full.get("payload", {})),
-                    internal_date=str(full.get("internalDate") or ""),
+                notices.append(
+                    EmailNotice(
+                        message_id=f"{mailbox}:{message_id}",
+                        subject=headers.get("subject", ""),
+                        body=_gmail_text_from_payload(full.get("payload", {})),
+                        internal_date=str(full.get("internalDate") or ""),
+                        mailbox=mailbox,
+                        gmail_message_id=message_id,
+                    )
                 )
-                # Track source mailbox for mark_processed
-                notice._source_mailbox = mailbox  # type: ignore[attr-defined]
-                notice._source_msg_id = message_id  # type: ignore[attr-defined]
-                notices.append(notice)
         return notices
 
     def mark_processed(self, message_id: str) -> None:
@@ -363,6 +455,8 @@ class GmailNoticeSource:
                     subject=headers.get("subject", ""),
                     body=_gmail_text_from_payload(full.get("payload", {})),
                     internal_date=str(full.get("internalDate") or ""),
+                    mailbox=self.mailbox,
+                    gmail_message_id=message_id,
                 )
             )
         return notices
@@ -414,55 +508,173 @@ def _row_policy_number(row: dict[str, Any]) -> str:
     return _first_present(row, ("PolicyNumber", "policyNumber", "policy_number"))
 
 
+def normalize_policy_number(value: str) -> str:
+    """Uppercase and drop spaces. Hyphens and term suffixes stay."""
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def strip_policy_term_suffix(value: str) -> str:
+    """Drop a trailing term suffix (``-00``, ``-01``, ``-1``) after normalization."""
+    return _TERM_SUFFIX_RE.sub("", normalize_policy_number(value))
+
+
+def _rows_matching_policy(rows: list[dict[str, Any]], policy_number: str) -> list[dict[str, Any]]:
+    """Exact normalized match, else a term-suffix match on both sides.
+
+    An exact hit wins and stops the suffix pass, so ``ABC123-00`` does not
+    also collect a different ``ABC123`` row when the exact row is present.
+    """
+    target = normalize_policy_number(policy_number)
+    if not target:
+        return []
+    exact = [
+        row
+        for row in rows
+        if normalize_policy_number(_row_policy_number(row)) == target
+    ]
+    if exact:
+        return exact
+    target_base = strip_policy_term_suffix(target)
+    if not target_base:
+        return []
+    return [
+        row
+        for row in rows
+        if normalize_policy_number(_row_policy_number(row))
+        and strip_policy_term_suffix(_row_policy_number(row)) == target_base
+    ]
+
+
 def resolve_applicant(
     ezlynx_client: Any,
     policy_numbers: list[str],
     insured_name: str | None,
 ) -> tuple[ApplicantResolution | None, str]:
-    """Resolve (applicant_id, CSR login username) from PolicyApi rows.
+    """Resolve ``applicant_id`` from PolicyApi rows. Fail closed.
 
-    Policy numbers are tried first, in order; the first row whose number
-    matches exactly (case-insensitive) and which carries both an applicant id
-    and a username-shaped CSR value wins. Insured-name lookup is NOT
-    attempted: no reliable API helper exists in the repo, so a notice with no
-    policy number fails closed with ``applicant_unresolved``.
+    Compare policy numbers normalized (uppercase, spaces removed). When
+    that misses, strip a trailing term suffix (``-00`` / ``-01`` / ``-1``)
+    on both the notice and the row. Accept only when exactly one row
+    matches and it carries ``accountId`` (or ``ApplicantId``). Otherwise
+    ``applicant_unresolved`` and the candidate count.
 
-    Returns (resolution, reason). ``reason`` is "" on success.
+    PolicyApi rows have no CSR field. This function does not return one.
+    Insured-name lookup is not attempted.
     """
-    for policy_number in policy_numbers:
-        number = str(policy_number or "").strip()
-        if not number:
-            continue
+    del insured_name  # name lookup is intentionally unwired
+    numbers = [str(item or "").strip() for item in policy_numbers if str(item or "").strip()]
+    if not numbers:
+        return None, "applicant_unresolved: 0 candidate rows"
+    last_count = 0
+    for number in numbers:
         try:
             result = ezlynx_client.search_policy_by_number(number)
         except Exception as exc:  # noqa: BLE001 - fail closed, keep the class
             return None, f"policy_search_failed: {type(exc).__name__}"
-        for row in _policy_rows(result):
-            if _row_policy_number(row).casefold() != number.casefold():
-                continue
-            applicant_id = _first_present(row, _APPLICANT_ID_KEYS)
-            if not applicant_id:
-                continue
-            csr_username = ""
-            for key in _CSR_USERNAME_KEYS:
-                candidate = str(row.get(key) or "").strip()
-                if candidate and _LOGIN_USERNAME_RE.fullmatch(candidate):
-                    csr_username = candidate
-                    break
-            if not csr_username:
-                return None, "csr_unresolved: policy row has no login-username-shaped CSR field"
-            return (
-                ApplicantResolution(
-                    applicant_id=applicant_id,
-                    csr_username=csr_username,
-                    via="policy_number",
-                    policy_number=number,
-                ),
-                "",
+        matched = _rows_matching_policy(_policy_rows(result), number)
+        last_count = len(matched)
+        if last_count == 0:
+            continue
+        if last_count != 1:
+            return None, f"applicant_unresolved: {last_count} candidate rows"
+        account_id = _first_present(matched[0], _APPLICANT_ID_KEYS)
+        if not account_id:
+            return None, (
+                f"applicant_unresolved: {last_count} candidate row lacks accountId"
             )
-    if insured_name:
-        return None, "applicant_unresolved: no policy number matched; name lookup not wired"
-    return None, "applicant_unresolved: notice carries no policy number"
+        return (
+            ApplicantResolution(
+                applicant_id=account_id,
+                csr_username="",
+                via="policy_number",
+                policy_number=number,
+            ),
+            "",
+        )
+    return None, f"applicant_unresolved: {last_count} candidate rows"
+
+
+def _person_record(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _person_email(person: dict[str, Any]) -> str:
+    raw = str(person.get("email") or "").strip()
+    match = re.search(r"<([^>]+)>", raw)
+    if match:
+        raw = match.group(1).strip()
+    return raw
+
+
+def _email_local_part(email: str) -> str:
+    if "@" not in email:
+        return ""
+    return email.split("@", 1)[0].strip().casefold()
+
+
+def _person_is_missing(person: dict[str, Any] | None) -> bool:
+    if not person:
+        return True
+    return not (
+        _person_email(person)
+        or str(person.get("first_name") or "").strip()
+        or str(person.get("last_name") or "").strip()
+    )
+
+
+def _normalized_name(value: str) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def resolve_cancellation_csr(program: dict[str, Any] | None) -> tuple[str, str]:
+    """EZLynx login for a cancellation task. Fail closed. Never invent one.
+
+    CSR is the Ascend program producer. When the producer record is
+    missing, fall back to ``account_manager``. Map ``email`` /
+    ``first_name`` / ``last_name`` through ``requester_login``. Shared
+    mailboxes (hello@, accounting@, robie@) and unmapped names return
+    ``csr_unresolved``.
+    """
+    from .confirmation_notify import requester_login
+
+    record = program if isinstance(program, dict) else {}
+    producer = _person_record(record.get("producer"))
+    manager = _person_record(record.get("account_manager"))
+    if _person_is_missing(producer):
+        person = manager
+        source = "account_manager"
+    else:
+        person = producer
+        source = "producer"
+    if _person_is_missing(person) or person is None:
+        return "", "csr_unresolved: program has no producer or account_manager"
+    email = _person_email(person)
+    local = _email_local_part(email)
+    if local in _SHARED_CSR_LOCAL_PARTS:
+        return "", f"csr_unresolved: shared mailbox {email}"
+    first = str(person.get("first_name") or "").strip()
+    last = str(person.get("last_name") or "").strip()
+    candidates: list[str] = []
+    if first and last:
+        candidates.append(f"{first} {last}")
+    if first:
+        candidates.append(first)
+    if local:
+        spaced = local.replace(".", " ")
+        candidates.append(spaced)
+        if spaced != local:
+            candidates.append(local)
+    non_shared = False
+    for name in candidates:
+        if _normalized_name(name) in _SHARED_CSR_NAMES:
+            continue
+        non_shared = True
+        login = requester_login(name)
+        if login and _LOGIN_USERNAME_RE.fullmatch(str(login)):
+            return str(login), ""
+    if not non_shared:
+        return "", "csr_unresolved: shared mailbox"
+    return "", f"csr_unresolved: unmapped {source}"
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +697,7 @@ class DriverContext:
 class NoticeResult:
     message_id: str
     subject: str
-    status: str  # done | dry_run | skipped
+    status: str  # done | dry_run | skipped | ignored
     reason: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -503,7 +715,9 @@ def discussion_title_hint(notice_type: str) -> str | None:
     """
     if notice_type == triage.CANCELLATION:
         return "cancellation"
-    if notice_type == triage.LATE_PAYMENT:
+    # Late payment and intent-to-cancel are notes on the Ascend NOC card.
+    # Intent-to-cancel never uses the cancellation hint and never gets the label.
+    if notice_type in {triage.LATE_PAYMENT, triage.INTENT_TO_CANCEL}:
         return "noc"
     return None
 
@@ -516,6 +730,87 @@ def signed_notice_note(note_text: str) -> str:
     if ROBIE_WAS_HERE.casefold() in text.casefold():
         return text
     return f"{text}\n\n{ROBIE_WAS_HERE}"
+
+
+def _prepare_dry_run_note(
+    client: DiscussionApiClient,
+    applicant_id: str,
+    note_body: str,
+    *,
+    title_hint: str | None,
+) -> dict[str, Any]:
+    """Validate the note the live path would file. No driver gate, no POST.
+
+    Write-scope is checked with ``applicant_is_write_allowed`` so a
+    disallowed applicant still fails closed. ``require_allowed_ezlynx_write_applicant``
+    is not used: that helper always calls ``driver_gate_for_write``.
+    """
+    from .chat_write_boundary import assert_chat_applicant
+    from .ezlynx_write_scope import (
+        EZLYNX_WRITE_SCOPE_REFUSED,
+        applicant_is_write_allowed,
+        normalize_applicant_id,
+    )
+
+    applicant = normalize_applicant_id(applicant_id)
+    if not applicant_is_write_allowed(applicant):
+        display = applicant or "<missing>"
+        raise EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} is not on the "
+            "EZLynx business-write allowlist"
+        )
+    assert_chat_applicant(applicant)
+    text = discussions.reject_phone_numbers(note_body).strip()
+    if not text:
+        raise discussions.DiscussionApiError(None, "note body is required")
+    rows = client.get_discussions(applicant)
+    try:
+        record = discussions.select_discussion_for_note(rows, title_hint=title_hint)
+    except discussions.DiscussionSelectionError as exc:
+        return {
+            "status": "pending",
+            "reason_code": exc.code,
+            "reason": str(exc),
+            "applicant_id": applicant,
+            "discussion_id": None,
+            "note_id": None,
+            "matches": list(getattr(exc, "matches", []) or []),
+        }
+    discussion_id = discussions.discussion_id_of(record)
+    if not discussion_id:
+        return {
+            "status": "pending",
+            "reason_code": discussions.AMBIGUOUS_DISCUSSIONS,
+            "reason": "selected discussion has no usable id; refusing to write",
+            "applicant_id": applicant,
+            "discussion_id": None,
+            "note_id": None,
+        }
+    return {
+        "status": "dry_run",
+        "reason_code": None,
+        "reason": "dry run: note validated, nothing written",
+        "applicant_id": applicant,
+        "discussion_id": discussion_id,
+        "discussion_title": discussions.discussion_title_of(record),
+        "note_id": None,
+    }
+
+
+def _dry_run_label_result(applicant_id: str, plan: dict[str, str]) -> dict[str, Any]:
+    """The label receipt a dry-run would record. Does not apply anything."""
+    from .ezlynx_write_scope import normalize_applicant_id
+
+    return {
+        "status": "dry_run",
+        "applicant_id": normalize_applicant_id(applicant_id),
+        "note_id": None,
+        "label_name": plan.get("name") or "",
+        "label_id": plan.get("id") or "",
+        "method": "api",
+        "auth_path": org_labels.AUTH_PATH_CDP_SESSION,
+        "endpoint": org_labels.NOTE_LABELS_PATH,
+    }
 
 
 def process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
@@ -536,12 +831,17 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result = NoticeResult(message_id=notice.message_id, subject=notice.subject, status="skipped")
 
     triaged = triage.triage_notice(ctx.ascend_client, notice.subject, notice.body)
+    notice_type = str(triaged.get("notice_type") or "")
+    result.detail["notice_type"] = notice_type
+    if notice_type in triage.IGNORE_TYPES or triaged.get("ignored"):
+        result.status = "ignored"
+        result.reason = "ignored"
+        return result
     if triaged.get("needs_human_review"):
         result.reason = (
             "needs_human_review: " + str(triaged.get("review_reason") or "triage flagged")
         )
         return result
-    notice_type = str(triaged.get("notice_type") or "")
     if notice_type == triage.UNKNOWN:
         result.reason = "unknown_notice_type"
         return result
@@ -554,16 +854,32 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     if resolution is None:
         result.reason = reason
         return result
+    if notice_type == triage.CANCELLATION:
+        csr_login, csr_reason = resolve_cancellation_csr(triaged.get("program"))
+        if not csr_login:
+            result.reason = csr_reason
+            result.detail["applicant_id"] = resolution.applicant_id
+            result.detail["policy_number"] = resolution.policy_number
+            return result
+        resolution = ApplicantResolution(
+            applicant_id=resolution.applicant_id,
+            csr_username=csr_login,
+            via=resolution.via,
+            policy_number=resolution.policy_number,
+        )
     result.detail["applicant_id"] = resolution.applicant_id
-    result.detail["csr_username"] = resolution.csr_username
+    result.detail["policy_number"] = resolution.policy_number
+    if resolution.csr_username:
+        result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
 
     # Cancellation notices also get the exact org label "Ascend NOC" on
     # the filed note (Activities; UI path) so existing email/text
-    # automation can fire. Late-pay / return-premium stay note-only.
-    # Resolve the unique label before filing so a missing or ambiguous
-    # label does not leave an orphan note. Apply uses CDP session
-    # cookies — OAuth Portal OrganizationLabels is HTTP 403.
+    # automation can fire. Late-pay, intent-to-cancel, and return-premium
+    # stay note-only: no label, and intent-to-cancel is never a
+    # cancellation task. Resolve the unique label before filing so a
+    # missing or ambiguous label does not leave an orphan note. Apply
+    # uses CDP session cookies — OAuth Portal OrganizationLabels is HTTP 403.
     label_plan: dict[str, str] | None = None
     if notice_type == triage.CANCELLATION:
         try:
@@ -585,24 +901,33 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # select_discussion_for_note. The write-scope guard refuses
     # non-allowlisted applicants; phone numbers in the body raise. Both are
     # caught below and become a skip, never a silent write.
-    # The shared EZLynx seat is gated before the note and again before Zapier.
-    # TEST holding the lease must stop a Prod notice from filing or firing.
-    from .ezlynx_driver_gate import EzlynxDriverGateRefused
-    from .safety_seal import driver_gate_for_write
+    # The shared EZLynx seat is gated before a live note and again before
+    # a live Zapier post. Dry-run does not call driver_gate_for_write.
+    title_hint = discussion_title_hint(notice_type)
+    try:
+        if ctx.dry_run:
+            filed = _prepare_dry_run_note(
+                ctx.discussion_client,
+                resolution.applicant_id,
+                note_text,
+                title_hint=title_hint,
+            )
+        else:
+            from .ezlynx_driver_gate import EzlynxDriverGateRefused
+            from .safety_seal import driver_gate_for_write
 
-    try:
-        driver_gate_for_write()
-    except EzlynxDriverGateRefused as exc:
-        result.reason = f"driver_gate_refused: {exc}"
-        return result
-    try:
-        filed = discussions.file_note_to_existing_discussion(
-            ctx.discussion_client,
-            resolution.applicant_id,
-            note_text,
-            title_hint=discussion_title_hint(notice_type),
-            dry_run=ctx.dry_run,
-        )
+            try:
+                driver_gate_for_write()
+            except EzlynxDriverGateRefused as exc:
+                result.reason = f"driver_gate_refused: {exc}"
+                return result
+            filed = discussions.file_note_to_existing_discussion(
+                ctx.discussion_client,
+                resolution.applicant_id,
+                note_text,
+                title_hint=title_hint,
+                dry_run=False,
+            )
     except EzlynxWriteScopeError as exc:
         result.reason = f"write_scope_refused: {exc}"
         return result
@@ -621,13 +946,16 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 
     if label_plan is not None:
         try:
-            labeled = org_labels.apply_planned_label(
-                ctx.ezlynx_client,
-                resolution.applicant_id,
-                label_plan,
-                dry_run=ctx.dry_run,
-                note_id=str(filed.get("note_id") or "") or None,
-            )
+            if ctx.dry_run:
+                labeled = _dry_run_label_result(resolution.applicant_id, label_plan)
+            else:
+                labeled = org_labels.apply_planned_label(
+                    ctx.ezlynx_client,
+                    resolution.applicant_id,
+                    label_plan,
+                    dry_run=False,
+                    note_id=str(filed.get("note_id") or "") or None,
+                )
         except EzlynxWriteScopeError as exc:
             result.reason = f"write_scope_refused: {exc}"
             return result
@@ -643,6 +971,8 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # gets its note and a logged skip — never an invented payload.
     task_fired: dict[str, Any] | None = None
     if notice_type == triage.CANCELLATION:
+        from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
         payload = triage.build_cancellation_task_payload(
             triaged,
             applicant_id=resolution.applicant_id,
@@ -651,8 +981,17 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         )
         result.detail["task_payload"] = payload
         try:
-            driver_gate_for_write()
-            task_fired = zapier_tasks.fire_task(dict(payload), dry_run=ctx.dry_run)
+            if ctx.dry_run:
+                # In-process validation only. Do not spawn zap-trigger and do
+                # not call driver_gate_for_write.
+                checked = dict(payload)
+                zapier_tasks.validate_task_payload(checked)
+                task_fired = {"ok": True, "dry_run": True}
+            else:
+                from .safety_seal import driver_gate_for_write
+
+                driver_gate_for_write()
+                task_fired = zapier_tasks.fire_task(dict(payload), dry_run=False)
         except EzlynxDriverGateRefused as exc:
             result.reason = f"driver_gate_refused: {exc}"
             return result
@@ -680,35 +1019,101 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 # ---------------------------------------------------------------------------
 
 
+def _reason_prefix(reason: str) -> str:
+    """``applicant_unresolved: 2 candidate rows`` -> ``applicant_unresolved``."""
+    text = str(reason or "").strip()
+    if not text:
+        return ""
+    return text.split(":", 1)[0].strip()
+
+
+def _gmail_identity(notice: EmailNotice) -> tuple[str, str]:
+    """Return (mailbox, gmail message id) for a dry-run spot check."""
+    mailbox = str(notice.mailbox or "").strip()
+    gmail_id = str(notice.gmail_message_id or "").strip()
+    message_id = str(notice.message_id or "")
+    if not gmail_id and mailbox and message_id.startswith(mailbox + ":"):
+        gmail_id = message_id.split(":", 1)[1]
+    if (not gmail_id or not mailbox) and ":" in message_id:
+        left, right = message_id.split(":", 1)
+        if "@" in left:
+            mailbox = mailbox or left
+            gmail_id = gmail_id or right
+    if not gmail_id:
+        gmail_id = message_id
+    return mailbox, gmail_id
+
+
+def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, Any]:
+    mailbox, gmail_id = _gmail_identity(notice)
+    detail = result.detail or {}
+    entry = {
+        "gmail_message_id": gmail_id,
+        "mailbox": mailbox,
+        "notice_type": str(detail.get("notice_type") or ""),
+        "policy_number": str(detail.get("policy_number") or ""),
+        "applicant_id": str(detail.get("applicant_id") or ""),
+    }
+    if entry["notice_type"] == triage.CANCELLATION:
+        entry["csr_login"] = str(detail.get("csr_username") or "")
+    return entry
+
+
 def run_driver(ctx: DriverContext) -> dict[str, Any]:
     """Process every unread notice; return a JSON-serializable summary."""
     notices = ctx.source.fetch_notices()
-    results: list[NoticeResult] = []
+    paired: list[tuple[EmailNotice, NoticeResult]] = []
     for notice in notices:
-        results.append(process_notice(notice, ctx))
+        paired.append((notice, process_notice(notice, ctx)))
+    results = [item for _, item in paired]
+    by_notice_type: dict[str, int] = {}
+    skipped_by_reason: dict[str, int] = {}
+    for item in results:
+        notice_type = str((item.detail or {}).get("notice_type") or "unclassified")
+        by_notice_type[notice_type] = by_notice_type.get(notice_type, 0) + 1
+        if item.status == "skipped":
+            prefix = _reason_prefix(item.reason)
+            skipped_by_reason[prefix] = skipped_by_reason.get(prefix, 0) + 1
+    would_file = [
+        _would_file_entry(notice, item)
+        for notice, item in paired
+        if ctx.dry_run and item.status == "dry_run"
+    ]
+    ignored = sum(1 for item in results if item.status == "ignored")
     summary = {
         "dry_run": ctx.dry_run,
         "notices_seen": len(notices),
-        "done": sum(1 for r in results if r.status == "done"),
-        "dry_runs": sum(1 for r in results if r.status == "dry_run"),
-        "skipped": sum(1 for r in results if r.status == "skipped"),
+        "done": sum(1 for item in results if item.status == "done"),
+        "dry_runs": sum(1 for item in results if item.status == "dry_run"),
+        "skipped": sum(1 for item in results if item.status == "skipped"),
+        "ignored": ignored,
+        "by_notice_type": by_notice_type,
+        "would_file_count": len(would_file),
+        "would_file": would_file,
+        "skipped_by_reason": skipped_by_reason,
+        "breakdown": {
+            "by_notice_type": dict(by_notice_type),
+            "would_file": len(would_file),
+            "ignored": ignored,
+            "skipped_by_reason": dict(skipped_by_reason),
+        },
         "results": [
             {
-                "message_id": r.message_id,
-                "subject": r.subject,
-                "status": r.status,
-                "reason": r.reason,
-                "detail": r.detail,
+                "message_id": item.message_id,
+                "subject": item.subject,
+                "status": item.status,
+                "reason": item.reason,
+                "detail": item.detail,
             }
-            for r in results
+            for item in results
         ],
     }
     return summary
 
 
 def _notice_allow_modify(*, dry_run: bool) -> bool:
-    """Request gmail.modify for live mark-read, or when the env flag is set."""
-    return (not dry_run) or _truthy(os.environ.get("ASCEND_DRIVER_GMAIL_MODIFY"))
+    """Live mark-read needs gmail.modify. Dry-run requests readonly only."""
+    return not dry_run
 
 
 def discussion_config_from_api_config(api_config: Any) -> DiscussionApiConfig:
@@ -765,21 +1170,24 @@ def build_live_context(
     """Assemble real clients from Secret Manager / env. Raises with a clear
     message when required configuration is missing (fail closed)."""
     service_account = str(os.environ.get("ROBIE_GMAIL_DELEGATION_SA") or "").strip()
-    # Multi-mailbox mode: scan all employee mailboxes via domain-wide delegation.
-    # Falls back to single mailbox for backwards compatibility.
+    allow_modify = _notice_allow_modify(dry_run=dry_run)
+    # Multi-mailbox mode: scan the allowlisted staff mailboxes via domain-wide
+    # delegation. A single mailbox stays on GmailNoticeSource.
     if mailboxes:
+        targets = enforce_mailbox_allowlist(list(mailboxes))
         source: NoticeSource = MultiMailboxNoticeSource(
-            mailboxes=mailboxes,
+            mailboxes=targets,
             query=query,
             service_account_email=service_account,
-            allow_modify=_notice_allow_modify(dry_run=dry_run),
+            allow_modify=allow_modify,
         )
     else:
+        targets = enforce_mailbox_allowlist([mailbox])
         source = GmailNoticeSource(
-            mailbox=mailbox,
+            mailbox=targets[0],
             query=query,
             service_account_email=service_account,
-            allow_modify=_notice_allow_modify(dry_run=dry_run),
+            allow_modify=allow_modify,
         )
     return build_processing_context(dry_run=dry_run, due_days=due_days, source=source)
 
@@ -797,14 +1205,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Actually write notes and fire tasks. Without this (or "
         "ASCEND_DRIVER_LIVE=1) the driver runs in dry-run mode and writes nothing.",
     )
-    parser.add_argument("--mailbox", default=os.environ.get("ASCEND_DRIVER_MAILBOX", DEFAULT_MAILBOX))
+    parser.add_argument(
+        "--mailbox",
+        default=None,
+        help="Scan one mailbox. Used when --mailboxes and ASCEND_DRIVER_MAILBOXES are unset.",
+    )
     parser.add_argument(
         "--mailboxes",
-        default=os.environ.get("ASCEND_DRIVER_MAILBOXES", ""),
-        help="Comma-separated list of mailboxes to scan via domain-wide delegation. "
-        "When set, overrides --mailbox and scans all listed mailboxes.",
+        default=None,
+        help="Comma-separated mailboxes. Overrides --mailbox. "
+        "When neither this nor --mailbox nor the mailbox env vars are set, "
+        "the driver scans the default staff mailboxes.",
     )
-    parser.add_argument("--query", default=os.environ.get("ASCEND_DRIVER_QUERY", DEFAULT_QUERY))
+    parser.add_argument(
+        "--query",
+        default=None,
+        help="Gmail search. Defaults to ASCEND_DRIVER_QUERY or the Ascend sender filter.",
+    )
     parser.add_argument(
         "--due-days",
         type=int,
@@ -820,13 +1237,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("LIVE MODE: notes will be filed and Zapier tasks fired")
 
     try:
-        mailboxes = [m.strip() for m in (args.mailboxes or "").split(",") if m.strip()]
+        mailboxes = resolve_mailboxes(mailbox=args.mailbox, mailboxes=args.mailboxes)
         ctx = build_live_context(
-            mailbox=args.mailbox,
-            query=args.query,
+            mailbox=mailboxes[0],
+            query=configured_query(args.query),
             dry_run=dry_run,
             due_days=args.due_days,
-            mailboxes=mailboxes or None,
+            mailboxes=mailboxes,
         )
         summary = run_driver(ctx)
     except Exception as exc:  # noqa: BLE001 - top-level fail closed

@@ -1,21 +1,28 @@
-"""Read-only triage for Ascend notice emails landing in the hello inbox.
+"""Read-only triage for Ascend notice emails.
 
-Covers the three notice families Carlo asked for plus the closely related
-return-premium notice:
+Actionable families:
 
-- late_payment   -- "Past due payment for {Insured}"
-- cancellation   -- "{Insured} canceled for non-payment ..." (loan canceled)
-- return_premium -- "Return premium received for Policy {id}"
-- new_program    -- new premium-finance program created
-- unknown        -- anything else; always routed to human review
+- late_payment      -- "Past due payment" / "Payment failed"
+- intent_to_cancel  -- "[URGENT] ... Policy(s) at risk for cancellation"
+                       (Notice of Intent to Cancel). Note only. Never a
+                       cancellation task and never the Ascend NOC label.
+- cancellation      -- "canceled for non-payment" / "loan has been canceled"
+- return_premium    -- "Return premium received"
+- new_program       -- new premium-finance program created
+
+Informational mail (processing payment, payment confirmation, refunds,
+potential policies, programs ready, underwriting, paid off, sign-in, MSA)
+is an explicit ignore type: status ``ignored``, not human-review noise.
+
+- unknown -- anything else; always routed to human review
 
 The module never writes to Ascend or EZLynx.  It classifies the email,
 resolves the Ascend program (preferring the program UUID embedded in the
 email's dashboard link, falling back to a policy-number search), reads the
-program back, and returns a structured triage recommendation: which EZLynx
-workflow/label to use and what note to file.  A notice is only marked
-actionable when the program resolved cleanly; every failure mode sets
-``needs_human_review`` instead of failing silently.
+program back, and returns a structured triage recommendation.  A notice is
+only marked actionable when the program resolved cleanly; every failure
+mode sets ``needs_human_review`` instead of failing silently.  Ignored
+types return before any API call.
 """
 
 from __future__ import annotations
@@ -28,38 +35,96 @@ from .ascend_api import AscendApiClient, AscendApiError
 from .zapier_tasks import validate_due_date
 
 LATE_PAYMENT = "late_payment"
+INTENT_TO_CANCEL = "intent_to_cancel"
 CANCELLATION = "cancellation"
 RETURN_PREMIUM = "return_premium"
 NEW_PROGRAM = "new_program"
+PROCESSING_PAYMENT = "processing_payment"
+PAYMENT_CONFIRMATION = "payment_confirmation"
+REFUND = "refund"
+POTENTIAL_POLICIES = "potential_policies"
+PROGRAMS_READY = "programs_ready"
+UNDERWRITING = "underwriting"
+PAID_OFF = "paid_off"
+SIGN_IN = "sign_in"
+MSA = "msa"
 UNKNOWN = "unknown"
 
-NOTICE_TYPES = (LATE_PAYMENT, CANCELLATION, RETURN_PREMIUM, NEW_PROGRAM, UNKNOWN)
+# Informational Ascend mail. The driver records status "ignored" and does
+# not open a human-review item. UNKNOWN stays needs_human_review.
+IGNORE_TYPES = frozenset(
+    {
+        PROCESSING_PAYMENT,
+        PAYMENT_CONFIRMATION,
+        REFUND,
+        POTENTIAL_POLICIES,
+        PROGRAMS_READY,
+        UNDERWRITING,
+        PAID_OFF,
+        SIGN_IN,
+        MSA,
+    }
+)
+
+NOTICE_TYPES = (
+    LATE_PAYMENT,
+    INTENT_TO_CANCEL,
+    CANCELLATION,
+    RETURN_PREMIUM,
+    NEW_PROGRAM,
+    *tuple(sorted(IGNORE_TYPES)),
+    UNKNOWN,
+)
 
 # Source tag sent with every Zapier-fired task so the Zap (and the audit log)
 # can tell inbox-triage tasks apart from other task creators.
 ZAPIER_SOURCE = "inbox-triage"
 
-# Subject-line patterns observed in real Ascend mail (Sep 2026).  Kept as
-# ordered (pattern, type) pairs so the first match wins; the unknown fallback
-# is intentional -- an unrecognized notice must go to a human, never be
-# auto-filed.
+# Subject-line patterns. First match wins. Intent-to-cancel is listed
+# before any cancellation pattern: "[URGENT] ... Policy(s) at risk for
+# cancellation" contains the word "cancellation" and must not become a
+# cancellation task. Cancellation itself is only the two non-payment
+# phrases, not a bare "cancellation".
 _SUBJECT_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"past[ -]?due payment", LATE_PAYMENT),
     (r"payment failed|failed payment", LATE_PAYMENT),
+    (r"policy\(s\) at risk for cancellation|at risk for cancellation", INTENT_TO_CANCEL),
+    (r"notice of intent to cancel", INTENT_TO_CANCEL),
     (r"canceled? (for|due to) non[- ]?pay", CANCELLATION),
-    (r"notice of cancel", CANCELLATION),
-    (r"loan has been canceled|cancellation", CANCELLATION),
+    (r"loan has been canceled", CANCELLATION),
     (r"return premium received", RETURN_PREMIUM),
     (r"program created|new program|finance agreement", NEW_PROGRAM),
+    (r"processing payment", PROCESSING_PAYMENT),
+    (r"payment confirmation", PAYMENT_CONFIRMATION),
+    (r"\brefund\b", REFUND),
+    (r"potential polic", POTENTIAL_POLICIES),
+    (r"programs ready", PROGRAMS_READY),
+    (r"underwriting request|counteroffer", UNDERWRITING),
+    (r"paid off", PAID_OFF),
+    (r"\bsign[- ]?in\b", SIGN_IN),
+    (r"\bmsa\b|master service agreement", MSA),
 )
 
 _BODY_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"notice of intent to cancel", INTENT_TO_CANCEL),
+    (r"failure to pay will result in the cancelation", INTENT_TO_CANCEL),
     (r"past-due payment of", LATE_PAYMENT),
     (r"has a past[ -]?due payment", LATE_PAYMENT),
     (r"canceled for non-payment", CANCELLATION),
     (r"loan has been canceled effective", CANCELLATION),
     (r"return premium of \$", RETURN_PREMIUM),
     (r"will be applied toward the loan", RETURN_PREMIUM),
+    (r"processing payment", PROCESSING_PAYMENT),
+    (r"payment confirmation", PAYMENT_CONFIRMATION),
+    # Specific refund sentences only. A disputed-charge notice mentions
+    # "refund" in passing and must stay UNKNOWN for a human.
+    (r"a refund (?:of|has been|to your customer)|refund has been initiated", REFUND),
+    (r"potential polic", POTENTIAL_POLICIES),
+    (r"programs ready", PROGRAMS_READY),
+    (r"underwriting request|counteroffer", UNDERWRITING),
+    (r"has been paid off", PAID_OFF),
+    (r"\bsign[- ]?in\b", SIGN_IN),
+    (r"\bmsa\b|master service agreement", MSA),
 )
 
 _DASHBOARD_PROGRAM_RE = re.compile(
@@ -151,6 +216,18 @@ def _first_date(body: str) -> str | None:
 
 def recommended_action(notice_type: str) -> dict[str, Any]:
     """EZLynx-side recommendation for a notice type (advisory only)."""
+    if notice_type == INTENT_TO_CANCEL:
+        return {
+            "ezlynx_workflow": "Ascend NOC",
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": (
+                "File a note on the existing Ascend NOC workflow. This is a "
+                "Notice of Intent to Cancel: the policy is not canceled. Do "
+                "not apply the Ascend NOC label and do not create a "
+                "cancellation task."
+            ),
+        }
     if notice_type == LATE_PAYMENT:
         return {
             "ezlynx_workflow": "Ascend NOC",
@@ -205,6 +282,16 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
                 "the program details match the bound policy."
             ),
         }
+    if notice_type in IGNORE_TYPES:
+        return {
+            "ezlynx_workflow": None,
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": (
+                "Informational Ascend mail. Do not file a note, apply a "
+                "label, or create a task."
+            ),
+        }
     return {
         "ezlynx_workflow": "human review",
         "ezlynx_label": "email received",
@@ -241,6 +328,11 @@ def triage_notice(
         "needs_human_review": False,
         "review_reason": "",
     }
+
+    if notice_type in IGNORE_TYPES:
+        result["ignored"] = True
+        result["needs_human_review"] = False
+        return result
 
     if notice_type == UNKNOWN:
         result["needs_human_review"] = True
@@ -318,7 +410,8 @@ def build_cancellation_task_payload(
     if triage_result.get("notice_type") != CANCELLATION:
         raise ValueError(
             "Zapier cancellation tasks are only built for cancellation notices, "
-            f"got {triage_result.get('notice_type')!r}"
+            f"got {triage_result.get('notice_type')!r}. "
+            "Intent-to-cancel is a note, never a cancellation task."
         )
     if not applicant_id or not str(applicant_id).strip():
         raise ValueError("applicant_id is required to assign a cancellation task")

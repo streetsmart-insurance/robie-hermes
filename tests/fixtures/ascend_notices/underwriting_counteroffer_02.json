@@ -1,0 +1,11 @@
+{
+  "family": "underwriting_counteroffer",
+  "from": "no-reply@useascend.com",
+  "subject": "A counteroffer to your underwriting request for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (897b)",
+    "  text/html (21789b)"
+  ],
+  "text_plain": "The loan terms were not approved as requested, but a counteroffer has been approved.\r\n\r\nYour customer can pay for their coverage under the updated loan terms using the checkout link below:\r\n\r\nMake a payment ( https://checkout.useascend.com/streetsmart_insurance_agency/overview?program_id=b54a4b84-51db-4e3e-a9c4-017f3f66df61&s_token=FIXTURE )\r\n\r\nApproved loan terms:\r\n\r\nTotal$31,065.90Down payment20% ($8,722.36)APR16.99%Loan duration10 monthly installments • $5,403.70/eaInstallment start date10/25/2026\r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by AscendAscend"
+}

@@ -1,0 +1,11 @@
+{
+  "family": "refund_initiated",
+  "from": "support@useascend.com",
+  "subject": "A refund for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (685b)",
+    "  text/html (22350b)"
+  ],
+  "text_plain": "Hi Sandy,\r\n\r\n100 Fixture Street\n\r\nThis refund is related to the coverage:\r\n\r\nPolicyCommercial Package (Tapco Underwriters)Policy IDADTIS-REffective date11/06/2025 \r\n\r\nView refund details ( https://dashboard.useascend.com/programs/f0381f6c-0533-4b17-ad66-1f89f6537971?refund_id=94ef7284-27cd-426d-af91-0197f28477c6 )\r\n\r\nIf this check needs to go to a different address, you can reissue it with an updated address. Updating the address will require verification documents.\r\n\r\nPowered by AscendAscend"
+}

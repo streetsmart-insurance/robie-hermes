@@ -1,0 +1,11 @@
+{
+  "family": "potential_policies_unpurchased",
+  "from": "support@useascend.com",
+  "subject": "You have 5 potential policies that haven't been purchased!",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (1625b)",
+    "  text/html (86841b)"
+  ],
+  "text_plain": "5 policies that you produced in the last two weeks haven't\r\n\r\nbeen purchased yet.\r\n\r\nPlease reach out to your customers for the policies listed below:\r\n\r\nView all in dashboard ( https://dashboard.useascend.com/programs )\r\n\r\nInsured\r\n\r\nFixture Insured A LLC\r\n\r\nIdentifier\r\n\r\nP708629787\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/b5249c26-c244-4079-a5c7-6d113cee399f )\r\n\r\n \r\n\r\nInsured\r\n\r\nFixture Insured C LLC\r\n\r\nIdentifier\r\n\r\nP005179986\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/8683ade8-a71b-4d99-a44e-376036c7ebfc )\r\n\r\n \r\n\r\nInsured\r\n\r\nFixture Insured B LLC\r\n\r\nIdentifier\r\n\r\nP827037815\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/057353da-1c10-4538-af0c-09f7048ad042 )\r\n\r\n \r\n\r\nInsured\r\n\r\nFixture Insured D LLC\r\n\r\nIdentifier\r\n\r\nP250672830\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/be2d1510-fa37-4e23-a68c-2deaaf79592a )\r\n\r\n \r\n\r\nInsured\r\n\r\nFixture Insured B LLC\r\n\r\nIdentifier\r\n\r\nP441271141\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/c86b32de-f050-4569-a892-c5f47829c51a )\r\n\r\n \r\n\r\n \r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThis email has been sent on behalf of Ascend. Please do not reply to this\r\nmessage. If you have any queries, please contact Customer Support using the contact\r\ndetails found below:\r\n\r\n(555) 010-0000\r\n\r\nsupport@useascend.com\r\n\r\nUnsubscribe ( https://track.customer.io/unsubscribe/dgTJ2wYBAM5czVwBoQIS0GztJyxXH0GSXvz7 )"
+}

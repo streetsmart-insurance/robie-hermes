@@ -1,0 +1,11 @@
+{
+  "family": "refund_initiated",
+  "from": "support@useascend.com",
+  "subject": "A refund for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (881b)",
+    "  text/html (24138b)"
+  ],
+  "text_plain": "Hi Mike,\r\n\r\nA refund of $5.51 to your customer, Fixture Other LLC, via check #19445629 mailed to 100 Fixture Street has been stopped because the check has not been cashed for 30 days.\r\n\r\nThis refund is related to the coverage:\r\n\r\nPolicyAuto Physical Damage (238394-001APD-95189-SSRM)Endorsement ID2Reason for endorsementAdd 2020 FRHT (V0000)\r\nAdding 2018 Freightliner (V0000)Effective date04/25/2025\r\n\r\nPolicyAuto Physical Damage (Trinity Underwriters)Policy ID231776-300APD-92181-SSRMEffective date11/10/2024 \r\n\r\nView refund details ( https://dashboard.useascend.com/programs/43827009-2ffa-4f3f-ab84-51292c4fd833?refund_id=9f223912-c923-4874-a0ed-cf2cd06e781f )\r\n\r\nIf this check needs to go to a different address, you can reissue it with an updated address. Updating the address will require verification documents.\r\n\r\nPowered by AscendAscend"
+}
