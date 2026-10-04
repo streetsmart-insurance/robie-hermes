@@ -643,9 +643,15 @@ def resume_task(
         print("An answer can only be recorded on a job that is waiting on a person")
         return 1
 
+    from .ezlynx_task_jobs import payload_request_fingerprint
+
+    current_fp = payload_request_fingerprint(payload)
     answer = dict(store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {})
+    if answer and str(answer.get("request_fp") or "") != current_fp:
+        answer = {}  # an answer given for an earlier request is never carried into a changed one
     answer.update({"task_id": str(payload.get("task_id") or ""), "applicant_id": str(payload.get("applicant_id") or ""),
-                   "discussion_id": str(payload.get("discussion_id") or ""), "round": round_no})
+                   "discussion_id": str(payload.get("discussion_id") or ""), "round": round_no,
+                   "request_fp": current_fp})
     notes: list[str] = []
 
     if assign_to is not None:

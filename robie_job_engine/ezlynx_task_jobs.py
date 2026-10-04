@@ -103,6 +103,19 @@ def request_fingerprint(task: AssignedTask) -> str:
         activity_labels=task.activity_labels)
 
 
+def payload_request_fingerprint(payload: dict[str, Any]) -> str:
+    """The APPROVED REQUEST a human's answer applies to: wording, labels, client and discussion.
+
+    Routing (creator, producer, CSR) is deliberately left out: a person's choice of return
+    owner replaces the normal routing, so a routing change must not undo it, while any change
+    to what is being asked of Robie must.
+    """
+    return _fingerprint(
+        title=payload.get("title"), description=payload.get("description"),
+        applicant_id=payload.get("applicant_id"), discussion_id=payload.get("discussion_id"),
+        created_by="", assigned_producer="", csr="", activity_labels=payload.get("activity_labels"))
+
+
 def _payload_fingerprint(payload: dict[str, Any]) -> str:
     return _fingerprint(
         title=payload.get("title"), description=payload.get("description"),

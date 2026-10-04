@@ -1598,7 +1598,7 @@ def test_a_human_chosen_return_owner_does_not_depend_on_report_routing_fields(st
     first = _work(store, _worker(disc, owners), task)
     assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
     assert intake.resume_task(task.task_id, db_path=store.path, assign_to="Mike Sosa") == 0
-    owners.state_error = cdp.ReassignError("routing fields are unreadable")  # irrelevant to a human's choice
+    owners.live_fields = {"created_by": "Someone New", "assigned_producer": "Jazmin Molina"}  # routing moved: irrelevant
     second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
     assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
     assert owners.calls == ["Mike Sosa"]
@@ -1765,9 +1765,17 @@ ACTIVITY_URL = "https://app.ezlynx.com/web/account/220250093/activity"
 
 
 class _LazyInspector2:
-    def __getattr__(self, name):
+    """The real inspector module, imported on first use; reads AND writes (monkeypatch) go to it."""
+    @staticmethod
+    def _module():
         import importlib
-        return getattr(importlib.import_module("robie_job_engine.task_field_inspector"), name)
+        return importlib.import_module("robie_job_engine.task_field_inspector")
+    def __getattr__(self, name):
+        return getattr(self._module(), name)
+    def __setattr__(self, name, value):
+        setattr(self._module(), name, value)
+    def __delattr__(self, name):
+        delattr(self._module(), name)
 
 
 insp = _LazyInspector2()
@@ -1939,6 +1947,14 @@ class _ApiClient:
             {"id": "1", "type": "TaskCreationNote", "body": "Send the dec page", "createdDate": "2026-10-06T09:00:00Z",
              "task": {"assignedUserId": 5}, "apiToken": "tok-123"}]}
     def append_note(self, *a, **k): raise AssertionError("the inspection wrote a note")
+
+
+@pytest.fixture(autouse=True)
+def _api_supervision(monkeypatch):
+    """API discovery is supervised too: the Test host, with reassignment and calls off."""
+    monkeypatch.setattr(insp, "_hostname", lambda: TEST_HOST)
+    monkeypatch.delenv("EZLYNX_TASK_REASSIGN_ENABLED", raising=False)
+    monkeypatch.delenv("ROBIE_PHONE_LIVE_CALLS", raising=False)
 
 
 def _api_kwargs(tmp_path):
@@ -2156,3 +2172,25 @@ def test_the_verifier_rejects_a_human_choice_recorded_for_a_different_request(st
     assert done["status"] == JobStatus.VERIFYING.value, done.get("last_error")
     store.update_payload(first["id"], {**store.get_job(first["id"])["payload"], "description": "Changed after the fact."})
     assert _verify(store, first["id"], disc, owners, verifier_store=store)["status"] != JobStatus.COMPLETE.value
+
+
+def test_the_dialog_inventory_can_be_switched_off_leaving_only_the_approved_fields(monkeypatch, tmp_path):
+    metas = [_meta(0, "Instructions"), _meta(1, "Home phone")]
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=metas, dialog_values={0: "Send the dec page"})
+    insp.run_dom_inspection(dialog_inventory=False, **kwargs)
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    assert saved["dialog_controls"] == []
+    assert [item["name"] for item in saved["approved_fields"]] == ["Instructions"]
+    assert "Home phone" not in json.dumps(saved)
+
+
+def test_a_login_or_expired_session_page_stops_the_inspection(monkeypatch, tmp_path):
+    kwargs, log, page = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")])
+    def expired(page_, applicant_id):
+        raise cdp.ReassignError("EZLynx session appears expired (login page shown)")
+    monkeypatch.setattr(cdp, "_goto_activity", expired)
+    with pytest.raises(insp.InspectionAborted):
+        insp.run_dom_inspection(**kwargs)
+    saved = json.loads(kwargs["output_path"].read_text())
+    assert saved["stopped"]["reason"].startswith("unexpected page") and saved["approved_fields"] == []
+    assert not any(entry[0] in ("describe", "read", "open") for entry in log)
