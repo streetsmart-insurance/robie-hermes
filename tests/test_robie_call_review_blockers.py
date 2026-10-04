@@ -18,14 +18,18 @@ Covers the exact failure modes the review reproduced against PRs #745/#746:
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from robie_job_engine import robie_call_handler as rch
+
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +146,8 @@ def make_ports(**over) -> Any:
 def make_config(**over) -> Any:
     # NOTE: there is no verification opt-out. Outcome verification is
     # unconditional: a placement ack alone never marks the task ok.
-    kw = dict(dry_run=False, outcome_poll_tries=1, outcome_poll_interval_s=0)
+    kw = dict(dry_run=False, now=IN_WINDOW,
+              outcome_poll_tries=1, outcome_poll_interval_s=0)
     kw.update(over)
     return rch.RobieCallConfig(**kw)
 
@@ -155,6 +160,7 @@ def make_task(**over) -> Dict[str, Any]:
         "Applicant ID": "A-100",
         "Applicant Name": "John Smith",
         "Task Created By": "Jane Producer",
+        "Assigned Producer": "Jane Producer",
         "Assigned To": "Robie AI",
         "Task Due Date": "2026-10-10",
     }
@@ -655,8 +661,12 @@ def test_third_party_with_explicit_number_is_on_behalf_of(clean_state):
     # Eva's prompt frames it as on-behalf-of.
     eva_task = rch._build_eva_task(
         task["Task Description"], "Mary Smith", on_behalf_of=True,
+        called_party="Progressive", producer_name="Jane Producer",
         transfer_to_name="Jane Producer", transfer_number="+15559876543")
-    assert "on behalf of Mary Smith" in eva_task
+    assert "on behalf of Jane Producer" in eva_task
+    assert "calling Progressive" in eva_task
+    assert "for Mary Smith" in eva_task
+    assert "Jake" not in eva_task
 
 
 def test_name_mismatch_without_number_still_fails_closed(clean_state):
@@ -679,19 +689,13 @@ def test_transfer_lookup_resolves_assigner_did():
         ports, "Jane Producer") == "+15559876543"
 
 
-def test_transfer_lookup_falls_back_to_carlo():
-    # No port wired.
-    assert rch._resolve_transfer_number(
-        make_ports(), "Jane Producer") == rch.TRANSFER_NUMBER
-    # Unknown name.
+def test_transfer_lookup_without_a_number_takes_a_message():
+    # No port wired, an unknown name, and a failed lookup are all "no target".
+    assert rch._resolve_transfer_number(make_ports(), "Jane Producer") is None
     ports = make_ports(transfer_lookup=FakeTransferLookup({}))
-    assert rch._resolve_transfer_number(
-        ports, "Nobody Here") == rch.TRANSFER_NUMBER
-    # Lookup blows up: still Carlo's line, never a crash.
-    ports = make_ports(
-        transfer_lookup=FakeTransferLookup(raise_on_lookup=True))
-    assert rch._resolve_transfer_number(
-        ports, "Jane Producer") == rch.TRANSFER_NUMBER
+    assert rch._resolve_transfer_number(ports, "Nobody Here") is None
+    ports = make_ports(transfer_lookup=FakeTransferLookup(raise_on_lookup=True))
+    assert rch._resolve_transfer_number(ports, "Jane Producer") is None
 
 
 def test_eva_prompt_has_frustration_transfer():
@@ -742,4 +746,4 @@ def test_payload_uses_assigner_transfer_number():
         transfer_phone_number="+15559876543")
     assert payload["transfer_phone_number"] == "+15559876543"
     fallback = rch.bland_payload_spec("+18007764737", "task", "hi", "bye", 1)
-    assert fallback["transfer_phone_number"] == rch.TRANSFER_NUMBER
+    assert "transfer_phone_number" not in fallback

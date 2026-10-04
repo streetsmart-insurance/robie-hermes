@@ -67,6 +67,10 @@ class NeedsHuman(Exception):
     """The worker needs a human answer before this job can proceed."""
 
 
+class CallQueued(Exception):
+    """The call is outside the calling window. Leave the job pending."""
+
+
 class UnverifiedNoteError(Exception):
     """A note post could not be confirmed via read-back."""
 
@@ -224,6 +228,15 @@ class TaskAssignmentWorker:
         job = store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
         try:
             action = self._do_work(store, job)
+        except CallQueued as e:
+            logger.info("Job %s queued until the calling window: %s", job_id, e)
+            return store.transition(
+                job_id,
+                JobStatus.PENDING,
+                expected={JobStatus.RUNNING},
+                error=str(e)[:500],
+                release_lease=True,
+            )
         except NeedsHuman as e:
             logger.warning(f"Job {job_id} needs a human: {e}")
             return store.transition(
@@ -377,8 +390,9 @@ class TaskAssignmentWorker:
             "Task Subject": task.title,
             "Task Description": task.description,
             "Applicant ID": task.applicant_id,
-            "Applicant Name": payload.get("account_name") or "",
+            "Applicant Name": payload.get("account_name") or task.applicant_name or "",
             "Task Created By": task.created_by,
+            "Assigned Producer": task.assigned_producer,
             "Assigned To": payload.get("assigned_to") or "Robie AI",
             "Task Due Date": task.due_date,
         }
@@ -395,6 +409,13 @@ class TaskAssignmentWorker:
         )
         config = rch.RobieCallConfig(dry_run=self.call_dry_run)
         result = rch.handle_robie_call_task(task_dict, config, ports)
+        if result.get("queued_for_calling_window"):
+            self._record(
+                task, "queued",
+                f"Robie Call queued: {result.get('error')}.",
+                timestamp,
+            )
+            raise CallQueued(str(result.get("error") or "outside calling window"))
 
         note = result.get("writeback") or {}
         action: dict[str, Any] = {
