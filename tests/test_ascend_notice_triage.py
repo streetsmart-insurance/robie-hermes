@@ -235,6 +235,11 @@ def test_triage_cancellation_recommends_human_check():
     result = triage.triage_notice(client, subject, body)
     assert result["notice_type"] == triage.CANCELLATION
     assert result["recommendation"]["ezlynx_workflow"] == "Service-Cancellation"
+    assert result["recommendation"]["ezlynx_label"] is None
+    assert result["note_text"].startswith(
+        "NON-PAY CANCELLATION notice from Ascend. The policy was canceled on 06/22/2026."
+    )
+    assert "Email subject:" not in result["note_text"]
     assert result["needs_human_review"] is False  # program resolved; action still advisory
 
 

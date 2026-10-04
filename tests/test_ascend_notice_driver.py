@@ -283,7 +283,10 @@ def test_dry_run_writes_nothing(no_zap_fire):
     assert summary["skipped"] == 0
     result = summary["results"][0]
     assert result["status"] == "dry_run"
-    assert result["reason"] == "ok"
+    assert result["reason"] == "label_skipped_by_policy"
+    assert result["detail"]["label"]["status"] == "label_skipped_by_policy"
+    assert "label_id" not in result["detail"]["label"]
+    assert ctx.ezlynx_client.label_list_calls == 0
     # The note was validated against the real discussion lookup but never posted.
     assert result["detail"]["discussion_id"] == "d1"
     assert discussion_client._urlopen.posts_to("/notes") == []
@@ -305,13 +308,17 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert detail["applicant_id"] == ALLOWED_APPLICANT
     assert detail["csr_username"] == "KarlaSS"
     assert detail["notice_type"] == triage.CANCELLATION
-    assert "Ascend notice: cancellation." in detail["note_text"]
+    assert detail["note_text"].startswith(
+        "NON-PAY CANCELLATION notice from Ascend. Policy HO-998877 was canceled for non-payment."
+    )
+    assert "Email subject:" not in detail["note_text"]
+    assert "Insured:" not in detail["note_text"]
     assert driver.ROBIE_WAS_HERE in detail["note_text"]
     assert detail["task_payload"]["task_title"].startswith("Ascend cancellation notice")
-    assert detail["label_name"] == "Ascend NOC"
-    assert detail["label"]["status"] == "dry_run"
-    assert detail["label"]["method"] == "api"
-    assert detail["label"]["auth_path"] == "cdp_session_cookie"
+    assert detail["label"]["status"] == "label_skipped_by_policy"
+    assert "label_id" not in detail
+    assert "label_name" not in detail
+    assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.ezlynx_client.applied_labels == []
     assert summary["would_file_count"] == 1
     assert summary["breakdown"]["would_file"] == 1
@@ -484,11 +491,11 @@ def test_needs_human_review_skipped(no_zap_fire):
 
 
 def test_phone_number_in_note_text_is_rejected(no_zap_fire):
-    # The triage note echoes the email subject, so a phone number there must
+    # The insured name is copied into the note. A phone number there must
     # be refused before anything is written.
     subject = (
-        "The coverage policy for Stafford Adult Softball League LLC has been "
-        "canceled due to non-payment, call 603-769-3995"
+        "The coverage policy for Stafford 603-769-3995 LLC has been "
+        "canceled due to non-payment"
     )
     notice = make_notice(subject=subject)
     ctx, discussion_client = make_ctx(
@@ -694,10 +701,11 @@ def test_dry_run_reports_existing_note_duplicate_for_blocked_applicant(no_zap_fi
     assert no_zap_fire == []
 
 
-def test_label_list_unavailable_still_would_file_without_inventing_an_id(no_zap_fire):
+def test_cancellation_does_not_look_up_or_apply_ascend_noc(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
         policy_rows={"HO-998877": [policy_row(applicant_id="175448994")]},
+        org_labels=[{"id": "c1", "name": "Cancellation"}],
         label_list_error=RuntimeError("portal label list HTTP 500"),
     )
     with mock.patch(
@@ -707,14 +715,13 @@ def test_label_list_unavailable_still_would_file_without_inventing_an_id(no_zap_
         summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "dry_run"
-    assert result["reason"].startswith("label_not_applied:")
-    assert "LABEL_LIST_UNAVAILABLE" in result["reason"]
-    assert "organization label list failed" in result["reason"]
+    assert result["reason"] == "label_skipped_by_policy"
     label = result["detail"]["label"]
-    assert label["status"] == "label_not_applied"
+    assert label["status"] == "label_skipped_by_policy"
     assert "label_id" not in label
     assert "label_id" not in result["detail"]
     assert "110248" not in json.dumps(result)
+    assert "Ascend NOC" not in result["detail"]["note_text"]
     assert summary["would_file_count"] == 1
     assert summary["skipped"] == 0
     entry = summary["would_file"][0]
@@ -723,26 +730,30 @@ def test_label_list_unavailable_still_would_file_without_inventing_an_id(no_zap_
     assert entry["csr_login"] == "KarlaSS"
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert ctx.ezlynx_client.applied_labels == []
-    assert ctx.ezlynx_client.label_list_calls == 1
+    assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.source.marked == []
     assert no_zap_fire == []
 
 
-def test_label_list_unavailable_live_files_note_and_does_not_apply(no_zap_fire):
+def test_cancellation_live_files_note_without_calling_the_label_api(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
         policy_rows={"HO-998877": [policy_row()]},
         dry_run=False,
-        label_list_error=RuntimeError("portal label list HTTP 500"),
+        label_list_error=RuntimeError("portal label list must not be called"),
+        apply_label_error=org_labels.OrgLabelError(
+            org_labels.LABEL_APPLY_FAILED, "organization label apply failed: HTTP 403"
+        ),
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "done"
-    assert "label_not_applied" in result["reason"]
-    assert "LABEL_LIST_UNAVAILABLE" in result["reason"]
+    assert result["reason"] == "label_skipped_by_policy"
+    assert result["detail"]["label"]["status"] == "label_skipped_by_policy"
     assert "label_id" not in result["detail"]["label"]
     assert len(discussion_client._urlopen.posts_to("/notes")) == 1
     assert ctx.ezlynx_client.applied_labels == []
+    assert ctx.ezlynx_client.label_list_calls == 0
     assert len(no_zap_fire) == 1
     assert ctx.source.marked == ["m1"]
 
@@ -771,11 +782,11 @@ def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
     body = json.loads(posts[0]["data"].decode("utf-8"))
     assert driver.ROBIE_WAS_HERE in body["body"]
     assert "bind" not in body["body"].lower()
-    assert result["detail"]["label"]["label_name"] == "Ascend NOC"
-    assert result["detail"]["label"]["auth_path"] == "cdp_session_cookie"
-    assert ctx.ezlynx_client.applied_labels == [
-        {"note_id": "n7", "label_id": "noc-1"}
-    ]
+    assert result["reason"] == "label_skipped_by_policy"
+    assert result["detail"]["label"]["status"] == "label_skipped_by_policy"
+    assert "label_id" not in result["detail"]["label"]
+    assert ctx.ezlynx_client.label_list_calls == 0
+    assert ctx.ezlynx_client.applied_labels == []
 
 
 def test_untitled_only_discussions_are_not_filed(no_zap_fire):
@@ -794,42 +805,33 @@ def test_untitled_only_discussions_are_not_filed(no_zap_fire):
     assert no_zap_fire == []
 
 
-def test_missing_or_ambiguous_ascend_noc_does_not_file_or_label(no_zap_fire):
-    ctx, discussion_client = make_ctx(
-        notices=[make_notice()],
-        policy_rows={"HO-998877": [policy_row()]},
-        org_labels=[{"id": "c1", "name": "Cancellation"}, {"id": "n1", "name": "Ascend noc"}],
-    )
-    summary = driver.run_driver(ctx)
-    result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert "label_not_applied" in result["reason"]
-    assert "LABEL_NOT_FOUND" in result["reason"]
-    assert discussion_client._urlopen.posts_to("/notes") == []
-    assert ctx.ezlynx_client.applied_labels == []
-    assert no_zap_fire == []
-
-
-def test_duplicate_ascend_noc_labels_fail_closed(no_zap_fire):
+def test_missing_or_duplicate_ascend_noc_catalog_does_not_block_the_note(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
         policy_rows={"HO-998877": [policy_row()]},
         org_labels=[
+            {"id": "c1", "name": "Cancellation"},
             {"id": "a", "name": "Ascend NOC"},
             {"id": "b", "name": "Ascend NOC"},
         ],
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert "LABEL_NOT_UNIQUE" in result["reason"]
+    assert result["status"] == "dry_run"
+    assert result["reason"] == "label_skipped_by_policy"
+    assert result["detail"]["label"]["status"] == "label_skipped_by_policy"
     assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.ezlynx_client.applied_labels == []
+    assert summary["would_file_count"] == 1
+    assert no_zap_fire == []
 
 
-def test_driver_label_path_is_api_not_playwright():
+def test_driver_does_not_apply_org_labels():
     source = Path(driver.__file__).read_text(encoding="utf-8")
-    assert "ezlynx_org_labels" in source
+    assert "ezlynx_org_labels" not in source
+    assert "plan_exact_label" not in source
+    assert "apply_planned_label" not in source
     assert "apply_account_label" not in source
     assert "playwright" not in source.casefold()
     assert "bland" not in source.casefold()
@@ -920,12 +922,11 @@ def test_live_mode_files_note_fires_task_and_marks_read(no_zap_fire):
     assert len(no_zap_fire) == 1
     assert no_zap_fire[0]["dry_run"] is False
     assert ctx.source.marked == ["m1"]
-    assert result["detail"]["label"]["label_name"] == "Ascend NOC"
-    assert result["detail"]["label"]["status"] == "applied"
-    assert result["detail"]["label"]["auth_path"] == "cdp_session_cookie"
-    assert ctx.ezlynx_client.applied_labels == [
-        {"note_id": "n7", "label_id": "noc-1"}
-    ]
+    assert result["reason"] == "label_skipped_by_policy"
+    assert result["detail"]["label"]["status"] == "label_skipped_by_policy"
+    assert "label_id" not in result["detail"]["label"]
+    assert ctx.ezlynx_client.label_list_calls == 0
+    assert ctx.ezlynx_client.applied_labels == []
 
 
 def test_live_mode_leaves_failed_email_unread(no_zap_fire):
@@ -941,7 +942,7 @@ def test_live_mode_leaves_failed_email_unread(no_zap_fire):
     assert ctx.source.marked == ["m1"]  # the failed one stays unread
 
 
-def test_label_apply_403_fail_closed_leaves_unread(no_zap_fire):
+def test_label_apply_error_is_never_reached_for_a_cancellation(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
         policy_rows={"HO-998877": [policy_row()]},
@@ -952,13 +953,14 @@ def test_label_apply_403_fail_closed_leaves_unread(no_zap_fire):
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert "LABEL_APPLY_FAILED" in result["reason"]
-    assert "403" in result["reason"]
-    assert ctx.source.marked == []
+    assert result["status"] == "done"
+    assert result["reason"] == "label_skipped_by_policy"
+    assert "403" not in result["reason"]
+    assert ctx.source.marked == ["m1"]
+    assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.ezlynx_client.applied_labels == []
     assert len(discussion_client._urlopen.posts_to("/notes")) == 1
-    assert no_zap_fire == []
+    assert len(no_zap_fire) == 1
 
 
 # ---------------------------------------------------------------------------

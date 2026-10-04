@@ -13,7 +13,6 @@ Pipeline per email::
       -> resolve applicant_id                  (EZLynx PolicyApi, normalized policy number)
       -> resolve CSR login                    (cancellation only; Ascend producer)
       -> file_note_to_existing_discussion()    (EXISTING discussion only)
-      -> apply Ascend NOC on that note         (CDP session cookies; cancellation only)
       -> build_cancellation_task_payload()     (cancellation notices only)
       -> zapier_tasks.fire_task()              (Zapier catch-hook Zap)
 
@@ -29,14 +28,13 @@ Safety (non-negotiable):
   error, phone numbers in the note text, or a write-scope refusal -> that
   email is skipped, logged, and the driver continues with the rest.
   Informational mail is ``ignored``, not a human-review skip.
-- Write-scope eligibility is checked before org-label planning. Dry-run
-  reports matches blocked only by that allowlist as
+- Write-scope eligibility is checked before filing. Dry-run reports
+  matches blocked only by that allowlist as
   ``would_file_if_write_scope_allowed``, with applicant ids. The allowlist
   itself is unchanged.
-- When the org-label list is unavailable, the note is still filed (dry-run
-  counts it as would-file) and the result says ``label_not_applied``. No
-  label id is invented. A list that succeeds but has no unique
-  ``Ascend NOC`` still skips the notice.
+- Cancellations are notes only. The driver does not list or apply the
+  Ascend NOC label. That label sends client email and text, and Robie
+  does not send those. The result says ``label_skipped_by_policy``.
 - One run files one note per applicant, policy, notice type, and due or
   cancel date (or the same normalized email body). Later copies in that
   run are ``duplicate_in_run`` and are not filed. That collapse does not
@@ -90,7 +88,6 @@ from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
 from . import ezlynx_discussions as discussions
-from . import ezlynx_org_labels as org_labels
 from . import zapier_tasks
 from .ascend_api import AscendApiClient, configured_client as configured_ascend_client
 from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
@@ -980,22 +977,6 @@ def _write_scope_refusal_reason(applicant_id: str) -> str:
     )
 
 
-def _dry_run_label_result(applicant_id: str, plan: dict[str, str]) -> dict[str, Any]:
-    """The label receipt a dry-run would record. Does not apply anything."""
-    from .ezlynx_write_scope import normalize_applicant_id
-
-    return {
-        "status": "dry_run",
-        "applicant_id": normalize_applicant_id(applicant_id),
-        "note_id": None,
-        "label_name": plan.get("name") or "",
-        "label_id": plan.get("id") or "",
-        "method": "api",
-        "auth_path": org_labels.AUTH_PATH_CDP_SESSION,
-        "endpoint": org_labels.NOTE_LABELS_PATH,
-    }
-
-
 def process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     """Run one email through triage -> note -> task. Never raises."""
     try:
@@ -1095,8 +1076,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     if note_match.get("reason") and not note_match.get("read"):
         result.detail["existing_note_read_reason"] = note_match["reason"]
 
-    # Write scope before any label lookup. A narrow allowlist must not hide
-    # a real match behind a label-list failure, and must not call the list.
+    # Write scope before filing. A narrow allowlist must not hide a real match.
     scope_refusal = _write_scope_refusal_reason(resolution.applicant_id)
     if scope_refusal:
         result.reason = scope_refusal
@@ -1108,31 +1088,9 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         )
         return result
 
-    # Cancellation notices also get the exact org label "Ascend NOC" on
-    # the filed note (Activities; UI path) so existing email/text
-    # automation can fire. Late-pay, intent-to-cancel, and return-premium
-    # stay note-only: no label, and intent-to-cancel is never a
-    # cancellation task. A successful list with a missing or ambiguous
-    # label still skips, so we do not file an orphan note. A list that
-    # cannot be read does not skip: the note is filed and the result says
-    # label_not_applied. No label id is invented. Apply uses CDP session
-    # cookies — OAuth Portal OrganizationLabels is HTTP 403.
-    label_plan: dict[str, str] | None = None
-    label_list_unavailable = ""
-    if notice_type == triage.CANCELLATION:
-        try:
-            label_plan = org_labels.plan_exact_label(
-                ctx.ezlynx_client, org_labels.ASCEND_NOC_LABEL
-            )
-        except org_labels.OrgLabelError as exc:
-            if exc.code == org_labels.LABEL_LIST_UNAVAILABLE:
-                label_list_unavailable = f"label_not_applied: {exc.code}: {exc}"
-            else:
-                result.reason = f"label_not_applied: {exc.code}: {exc}"
-                return result
-        else:
-            result.detail["label_name"] = label_plan["name"]
-            result.detail["label_id"] = label_plan["id"]
+    # Cancellations are notes only. Do not list or apply Ascend NOC.
+    # That label sends client email and text, and Robie does not send those.
+    # Intent-to-cancel is also a note, never a cancellation task.
 
     # Append to an EXISTING titled discussion. Untitled is refused inside
     # select_discussion_for_note. The write-scope guard refuses
@@ -1181,35 +1139,6 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["note_id"] = filed.get("note_id")
     result.detail["note_text"] = note_text
 
-    if label_plan is not None:
-        try:
-            if ctx.dry_run:
-                labeled = _dry_run_label_result(resolution.applicant_id, label_plan)
-            else:
-                labeled = org_labels.apply_planned_label(
-                    ctx.ezlynx_client,
-                    resolution.applicant_id,
-                    label_plan,
-                    dry_run=False,
-                    note_id=str(filed.get("note_id") or "") or None,
-                )
-        except EzlynxWriteScopeError as exc:
-            result.reason = f"write_scope_refused: {exc}"
-            return result
-        except org_labels.OrgLabelError as exc:
-            result.reason = f"label_not_applied: {exc.code}: {exc}"
-            return result
-        if labeled.get("status") not in {"applied", "dry_run"}:
-            result.reason = f"label_not_applied: {labeled.get('status')}"
-            return result
-        result.detail["label"] = labeled
-    elif label_list_unavailable:
-        # Note proceeds. The label id is unknown; do not invent one.
-        result.detail["label"] = {
-            "status": "label_not_applied",
-            "reason": label_list_unavailable,
-        }
-
     # Zapier task: only cancellation notices have a builder. Anything else
     # gets its note and a logged skip — never an invented payload.
     task_fired: dict[str, Any] | None = None
@@ -1246,7 +1175,17 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task builder for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
-    result.reason = label_list_unavailable or "ok"
+    if notice_type == triage.CANCELLATION:
+        result.detail["label"] = {
+            "status": "label_skipped_by_policy",
+            "reason": (
+                "Ascend NOC is not applied. That label sends client email "
+                "and text, and Robie does not send those."
+            ),
+        }
+        result.reason = "label_skipped_by_policy"
+    else:
+        result.reason = "ok"
     if not ctx.dry_run:
         try:
             ctx.source.mark_processed(notice.message_id)

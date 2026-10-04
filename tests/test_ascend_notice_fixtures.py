@@ -185,6 +185,52 @@ def test_ignore_types_do_not_ask_for_human_review():
     assert saw_ignore and saw_unknown
 
 
+class _ResolvedProgram:
+    def __init__(self, status):
+        self.status = status
+
+    def get_program(self, program_uuid):
+        return {"id": program_uuid, "status": self.status}
+
+    def find_program_by_policy(self, policy_number):
+        return {"program": {"status": self.status}, "program_id": "prog-fixture"}
+
+
+def test_cancellation_fixture_note_is_plain_and_skips_the_label():
+    data = dict(_load_all())["loan_canceled_nonpayment_01.json"]
+    result = triage.triage_notice(
+        _ResolvedProgram("canceled"), data["subject"], data["text_plain"]
+    )
+    assert result["notice_type"] == triage.CANCELLATION
+    assert result["recommendation"]["ezlynx_label"] is None
+    assert result["note_text"] == (
+        "NON-PAY CANCELLATION notice from Ascend. "
+        "Policy CPS6534227 was canceled on 09/23/2026.\n"
+        "Fixture Insured A LLC still has an overdue balance of $133.42.\n"
+        "The loan was canceled because the payment was not made."
+    )
+    for banned in ("Email subject:", "Insured:", "Policies:", "Amount:", "Ascend program"):
+        assert banned not in result["note_text"]
+
+
+def test_late_payment_fixture_note():
+    data = dict(_load_all())["past_due_payment_01.json"]
+    result = triage.triage_notice(
+        _ResolvedProgram("past_due"), data["subject"], data["text_plain"]
+    )
+    assert result["notice_type"] == triage.LATE_PAYMENT
+    assert result["note_text"] == (
+        "Ascend notice: late payment.\n"
+        "Email subject: Past due payment for Fixture Insured A LLC\n"
+        "Insured: Fixture Insured A LLC\n"
+        "Policies: GAT5643640-26\n"
+        "Amount: $0,241.00\n"
+        "Date: 10/01/2026\n"
+        "Ascend program: 51e835b5-b6ae-43a1-ab48-cef007d242db\n"
+        "Ascend program status: past_due"
+    )
+
+
 def test_sign_in_and_msa_are_explicit_ignores():
     assert triage.classify_notice("Sign in to Ascend", "") == triage.SIGN_IN
     assert triage.classify_notice("", "Please sign in to continue") == triage.SIGN_IN

@@ -139,6 +139,10 @@ _POLICY_ID_RE = re.compile(
 )
 _MONEY_RE = re.compile(r"\$\s?([\d,]+\.\d{2})")
 _DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+_CANCEL_EFFECTIVE_RE = re.compile(
+    r"canceled effective\s*(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
 
 
 def classify_notice(subject: str, body: str) -> str:
@@ -214,6 +218,57 @@ def _first_date(body: str) -> str | None:
     return match.group(1) if match else None
 
 
+def cancel_effective_date(body: str) -> str | None:
+    """The loan cancel date, not the policy effective date."""
+    match = _CANCEL_EFFECTIVE_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def _policy_phrase(policy_numbers: list[str]) -> str:
+    policies = [str(item).strip() for item in policy_numbers if str(item or "").strip()]
+    if len(policies) == 1:
+        return f"Policy {policies[0]}"
+    if len(policies) > 1:
+        return "Policies " + ", ".join(policies)
+    return "The policy"
+
+
+def build_cancellation_note(
+    *,
+    body: str,
+    policy_numbers: list[str],
+    insured_name: str | None,
+    amount: str | None,
+) -> str:
+    """Staff-facing cancellation note. Plain sentences, no field labels.
+
+    The first line names the non-pay cancellation, the policy, and the
+    cancel date. Robie does not apply the Ascend NOC label.
+    """
+    policy_phrase = _policy_phrase(policy_numbers)
+    when = cancel_effective_date(body)
+    if when:
+        first = (
+            "NON-PAY CANCELLATION notice from Ascend. "
+            f"{policy_phrase} was canceled on {when}."
+        )
+    else:
+        first = (
+            "NON-PAY CANCELLATION notice from Ascend. "
+            f"{policy_phrase} was canceled for non-payment."
+        )
+    lines = [first]
+    insured = str(insured_name or "").strip()
+    if insured and amount:
+        lines.append(f"{insured} still has an overdue balance of {amount}.")
+    elif insured:
+        lines.append(f"This notice is for {insured}.")
+    elif amount:
+        lines.append(f"The overdue balance is {amount}.")
+    lines.append("The loan was canceled because the payment was not made.")
+    return "\n".join(lines)
+
+
 def recommended_action(notice_type: str) -> dict[str, Any]:
     """EZLynx-side recommendation for a notice type (advisory only)."""
     if notice_type == INTENT_TO_CANCEL:
@@ -245,20 +300,20 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
     if notice_type == CANCELLATION:
         return {
             "ezlynx_workflow": "Service-Cancellation",
-            "ezlynx_label": "email received",
+            "ezlynx_label": None,
             "zapier_task": True,
             "instruction": (
-                "Apply the cancellation transaction in EZLynx ONLY if the "
-                "policy is manual -- download policies are handled by the "
-                "carrier download. First check the History of transactions "
+                "File a note only. Do not apply the Ascend NOC label. That "
+                "label emails or texts the client, and Robie does not send "
+                "those. Apply the cancellation transaction in EZLynx ONLY if "
+                "the policy is manual -- download policies are handled by "
+                "the carrier download. First check the History of transactions "
                 "and the Activity notes: if the cancellation was already "
                 "applied, do not apply it again. Cancel type is always "
                 "'Cancel Confirmation'. Enter the return premium from the "
                 "notice; if the notice shows none, enter $0. After applying, "
                 "EZLynx auto-runs a cancellation workflow assigned to the "
-                "CSR -- enter notes there. If the workflow does not trigger "
-                "(EZLynx bug), manually run a cancellation-notice label to "
-                "create it and add notes. Assign an EZLynx follow-up task "
+                "CSR -- enter notes there. Assign an EZLynx follow-up task "
                 "via the Zapier task Zap (build_cancellation_task_payload) "
                 "to the CSR on the account; a human CSR/AP reviews before "
                 "anything is closed."
@@ -368,6 +423,14 @@ def triage_notice(
     result["program"] = program
 
     amount = _first_money(body)
+    if notice_type == CANCELLATION:
+        result["note_text"] = build_cancellation_note(
+            body=body,
+            policy_numbers=policy_numbers,
+            insured_name=insured_name,
+            amount=amount,
+        )
+        return result
     date = _first_date(body)
     lines = [
         f"Ascend notice: {notice_type.replace('_', ' ')}.",
