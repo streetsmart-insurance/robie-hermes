@@ -250,14 +250,14 @@ def _driver_lease_line(episode: dict, *, reader=None) -> str:
     return ""
 
 
-def _environment_file_paths(shown: str) -> list[str]:
-    """Absolute paths from ``systemctl show -p EnvironmentFiles``.
+def _environment_file_entries(shown: str) -> list[dict]:
+    """Each EnvironmentFiles line: path, and whether the file is optional.
 
-    Real output is one prefixed line per file, often with a trailing
-    ``(ignore_errors=yes)``. A leading ``-`` marks an optional file.
-    Every line is kept. The parenthetical flag is not a path.
+    systemd 255 prints one prefixed line per file and marks an optional
+    file with ``(ignore_errors=yes)`` and no leading dash. A leading ``-``
+    is also optional. The parenthetical is not a path. Every line is kept.
     """
-    paths: list[str] = []
+    entries: list[dict] = []
     for raw in (shown or "").splitlines():
         line = raw.strip()
         if not line:
@@ -267,11 +267,18 @@ def _environment_file_paths(shown: str) -> list[str]:
         if not line:
             continue
         token = line.split()[0]
+        optional = "(ignore_errors=yes)" in line
         if token.startswith("-"):
+            optional = True
             token = token[1:]
         if token.startswith("/"):
-            paths.append(token)
-    return paths
+            entries.append({"path": token, "optional": optional})
+    return entries
+
+
+def _environment_file_paths(shown: str) -> list[str]:
+    """Absolute paths from ``systemctl show -p EnvironmentFiles``."""
+    return [str(entry["path"]) for entry in _environment_file_entries(shown)]
 
 
 def _env_check_state_path() -> str:
@@ -313,7 +320,12 @@ def _environment_file_review(shown: str | None) -> tuple[str, list[str]]:
     problem = ""
     notes: list[str] = []
     assigns = "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND"
-    for path in _environment_file_paths(shown):
+    for entry in _environment_file_entries(shown):
+        path = str(entry["path"])
+        # A missing optional file is not installed. Skip it. A missing
+        # required file still falls through and is reported.
+        if entry["optional"] and not Path(path).exists():
+            continue
         try:
             text = Path(path).read_text(encoding="utf-8")
         except OSError:

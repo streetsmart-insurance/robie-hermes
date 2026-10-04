@@ -11,6 +11,8 @@
 #                    A dry run needs a report delivered within the last 90 minutes.
 #                    An older report prints the stale-report reason and what
 #                    the run would do, then exits 2.
+#                    Health trusts the installer's env-check record until the
+#                    next install. Re-run the installer after any env-file change.
 #   --enable-timer   install units and enable both timers. Removes a
 #                    leftover 10-dry-run.conf so the timer cannot stay dry.
 #   --live           install the Bland live drop-in and reload systemd.
@@ -122,10 +124,11 @@ verify_effective_write_scope() {
   fi
 }
 
-# systemctl show -p EnvironmentFiles prints one prefixed line per file:
-#   EnvironmentFiles=/etc/robie.env (ignore_errors=yes)
-#   EnvironmentFiles=-/etc/optional.env (ignore_errors=yes)
-# The parenthetical is not a path. A leading "-" marks an optional file.
+# systemctl show -p EnvironmentFiles prints one prefixed line per file.
+# systemd 255 prints an optional file with no leading dash:
+#   EnvironmentFiles=/etc/robie-recording.env (ignore_errors=yes)
+# A leading "-" is also optional. A missing optional file is skipped.
+# A missing required file fails closed. The parenthetical is not a path.
 env_file_assigns_scope() {
   local path line
   path="$1"
@@ -196,6 +199,10 @@ verify_environment_files() {
     if [[ "${token}" == -* ]]; then
       optional=true
       token="${token#-}"
+    fi
+    # systemd 255 has no dash. "(ignore_errors=yes)" is the optional mark.
+    if [[ "${rest}" == *"(ignore_errors=yes)"* ]]; then
+      optional=true
     fi
     [[ "${token}" == /* ]] || continue
     path="${token}"

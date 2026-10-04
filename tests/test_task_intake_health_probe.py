@@ -401,13 +401,18 @@ def test_environment_file_that_sets_scope_or_playground_is_red(tmp_path):
 
 
 def test_environment_file_paths_keep_every_prefixed_line():
+    """systemd 255 has no leading dash. ignore_errors=yes is optional."""
     shown = (
         "EnvironmentFiles=/etc/recording.env (ignore_errors=yes)\n"
-        "EnvironmentFiles=-/etc/accountability.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=/etc/accountability.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=/etc/streetsmart-hermes/robie-recording.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=-/etc/also-optional.env\n"
     )
     assert _environment_file_paths(shown) == [
         "/etc/recording.env",
         "/etc/accountability.env",
+        "/etc/streetsmart-hermes/robie-recording.env",
+        "/etc/also-optional.env",
     ]
 
 
@@ -421,20 +426,26 @@ def test_second_environment_file_that_sets_playground_is_red(tmp_path, monkeypat
     first.write_text("OTHER=1\n", encoding="utf-8")
     second.write_text("ROBIE_PLAYGROUND=0\n", encoding="utf-8")
     monkeypatch.setenv("ROBIE_TASK_INTAKE_ENV_CHECK", str(tmp_path / "missing-state.json"))
+    missing = "/etc/streetsmart-hermes/robie-recording.env"
     shown = (
+        f"EnvironmentFiles={missing} (ignore_errors=yes)\n"
         f"EnvironmentFiles={first} (ignore_errors=yes)\n"
-        f"EnvironmentFiles=-{second} (ignore_errors=yes)\n"
+        f"EnvironmentFiles={second} (ignore_errors=yes)\n"
     )
+    details: list[str] = []
     red = check_task_intake(
         now=_at(5, 10),
         heartbeats=[fresh],
         effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
         environment_files=shown,
+        details=details,
     )
     assert any(
         "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
         for item in red
     )
+    assert not any(missing in item for item in red)
+    assert not any(missing in line for line in details)
 
 
 def test_unreadable_environment_file_is_detail_and_does_not_page(tmp_path, monkeypatch):
