@@ -1,0 +1,11 @@
+{
+  "family": "potential_policies_unpurchased",
+  "from": "support@useascend.com",
+  "subject": "You have 2 potential policies that haven't been purchased!",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (1070b)",
+    "  text/html (48689b)"
+  ],
+  "text_plain": "2 policies that you produced in the last two weeks haven't\r\n\r\nbeen purchased yet.\r\n\r\nPlease reach out to your customers for the policies listed below:\r\n\r\nView all in dashboard ( https://dashboard.useascend.com/programs )\r\n\r\nInsured\r\n\r\nFixture Insured A LLC\r\n\r\nIdentifier\r\n\r\nP527626045\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/88101dd4-2a4d-45d7-aa22-aa2baee63120 )\r\n\r\n \r\n\r\nInsured\r\n\r\nFixture Insured B LLC\r\n\r\nIdentifier\r\n\r\nP601412408\r\n\r\n \r\n\r\nView Program ( https://dashboard.useascend.com/programs/0de4b8cf-7259-4d76-aeb1-a0353318ec8b )\r\n\r\n \r\n\r\n \r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThis email has been sent on behalf of Ascend. Please do not reply to this\r\nmessage. If you have any queries, please contact Customer Support using the contact\r\ndetails found below:\r\n\r\n(555) 010-0000\r\n\r\nsupport@useascend.com\r\n\r\nUnsubscribe ( https://track.customer.io/unsubscribe/dgTJ2wYBAM5czVwBoKqGX3dzGpgq4xR2sEOa )"
+}

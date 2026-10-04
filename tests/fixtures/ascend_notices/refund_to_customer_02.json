@@ -1,0 +1,11 @@
+{
+  "family": "refund_to_customer",
+  "from": "support@useascend.com",
+  "subject": "A refund to your customer, Fixture Insured A LLC, has been stopped",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (653b)",
+    "  text/html (25478b)"
+  ],
+  "text_plain": "Hi Hello,\r\n\r\nA refund to your customer has been stopped due to a change on the refund instructions.\r\n\r\nRecipient Fixture Insured A LLC\r\nAmount $01.98\r\n100 Fixture Street\nPayment reference Check29745982\r\n\r\nThis refund is related to a change on the loan below:\r\n\r\nReason Paid off\r\n\r\nView refund details ( https://dashboard.useascend.com/programs/c3439897-1468-441e-a312-520d6cd5c792?refund_id=ca92cc16-7d5c-4b54-a114-4abba2f24b05 )\r\n\r\nIf this check needs to go to a different address, you can reissue it with an updated address. Updating the address will require verification documents.\r\n\r\nPowered by Ascend Ascend"
+}

@@ -1,0 +1,11 @@
+{
+  "family": "refund_to_customer",
+  "from": "support@useascend.com",
+  "subject": "A refund to your customer, Fixture Insured A LLC, is on the way",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (534b)",
+    "  text/html (21156b)"
+  ],
+  "text_plain": "Hi Hello,\r\n\r\nA refund has been issued to your customer:\r\n\r\n100 Fixture Street\n\r\nView refund details ( https://dashboard.useascend.com/programs/d1091bce-db61-48f0-a2a9-e22081e01871?refund_id=342c02e1-d293-4d11-ac91-9e574a0fe5ba )\r\n\r\nIf this check needs to go to a different address, you can reissue it with an updated address. Updating the address will require verification documents.\r\n\r\nPowered by AscendAscend"
+}

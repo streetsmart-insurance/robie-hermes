@@ -1,0 +1,11 @@
+{
+  "family": "return_premium_received",
+  "from": "accounting@useascend.com",
+  "subject": "Return premium received for Fixture Insured B LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (700b)",
+    "  text/html (25458b)"
+  ],
+  "text_plain": "Hi StreetSmart Insurance Agency,\r\n\r\nAscend has received a return premium of $366.00 from Amwins Access Insurance Services, LLC due to a cancelation on the following policy:\r\n\r\nInsuredFixture Insured A LLCPolicyGeneral Liability (Amwins Access Insurance Services, LLC)Policy IDWS679493\r\n\r\nThese funds will be applied toward the loan associated with this policy.\r\n\r\nIf you haven't already sent unearned commission for this policy, please do so now.\r\n\r\nSend unearned commission ( https://dashboard.useascend.com/programs/beb4d204-eb52-4873-a93f-d6cbc06d3fe2 )\r\n\r\nThanks,\r\nThe Ascend Team\r\n\r\nPlease don't hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nPowered by AscendAscend"
+}

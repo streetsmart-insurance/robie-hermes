@@ -1,0 +1,11 @@
+{
+  "family": "programs_ready",
+  "from": "support@useascend.com",
+  "subject": "Programs ready for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (773b)",
+    "  text/html (19436b)"
+  ],
+  "text_plain": "Renew program(s) before coverage ends\r\n\r\nCoverage for the following programs will end within 90 days. You can renew their policies and collect payment.\r\n\r\nFixture Other LLC\r\nperson@example.com\r\n100 Fixture Street\n\r\nView all programs ( https://dashboard.useascend.com/programs?account_manager=490f0a98-f6ce-45c0-afcc-3310f0607ca4&expiration_date=custom&expiration_date_min=(555) 010-0000&expiration_date_max=(555) 010-0000&program_status=active&program_status=overdue&program_status=pending_cancelation )\r\n\r\nPlease don’t hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nPowered by AscendAscend"
+}
