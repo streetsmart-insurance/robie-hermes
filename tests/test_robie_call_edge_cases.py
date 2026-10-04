@@ -13,8 +13,12 @@ Covers Carlo's "extremely reliable" requirements:
 """
 import os
 import unittest
+from datetime import datetime
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
+
+from robie_job_engine.ezlynx_driver_gate import DriverDecision
 
 from robie_job_engine import robie_call_handler as rch
 from robie_job_engine.robie_call_handler import (
@@ -30,6 +34,23 @@ from robie_job_engine.robie_call_handler import (
 
 
 TEST_APPLICANT = "220250093"
+IN_WINDOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+_LEASE_PATCH = None
+
+
+def setUpModule():
+    """Unit tests must not read the live EZLynx driver lease."""
+    global _LEASE_PATCH
+    _LEASE_PATCH = patch(
+        "robie_job_engine.ezlynx_driver_gate.require_driver_in",
+        return_value=DriverDecision(True, "TEST", "unit test; lease not read"),
+    )
+    _LEASE_PATCH.start()
+
+
+def tearDownModule():
+    if _LEASE_PATCH is not None:
+        _LEASE_PATCH.stop()
 
 
 def make_task(**overrides: Any) -> Dict[str, Any]:
@@ -40,6 +61,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
+        "Assigned Producer": "Jane Producer",
     }
     task.update(overrides)
     return task
@@ -155,7 +177,7 @@ def make_ports(**overrides):
 
 
 def live_config(**overrides):
-    kw = {"dry_run": False}
+    kw = {"dry_run": False, "now": IN_WINDOW}
     kw.update(overrides)
     return RobieCallConfig(**kw)
 
@@ -283,19 +305,20 @@ class TestPhoneMismatch(unittest.TestCase):
         self.assertIsNone(_instruction_phone_mismatch(
             "Call about renewal", "+17326688161"))
 
-    def test_ezlynx_wins_but_mismatch_flagged_in_note(self):
+    def test_task_provided_number_wins(self):
+        # Free-form directive: a number in the task text overrides the
+        # number on file. Roby dials the task's number, on the applicant's
+        # account.
         task = make_task(**{
             "Task Description": "Call John at 555-999-8888 about his renewal.",
         })
         ports = make_ports()
         result = handle_robie_call_task(task, live_config(), ports)
         self.assertTrue(result["ok"])
-        # Dialed the EZLynx number, not the task's number.
-        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
+        # Dialed the task's number, not the EZLynx number on file.
+        self.assertEqual(ports.bland.calls[0]["phone"], "+15559998888")
+        # The dialed number never appears in the note (API rejects digits).
         body = ports.discussion_client.appended[0]["body"]
-        self.assertIn("different phone number", body)
-        self.assertIn("number on file", body)
-        # The wrong number never appears in the note (API rejects digits).
         self.assertNotIn("555-999-8888", body)
         self.assertNotIn("5559998888", body)
 

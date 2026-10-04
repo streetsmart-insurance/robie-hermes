@@ -1,0 +1,10 @@
+# Opt-in live mode for robie-ascend-notice-driver.service.
+# scripts/install-ascend-notice-driver.sh installs this only with --live.
+# Copying it by hand:
+#   sudo install -o root -g root -m 0644 \
+#     30-live.conf.example \
+#     /etc/systemd/system/robie-ascend-notice-driver.service.d/30-live.conf
+#   sudo systemctl daemon-reload
+# Dry-run stays the default until this drop-in is installed.
+[Service]
+Environment=ASCEND_DRIVER_LIVE=1

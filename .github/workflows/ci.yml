@@ -35,7 +35,7 @@ jobs:
       - name: Test Chat approval cards
         run: PYTHONPATH=. python -m pytest -q tests/test_confirmation_chat_buttons.py tests/test_confirmation_origin_notify.py
       - name: Test exact task identity and durable note acceptance
-        run: PYTHONPATH=.:tests python -m pytest -q tests/test_ezlynx_task_intake.py tests/test_task_intake_safety.py tests/test_call_handler_wiring.py
+        run: PYTHONPATH=.:tests python -m pytest -q tests/test_ezlynx_task_intake.py tests/test_task_intake_safety.py tests/test_call_handler_wiring.py tests/test_robie_call_handler.py tests/test_robie_call_edge_cases.py tests/test_robie_call_hardening.py tests/test_robie_call_review_blockers.py tests/test_ezlynx_create_task_honesty.py tests/test_bland_transport_only_egress.py tests/test_bland_prod_transport.py tests/test_bland_prod_rules.py tests/test_bland_prod_scripts.py
       - name: Run regression battery
         run: PYTHONPATH=. python -m robie_job_engine.regression_battery --ci
       - name: Test durable Chat generations and reply recovery
@@ -99,8 +99,13 @@ jobs:
         run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_job_scope.py tests/test_ezlynx_write_scope.py tests/test_production_deploy_workflow.py tests/test_email_acceptance_audit.py tests/test_email_agent_runner.py tests/test_ezlynx_policy_setup_profiles.py tests/test_policy_skill_release.py tests/test_hermes_tool_visibility.py tests/test_ezlynx_document_tool.py tests/test_canary_create_policy.py tests/test_zapier_skill.py tests/test_zapier_resolver.py
       - name: Test scheduler sweep redaction and ExecStart parsing
         run: PYTHONPATH=.:tests python -m pytest -q tests/test_sweep_box_schedulers.py
+      - name: Test chat intake quiet inbox and preflight alert delivery
+        run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_preflight.py tests/test_health_check_import_root.py tests/test_health_check_profile.py
       - name: Test document retrieval filing
         run: ROBIE_ENV=TEST PYTHONPATH=. python -m unittest tests.test_document_retrieval_filing tests.test_progressive_fao_memo tests.test_gemini_ui_rescue
+      - name: Test Ascend API notice source
+        run: PYTHONPATH=. python -m pytest -q tests/test_ascend_api_notice_source.py tests/test_ascend_notice_driver.py
+
       - name: Build immutable release candidate
         run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
 

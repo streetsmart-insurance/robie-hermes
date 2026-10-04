@@ -1,0 +1,11 @@
+[Unit]
+Description=ROBIE hourly health check
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1min
+Unit=robie-health-check.service
+
+[Install]
+WantedBy=timers.target
