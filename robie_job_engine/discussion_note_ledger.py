@@ -256,6 +256,64 @@ def _compact_policy(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
 
 
+_AMOUNT_RE = re.compile(r"\$\s?([\d,]+\.\d{2})")
+_DUE_RE = re.compile(
+    r"(?:which was due on|was due on|was due|due on)\s+(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_INVOICE_RE = re.compile(
+    r"Invoice(?:\s+No\.?)?\s+([A-Za-z0-9-]{4,})",
+    re.IGNORECASE,
+)
+
+
+def notice_anchors(text: str) -> dict[str, list[str]]:
+    """Amounts, due dates, and invoice numbers named in a notice or a note."""
+    amounts: list[str] = []
+    dues: list[str] = []
+    invoices: list[str] = []
+    seen_amounts: set[str] = set()
+    seen_dues: set[str] = set()
+    seen_invoices: set[str] = set()
+    for match in _AMOUNT_RE.finditer(str(text or "")):
+        token = match.group(1).replace(",", "")
+        if token not in seen_amounts:
+            seen_amounts.add(token)
+            amounts.append(token)
+    for match in _DUE_RE.finditer(str(text or "")):
+        token = match.group(1)
+        if token not in seen_dues:
+            seen_dues.add(token)
+            dues.append(token)
+    for match in _INVOICE_RE.finditer(str(text or "")):
+        token = match.group(1).strip().upper()
+        if token and token not in seen_invoices:
+            seen_invoices.add(token)
+            invoices.append(token)
+    return {"amounts": amounts, "due_dates": dues, "invoice_numbers": invoices}
+
+
+def anchors_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when the due date, the amount, or the invoice number is shared."""
+    if set(left.get("amounts") or []).intersection(right.get("amounts") or []):
+        return True
+    if set(left.get("due_dates") or []).intersection(right.get("due_dates") or []):
+        return True
+    left_invoices = {str(item).upper() for item in (left.get("invoice_numbers") or []) if item}
+    right_invoices = {str(item).upper() for item in (right.get("invoice_numbers") or []) if item}
+    return bool(left_invoices.intersection(right_invoices))
+
+
+def _row_anchors(row: dict[str, Any]) -> dict[str, list[str]]:
+    return {
+        "amounts": [str(item) for item in (row.get("amounts") or []) if str(item)],
+        "due_dates": [str(item) for item in (row.get("due_dates") or []) if str(item)],
+        "invoice_numbers": [
+            str(item).upper() for item in (row.get("invoice_numbers") or []) if str(item)
+        ],
+    }
+
+
 @with_serialized_ledger
 def remember_notice_filing(
     applicant_id: str,
@@ -266,12 +324,16 @@ def remember_notice_filing(
     note_id: str = "",
     ledger_path: Path | str | None = None,
     posted_at: str = "",
+    notice_text: str = "",
+    amounts: list[str] | None = None,
+    due_dates: list[str] | None = None,
+    invoice_numbers: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Remember a posted Ascend note by policy number and notice type.
+    """Remember a posted Ascend note by policy, type, and this bill's anchors.
 
-    The discussion read does not return note text, so this row is how a
-    later ready-row filing can see that the email driver already posted it.
-    Does not call EZLynx.
+    A later month on the same policy is a different row. The email driver
+    does not call this: its unit cannot write the shared ledger. The API
+    poller does, after it has posted. Does not call EZLynx.
     """
 
     applicant = str(applicant_id or "").strip()
@@ -284,6 +346,21 @@ def remember_notice_filing(
     ]
     if not applicant or not discussion or not kind or not numbers:
         return None
+    extracted = notice_anchors(notice_text)
+    remembered_amounts = list(amounts) if amounts is not None else list(extracted["amounts"])
+    remembered_dues = list(due_dates) if due_dates is not None else list(extracted["due_dates"])
+    remembered_invoices = [
+        str(item).upper()
+        for item in (
+            invoice_numbers if invoice_numbers is not None else extracted["invoice_numbers"]
+        )
+        if str(item or "").strip()
+    ]
+    fresh = {
+        "amounts": remembered_amounts,
+        "due_dates": remembered_dues,
+        "invoice_numbers": remembered_invoices,
+    }
     path = resolve_ledger_path(ledger_path)
     payload = _read_file(path)
     notes = [item for item in payload.get("notes") or [] if isinstance(item, dict)]
@@ -302,7 +379,12 @@ def remember_notice_filing(
             for number in (row.get("policy_numbers") or [])
             if _compact_policy(number)
         }
-        if stored.intersection(numbers):
+        if not stored.intersection(numbers):
+            continue
+        stored_anchors = _row_anchors(row)
+        if not any(stored_anchors.values()) and not any(fresh.values()):
+            return dict(row)
+        if anchors_overlap(stored_anchors, fresh):
             return dict(row)
     row = {
         "applicant_id": applicant,
@@ -316,6 +398,9 @@ def remember_notice_filing(
         "confirmation": CONFIRMED,
         "notice_type": kind,
         "policy_numbers": numbers,
+        "amounts": remembered_amounts,
+        "due_dates": remembered_dues,
+        "invoice_numbers": remembered_invoices,
     }
     notes.append(row)
     payload["version"] = LEDGER_VERSION
@@ -333,25 +418,52 @@ def find_recent_notice_filing(
     within_days: int = 30,
     ledger_path: Path | str | None = None,
     now: datetime | None = None,
+    not_before: datetime | None = None,
+    notice_text: str = "",
+    amounts: list[str] | None = None,
+    due_dates: list[str] | None = None,
+    invoice_numbers: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """A notice Robie posted on this discussion in the window.
+    """A notice already posted for this same bill, not merely this policy.
 
-    Matches the policy number and the Ascend notice type, not the full text.
+    The row must be posted on or after ``not_before`` (the ready row's
+    first_seen) and share the due date, the amount, or the invoice number.
+    A prior month's late notice does not match. Rows with no anchors do
+    not match.
     """
 
     applicant = str(applicant_id or "").strip()
     discussion = str(discussion_id or "").strip()
     kind = str(notice_type or "").strip()
-    wanted = {
+    wanted_policies = {
         _compact_policy(number)
         for number in policy_numbers
         if len(_compact_policy(number)) >= 4
     }
-    if not applicant or not discussion or not kind or not wanted:
+    if not_before is None or not applicant or not discussion or not kind or not wanted_policies:
+        return None
+    floor = not_before
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    floor = floor.astimezone(timezone.utc)
+    extracted = notice_anchors(notice_text)
+    wanted = {
+        "amounts": list(amounts) if amounts is not None else list(extracted["amounts"]),
+        "due_dates": list(due_dates) if due_dates is not None else list(extracted["due_dates"]),
+        "invoice_numbers": [
+            str(item).upper()
+            for item in (
+                invoice_numbers if invoice_numbers is not None else extracted["invoice_numbers"]
+            )
+            if str(item or "").strip()
+        ],
+    }
+    if not any(wanted.values()):
         return None
     clock = now or datetime.now(timezone.utc)
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
+    clock = clock.astimezone(timezone.utc)
     window = timedelta(days=within_days)
     for row in _rows(ledger_path):
         if str(row.get("source") or "") != "notice-filing":
@@ -367,14 +479,17 @@ def find_recent_notice_filing(
             for number in (row.get("policy_numbers") or [])
             if _compact_policy(number)
         }
-        if not stored.intersection(wanted):
+        if not stored.intersection(wanted_policies):
             continue
         posted = _parse_stamp(row.get("posted_at"))
-        if posted is None:
+        if posted is None or posted < floor:
             continue
         age = clock - posted
-        if timedelta(0) <= age <= window:
-            return dict(row)
+        if age < timedelta(0) or age > window:
+            continue
+        if not anchors_overlap(wanted, _row_anchors(row)):
+            continue
+        return dict(row)
     return None
 
 

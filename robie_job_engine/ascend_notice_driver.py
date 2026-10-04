@@ -1206,14 +1206,21 @@ class DriverContext:
     dry_run: bool = True
     due_days: int = DEFAULT_DUE_DAYS
     today: date = field(default_factory=date.today)
+    # The poll clock. Ready-row comparisons use this so a test clock and a
+    # note timestamp stay on the same timeline.
+    now: datetime | None = None
     # In-run collapse. Cleared at the start of each run_driver call.
     seen_notice_events: list[dict[str, Any]] = field(default_factory=list)
     # (applicant id, canonical category title) -> discussion id, or a
     # planned-create token when this run has not created it yet.
     planned_category_discussions: dict[tuple[str, str], str] = field(default_factory=dict)
     # Set only while the API poll is filing a digest-matched ready row.
-    # The broader 30-day policy-and-type check applies to that path.
+    # That path skips a note already posted for this same bill.
     ready_row_filing: bool = False
+    # The API poller can write the shared discussion-note ledger. The email
+    # driver cannot (its unit only writes its own state directory), so it
+    # leaves this false and does not try.
+    remember_filings: bool = False
 
 
 @dataclass
@@ -1722,14 +1729,32 @@ def recent_same_notice(
     policy_numbers: list[str],
     notice_type: str,
     now: datetime | None = None,
+    not_before: datetime | None = None,
+    notice_text: str = "",
 ) -> dict[str, Any] | None:
-    """A note from the last 30 days with this policy number and notice type.
+    """A note already posted for this same bill.
 
-    Discussion reads are checked first. The local ledger is the record of
-    notes Robie already posted when the discussion read has no note text.
+    It has to be on or after ``not_before`` (the ready row's first_seen),
+    name this policy and notice type, and share the due date, the amount,
+    or the invoice number. Last month's late notice is a different bill.
+    Discussion reads are checked first. A ledger row counts only when it
+    carries the same anchors.
     """
-    from .discussion_note_ledger import find_recent_notice_filing
+    from .discussion_note_ledger import (
+        anchors_overlap,
+        find_recent_notice_filing,
+        notice_anchors,
+    )
 
+    if not_before is None:
+        return None
+    floor = not_before
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    floor = floor.astimezone(timezone.utc)
+    wanted = notice_anchors(notice_text)
+    if not any(wanted.values()):
+        return None
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -1742,20 +1767,25 @@ def recent_same_notice(
             if not isinstance(row, dict):
                 continue
             posted = _note_posted_at(row)
-            if posted is None:
+            if posted is None or posted < floor:
                 continue
             age = moment - posted
             if age < timedelta(0) or age > _RECENT_NOTE_WINDOW:
                 continue
             body = discussions._note_body(row)
-            if _note_has_policy_and_type(body, policy_numbers, notice_type):
-                return {"note_id": _note_id_from(row), "source": "discussion"}
+            if not _note_has_policy_and_type(body, policy_numbers, notice_type):
+                continue
+            if not anchors_overlap(wanted, notice_anchors(body)):
+                continue
+            return {"note_id": _note_id_from(row), "source": "discussion"}
     remembered = find_recent_notice_filing(
         applicant_id,
         pinned,
         policy_numbers,
         notice_type,
         now=moment,
+        not_before=floor,
+        notice_text=notice_text,
     )
     if remembered is None:
         return None
@@ -1771,8 +1801,9 @@ def _remember_notice_filing(
     discussion_id: str,
     policy_numbers: list[str],
     notice_type: str,
+    notice_text: str,
 ) -> None:
-    """Remember a note that was posted, so a later ready row does not post it again."""
+    """Remember a note the API poller posted. The email driver does not call this."""
     from .discussion_note_ledger import DiscussionNoteLedgerError, remember_notice_filing
 
     try:
@@ -1781,6 +1812,7 @@ def _remember_notice_filing(
             discussion_id,
             policy_numbers=policy_numbers,
             notice_type=notice_type,
+            notice_text=notice_text,
         )
     except DiscussionNoteLedgerError as exc:
         logger.warning("notice filing was not remembered: %s", exc)
@@ -2192,9 +2224,10 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     if note_match.get("reason") and not note_match.get("read"):
         result.detail["existing_note_read_reason"] = note_match["reason"]
 
-    # A ready row does not post again when this discussion already has the
-    # same policy and the same notice type from the last 30 days. That note
-    # is already in EZLynx. A failed read does not post.
+    # A ready row does not post again when this discussion already has a
+    # note for this same bill: posted on or after first_seen, and the due
+    # date, amount, or invoice number matches. Last month's late notice
+    # does not count. A failed read does not post.
     if ctx.ready_row_filing and chosen_id:
         try:
             recent = recent_same_notice(
@@ -2203,6 +2236,11 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 discussion_id=chosen_id,
                 policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
                 notice_type=notice_type,
+                now=ctx.now,
+                not_before=_note_posted_at({"createdAt": notice.internal_date}),
+                notice_text="\n".join(
+                    part for part in (notice.subject, notice.body, note_text) if part
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - do not post when the check cannot finish
             result.reason = f"discussion_error: {type(exc).__name__}"
@@ -2212,7 +2250,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             result.reason = (
                 f"recent_same_notice: {note_id}" if note_id else "recent_same_notice"
             )
-            result.detail["existing_note_duplicate"] = True
+            result.detail["notice_anchor_matched"] = True
             if note_id:
                 result.detail["existing_note_id"] = note_id
             return result
@@ -2476,12 +2514,19 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
-    if result.status == "done":
+    # The email driver does not write the ledger. Its unit can only write
+    # /var/lib/robie-ascend-notice-driver, and a copy there is invisible to
+    # the API poller. Ready-row checks read the discussion. The poller sets
+    # remember_filings because it can write the shared ledger.
+    if result.status == "done" and ctx.remember_filings:
         _remember_notice_filing(
             applicant_id=resolution.applicant_id,
             discussion_id=str(result.detail.get("discussion_id") or chosen_id),
             policy_numbers=[str(p) for p in (triaged.get("policy_numbers") or [])],
             notice_type=notice_type,
+            notice_text="\n".join(
+                part for part in (notice.subject, notice.body, note_text) if part
+            ),
         )
     # The notice driver cannot write the API store. Its unit is
     # ProtectSystem=strict and ReadWritePaths covers only

@@ -1295,18 +1295,44 @@ def plain_file_failure(reason: str) -> str:
 
 
 def _already_in_ezlynx(outcome: dict[str, Any]) -> bool:
-    """True when the note is already in EZLynx, so the row should be resolved."""
+    """True when this same bill's note is already in EZLynx.
+
+    A same-policy note from an earlier month is not this bill. That result
+    is a ``recent_same_notice`` only when the due date, amount, or invoice
+    number was confirmed.
+    """
     if str(outcome.get("status") or "") == "done":
         return True
     reason = str(outcome.get("reason") or "")
-    if reason == "api_already_filed" or reason.startswith(
-        ("existing_note_duplicate", "recent_same_notice")
-    ):
+    if reason == "api_already_filed" or reason.startswith("existing_note_duplicate"):
         return True
     detail = outcome.get("detail")
-    if isinstance(detail, dict) and detail.get("existing_note_duplicate"):
+    if not isinstance(detail, dict):
+        return False
+    if reason.startswith("recent_same_notice"):
+        return bool(detail.get("notice_anchor_matched"))
+    if detail.get("existing_note_duplicate"):
         return True
     return False
+
+
+def _poll_will_file(live: bool) -> bool:
+    """True when this poll may file notes.
+
+    ``ASCEND_API_SOURCE_LIVE=1`` is not enough. A lease that would refuse
+    the write is recorded as not filing, so the accounting email does not
+    say the notes are on.
+    """
+    if not live:
+        return False
+    try:
+        from .ascend_notice_driver import _driver_gate_refusal
+
+        refusal = _driver_gate_refusal()
+    except Exception as exc:  # noqa: BLE001 - do not promise a filing we cannot check
+        logger.warning("driver lease was not checked: %s", type(exc).__name__)
+        return False
+    return not bool(refusal)
 
 
 def _unmatched_row(row: Any) -> dict[str, Any]:
@@ -2497,6 +2523,8 @@ def run_once(
     from .ascend_notice_driver import NullNoticeSource
 
     ctx.dry_run = not live
+    ctx.remember_filings = True
+    ctx.now = moment
     ctx.source = NullNoticeSource()
     ctx.ascend_client = _SnapshotPrograms(programs)
     if hasattr(ctx, "seen_notice_events"):
@@ -2580,8 +2608,9 @@ def run_once(
                 notice.event_key,
             )
 
+    filing = _poll_will_file(live)
     ready_results: list[dict[str, Any]] = []
-    if live:
+    if filing:
         ready_results = _file_ready_unmatched(
             ctx,
             store,
@@ -2595,7 +2624,7 @@ def run_once(
         ok=ok,
         error="; ".join(errors),
         started_at=started,
-        live=live,
+        live=filing,
     )
     alerted = False
     if streak >= STALL_RUNS:
@@ -2604,11 +2633,11 @@ def run_once(
             f"Last error: {redact_text('; '.join(errors))[:400]}"
         )
         alerted = _alert(message, alerter)
-    if ok and live:
+    if ok and filing:
         store.advance_cursor(moment)
     summary = {
         "dry_run": not live,
-        "live": live,
+        "live": filing,
         "since": since_iso,
         "http_methods": ["GET"],
         "feeds": {path: len(feeds.get(path) or []) for path in FEEDS},
@@ -2818,10 +2847,11 @@ def _file_ready_unmatched(
 
     Live only. The caller must not invoke this while the API source is
     dry-run. At most ``limit`` rows. A note that is already in EZLynx,
-    including an exact duplicate and a same policy and notice type from
-    the last 30 days, is recorded as filed and the row is resolved. Any
-    other result counts as one attempt. Write scope, dedupe, and
-    discussion ownership stay inside ``_file_through_driver``.
+    including an exact duplicate and this same bill posted on or after
+    first_seen, is recorded as filed and the row is resolved. Any other
+    result counts as one attempt. A failure while recording that attempt
+    does not stop the remaining rows or the poll record. Write scope,
+    dedupe, and discussion ownership stay inside ``_file_through_driver``.
     """
     if not live_enabled():
         return []
@@ -2869,11 +2899,18 @@ def _file_ready_unmatched(
                 logger.warning(
                     "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
                 )
-                store.note_ready_attempt(
-                    notice.event_key,
-                    seen_at,
-                    plain_file_failure(f"error: {type(exc).__name__}"),
-                )
+                try:
+                    store.note_ready_attempt(
+                        notice.event_key,
+                        seen_at,
+                        plain_file_failure(f"error: {type(exc).__name__}"),
+                    )
+                except Exception as record_exc:  # noqa: BLE001 - a locked store must not abort the poll
+                    logger.warning(
+                        "ready-to-file %s attempt was not recorded: %s",
+                        notice.event_key,
+                        type(record_exc).__name__,
+                    )
                 filed.append(
                     {
                         "event_key": notice.event_key,
@@ -3176,7 +3213,7 @@ def main(argv: list[str] | None = None) -> int:
                 ok=False,
                 error=f"{type(exc).__name__}: {exc}",
                 started_at=_iso(_now()),
-                live=live,
+                live=_poll_will_file(live),
             )
             if streak >= STALL_RUNS:
                 _alert(

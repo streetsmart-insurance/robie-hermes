@@ -153,9 +153,14 @@ _NOTICE_WORDS = {
 }
 
 _POLICY_IGNORABLE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014]+")
-_FIX_LINE = (
+_FIX_LINE_CHECKED = (
     "Fix the policy number in EZLynx or Ascend and it drops off this list "
     "once Robie matches it and files the note."
+)
+_FIX_LINE_AS_SHOWN = (
+    "Fix the policy number in EZLynx and it drops off this list "
+    "once Robie matches it and files the note. "
+    "The policy number is as shown in EZLynx."
 )
 _READY_WHEN_NOTES_OFF = "Ready, will file once Robie's Ascend notes are on."
 _READY_WHEN_NOTES_ON = (
@@ -497,11 +502,14 @@ def _read_program_policy_numbers(
     *,
     deadline: float | None,
     clock: Callable[[], float] | None,
+    persist: bool,
 ) -> list[str] | None:
     """The program's current policy numbers. Read only. None keeps the saved ones.
 
     Uses the same deadline as the EZLynx re-check. A failed read keeps the
-    numbers saved when the notice was first seen.
+    numbers saved when the notice was first seen. The store is updated only
+    when this digest run is persisting. A dry run still uses the fresh
+    numbers for this email.
     """
     if ascend_client is None:
         return None
@@ -538,9 +546,10 @@ def _read_program_policy_numbers(
     row["body"] = body
     encoded = json.dumps(record, default=str)
     row["program_json"] = encoded
+    row["_policy_rechecked"] = True
     store = row.get("_store")
     key = str(row.get("event_key") or "").strip()
-    if isinstance(store, EventKeyStore) and key:
+    if persist and isinstance(store, EventKeyStore) and key:
         try:
             store.refresh_unmatched_policy(key, numbers, body, encoded)
         except Exception as exc:  # noqa: BLE001 - the search can still use the new numbers
@@ -561,6 +570,7 @@ def _resolve_open_row(
     pause: Callable[[float], None],
     deadline: float | None,
     clock: Callable[[], float] | None,
+    persist: bool,
 ) -> bool:
     """True when this open row now belongs to exactly one EZLynx client.
 
@@ -570,7 +580,7 @@ def _resolve_open_row(
     row. Nothing here files a note or writes a policy.
     """
     fresh = _read_program_policy_numbers(
-        row, ascend_client, deadline=deadline, clock=clock
+        row, ascend_client, deadline=deadline, clock=clock, persist=persist
     )
     numbers = fresh if fresh else _policy_numbers_of(row)
     if not numbers:
@@ -637,6 +647,7 @@ def recheck_open_unmatched(
                 pause=sleeper,
                 deadline=deadline,
                 clock=ticks,
+                persist=persist,
             )
         except PolicyBudgetExpired:
             stopped = True
@@ -739,6 +750,7 @@ def render_digest(
     aged: list[dict[str, Any]],
     *,
     when: datetime | None = None,
+    policy_rechecked: bool = False,
 ) -> tuple[str, str] | None:
     """Subject and body, or None when there is nothing to send."""
     if not current and not aged:
@@ -752,7 +764,7 @@ def render_digest(
             name = str(item.get("insured_name") or "").strip() or "An insured"
             bits.append(f"{name}, {notice_words(str(item.get('notice_type') or ''))}")
         lines.append("Still unmatched after 14 days: " + "; ".join(bits) + ".")
-    lines.append(_FIX_LINE)
+    lines.append(_FIX_LINE_CHECKED if policy_rechecked else _FIX_LINE_AS_SHOWN)
     return subject, "\n".join(lines)
 
 
@@ -1247,7 +1259,11 @@ def run_digest(
         index_complete=index_complete,
     )
     current, aged = split_window(open_rows, moment)
-    rendered = render_digest(current, aged, when=moment)
+    emailed = [*current, *aged]
+    policy_rechecked = bool(emailed) and all(row.get("_policy_rechecked") for row in emailed)
+    rendered = render_digest(
+        current, aged, when=moment, policy_rechecked=policy_rechecked
+    )
     result: dict[str, Any] = {
         "dry_run": not sending,
         "live": sending,
@@ -1447,6 +1463,25 @@ def _last_run_payload(result: dict[str, Any], *, exit_code: int, run_at: str) ->
     }
 
 
+class _AscendProgramRead:
+    """GET one program through the poll's read client.
+
+    This is the same client ``robie-ascend-sync`` and the notice poll use.
+    It cannot create programs, billables, or insureds.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def get_program(self, program_id: str) -> Any:
+        from .ascend_api_notice_source import FEED_PROGRAMS
+
+        program = str(program_id or "").strip()
+        if not program:
+            raise ValueError("program id is required")
+        return self._client.get(f"{FEED_PROGRAMS}/{program}")
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
     parser = argparse.ArgumentParser(
@@ -1496,11 +1531,11 @@ def main(argv: list[str] | None = None) -> int:
                 client = None
         ascend_client = None
         try:
-            from .ascend_api import configured_client
+            from .ascend_api_notice_source import build_client
 
-            ascend_client = configured_client()
+            ascend_client = _AscendProgramRead(build_client())
         except Exception as exc:  # noqa: BLE001 - the saved policy number still works
-            logger.warning("Ascend program client unavailable: %s", type(exc).__name__)
+            logger.warning("Ascend program read unavailable: %s", type(exc).__name__)
             ascend_client = None
         result = run_digest(
             now=moment,
