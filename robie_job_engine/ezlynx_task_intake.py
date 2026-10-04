@@ -194,25 +194,12 @@ def _record_run(
 
 
 def _build_discussion_client():
-    """DiscussionApiClient from the standard secret path (fail-closed)."""
-    from urllib.parse import urlparse
+    """DiscussionApiClient on the explicit, fail-closed route (see task_discussion_route)."""
+    from .task_discussion_route import build_task_discussion_client
 
-    from .ezlynx_api import load_ezlynx_api_config
-    from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
-
-    api_config = load_ezlynx_api_config()
-    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    config = DiscussionApiConfig(
-        discussion_base_url=origin + "/DiscussionApi/",
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
-    )
-    return DiscussionApiClient(config)
+    # browser_session=True keeps this flow's existing session behaviour unchanged; the read-only
+    # inspection and lookup never use it.
+    return build_task_discussion_client(browser_session=True)
 
 
 def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
@@ -1330,9 +1317,15 @@ def resume_task(
         print("An answer can only be recorded on a job that is waiting on a person")
         return 1
 
+    from .ezlynx_task_jobs import payload_request_fingerprint
+
+    current_fp = payload_request_fingerprint(payload)
     answer = dict(store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {})
+    if answer and str(answer.get("request_fp") or "") != current_fp:
+        answer = {}  # an answer given for an earlier request is never carried into a changed one
     answer.update({"task_id": str(payload.get("task_id") or ""), "applicant_id": str(payload.get("applicant_id") or ""),
-                   "discussion_id": str(payload.get("discussion_id") or ""), "round": round_no})
+                   "discussion_id": str(payload.get("discussion_id") or ""), "round": round_no,
+                   "request_fp": current_fp})
     notes: list[str] = []
 
     if assign_to is not None:

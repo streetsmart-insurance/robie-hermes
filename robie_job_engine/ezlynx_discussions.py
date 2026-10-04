@@ -500,14 +500,18 @@ class DiscussionApiClient:
         parsed = self._get("v8/discussions/ids-by-applicant", {"applicantId": applicant})
         return _normalize_id_list(parsed)
 
-    def get_discussions(self, applicant_id: str) -> list[dict[str, Any]]:
-        """Full discussion records on the applicant (v8 by-applicant)."""
+    def get_discussions(self, applicant_id: str, *, remember_choices: bool = True) -> list[dict[str, Any]]:
+        """Full discussion records on the applicant (v8 by-applicant).
+
+        ``remember_choices=False`` skips the discussion_choices checkpoint a job context would
+        otherwise receive; read-only discovery passes it so a lookup can never write."""
         applicant = str(applicant_id or "").strip()
         if not applicant:
             raise DiscussionApiError(None, "applicant id is required")
         parsed = self._get("v8/discussions/by-applicant", {"applicantId": applicant})
         rows = _normalize_record_list(parsed)
-        _remember_discussions_for_choice(rows)
+        if remember_choices:
+            _remember_discussions_for_choice(rows)
         return rows
 
     def get_discussion(self, discussion_id: str) -> dict[str, Any]:

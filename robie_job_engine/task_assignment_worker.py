@@ -97,9 +97,14 @@ LEASE_SECONDS = 900
 # these immediately before a Save, or the row is an old snapshot: a human may have changed the
 # Producer, CSR, creator, labels or instructions since it was generated.
 CONSEQUENTIAL_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
+# What a person's explicit choice of return owner still depends on: the request itself. The
+# routing fields (creator, producer, CSR) are replaced by the choice, but the instructions and
+# labels must still be the current ones, and Robie must still own the task.
+REQUEST_FIELDS = ("description", "activity_labels")
 
 
-def routing_proof_problem(state: dict[str, Any], task: AssignedTask, *, expected_assignee: str) -> str | None:
+def routing_proof_problem(state: dict[str, Any], task: AssignedTask, *, expected_assignee: str,
+                          fields: tuple[str, ...] = CONSEQUENTIAL_FIELDS) -> str | None:
     """Why the live task state does NOT prove the stored row is current; None when it does.
 
     A field the live read could not return is unproven, never assumed to match or to be blank.
@@ -110,17 +115,18 @@ def routing_proof_problem(state: dict[str, Any], task: AssignedTask, *, expected
     live_owner = str(state.get("assignee") or "").strip()
     if live_owner.casefold() != (expected_assignee or "").strip().casefold():
         return f"the live owner is {live_owner or 'unknown'!r}, not {expected_assignee!r}"
-    for name in CONSEQUENTIAL_FIELDS:
+    for name in fields:
         if name not in state or state[name] is None:
             return f"{name} could not be read live, so it is unproven"
         if norm(state[name]) != norm(getattr(task, name)):
             return f"the live {name} differs from the report row (an old snapshot)"
-    if not norm(state["description"]):
+    if "description" in fields and not norm(state["description"]):
         return "the live instructions are empty"
     return None
 
 
-def prove_fresh_routing(reassigner: Any, task: AssignedTask, *, expected_assignee: str) -> None:
+def prove_fresh_routing(reassigner: Any, task: AssignedTask, *, expected_assignee: str,
+                        fields: tuple[str, ...] = CONSEQUENTIAL_FIELDS) -> None:
     """Live proof that the stored routing is current. Required immediately before EVERY Save.
 
     Raises NeedsHuman (no Save) when the live read is unavailable, unreadable, or disagrees.
@@ -135,7 +141,7 @@ def prove_fresh_routing(reassigner: Any, task: AssignedTask, *, expected_assigne
             f"Task {task.task_id}: routing could not be proven live ({type(exc).__name__}: {str(exc)[:200]}); "
             "no Save was sent."
         ) from exc
-    problem = routing_proof_problem(state, task, expected_assignee=expected_assignee)
+    problem = routing_proof_problem(state, task, expected_assignee=expected_assignee, fields=fields)
     if problem:
         raise NeedsHuman(f"Task {task.task_id}: {problem}; no Save was sent. "
                          "Wait for a newer report, then resume.")
@@ -653,11 +659,18 @@ class TaskAssignmentWorker:
 
     def _human_answer(self, store: Any, job: dict[str, Any], task: AssignedTask) -> dict[str, Any]:
         """The human's answer for THIS round of THIS task; anything else is ignored."""
+        from .ezlynx_task_jobs import payload_request_fingerprint
+
         round_no = job_round(job)
         data = store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
         if data and (str(data.get("task_id")) != task.task_id
                      or str(data.get("applicant_id")) != task.applicant_id
                      or int(data.get("round", -1)) != round_no):
+            return {}
+        if data and str(data.get("request_fp") or "") != payload_request_fingerprint(job.get("payload") or {}):
+            # The request changed since the person answered: the choice (and any retry grant)
+            # was for a different request and no longer applies.
+            logger.info("Job %s: the human answer was for a different request; ignored", job["id"])
             return {}
         return data
 
@@ -792,12 +805,14 @@ class TaskAssignmentWorker:
                         f"Task {task.task_id}: the assignee is {current!r}, not {expected!r} "
                         f"or {prior!r}; nothing was sent. A human must look at the task."
                     )
-            if field != "human_choice":
-                # Immediately before every Save, including the first round and any retry, prove
-                # the routing that produced this target is current. Done BEFORE the intent so a
-                # refusal is certainly not an unknown Save. A person's explicit choice does not
-                # depend on report routing; the Save's own owner check still applies.
-                prove_fresh_routing(self.reassigner, task, expected_assignee=expected)
+            # Immediately before every Save, including the first round and any retry, prove the
+            # live task is current. Done BEFORE the intent so a refusal is certainly not an
+            # unknown Save. A person's explicit choice replaces the normal return ORDER, so the
+            # routing fields are not required to match, but the current request (instructions and
+            # labels), Robie's ownership and the identity checks still apply.
+            prove_fresh_routing(
+                self.reassigner, task, expected_assignee=expected,
+                fields=REQUEST_FIELDS if field == "human_choice" else CONSEQUENTIAL_FIELDS)
             attempt += 1
             save("attempting", name)
             self._fence()
@@ -1284,8 +1299,12 @@ class TaskIntakeVerifier:
         if str(action.get("reassign_field") or "") == "human_choice":
             if self.store is None:
                 return None
+            from .ezlynx_task_jobs import payload_request_fingerprint
+
             round_no = job_round(job)
             answer = self.store.get_checkpoint(job["id"], human_answer_kind(round_no)) or {}
+            if str(answer.get("request_fp") or "") != payload_request_fingerprint(job.get("payload") or {}):
+                return "the human's choice was recorded for a different request"
             if (str(answer.get("task_id")) != task.task_id
                     or str(answer.get("applicant_id")) != task.applicant_id
                     or int(answer.get("round", -1)) != round_no):
