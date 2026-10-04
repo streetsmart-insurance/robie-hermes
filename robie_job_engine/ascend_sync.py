@@ -65,8 +65,9 @@ def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> b
       (a known incoming webhook for the agency ops space);
     - there is no credential fallback and no second identity: an unconfigured
       URL returns False and nothing is posted anywhere;
-    - it is used only for low-risk operational notices (agreement signed,
-      reinstatement paid), never for HITL and never for operator fail-notify;
+    - it is used for low-risk operational notices (agreement signed,
+      reinstatement paid) and for the ascend-sync alert that an EZLynx
+      task was not created. It is never used for HITL;
     - webhook posts appear under the webhook's own app name, never as Robie.
     """
     target_url = webhook_url or os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
@@ -85,6 +86,26 @@ def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> b
     except Exception as exc:
         logger.warning("Failed to send Google Chat webhook alert: %s", exc)
         return False
+
+
+def ezlynx_task_was_created(result: Any) -> bool:
+    """True only when create_task reported a real success."""
+    return (
+        isinstance(result, dict)
+        and str(result.get("status") or "").strip().lower() == "success"
+    )
+
+
+def ezlynx_task_failure_reason(result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("reason", "error", "message"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        status = result.get("status")
+        if status:
+            return str(status)
+    return "task not created"
 
 
 def _now_iso() -> str:
@@ -497,9 +518,36 @@ class AscendEZLynxSyncManager:
         self.matcher = matcher or EZLynxAccountMatcher()
         self.poster = poster or EZLynxAgreementPoster()
         self.qb = quickbooks_client or QuickBooksApiClient()
+        self._task_failures: List[str] = []
+
+    def _leave_pending_after_task_failure(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        result: Any,
+        applicant_id: Optional[str] = None,
+    ) -> None:
+        """Log, alert, and leave the event unrecorded so the next poll retries it."""
+        reason = ezlynx_task_failure_reason(result)
+        message = (
+            f"EZLynx task NOT created for {event_type} {event_id} "
+            f"(applicant {applicant_id or 'n/a'}): {reason}. "
+            "Event left pending for retry."
+        )
+        logger.error(message)
+        self._task_failures.append(message)
+        send_google_chat_alert(
+            "⚠️ *Ascend sync: EZLynx task not created*\n"
+            f"• Event: {event_type} {event_id}\n"
+            f"• Applicant: {applicant_id or 'n/a'}\n"
+            f"• Reason: {reason}\n"
+            "• The event was not marked done and will be retried."
+        )
 
     def sync_once(self) -> Dict[str, Any]:
         """Perform one full synchronization run of all Ascend event feeds."""
+        self._task_failures = []
         started_at = _now_iso()
         stats = {
             "started_at": started_at,
@@ -560,6 +608,9 @@ class AscendEZLynxSyncManager:
         except Exception as exc:
             logger.error("Accounting payouts sync error: %s", exc, exc_info=True)
             stats["errors"].append(f"Accounting Payouts: {exc}")
+
+        if self._task_failures:
+            stats["errors"].extend(self._task_failures)
 
         completed_at = _now_iso()
         stats["completed_at"] = completed_at
@@ -666,13 +717,21 @@ class AscendEZLynxSyncManager:
                     f"1) Review notice terms and unearned return calculation.\n"
                     f"2) Follow up with insured and carrier prior to cancellation effective date ({event.due_date_text})."
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="cancellation",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
             else:
                 logger.info(
                     "Policy %s (%s) not found in EZLynx. Event recorded as UNMATCHED.",
@@ -875,13 +934,21 @@ class AscendEZLynxSyncManager:
                     f"Overview: {prog_url}\n\n"
                     f"Coverage is ready to bind with carrier {carrier_name}!"
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="agreement_signed",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
 
             chat_msg = (
                 f"🎉 *Agreement Signed & Checked Out! Ready to Bind:*\n"
@@ -984,13 +1051,21 @@ class AscendEZLynxSyncManager:
                     f"Subject: {email_draft['subject']}\n\n"
                     f"{email_draft['body']}"
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="reinstatement_paid",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
 
             chat_msg = (
                 f"🚨 *REINSTATEMENT PAYMENT RECEIVED!*\n"
@@ -1111,14 +1186,24 @@ class AscendEZLynxSyncManager:
                         ascend_reference_url=f"https://app.useascend.com/payouts/{payout_id}",
                     )
                     # Discrepancy escalation:
-                    # High priority EZLynx Task assigned to Accounting (no Google Chat alert per user directive)
-                    self.poster.create_task(
+                    # High priority EZLynx task assigned to Accounting.
+                    # A task that was actually created does not also page Google Chat.
+                    # A failed create leaves the payout pending and sends the failure alert.
+                    task_result = self.poster.create_task(
                         applicant_id="0",
                         title=f"⚠️ ACCOUNTING AUDIT: {status.upper()} Supplier Payout to {owner_name} ({amount_text})",
                         description=task_text,
                         assigned_user=accounting_assignee,
                         due_days_out=1,
                     )
+                    if not ezlynx_task_was_created(task_result):
+                        self._leave_pending_after_task_failure(
+                            event_id=str(event_id),
+                            event_type="accounting_issue",
+                            result=task_result,
+                            applicant_id="0",
+                        )
+                        continue
                     logger.info(
                         "Dispatched Accounting audit task in EZLynx for %s supplier payout %s to %s",
                         status.upper(),
