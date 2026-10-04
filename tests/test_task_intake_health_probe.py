@@ -1,6 +1,7 @@
 """Task intake health: stall, identical reports, and quiet hours."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 from robie_job_engine.task_intake_health import (
     LEASE_RECOVERY_LINE,
     RECOVERY_LINE,
+    _environment_file_paths,
     check_task_intake,
     main,
 )
@@ -396,6 +398,90 @@ def test_environment_file_that_sets_scope_or_playground_is_red(tmp_path):
         "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
         for item in red
     )
+
+
+def test_environment_file_paths_keep_every_prefixed_line():
+    shown = (
+        "EnvironmentFiles=/etc/recording.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=-/etc/accountability.env (ignore_errors=yes)\n"
+    )
+    assert _environment_file_paths(shown) == [
+        "/etc/recording.env",
+        "/etc/accountability.env",
+    ]
+
+
+def test_second_environment_file_that_sets_playground_is_red(tmp_path, monkeypatch):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    first = tmp_path / "recording.env"
+    second = tmp_path / "accountability.env"
+    first.write_text("OTHER=1\n", encoding="utf-8")
+    second.write_text("ROBIE_PLAYGROUND=0\n", encoding="utf-8")
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ENV_CHECK", str(tmp_path / "missing-state.json"))
+    shown = (
+        f"EnvironmentFiles={first} (ignore_errors=yes)\n"
+        f"EnvironmentFiles=-{second} (ignore_errors=yes)\n"
+    )
+    red = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+    )
+    assert any(
+        "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
+        for item in red
+    )
+
+
+def test_unreadable_environment_file_is_detail_and_does_not_page(tmp_path, monkeypatch):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    blocked = tmp_path / "accountability.env"
+    blocked.write_text("OTHER=1\n", encoding="utf-8")
+    blocked.chmod(0)
+    state = tmp_path / "env-check.json"
+    state.write_text(json.dumps({
+        "ok": True,
+        "problem": "",
+        "files": [{
+            "path": str(blocked),
+            "optional": True,
+            "readable": True,
+            "assigns": False,
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ENV_CHECK", str(state))
+    shown = f"EnvironmentFiles=-{blocked} (ignore_errors=yes)\n"
+    try:
+        details: list[str] = []
+        quiet = check_task_intake(
+            now=_at(5, 10),
+            heartbeats=[fresh],
+            effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+            environment_files=shown,
+            details=details,
+        )
+        assert quiet == []
+        assert any("could not read EnvironmentFile" in line and str(blocked) in line for line in details)
+        assert any("recorded it as clean" in line for line in details)
+        again: list[str] = []
+        still_quiet = check_task_intake(
+            now=_at(5, 10),
+            heartbeats=[fresh],
+            effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+            environment_files=shown,
+            details=again,
+        )
+        assert still_quiet == []
+        assert any(str(blocked) in line for line in again)
+    finally:
+        blocked.chmod(0o644)
 
 
 def test_effective_environment_must_name_the_all_clients_scope():

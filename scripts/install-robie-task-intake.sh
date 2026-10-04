@@ -8,6 +8,9 @@
 #                    ROBIE_TASK_INTAKE_DRY_RUN=1, then remove that drop-in.
 #                    The one-shot does not write EZLynx, does not create job
 #                    rows, and does not enable timers or the live drop-in.
+#                    A dry run needs a report delivered within the last 90 minutes.
+#                    An older report prints the stale-report reason and what
+#                    the run would do, then exits 2.
 #   --enable-timer   install units and enable both timers. Removes a
 #                    leftover 10-dry-run.conf so the timer cannot stay dry.
 #   --live           install the Bland live drop-in and reload systemd.
@@ -119,10 +122,14 @@ verify_effective_write_scope() {
   fi
 }
 
+# systemctl show -p EnvironmentFiles prints one prefixed line per file:
+#   EnvironmentFiles=/etc/robie.env (ignore_errors=yes)
+#   EnvironmentFiles=-/etc/optional.env (ignore_errors=yes)
+# The parenthetical is not a path. A leading "-" marks an optional file.
 env_file_assigns_scope() {
   local path line
   path="$1"
-  [[ -f "${path}" ]] || return 1
+  [[ -f "${path}" && -r "${path}" ]] || return 1
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="${line%%#*}"
     line="${line#"${line%%[![:space:]]*}"}"
@@ -136,17 +143,95 @@ env_file_assigns_scope() {
   return 1
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "${value}"
+}
+
+# Health runs as streetsmart-hermes and cannot read a 600 root env file.
+# The installer runs as root, so this is the record health is allowed to read.
+ENV_CHECK_STATE="${ROBIE_TASK_INTAKE_ENV_CHECK:-/opt/streetsmart-hermes/robie-job-engine/data/task-intake-env-check.json}"
+
+write_env_check_state() {
+  local ok_flag="$1" problem="$2" rows="$3"
+  local dest dir tmp now
+  dest="${ENV_CHECK_STATE}"
+  dir="$(dirname "${dest}")"
+  if ! mkdir -p "${dir}"; then
+    echo "could not write the environment check state" >&2
+    exit 2
+  fi
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tmp="$(mktemp "${dir}/.task-intake-env-check.XXXXXX")"
+  {
+    printf '{\n'
+    printf '  "checked_at": "%s",\n' "${now}"
+    printf '  "ok": %s,\n' "${ok_flag}"
+    printf '  "problem": "%s",\n' "$(json_escape "${problem}")"
+    printf '  "files": [%s]\n' "${rows}"
+    printf '}\n'
+  } > "${tmp}"
+  chmod 0644 "${tmp}"
+  mv -f "${tmp}" "${dest}"
+}
+
 verify_environment_files() {
-  local shown rest token
+  local shown line rest token path optional readable assigns
+  local rows="" fail_reason="" object
   shown="$("${SYSTEMCTL}" show robie-task-intake.service -p EnvironmentFiles --no-pager 2>/dev/null || true)"
-  rest="${shown#*EnvironmentFiles=}"
-  for token in ${rest}; do
-    [[ "${token}" == /* ]] || continue
-    if env_file_assigns_scope "${token}"; then
-      echo "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" >&2
-      exit 2
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "${line}" ]] && continue
+    if [[ "${line}" == EnvironmentFiles=* ]]; then
+      rest="${line#EnvironmentFiles=}"
+    else
+      rest="${line}"
     fi
-  done
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [[ -z "${rest}" ]] && continue
+    token="${rest%%[[:space:]]*}"
+    optional=false
+    if [[ "${token}" == -* ]]; then
+      optional=true
+      token="${token#-}"
+    fi
+    [[ "${token}" == /* ]] || continue
+    path="${token}"
+    readable=false
+    assigns=false
+    if [[ -e "${path}" && -r "${path}" ]]; then
+      readable=true
+      if env_file_assigns_scope "${path}"; then
+        assigns=true
+        if [[ -z "${fail_reason}" ]]; then
+          fail_reason="an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND"
+        fi
+      fi
+    elif [[ -e "${path}" ]]; then
+      if [[ -z "${fail_reason}" ]]; then
+        fail_reason="an EnvironmentFile is unreadable: ${path}"
+      fi
+    elif [[ "${optional}" == false ]]; then
+      if [[ -z "${fail_reason}" ]]; then
+        fail_reason="an EnvironmentFile is missing: ${path}"
+      fi
+    fi
+    object="$(printf '{"path":"%s","optional":%s,"readable":%s,"assigns":%s}' \
+      "$(json_escape "${path}")" "${optional}" "${readable}" "${assigns}")"
+    if [[ -n "${rows}" ]]; then
+      rows="${rows},${object}"
+    else
+      rows="${object}"
+    fi
+  done <<< "${shown}"
+  if [[ -n "${fail_reason}" ]]; then
+    write_env_check_state false "${fail_reason}" "${rows}"
+    echo "${fail_reason}" >&2
+    exit 2
+  fi
+  write_env_check_state true "" "${rows}"
 }
 
 verify_effective_env() {

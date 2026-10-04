@@ -1027,3 +1027,85 @@ def test_intake_unit_does_not_enable_reassignment_or_fill_the_field_contract():
     )
     assert contract["fields"] == {}
     assert contract["status"] == "UNVERIFIED"
+
+
+def test_dry_run_of_a_stale_report_says_what_it_would_do(tmp_path, monkeypatch, caplog):
+    import logging
+
+    db = tmp_path / "jobs.db"
+    notes = _Notes()
+    bland = _Bland()
+    _install_fakes(monkeypatch, notes, bland)
+    stale_at = (MONDAY - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    task = _task(description="Please call the client about the renewal.")
+    report = _report(task)
+    report = type(report)(
+        message_id=report.message_id,
+        filename=report.filename,
+        digest=report.digest,
+        received_at=stale_at,
+        tasks=report.tasks,
+        row_count=report.row_count,
+        newest_created_et=report.newest_created_et,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(report),
+    )
+    with caplog.at_level(logging.INFO, logger="ezlynx_task_intake"):
+        assert run_intake(db_path=str(db), dry_run=True) == 2
+    assert "refusing to start new work" in caplog.text
+    assert "[DRY-RUN]" in caplog.text
+    assert "No jobs, no EZLynx writes, no worker" in caplog.text
+    assert notes.notes == []
+    assert bland.dials == 0
+    with JobStore(str(db)).connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM ezlynx_task_intake_runs").fetchone()[0] == 0
+
+
+def test_pending_work_rereads_job_status_before_acting(tmp_path, monkeypatch):
+    from robie_job_engine.ezlynx_task_jobs import _find_by_idempotency_key, task_idempotency_key
+    from robie_job_engine.models import JobStatus
+
+    db = tmp_path / "jobs.db"
+    notes = _Notes()
+    bland = _Bland()
+    _install_fakes(monkeypatch, notes, bland)
+    JobStore(str(db))
+    SeenTaskStore(str(db)).observe(["seed-task"], report_digest="seed")
+    acted: list[str] = []
+    pair = {"90026158", "90026159"}
+
+    def wrapped(self, store, job):
+        del self
+        task_id = str((job.get("payload") or {}).get("task_id") or "")
+        acted.append(task_id)
+        for other_id in pair - {task_id}:
+            other = _find_by_idempotency_key(store, task_idempotency_key(other_id))
+            assert other is not None
+            with store.transaction() as conn:
+                conn.execute(
+                    "UPDATE jobs SET status=? WHERE id=?",
+                    (JobStatus.FAILED.value, other["id"]),
+                )
+        return {"ok": True}
+
+    monkeypatch.setattr(TaskAssignmentWorker, "process_job", wrapped)
+    # 09:00 Central is 10:00 ET, the same moment as the test clock.
+    # 08:00 Central is earlier that morning. A later clock time is in
+    # the future and is held instead of queued.
+    newer = _task(task_id="90026158", created_at="2026-10-05T09:00:00")
+    older = _task(
+        task_id="90026159",
+        discussion_id="70020002",
+        applicant_id="80026159",
+        created_at="2026-10-05T08:00:00",
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(_report(newer, older)),
+    )
+    assert run_intake(db_path=str(db)) == 0
+    assert len(acted) == 1
+    assert acted[0] in pair

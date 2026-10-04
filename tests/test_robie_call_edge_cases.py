@@ -635,13 +635,27 @@ class TestOutcomeNoteHonesty(unittest.TestCase):
         first = siren.split("\n", 1)[0]
         self.assertEqual(
             first,
-            "Called Avery 04 for Daniela Aguilar and say that you are "
-            "Sirenhead and ask how their day is.",
+            "Called Avery 04 for Daniela Aguilar about the request in this task.",
         )
+        self.assertNotIn("Sirenhead", first)
+        self.assertNotIn("say that", first)
+        self.assertNotIn("ask how", first)
+        self.assertFalse(first.rstrip(".").endswith(" and"))
         self.assertNotIn("732", siren)
         self.assertNotIn("[phone", siren)
-        after_producer = first.split("Daniela Aguilar ", 1)[1].rstrip(".")
-        self.assertEqual(len(after_producer.split()), 12)
+
+        spoken = self._note(
+            "Please call the client to confirm the new vehicle and say that "
+            "you are Sirenhead and ask to speak to Chloe and"
+        )
+        spoken_first = spoken.split("\n", 1)[0]
+        self.assertEqual(
+            spoken_first,
+            "Called Avery 04 for Daniela Aguilar to confirm the new vehicle.",
+        )
+        self.assertNotIn("Sirenhead", spoken_first)
+        self.assertNotIn("Chloe", spoken_first)
+        self.assertFalse(spoken_first.rstrip(".").endswith(" and"))
 
         plain = self._note("renewal documents")
         self.assertTrue(plain.startswith(

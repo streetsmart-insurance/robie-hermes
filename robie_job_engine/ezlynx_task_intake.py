@@ -929,6 +929,12 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it."
         )
         logger.error(msg)
+        if dry_run:
+            logger.info(
+                "[DRY-RUN] %s Robie tasks; a stale report would not be baselined, "
+                "dialed, or written. No jobs, no EZLynx writes, no worker. %s",
+                len(tasks), msg,
+            )
         if not _already_processed(store, report.message_id) and not dry_run:
             _record_run(
                 store, message_id=report.message_id, digest=report.digest,
@@ -1219,15 +1225,18 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
 
     # 5. Work PENDING jobs for tasks in THIS report only.
     # Includes a job left pending by an earlier lease refusal.
+    # Re-read the row first. The list was built earlier, and a job can
+    # leave PENDING before this loop reaches it.
     for job in jobs:
         payload = job.get("payload") or {}
         task_id = str(payload.get("task_id") or "")
         if task_id not in in_report:
             continue
-        if JobStatus(job["status"]) != JobStatus.PENDING:
-            continue
         try:
-            worker.process_job(store, job)
+            current = store.get_job(job["id"])
+            if JobStatus(current["status"]) != JobStatus.PENDING:
+                continue
+            worker.process_job(store, current)
         except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
             logger.error(f"process_job raised for {task_id}: {e}")
 

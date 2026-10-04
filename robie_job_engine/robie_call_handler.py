@@ -1505,6 +1505,19 @@ _NAME_BEFORE_CONNECTOR_RE = re.compile(
     r"(?:\s+(?!(?:to|about|regarding|re|and)\b)[A-Za-z][\w'.-]*){0,2}"
     r"\s+(?=(?:to|about|regarding|re|and)\b)"
 )
+# Spoken-script leftovers. The first of these ends the topic.
+_INSTRUCTION_PHRASE_RE = re.compile(
+    r"(?i)(?:^|[\s,;:.-]+)(?:"
+    r"and\s+say|say\s+that|say\s+you(?:'re| are)?|"
+    r"ask\s+(?:to|for|how|them|if)|"
+    r"tell\s+(?:them|the|him|her)|"
+    r"let\s+them\s+know|"
+    r"and\s+ask|and\s+tell|and\s+let"
+    r")\b"
+)
+_FUNCTION_WORDS = frozenset({
+    "and", "or", "to", "about", "the", "a", "an", "for", "of", "re", "regarding",
+})
 _DEFINITE_MISS_STATUSES = {
     "no-answer", "no_answer", "no answer",
     "busy", "failed", "canceled", "cancelled",
@@ -1528,14 +1541,37 @@ def _cap_words(text: str, limit: int = _TOPIC_WORD_CAP) -> str:
     return " ".join(words[:limit]).strip(" .")
 
 
+def _strip_instruction(topic: str) -> str:
+    """Drop everything from the first 'say that' / 'ask to' / 'tell them' phrase."""
+    match = _INSTRUCTION_PHRASE_RE.search(topic)
+    if match:
+        topic = topic[:match.start()]
+    return re.sub(r"\s+", " ", topic).strip(" .,;:-")
+
+
+def _strip_dangling_and(topic: str) -> str:
+    """A topic must not end on a leftover 'and'."""
+    return re.sub(r"(?i)(?:\s+\band\b)+$", "", topic).strip(" .")
+
+
+def _topic_is_thin(topic: str) -> bool:
+    """Empty, or only connector words. One real word such as "claim" stays."""
+    words = [word.strip(".,;:").lower() for word in topic.split() if word.strip(".,;:")]
+    return not any(word not in _FUNCTION_WORDS for word in words)
+
+
 def _outcome_clause(instruction: str) -> tuple:
     """(connector, topic) for the first sentence of an outcome note.
 
     A leading call instruction is removed: please/pls, then call/contact/
     reach out to/phone/ring, then the client/insured/customer, a name, or
-    a phone number, then to/about/regarding/re/and. What remains is capped
-    at about a dozen words. An empty description is "about this task". A
-    description with no call verb is "about" that description.
+    a phone number, then to/about/regarding/re/and. A later instruction
+    phrase (and say, say that, ask to, ask for, tell them, let them know)
+    ends the topic. The topic is capped at about a dozen words and does
+    not end on 'and'. What remains, if it is too thin to say, is
+    "about the request in this task". An empty description is
+    "about this task". A description with no call verb is "about" that
+    description.
     """
     text = _clean_topic_text(instruction)
     if not text:
@@ -1558,9 +1594,9 @@ def _outcome_clause(instruction: str) -> tuple:
             if follow:
                 connector = follow.group(1).lower()
                 topic = rest[follow.end():].strip()
-    topic = _cap_words(topic)
-    if not topic:
-        return "about", "this task"
+    topic = _strip_dangling_and(_cap_words(_strip_instruction(topic)))
+    if _topic_is_thin(topic):
+        return "about", "the request in this task"
     return connector, topic
 
 

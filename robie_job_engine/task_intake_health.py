@@ -20,6 +20,10 @@ health Chat when:
   ROBIE_EZLYNX_WRITE_SCOPE=all, or an EnvironmentFile sets
   ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND
 
+An EnvironmentFile this user cannot read is named in the detail log
+and does not page. The installer's state file is what health reads
+for a file it cannot open.
+
 Outside those hours the probe stays quiet, except for a leftover dry-run
 drop-in while live. ``--simulate-failure --no-chat`` prints a failure and
 does not post.
@@ -27,6 +31,7 @@ does not post.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -46,6 +51,9 @@ DEFAULT_STALL_MINUTES = 90
 DEFAULT_SAME_DIGEST_LIMIT = 3
 STALL_QUIET_UNTIL = time(10, 30)
 DEFAULT_DROPIN_DIR = "/etc/systemd/system/robie-task-intake.service.d"
+DEFAULT_ENV_CHECK_STATE = (
+    "/opt/streetsmart-hermes/robie-job-engine/data/task-intake-env-check.json"
+)
 RECOVERY_LINE = "the newest Created Date is moving again"
 LEASE_RECOVERY_LINE = "the driver lease is back with PRODUCTION"
 _ENV_FILE_ASSIGN_RE = re.compile(
@@ -245,13 +253,39 @@ def _driver_lease_line(episode: dict, *, reader=None) -> str:
 def _environment_file_paths(shown: str) -> list[str]:
     """Absolute paths from ``systemctl show -p EnvironmentFiles``.
 
-    The line looks like ``EnvironmentFiles=/etc/robie.env (ignore_errors)``.
-    The parenthetical flag is not a path.
+    Real output is one prefixed line per file, often with a trailing
+    ``(ignore_errors=yes)``. A leading ``-`` marks an optional file.
+    Every line is kept. The parenthetical flag is not a path.
     """
-    text = shown or ""
-    if "EnvironmentFiles=" in text:
-        text = text.split("EnvironmentFiles=", 1)[1]
-    return [token for token in text.split() if token.startswith("/")]
+    paths: list[str] = []
+    for raw in (shown or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("EnvironmentFiles="):
+            line = line.split("=", 1)[1].strip()
+        if not line:
+            continue
+        token = line.split()[0]
+        if token.startswith("-"):
+            token = token[1:]
+        if token.startswith("/"):
+            paths.append(token)
+    return paths
+
+
+def _env_check_state_path() -> str:
+    configured = os.environ.get("ROBIE_TASK_INTAKE_ENV_CHECK", "").strip()
+    return configured or DEFAULT_ENV_CHECK_STATE
+
+
+def _load_env_check_state() -> dict:
+    """The installer's root read of every EnvironmentFile. Missing is empty."""
+    try:
+        data = json.loads(Path(_env_check_state_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _file_assigns_scope_or_playground(text: str) -> bool:
@@ -263,26 +297,47 @@ def _file_assigns_scope_or_playground(text: str) -> bool:
     return False
 
 
-def _environment_file_override(shown: str | None) -> str:
-    """EnvironmentFile= overrides Environment=, so a file that sets either key is red."""
+def _environment_file_review(shown: str | None) -> tuple[str, list[str]]:
+    """Alert text, plus detail lines that must not page.
+
+    A file this process cannot read is skipped for the alert. The
+    installer's state file supplies the root read: an assignment recorded
+    there still alerts. Anything else about an unreadable file is detail.
+    """
     if not shown:
-        return ""
+        return "", []
+    recorded: dict[str, dict] = {}
+    for item in _load_env_check_state().get("files") or []:
+        if isinstance(item, dict) and item.get("path"):
+            recorded[str(item["path"])] = item
+    problem = ""
+    notes: list[str] = []
+    assigns = "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND"
     for path in _environment_file_paths(shown):
         try:
             text = Path(path).read_text(encoding="utf-8")
         except OSError:
-            logger.warning("could not read EnvironmentFile %s", path)
+            prior = recorded.get(path) or {}
+            if prior.get("assigns") is True:
+                problem = problem or assigns
+            note = f"could not read EnvironmentFile {path}"
+            if prior.get("readable") is True and prior.get("assigns") is False:
+                note += "; the installer recorded it as clean"
+            elif prior.get("readable") is False:
+                note += "; the installer recorded it as unreadable"
+            elif not prior:
+                note += "; no installer check is on record"
+            notes.append(note)
             continue
         if _file_assigns_scope_or_playground(text):
-            return (
-                "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND"
-            )
-    return ""
+            problem = assigns
+    return problem, notes
 
 
 def _effective_scope_problem(
     effective_environment: str | None,
     environment_files: str | None = None,
+    details: list[str] | None = None,
 ) -> str:
     """The intake unit's effective env must contain the all-clients scope.
 
@@ -303,7 +358,9 @@ def _effective_scope_problem(
     missing = ""
     if "ROBIE_EZLYNX_WRITE_SCOPE=all" not in (text or ""):
         missing = "effective environment is missing ROBIE_EZLYNX_WRITE_SCOPE=all"
-    override = _environment_file_override(files)
+    override, notes = _environment_file_review(files)
+    if details is not None:
+        details.extend(notes)
     if missing and override:
         return f"{missing}; {override}"
     return missing or override
@@ -338,6 +395,7 @@ def check_task_intake(
     driver_reader=None,
     effective_environment: str | None = None,
     environment_files: str | None = None,
+    details: list[str] | None = None,
 ) -> list[str]:
     """Problems to alert on. Empty means quiet.
 
@@ -358,7 +416,9 @@ def check_task_intake(
         lease = _driver_lease_line(episode, reader=driver_reader)
         if lease:
             problems.append(lease)
-        scope = _effective_scope_problem(effective_environment, environment_files)
+        scope = _effective_scope_problem(
+            effective_environment, environment_files, details=details,
+        )
         if scope:
             problems.append(scope)
         return problems
@@ -476,13 +536,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    details: list[str] = []
     if args.simulate_failure:
         problems = ["simulated task-intake health failure"]
     else:
         try:
-            problems = check_task_intake()
+            problems = check_task_intake(details=details)
         except Exception as exc:  # noqa: BLE001 — a broken probe is a failure
             problems = [f"the task intake health check crashed: {type(exc).__name__}"]
+
+    for line in details:
+        logger.info("task intake detail: %s", line)
 
     if not problems:
         logger.info("Task intake healthy — quiet.")
