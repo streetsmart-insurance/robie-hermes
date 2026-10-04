@@ -409,13 +409,19 @@ def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str
     return found
 
 
-def _confirm_returned(task: AssignedTask) -> bool:
-    """Live, read-only: is the task back with Robie, under the instructions the report claims?
+# Everything the handback depends on. The report row and the live task must agree on ALL of
+# them, or the row is an old snapshot: a human may have changed the Producer (or CSR, creator,
+# labels, instructions) since it was generated, and the handback would go to the wrong person.
+CONSEQUENTIAL_FIELDS = ("description", "created_by", "assigned_producer", "csr", "activity_labels")
 
-    Robie owning the task now is not enough: a delayed report can still carry an OLD
-    snapshot of the instructions after a human returned the task with changed ones. The
-    live current request must equal the report row's, or the row is stale and no round opens.
-    An unreadable request is unproven.
+
+def _confirm_returned(task: AssignedTask) -> bool:
+    """Live, read-only: is the task back with Robie, under the request the report describes?
+
+    Robie owning the task now is not enough, and neither is a matching description: a delayed
+    report can carry an OLD snapshot of the routing (creator, producer, CSR) or labels after a
+    human returned the task with changes. Every consequential field must be read live and equal
+    the report row's. A field the live read cannot return is unproven, never assumed to match.
     """
     try:
         state = PlaywrightTaskReassigner().read_task_state(
@@ -425,10 +431,19 @@ def _confirm_returned(task: AssignedTask) -> bool:
         return False
     if str(state.get("assignee") or "").strip().casefold() != ROBIE_NAME.casefold():
         return False
-    live = " ".join(str(state.get("description") or "").split()).casefold()
-    if not live or live != " ".join(task.description.split()).casefold():
-        logger.info(f"Task {task.task_id}: the report's instructions are not the live ones "
-                    "(old snapshot); no new round from this report")
+
+    def norm(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    for name in CONSEQUENTIAL_FIELDS:
+        if name not in state or state[name] is None:
+            logger.info(f"Task {task.task_id}: {name} could not be read live; return not proven")
+            return False
+        if norm(state[name]) != norm(getattr(task, name)):
+            logger.info(f"Task {task.task_id}: the report's {name} is not the live one "
+                        "(old snapshot); no new round from this report")
+            return False
+    if not norm(state["description"]):
         return False
     return True
 

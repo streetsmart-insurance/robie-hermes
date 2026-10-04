@@ -190,33 +190,70 @@ def _cancel_dialog(panel) -> None:
     _unique(panel.get_by_role("button", name="Cancel", exact=True), "task Cancel").click()
 
 
-# The label(s) the Edit Task dialog uses for the task's instructions. UNVERIFIED against the
-# live DOM: Test must observe the real field. Until a label matches exactly one field, the
-# live request cannot be read and a handed-back task never opens a new round (fail closed).
+# UNVERIFIED DOM CONTRACT. These labels are GUESSES: nothing in this repo has observed the
+# real EZLynx page. Test must observe each field read-only and correct the label BEFORE a
+# new round can open. A field that is not found exactly once makes the live read raise, so
+# an unconfirmed label means "unproven" and nothing proceeds (fail closed); it never means
+# "assume it matches". Task-level fields are looked for in the Edit Task dialog first,
+# account-level fields (Producer, CSR) on the account page first.
 TASK_DESCRIPTION_LABELS = ("Description", "Task description", "Task note", "Note")
+CONSEQUENTIAL_FIELD_LABELS = {
+    "description": TASK_DESCRIPTION_LABELS,
+    "created_by": ("Created by", "Created By", "Task created by"),
+    "assigned_producer": ("Producer", "Assigned Producer"),
+    "csr": ("CSR", "Customer Service Rep", "Account Manager"),
+    "activity_labels": ("Labels", "Activity Labels"),
+}
+_ACCOUNT_LEVEL_FIELDS = ("assigned_producer", "csr")
+
+
+def unverified_dom_contract() -> dict:
+    """Everything this module GUESSES about the page, for Test to confirm one by one."""
+    return {"status": "UNVERIFIED",
+            "fields": {name: list(labels) for name, labels in CONSEQUENTIAL_FIELD_LABELS.items()},
+            "note": "Labels are guesses; confirm each read-only on Test before any new round."}
+
+
+def _field_text(field) -> str:
+    text = ""
+    try:
+        text = field.input_value() or ""
+    except Exception:
+        pass
+    if not text.strip():
+        try:
+            text = field.text_content() or ""
+        except Exception:
+            text = ""
+    return " ".join(text.split())
+
+
+def _read_one_field(name: str, scopes) -> str:
+    for scope in scopes:
+        for label in CONSEQUENTIAL_FIELD_LABELS[name]:
+            field = scope.get_by_label(label, exact=True)
+            found = field.count()
+            if found == 0:
+                continue
+            if found != 1:
+                raise ReassignError(f"Ambiguous {name} field {label!r}; request not verifiable")
+            return _field_text(field)
+    raise ReassignError(f"{name} field not found; the live request cannot be verified "
+                        "(label is an UNVERIFIED guess)")
+
+
+def _read_consequential_fields(panel, page) -> dict:
+    """Every field the handback depends on, each read from exactly one labelled field."""
+    state = {}
+    for name in CONSEQUENTIAL_FIELD_LABELS:
+        scopes = (page, panel) if name in _ACCOUNT_LEVEL_FIELDS else (panel, page)
+        state[name] = _read_one_field(name, scopes)
+    return state
 
 
 def _read_task_description(panel) -> str:
     """The task's CURRENT instructions from the Edit Task dialog, whitespace-normalized."""
-    for label in TASK_DESCRIPTION_LABELS:
-        field = panel.get_by_label(label, exact=True)
-        found = field.count()
-        if found == 0:
-            continue
-        if found != 1:
-            raise ReassignError(f"Ambiguous task description field {label!r}; request not verifiable")
-        text = ""
-        try:
-            text = field.input_value() or ""
-        except Exception:
-            pass
-        if not text.strip():
-            try:
-                text = field.text_content() or ""
-            except Exception:
-                text = ""
-        return " ".join(text.split())
-    raise ReassignError("Task description field not found; the live request cannot be verified")
+    return _read_one_field("description", (panel,))
 
 
 class PlaywrightTaskReassigner:
@@ -225,21 +262,22 @@ class PlaywrightTaskReassigner:
     def read_task_state(
         self, task_id: str, applicant_id: str, description: str = ""
     ) -> dict:
-        """Read-only: the task's current assignee AND current instructions.
+        """Read-only: the task's current assignee AND every field the handback depends on.
 
         Used to prove a handed-back task is really back with Robie, under the same
-        instructions the report claims, before a new round opens.
+        instructions and routing the report claims, before a new round opens. The page
+        labels it relies on are UNVERIFIED guesses (see `unverified_dom_contract`).
         """
         validate_identity(task_id, applicant_id)
         with _browser_page() as page:
             _goto_activity(page, applicant_id)
             panel = _search_and_open_edit(page, task_id, applicant_id)
             assignee = _read_assignee_value(_assignee_field(panel))
-            request = _read_task_description(panel)
+            state = _read_consequential_fields(panel, page)
             _cancel_dialog(panel)
         if not assignee:
             raise ReassignError(f"Could not read assignee for task {task_id}")
-        return {"assignee": assignee, "description": request}
+        return {"assignee": assignee, **state}
 
     def read_assignee(
         self, task_id: str, applicant_id: str, description: str = ""
