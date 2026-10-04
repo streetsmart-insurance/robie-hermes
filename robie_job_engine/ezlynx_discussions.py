@@ -525,10 +525,11 @@ class DiscussionApiClient:
         raise DiscussionApiError(None, "discussion lookup returned unexpected shape")
 
     def get_discussion_with_notes(self, discussion_id: str) -> dict[str, Any]:
-        """GET v8/discussions/{id}/with-notes. This read includes note bodies.
+        """Discussion with its note bodies (v8 discussions/:discussionId/with-notes).
 
-        The plain discussion read does not. A missing body on that plain
-        read is not proof the note is absent.
+        ``get_discussion`` returns metadata only (count, latest id, no text).
+        A duplicate check that compares note text must use this read, because
+        ``POST .../notes`` returns no note id to compare against.
         """
         discussion = str(discussion_id or "").strip()
         if not discussion:
@@ -538,7 +539,9 @@ class DiscussionApiClient:
         )
         if isinstance(parsed, dict):
             return parsed
-        raise DiscussionApiError(None, "discussion with-notes lookup returned unexpected shape")
+        if isinstance(parsed, list):
+            return {"discussionId": discussion, "notes": parsed}
+        raise DiscussionApiError(None, "discussion with-notes returned unexpected shape")
 
     # -- append ----------------------------------------------------------
 
@@ -1117,35 +1120,58 @@ def iter_discussion_notes(record: Any):
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 
-def with_notes_read_is_complete(record: Any) -> bool:
-    """True when a with-notes payload is the whole list and bodies are readable.
-
-    An empty ``notes`` list is complete: the body is absent. Notes that
-    carry bodies, with no next page and a matching count, are complete.
-    A plain discussion read, a short page, or notes with no body text is
-    not complete. Absence is only meaningful on a complete read.
-    """
+def _with_notes_rows(record: Any) -> list[Any] | None:
+    """The note list from a with-notes payload, including a bare JSON list."""
+    if isinstance(record, list):
+        return record
     if not isinstance(record, dict):
-        return False
-    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
-    for key in ("next", "Next", "hasMore", "HasMore", "nextPage", "NextPage"):
-        if record.get(key) or meta.get(key):
-            return False
-    notes = None
+        return None
     for key in ("notes", "Notes"):
-        if key in record and isinstance(record.get(key), list):
-            notes = record[key]
-            break
-    if notes is None:
+        rows = record.get(key)
+        if isinstance(rows, list):
+            return rows
+    return None
+
+
+def with_notes_read_is_complete(record: Any, plain: dict[str, Any] | None = None) -> bool:
+    """True only when with-notes is proven to be the whole discussion.
+
+    ``plain`` is the metadata from ``GET v8/discussions/{id}``: ``note_count``
+    and ``most_recent_note_id``. The with-notes list must be that long and
+    must contain that latest note id. A first page with no count, a count
+    nested under ``discussion``, ``totalCount`` plus ``pageSize``, or a bare
+    list is not proof by itself. Missing plain metadata is not proof either.
+    Note bodies have to be readable when the list is not empty, so a missing
+    body means the text is absent rather than unread.
+    """
+    if not isinstance(plain, dict):
         return False
-    raw_count = record.get("noteCount", record.get("NoteCount"))
-    if isinstance(raw_count, bool):
-        raw_count = None
-    if isinstance(raw_count, str) and raw_count.strip().isdigit():
-        raw_count = int(raw_count.strip())
-    if isinstance(raw_count, int) and raw_count != len(notes):
+    count = plain.get("note_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         return False
-    if notes and not _payload_has_note_bodies(record):
+    latest = str(plain.get("most_recent_note_id") or "").strip()
+    if not latest:
+        return False
+    if isinstance(record, dict):
+        meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+        for key in ("next", "Next", "hasMore", "HasMore", "nextPage", "NextPage"):
+            if record.get(key) or meta.get(key):
+                return False
+        for key in ("totalCount", "TotalCount"):
+            total = record.get(key)
+            if isinstance(total, str) and total.strip().isdigit():
+                total = int(total.strip())
+            if isinstance(total, bool):
+                total = None
+            if isinstance(total, int) and total != count:
+                return False
+    notes = _with_notes_rows(record)
+    if notes is None or len(notes) != count:
+        return False
+    if not any(_note_id_of(row) == latest for row in notes):
+        return False
+    body_record = record if isinstance(record, dict) else {"notes": notes}
+    if not _payload_has_note_bodies(body_record):
         return False
     return True
 
@@ -1819,20 +1845,20 @@ def build_with_note_payload(
 ) -> dict[str, Any]:
     """Pure builder for the ``POST v8/discussions/with-note`` body.
 
-    SHAPE UNVERIFIED (2026-09-28): the public Postman documentation names the
-    endpoint and says it creates a discussion with a note and returns a
-    DiscussionId, but does not show the request body. UAT probing was blocked
-    because no valid UAT applicant id is on file (220250093 is
-    Production-only). The shape below is the documented camelCase convention
-    used by the rest of the v8 Discussion API. If EZLynx rejects it, the
-    caller's 400 detail surfaces in the error and the filing holds
-    UNVERIFIED — never silently FILED.
+    Shape from the EZLynx Postman collection item "Create a discussion with
+    one note": ``applicantId`` is an integer, the title is nested under
+    ``discussion``, and the note sits under ``note``. A flat body with a
+    top-level ``title`` and a string ``applicantId`` returns HTTP 500.
+    Proven 2026-10-04: this nested shape created discussion 850001255
+    (HTTP 200; the response body is the bare integer DiscussionId).
     """
     applicant = str(applicant_id or "").strip()
     heading = str(title or "").strip()
     text = str(note_body or "").strip()
     if not applicant:
         raise DiscussionApiError(None, "applicant id is required")
+    if not applicant.isdigit() or not applicant.isascii() or int(applicant) <= 0:
+        raise DiscussionApiError(None, "applicant id must be a positive integer")
     if not heading or heading.casefold() == "untitled":
         raise DiscussionApiError(
             None, "a real discussion title is required; Untitled is forbidden"
@@ -1840,8 +1866,8 @@ def build_with_note_payload(
     if not text:
         raise DiscussionApiError(None, "note body is required")
     return {
-        "applicantId": applicant,
-        "title": heading,
+        "applicantId": int(applicant),
+        "discussion": {"title": heading},
         "note": {"type": note_type, "body": text},
     }
 
@@ -1893,13 +1919,11 @@ def create_discussion_with_note(
     payload = build_with_note_payload(applicant, heading, text,
                                       note_type=note_type)
     created = client._post(WITH_NOTE_PATH, payload)
-    discussion_id = ""
-    if isinstance(created, dict):
-        for key in ("discussionId", "DiscussionId", "id", "Id"):
-            value = str(created.get(key) or "").strip()
-            if value:
-                discussion_id = value
-                break
+    # EZLynx answers with the bare integer DiscussionId (850001255 on
+    # 2026-10-04). A digit string or an object with an id is also accepted.
+    from .ezlynx_task_api import discussion_id_from_create_response
+
+    discussion_id = discussion_id_from_create_response(created)
     if not discussion_id:
         raise DiscussionApiError(
             None,

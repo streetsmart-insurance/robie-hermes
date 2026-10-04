@@ -124,31 +124,35 @@ def test_get_discussion_with_notes_uses_the_with_notes_path():
 
 
 def test_with_notes_read_is_complete_only_for_the_whole_list():
-    plain = {
-        "discussionId": "d1",
-        "title": "Ascend - Payments",
-        "noteCount": 1,
-        "mostRecentNoteId": "n1",
-    }
-    assert not disc.with_notes_read_is_complete(plain)
-    assert disc.with_notes_read_is_complete({"discussionId": "d1", "noteCount": 0, "notes": []})
-    assert disc.with_notes_read_is_complete(
-        {"discussionId": "d1", "noteCount": 1, "notes": [{"noteId": "n1", "body": "hello"}]}
+    proven = {"note_count": 1, "most_recent_note_id": "n1"}
+    whole = {"discussionId": "d1", "notes": [{"noteId": "n1", "body": "hello"}]}
+    assert disc.with_notes_read_is_complete(whole, proven)
+    assert not disc.with_notes_read_is_complete(whole)
+    assert not disc.with_notes_read_is_complete(
+        {"discussionId": "d1", "noteCount": 1, "mostRecentNoteId": "n1"}
     )
     assert not disc.with_notes_read_is_complete(
-        {"discussionId": "d1", "noteCount": 3, "notes": [{"noteId": "n1", "body": "hello"}]}
+        {"discussionId": "d1", "noteCount": 0, "notes": []},
+        {"note_count": 0, "most_recent_note_id": ""},
     )
     assert not disc.with_notes_read_is_complete(
-        {
-            "discussionId": "d1",
-            "noteCount": 1,
-            "next": "page-2",
-            "notes": [{"noteId": "n1", "body": "hello"}],
-        }
+        {"discussionId": "d1", "notes": [{"noteId": "n1"}]},
+        proven,
+    )
+    # A first page, a nested count, totalCount/pageSize, and a bare list
+    # are not proof, even when they look locally consistent.
+    page = [{"noteId": "n-page", "body": "other"}]
+    plain = {"note_count": 4, "most_recent_note_id": "n-latest"}
+    assert not disc.with_notes_read_is_complete({"notes": page}, plain)
+    assert not disc.with_notes_read_is_complete(
+        {"discussion": {"noteCount": 1, "mostRecentNoteId": "n-page"}, "notes": page},
+        plain,
     )
     assert not disc.with_notes_read_is_complete(
-        {"discussionId": "d1", "noteCount": 1, "notes": [{"noteId": "n1"}]}
+        {"totalCount": 4, "pageSize": 1, "notes": page},
+        plain,
     )
+    assert not disc.with_notes_read_is_complete(page, plain)
 
 
 # ---------------------------------------------------------------------------

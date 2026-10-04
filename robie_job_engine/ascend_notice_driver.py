@@ -1660,6 +1660,26 @@ def _confirm_landed_note(
         logger.warning("landed note was not confirmed in the ledger: %s", exc)
 
 
+def _plain_note_snapshot(client: Any, discussion_id: str) -> dict[str, Any] | None:
+    """noteCount and mostRecentNoteId from the plain discussion read.
+
+    That read has no note bodies. A failure here is not proof the with-notes
+    list is the whole discussion.
+    """
+    getter = getattr(client, "get_discussion", None)
+    if not callable(getter):
+        return None
+    try:
+        return discussions.discussion_note_snapshot(getter(discussion_id))
+    except Exception as exc:  # noqa: BLE001 - no metadata, so do not clear the guard
+        logger.warning(
+            "plain discussion re-read failed for %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return None
+
+
 def _keep_unconfirmed_guard(filed: dict[str, Any]) -> dict[str, Any]:
     """The with-notes read did not prove the note. Do not post."""
     kept = dict(filed)
@@ -1682,9 +1702,10 @@ def _settle_unconfirmed_note(
     timeout. Every other filing keeps the unconfirmed guard. A plain
     discussion read has no note bodies, so this uses
     ``GET v8/discussions/{id}/with-notes``. The identical body marks the
-    note filed and posts nothing. A complete read that does not contain
-    the body may clear that exact unconfirmed row and post once. A failed
-    read, a short page, or a payload with no bodies keeps the guard.
+    note filed and posts nothing. Clearing the unconfirmed row requires
+    positive proof from the plain read: the with-notes list is exactly
+    ``noteCount`` long, contains ``mostRecentNoteId``, and does not
+    contain this body. Anything else keeps the guard.
     """
     if not allow or _UNCONFIRMED_GUARD not in str(filed.get("reason") or ""):
         return filed
@@ -1715,7 +1736,8 @@ def _settle_unconfirmed_note(
                 "read_back": True,
                 "verified_by": "text",
             }
-    if not discussions.with_notes_read_is_complete(record):
+    plain = _plain_note_snapshot(client, discussion_id)
+    if not discussions.with_notes_read_is_complete(record, plain):
         return _keep_unconfirmed_guard(filed)
     try:
         from .discussion_note_ledger import undo_unconfirmed_note
@@ -1772,16 +1794,40 @@ def _read_existing_note(
 
     Write-scope is not checked here. Dry-run uses this for applicants the
     allowlist blocks so a reviewer can see an existing duplicate.
+
+    ``POST .../notes`` returns no note id, and ``GET v8/discussions/{id}``
+    has no note text, so the match reads ``.../with-notes`` (note bodies)
+    when the client can. ``bodies_error`` is set when that read failed; the
+    live path holds instead of posting blind (PNM Fencing discussion
+    346685002 collected 261 identical notes Sep 29-Oct 3 2026).
     """
     del applicant_id
-    outcome = {"read": False, "duplicate": False, "note_id": "", "reason": ""}
+    outcome = {
+        "read": False,
+        "duplicate": False,
+        "note_id": "",
+        "reason": "",
+        "bodies_read": False,
+        "bodies_error": "",
+    }
     record = {"discussionId": discussion_id}
     if not discussion_id:
         outcome["reason"] = "selected discussion has no id"
         return outcome
     detail: Any = None
+    with_notes = getattr(client, "get_discussion_with_notes", None)
+    if callable(with_notes):
+        try:
+            detail = with_notes(discussion_id)
+            outcome["read"] = True
+            outcome["bodies_read"] = True
+        except Exception as exc:  # noqa: BLE001 - live path holds on this
+            detail = None
+            outcome["bodies_error"] = f"{type(exc).__name__}: {exc}"
     getter = getattr(client, "get_discussion", None)
-    if callable(getter):
+    if detail is not None:
+        pass
+    elif callable(getter):
         try:
             detail = getter(discussion_id)
             outcome["read"] = True
@@ -2064,7 +2110,7 @@ def _prepare_dry_run_create(
         "reason": "dry run: create payload validated, nothing written",
         "applicant_id": applicant,
         "discussion_id": None,
-        "discussion_title": payload["title"],
+        "discussion_title": payload["discussion"]["title"],
         "note_id": None,
     }
 
@@ -2367,6 +2413,13 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["existing_note_id"] = note_match["note_id"]
     if note_match.get("reason") and not note_match.get("read"):
         result.detail["existing_note_read_reason"] = note_match["reason"]
+    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
+        # The note text on this discussion could not be read. Do not post a
+        # note that may already be there. This is before the recent-note
+        # read: a 404 on with-notes is a DiscussionApi miss, and that miss
+        # can make the next plain read fail closed for the wrong reason.
+        result.reason = f"existing_note_unreadable: {note_match['bodies_error']}"
+        return result
 
     # A ready row does not post again when this discussion already has a
     # note for this same bill: posted on or after first_seen, and the due

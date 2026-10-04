@@ -1410,27 +1410,28 @@ def _record_ready_miss(
     reason: str,
     *,
     maybe_note: bool = False,
+    free_retry: bool = False,
 ) -> None:
     """One unpaid pause, then one unpaid retry. After that, misses count.
 
-    A later HTTP 5xx does not start another free pause. The with-notes
-    uncertainty line is stored for the email and does not, by itself, spend
-    the free retry's attempt.
+    A later HTTP 5xx does not start another free pause. The free retry is
+    marked used whatever came back, including a refusal that is not a 5xx
+    and a with-notes uncertainty. That uncertainty line is stored for the
+    email and does not, by itself, spend an attempt.
     """
     from .ascend_unmatched_digest import MAYBE_NOTE_LINE
 
     text = str(reason or "")
-    guard = "couldn't confirm that note was added" in text.lower()
     transient = _is_transient_failure(text)
     used = _retry_was_used(row)
     held = _hold_is_set(row)
-    if not used and not held and transient:
-        _hold_transient(store, event_key, seen_at)
-        return
-    if not used and held and (transient or guard or maybe_note):
+    if free_retry or (not used and held):
         store.mark_transient_retry_used(event_key)
         if maybe_note:
             store.note_file_failure(event_key, MAYBE_NOTE_LINE)
+        return
+    if not used and not held and transient:
+        _hold_transient(store, event_key, seen_at)
         return
     store.note_ready_attempt(event_key, seen_at, plain_file_failure(text))
 
@@ -3061,7 +3062,19 @@ def _file_ready_unmatched(
     try:
         for _row, notice in queued:
             # Only a row parked by a 5xx or timeout may clear an unconfirmed note.
-            ctx.transient_note_retry = _hold_is_set(_row) and not _retry_was_used(_row)
+            # Mark that free retry used before the outcome, so a success or a
+            # non-5xx refusal cannot leave the row eligible for another pause.
+            on_free_retry = _hold_is_set(_row) and not _retry_was_used(_row)
+            ctx.transient_note_retry = on_free_retry
+            if on_free_retry:
+                try:
+                    store.mark_transient_retry_used(notice.event_key)
+                except Exception as exc:  # noqa: BLE001 - still file; the miss path marks it too
+                    logger.warning(
+                        "ready-to-file %s retry flag was not stored: %s",
+                        notice.event_key,
+                        type(exc).__name__,
+                    )
             try:
                 if store.is_filed(notice.event_key):
                     store.resolve_unmatched(notice.event_key, seen_at)
@@ -3089,6 +3102,7 @@ def _file_ready_unmatched(
                         seen_at,
                         reason,
                         maybe_note=bool(detail.get("maybe_note")),
+                        free_retry=on_free_retry,
                     )
                 filed.append(outcome)
             except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
@@ -3102,6 +3116,7 @@ def _file_ready_unmatched(
                         notice.event_key,
                         seen_at,
                         f"error: {type(exc).__name__}: {exc}",
+                        free_retry=on_free_retry,
                     )
                 except Exception as record_exc:  # noqa: BLE001 - a locked store must not abort the poll
                     logger.warning(
@@ -3261,6 +3276,13 @@ def _file_category_note(
         return {
             "status": "skipped",
             "reason": "existing_note_duplicate",
+            "detail": detail,
+        }
+    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
+        # Note text could not be read; do not post a note that may be there.
+        return {
+            "status": "skipped",
+            "reason": f"existing_note_unreadable: {note_match['bodies_error']}",
             "detail": detail,
         }
     try:

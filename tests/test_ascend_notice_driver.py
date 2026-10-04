@@ -2545,3 +2545,90 @@ def test_intent_to_cancel_csr_task_flag_on_assigns_the_csr(no_zap_fire, monkeypa
     assert "label" not in result["detail"]
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+
+
+# --- duplicate guard reads note bodies (POST /notes returns no note id) ---
+
+
+def test_live_duplicate_check_reads_note_bodies_from_with_notes(no_zap_fire):
+    """GET v8/discussions/{id} has no note text, so the live duplicate check
+    reads .../with-notes. A note already there is not posted again."""
+    notice = _intent_notice(_INTENT_BODY)
+    triaged = triage.triage_notice(
+        FakeAscendClient(program={"status": "overdue"}), notice.subject, notice.body
+    )
+    signed = driver.signed_notice_note(triaged["note_text"])
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        },
+        discussion_rows=[
+            {"discussionId": "d-noc", "title": "Ascend - Cancellation Notices"}
+        ],
+        # Metadata read: count and latest id only, like live EZLynx.
+        discussion_detail={"discussionId": "d-noc", "noteCount": 261,
+                           "mostRecentNoteId": "n-261"},
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+        dry_run=False,
+    )
+    discussion_client._urlopen.routes.insert(
+        0,
+        ("d-noc/with-notes", {"discussionId": "d-noc",
+                              "notes": [{"noteId": "n-261", "body": signed}]}),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert result["reason"] == "existing_note_duplicate: n-261"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert any(
+        c["url"].endswith("/v8/discussions/d-noc/with-notes")
+        for c in discussion_client._urlopen.calls
+    )
+    assert no_zap_fire == []
+
+
+def test_live_unreadable_note_bodies_hold_instead_of_posting(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+    )
+
+    def _fail(_discussion_id):
+        raise discussions.DiscussionApiError(503, "with-notes unavailable")
+
+    discussion_client.get_discussion_with_notes = _fail
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert result["reason"].startswith("existing_note_unreadable:")
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.source.marked == []
+    assert no_zap_fire == []
+
+
+def test_dry_run_with_unreadable_note_bodies_still_reports(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=True,
+    )
+
+    def _fail(_discussion_id):
+        raise discussions.DiscussionApiError(503, "with-notes unavailable")
+
+    discussion_client.get_discussion_with_notes = _fail
+    summary = driver.run_driver(ctx)
+    assert summary["results"][0]["status"] == "dry_run"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_discussion_client_with_notes_reads_the_with_notes_path():
+    client = make_discussion_client([], discussion_detail={"discussionId": "d9", "notes": []})
+    record = client.get_discussion_with_notes("d9")
+    assert record["discussionId"] == "d9"
+    assert client._urlopen.calls[-1]["url"].endswith("/v8/discussions/d9/with-notes")
+    with pytest.raises(discussions.DiscussionApiError):
+        client.get_discussion_with_notes("")
