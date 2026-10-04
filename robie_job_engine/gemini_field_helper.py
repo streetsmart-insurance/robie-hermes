@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
+from .gemini_video import stamp_video_processing
 from .playwright_write_guard import locator_is_positional_guess
 from .secrets import redact_text
 
@@ -275,14 +276,16 @@ class VertexGeminiFieldClient:
             f"publishers/google/models/{self.model}:generateContent"
         )
         body = json.dumps(
-            {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0,
-                    "maxOutputTokens": 256,
-                    "responseMimeType": "application/json",
-                },
-            }
+            stamp_video_processing(
+                {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0,
+                        "maxOutputTokens": 256,
+                        "responseMimeType": "application/json",
+                    },
+                }
+            )
         ).encode("utf-8")
         request = urllib.request.Request(
             url,
