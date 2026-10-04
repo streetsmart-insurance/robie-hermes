@@ -1036,8 +1036,10 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             return 0
         tasks = non_call
 
-    # Tasks that already carried a Splice label when those labels turned on
-    # are baseline and never dialed. The two live labels are not in this set.
+    # Tasks that already existed when the nine turned on, including tasks
+    # that appeared while the flag was off, are baseline and never dialed.
+    # Each off-to-on transition moves the timestamp. The two live labels
+    # are not in this set.
     if splice_at:
         already = []
         for task in tasks:

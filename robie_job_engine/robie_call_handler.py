@@ -534,6 +534,10 @@ def _phone_is_mobile(ports: RobieCallPorts, task: Dict[str, Any], applicant_id: 
     flag = _pick(task, "phone_is_mobile").lower()
     if flag in ("1", "true", "yes"):
         return True
+    from .call_pickup import is_test_server
+
+    if is_test_server():
+        return False
     method = getattr(ports.phone_lookup, "is_mobile", None)
     if method is None:
         return False
@@ -1953,6 +1957,7 @@ def _handle_call_task(
         SPLICE_WORKFLOW_IDS,
         calling_day,
         classify_call_request,
+        is_test_server,
         note_dedupe_key,
         splice_task_predates_enablement,
         splice_test_account_reason,
@@ -2129,24 +2134,46 @@ def _handle_call_task(
         return fail("kill switch active (ROBIE_CALL_HALT); failing closed")
 
     # ---- 5. Phone lookup ---------------------------------------------------
-    # An explicit number in the task ("Call Progressive at 1-800-776-4737")
-    # overrides the applicant's number on file. The call still logs on the
-    # applicant's account. Policy, claim, and quote numbers are not phones.
-    # A bare digit run that could be either is a question, not a dial.
-    explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
+    # Splice labels dial only the client's phone on file. A number or a
+    # policy number in the task note is ignored.
+    # Robie Call dials only a number typed in the task. It never uses the
+    # phone on file. No usable typed number files one short note and does
+    # not dial.
+    # Robie Lead Follow Up uses a typed number first, then the phone on file.
+    # Policy, claim, and quote numbers are not phones. A bare digit run
+    # that could be either is a question, not a dial, except on a Splice
+    # label, which does not read the note for a number.
+    if workflow is not None and workflow.id in SPLICE_WORKFLOW_IDS:
+        phone_policy = "on_file_only"
+    elif decision.action == "freeform":
+        phone_policy = "typed_only"
+    else:
+        phone_policy = "typed_then_file"
+    explicit_phone = None
+    phone_text_ambiguous = False
+    if phone_policy != "on_file_only":
+        explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
     if phone_text_ambiguous:
         log.warning("ambiguous number in task %s; asking instead of dialing",
                     task_id)
-        clar_note = (
-            "Robie received a call task but couldn't tell which phone to "
-            "dial. The task includes a number that might be a policy, claim, "
-            "or quote number rather than a phone number. Robie will not "
-            "guess and will not dial it. Please update the task with the "
-            "phone to call — for example, 'call at' followed by the number, "
-            "or the word 'phone' or 'cell' before it — or remove the number "
-            "if Robie should use the phone on file. Robie will pick this up "
-            "on the next check."
-        )
+        if phone_policy == "typed_only":
+            clar_note = (
+                "Robie did not call. The task has a number that might be a "
+                "policy, claim, or quote number rather than a phone. Type "
+                "the phone number to call, for example 'call at' followed "
+                "by the number."
+            )
+        else:
+            clar_note = (
+                "Robie received a call task but couldn't tell which phone to "
+                "dial. The task includes a number that might be a policy, claim, "
+                "or quote number rather than a phone number. Robie will not "
+                "guess and will not dial it. Please update the task with the "
+                "phone to call — for example, 'call at' followed by the number, "
+                "or the word 'phone' or 'cell' before it — or remove the number "
+                "if Robie should use the phone on file. Robie will pick this up "
+                "on the next check."
+            )
         wb = _writeback_once(
             ports, task_id, "clarification_ambiguous_number",
             applicant_id, clar_note, title_hint=None)
@@ -2158,7 +2185,31 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
-    if explicit_phone:
+    if phone_policy == "typed_only" and not explicit_phone:
+        log.warning("task %s has no typed phone number; asking instead of dialing",
+                    task_id)
+        clar_note = (
+            "Robie did not call. Type the phone number to call in this task."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_missing_number",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "no phone number typed in the task; asked for the number, "
+            "task left open",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
+    # Test never reads the applicant phone record. The Bland port posts
+    # only Jake's cell. A typed Robie Call number still decides whether
+    # the call is allowed; it is not the number that is posted.
+    if is_test_server() and phone_policy != "typed_only":
+        log.info("test server: skipping applicant phone lookup for task %s", task_id)
+        phone, phone_ambiguity = "+10000000000", None
+        explicit_phone = None
+    elif explicit_phone:
         log.info("using task-provided phone number for task %s", task_id)
         phone, phone_ambiguity = explicit_phone, None
     else:
@@ -2260,7 +2311,11 @@ def _handle_call_task(
     # applicant ("call Mary Smith" on John Doe's account), do NOT dial —
     # the phone belongs to the applicant, not the named person. Fail closed
     # with a clarification note instead of merely flagging it in the note.
-    phone_mismatch = _instruction_phone_mismatch(instruction, phone)
+    phone_mismatch = (
+        None
+        if phone_policy == "on_file_only"
+        else _instruction_phone_mismatch(instruction, phone)
+    )
     name_mismatch = _instruction_name_mismatch(instruction, applicant_name)
     # On-behalf-of calling: the task names someone other than the applicant
     # AND provides an explicit phone ("Call Progressive at 1-800-776-4737"

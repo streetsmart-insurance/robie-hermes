@@ -17,6 +17,11 @@
 #                    leftover 10-dry-run.conf so the timer cannot stay dry.
 #   --live           install the Bland live drop-in and reload systemd.
 #                    Removes a leftover 10-dry-run.conf.
+#   --install-test   install robie-task-intake-test.service and its timer
+#                    for hermes-test-01 and enable that timer. Does not
+#                    change the Production units. The Test unit leaves
+#                    ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS empty until an
+#                    operator fills the proof task ids.
 #   --rollback       stop and disable the timers, remove the units, the
 #                    live drop-in, and any leftover 10-dry-run.conf.
 #                    Backups under the backup root are kept.
@@ -41,14 +46,14 @@ DROPIN_DIR="robie-task-intake.service.d"
 DROPIN_NAME="20-bland-prod.conf"
 
 usage() {
-  echo "usage: $0 --dry-run-once | --enable-timer | --live | --rollback" >&2
+  echo "usage: $0 --dry-run-once | --enable-timer | --live | --install-test | --rollback" >&2
   exit 2
 }
 
 mode=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run-once|--enable-timer|--live|--rollback)
+    --dry-run-once|--enable-timer|--live|--install-test|--rollback)
       if [[ -n "${mode}" ]]; then
         echo "pass one mode at a time" >&2
         exit 2
@@ -307,5 +312,24 @@ case "${mode}" in
       "${DEST}/${DROPIN_DIR}/${DROPIN_NAME}"
     "${SYSTEMCTL}" daemon-reload
     echo "LIVE_DROPIN_INSTALLED"
+    ;;
+  --install-test)
+    mkdir -p "${DEST}"
+    for unit in robie-task-intake-test.service robie-task-intake-test.timer; do
+      source="${RELEASE_ROOT}/deploy/systemd/${unit}"
+      if [[ ! -f "${source}" ]]; then
+        echo "unit missing from release: ${unit}" >&2
+        exit 2
+      fi
+      if [[ -f "${DEST}/${unit}" ]]; then
+        stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        mkdir -p "${BACKUP_ROOT}/${stamp}"
+        cp -a "${DEST}/${unit}" "${BACKUP_ROOT}/${stamp}/${unit}"
+      fi
+      install -m 0644 "${source}" "${DEST}/${unit}"
+    done
+    "${SYSTEMCTL}" daemon-reload
+    "${SYSTEMCTL}" enable --now robie-task-intake-test.timer
+    echo "TEST_INTAKE_INSTALLED"
     ;;
 esac

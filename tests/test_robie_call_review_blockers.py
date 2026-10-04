@@ -122,6 +122,7 @@ class WritebackSpy:
     def __call__(self, discussion_client: Any, applicant_id: str,
                  body: str, title_hint: Any = None) -> Dict[str, Any]:
         self.calls += 1
+        self.body = body
         return {"status": "filed", "note_id": f"NOTE-{self.calls}",
                 "discussion_id": "D1", "applicant_id": applicant_id}
 
@@ -156,7 +157,7 @@ def make_task(**over) -> Dict[str, Any]:
     task = {
         "task_id": "T-100",
         "Task Subject": "Please call about renewal",
-        "Task Description": "Call John Smith about his renewal documents",
+        "Task Description": "Call John Smith about his renewal documents. Call at 555-123-4567.",
         "Applicant ID": "A-100",
         "Applicant Name": "John Smith",
         "Task Created By": "Jane Producer",
@@ -384,6 +385,7 @@ def test_instruction_naming_different_person_fails_closed(clean_state):
     bland = FakeBland()
     ports = make_ports(bland=bland)
     task = make_task(**{
+        "Activity Labels": "Robie Lead Follow Up",
         "Task Description": "Call Mary Johnson about her renewal documents",
     })
     result = rch.handle_robie_call_task(task, make_config(), ports)
@@ -635,14 +637,26 @@ def test_explicit_phone_overrides_applicant_lookup(clean_state):
         rch._checkpoint_key("T-100")]["phone"] == "+18007764737"
 
 
-def test_no_explicit_phone_uses_applicant_lookup(clean_state):
-    """No number in the task: falls back to the applicant's number on file."""
+def test_robie_call_without_a_typed_number_asks_and_does_not_use_the_file(clean_state):
+    """Robie Call never falls back to the phone on file."""
     bland = FakeBland()
-    ports = make_ports(bland=bland, phone=FakePhone("+15551234567"))
-    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
-    assert result["ok"] is True
-    assert ports.job_checkpoint.data[
-        rch._checkpoint_key("T-100")]["phone"] == "+15551234567"
+    looked = []
+
+    class CountingPhone(FakePhone):
+        def get_phone(self, applicant_id: str) -> Optional[str]:
+            looked.append(applicant_id)
+            return self._phone
+
+    ports = make_ports(bland=bland, phone=CountingPhone("+15551234567"))
+    task = make_task(**{
+        "Task Description": "Call John Smith about his renewal documents",
+    })
+    result = rch.handle_robie_call_task(task, make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert looked == []
+    assert result.get("clarification_note_filed") is True
+    assert "Type the phone number to call" in clean_state.body
 
 
 def test_third_party_with_explicit_number_is_on_behalf_of(clean_state):
@@ -670,8 +684,8 @@ def test_third_party_with_explicit_number_is_on_behalf_of(clean_state):
     assert "Jake" not in eva_task
 
 
-def test_name_mismatch_without_number_still_fails_closed(clean_state):
-    """No explicit number + wrong name: still fail closed, no dial."""
+def test_name_mismatch_without_number_asks_for_the_number(clean_state):
+    """No typed number: ask for the number. Do not dial the phone on file."""
     bland = FakeBland()
     ports = make_ports(bland=bland)
     task = make_task(**{
@@ -680,7 +694,8 @@ def test_name_mismatch_without_number_still_fails_closed(clean_state):
     result = rch.handle_robie_call_task(task, make_config(), ports)
     assert result["ok"] is False
     assert bland.dials == 0
-    assert "Mary Johnson" in (result.get("error") or "")
+    assert "typed" in (result.get("error") or "")
+    assert "Type the phone number to call" in clean_state.body
 
 
 def test_transfer_lookup_resolves_assigner_did():

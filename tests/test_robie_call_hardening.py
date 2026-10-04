@@ -52,7 +52,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
     task: Dict[str, Any] = {
         "Task ID": "TASK-1",
         "Task Subject": "Please call about renewal",
-        "Task Description": "Please call John about his renewal. Be friendly.",
+        "Task Description": "Please call John about his renewal. Be friendly. Call at 732-668-8161.",
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
@@ -280,7 +280,11 @@ class TestAmbiguousPhone(unittest.TestCase):
             "candidates": [{"label": "Cell"}, {"label": "Business"}],
         })
         ports = make_ports(phone_lookup=phone)
-        result = handle_robie_call_task(make_task(), live_config(), ports)
+        task = make_task(**{
+            "Activity Labels": "Robie Lead Follow Up",
+            "Task Description": "The lead asked about a homeowners quote.",
+        })
+        result = handle_robie_call_task(task, live_config(), ports)
         self.assertFalse(result["ok"])
         self.assertTrue(result.get("phone_ambiguous"))
         self.assertEqual(ports.bland.calls, [])  # never dialed
@@ -294,7 +298,11 @@ class TestAmbiguousPhone(unittest.TestCase):
     def test_dict_phone_clear_result_dials(self):
         phone = FakePhonePort(answer={"phone": "(732) 668-8161", "ambiguous": False})
         ports = make_ports(phone_lookup=phone)
-        result = handle_robie_call_task(make_task(), live_config(), ports)
+        task = make_task(**{
+            "Activity Labels": "Robie Lead Follow Up",
+            "Task Description": "The lead asked about a homeowners quote.",
+        })
+        result = handle_robie_call_task(task, live_config(), ports)
         self.assertTrue(result["ok"])
         self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
 

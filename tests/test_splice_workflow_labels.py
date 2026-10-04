@@ -17,6 +17,12 @@ from robie_job_engine.bland_call_port import (
     BlandTransportCallPort,
     select_dial_target,
 )
+from robie_job_engine.bland_prod_wiring import (
+    _no_applicant_phone,
+    build_call_dependencies,
+    fetch_ezlynx_applicant,
+    production_secret_reader,
+)
 from robie_job_engine.call_opt_in import CallOptInStore
 from robie_job_engine.call_pickup import (
     SPLICE_LABELS,
@@ -59,6 +65,7 @@ def teardown_module():
 
 
 JAKE_ACCOUNT = "910000111"
+JAKE_FERRARA_APPLICANT = "25486692"
 BUSTER_BROWN = "26356199"
 ROBIE_TEST_LLC = "220250093"
 CLIENT_PHONE = "+17325550142"
@@ -332,10 +339,11 @@ def test_production_default_dials_nothing_and_the_flag_does(monkeypatch):
     call = _handle(_task(**{
         "Task ID": "910077",
         "Activity Labels": "Robie Call",
-        "Task Description": "Please call Jake about the renewal documents.",
+        "Task Description": "Please call Jake about the renewal documents. Call at 732-555-0142.",
     }), live)
     assert call["ok"] is True
     assert "Please call Jake about the renewal documents." in live.bland.calls[0]["task_text"]
+    assert live.bland.calls[0]["phone"] == "+17325550142"
     assert WORKFLOWS["audit_not_complete"].body not in live.bland.calls[0]["task_text"]
     lead_ports = _ports()
     lead = _handle(_task(**{
@@ -693,6 +701,264 @@ def test_tasks_labeled_before_enablement_never_dial(tmp_path, monkeypatch):
     assert payloads["910003"]["workflow"] == "audit_not_complete"
     assert payloads["910003"]["applicant_id"] == JAKE_ACCOUNT
     assert payloads["910003"]["splice_enabled_at"]
+    assert bland.dials == 0
+
+
+def test_splice_dials_only_the_phone_on_file(monkeypatch):
+    _prod_env(monkeypatch)
+    monkeypatch.setenv(SPLICE_PROD_FLAG, "1")
+    looked = []
+
+    class FilePhone(_Phone):
+        def get_phone(self, applicant_id):
+            looked.append(applicant_id)
+            return "732-555-0142"
+
+    ports = _ports(phone_lookup=FilePhone())
+    result = _handle(_task(**{
+        "Task Description": "Call the cell at 908-555-0199 about policy 5544332211.",
+    }), ports)
+    assert result["ok"] is True
+    assert looked == [JAKE_ACCOUNT]
+    assert ports.bland.calls[0]["phone"] == "+17325550142"
+    assert "9085550199" not in ports.bland.calls[0]["phone"]
+
+
+def test_lead_follow_up_keeps_typed_number_then_phone_on_file(monkeypatch):
+    _prod_env(monkeypatch)
+    typed_ports = _ports()
+    typed = _handle(_task(**{
+        "Task ID": "910021",
+        "Activity Labels": "Robie Lead Follow Up",
+        "Task Description": "Call at 908-555-0199 about the homeowners quote.",
+    }), typed_ports)
+    assert typed["ok"] is True
+    assert typed_ports.bland.calls[0]["phone"] == "+19085550199"
+
+    file_ports = _ports()
+    filed = _handle(_task(**{
+        "Task ID": "910022",
+        "Activity Labels": "Robie Lead Follow Up",
+        "Task Description": "The lead asked about a homeowners quote for the lake house.",
+    }), file_ports)
+    assert file_ports.bland.calls[0]["phone"] == "+17325550142"
+
+
+def test_robie_call_bare_digits_ask_and_do_not_use_the_file(monkeypatch):
+    _prod_env(monkeypatch)
+    looked = []
+
+    class Counting(_Phone):
+        def get_phone(self, applicant_id):
+            looked.append(applicant_id)
+            return "732-555-0142"
+
+    ports = _ports(phone_lookup=Counting())
+    result = _handle(_task(**{
+        "Task ID": "910023",
+        "Activity Labels": "Robie Call",
+        "Task Description": "Please call about the renewal 5544332211.",
+    }), ports)
+    assert result["ok"] is False
+    assert ports.bland.calls == []
+    assert looked == []
+    assert result.get("clarification_note_filed") is True
+    body = ports.discussion_client.appended[0]["body"]
+    assert "policy, claim, or quote" in body
+    assert "phone on file" not in body
+
+
+def test_test_wiring_posts_jake_cell_for_applicant_25486692(monkeypatch):
+    """Real build_call_dependencies on Test. No EZLynx phone read."""
+    _test_env(monkeypatch, applicant=JAKE_FERRARA_APPLICANT)
+    monkeypatch.setenv("ROBIE_PHONE_LIVE_CALLS", "1")
+    monkeypatch.setenv("ROBIE_PHONE_REAL_CLIENTS", "1")
+    fetches = []
+
+    def refuse_applicant(applicant_id):
+        fetches.append(applicant_id)
+        raise AssertionError("EZLynx applicant phone lookup must not run on Test")
+
+    secret_names = []
+
+    def read_secret(name, project=None):
+        del project
+        secret_names.append(name)
+        if name == "robie-test-bland-api-key":
+            return "SYN-KEY"
+        if name == "bland-dispatcher-kill-switch":
+            return "0"
+        if name == JAKE_CELL_SECRET:
+            return TEST_CELL
+        raise AssertionError(name)
+
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.fetch_ezlynx_applicant", refuse_applicant,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.gcp_secret_reader.get_secret", read_secret,
+    )
+    posted = []
+
+    class _Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(request, timeout=0):
+        del timeout
+        data = getattr(request, "data", None)
+        if data:
+            body = json.loads(data.decode("utf-8"))
+            posted.append(body)
+        return _Response(
+            b'{"status":"completed","call_id":"SYN-CALL","answered_by":"human",'
+            b'"call_length":1,"concatenated_transcript":"Hello this is Jake. Yes I can talk."}'
+        )
+
+    env = {
+        "ROBIE_ENV": "TEST",
+        "ROBIE_PHONE_LIVE_CALLS": "1",
+        "ROBIE_PHONE_REAL_CLIENTS": "1",
+        "ROBIE_BLAND_ALLOWED_ENVS": "TEST",
+        "ROBIE_BLAND_ALLOWED_HOSTS": TEST_HOST,
+        "ROBIE_BLAND_MAX_DURATION_MINUTES": "12",
+        SPLICE_TEST_APPLICANT_ENV: JAKE_FERRARA_APPLICANT,
+    }
+    phone, bland, _transfer, dry_run = build_call_dependencies(
+        env=env, hostname=TEST_HOST, urlopen=urlopen,
+    )
+    assert dry_run is False
+    assert bland.execute is True
+    assert bland.secret_reader is production_secret_reader
+    assert phone._fetch is _no_applicant_phone
+    assert phone._fetch is not fetch_ezlynx_applicant
+    ports = _ports(phone_lookup=phone, bland=bland)
+    result = _handle(_task(**{
+        "Task ID": "910030",
+        "Applicant ID": JAKE_FERRARA_APPLICANT,
+        "Task Description": "Call the cell at 908-555-0199 about policy 5544332211.",
+    }), ports, outcome_poll_tries=1, outcome_poll_interval_s=0)
+    assert fetches == []
+    assert posted
+    assert all(body["phone_number"] == TEST_CELL for body in posted)
+    assert "9085550199" not in json.dumps(posted)
+    assert JAKE_CELL_SECRET in secret_names
+    assert "robie-test-bland-api-key" in secret_names
+    assert "bland-dispatcher-kill-switch" in secret_names
+    assert result["ok"] is True
+
+
+def test_off_on_off_on_rebaselines_tasks_created_while_off(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    SeenTaskStore(str(db)).observe(["8"], report_digest="seed")
+    clock = {"now": datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc)}
+    notes = _IntakeNotes()
+    bland = _IntakeBland()
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    monkeypatch.delenv(SPLICE_PROD_FLAG, raising=False)
+    monkeypatch.setattr(
+        "robie_job_engine.call_pickup.socket.gethostname", lambda: PROD_HOST,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake._intake_now", lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake._build_discussion_client", lambda: notes,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.build_call_dependencies",
+        lambda **kwargs: (_Phone(), bland, None, True),
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.report_email_source.build_default_gmail_service",
+        lambda: object(),
+    )
+    live_call = _intake_task(task_id="910001", activity_labels="Robie Call")
+    created_while_first_off = _intake_task(
+        task_id="910011",
+        activity_labels="Robie Audit Not Complete",
+        description="Audit Not Complete",
+        created_at="2026-10-05T08:00:00",
+    )
+    created_while_second_off = _intake_task(
+        task_id="910012",
+        activity_labels="Robie Audit Not Complete",
+        description="Audit Not Complete",
+        created_at="2026-10-05T11:00:00",
+        created_at_et="2026-10-05T12:00:00-05:00",
+        last_modified="2026-10-05T11:00:00",
+    )
+    created_after_second_on = _intake_task(
+        task_id="910013",
+        activity_labels="Robie Audit Not Complete",
+        description="Audit Not Complete",
+        created_at="2026-10-05T13:15:00",
+        created_at_et="2026-10-05T14:15:00-05:00",
+        last_modified="2026-10-05T13:15:00",
+    )
+
+    def deliver(*tasks, message_id):
+        monkeypatch.setattr(
+            "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+            lambda _service: _report(
+                *tasks, message_id=message_id, digest=message_id,
+                received_at=clock["now"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        )
+        assert run_intake(db_path=str(db), dry_run=False) == 0
+
+    deliver(live_call, created_while_first_off, message_id="off-1")
+    statuses = SeenTaskStore(str(db)).statuses()
+    assert "910011" not in statuses
+    assert bland.dials == 0
+
+    clock["now"] = datetime(2026, 10, 5, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv(SPLICE_PROD_FLAG, "1")
+    deliver(live_call, created_while_first_off, message_id="on-1")
+    statuses = SeenTaskStore(str(db)).statuses()
+    assert statuses["910011"] == "baseline"
+    assert "910011" not in {row["task_id"] for row in _payloads(db)}
+
+    clock["now"] = datetime(2026, 10, 5, 16, 30, tzinfo=timezone.utc)
+    monkeypatch.setenv(SPLICE_PROD_FLAG, "0")
+    deliver(
+        live_call, created_while_first_off, created_while_second_off,
+        message_id="off-2",
+    )
+    statuses = SeenTaskStore(str(db)).statuses()
+    assert statuses["910011"] == "baseline"
+    assert "910012" not in statuses
+
+    clock["now"] = datetime(2026, 10, 5, 17, 30, tzinfo=timezone.utc)
+    monkeypatch.setenv(SPLICE_PROD_FLAG, "1")
+    deliver(
+        live_call, created_while_first_off, created_while_second_off,
+        message_id="on-2",
+    )
+    statuses = SeenTaskStore(str(db)).statuses()
+    assert statuses["910011"] == "baseline"
+    assert statuses["910012"] == "baseline"
+    assert "910012" not in {row["task_id"] for row in _payloads(db)}
+
+    clock["now"] = datetime(2026, 10, 5, 19, 0, tzinfo=timezone.utc)
+    deliver(
+        live_call, created_while_first_off, created_while_second_off,
+        created_after_second_on, message_id="on-2b",
+    )
+    payloads = {row["task_id"]: row for row in _payloads(db)}
+    assert "910011" not in payloads
+    assert "910012" not in payloads
+    assert payloads["910013"]["workflow"] == "audit_not_complete"
+    assert payloads["910013"]["splice_enabled_at"] == "2026-10-05T17:30:00+00:00"
     assert bland.dials == 0
 
 

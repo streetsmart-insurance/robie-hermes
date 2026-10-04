@@ -60,29 +60,62 @@ def job_is_dialable(payload: dict[str, Any]) -> bool:
 
 
 def remember_splice_workflows(store: Any, *, enabled: bool, now: str) -> str:
-    """When the nine Splice labels first became enabled.
+    """Timestamp of the current on-period for the nine Splice labels.
 
-    Empty when they are off. The timestamp is written once and is not
-    moved forward, so tasks created before that moment stay ineligible.
+    Empty while they are off. Each off-to-on transition records a new
+    timestamp, so a task created while the labels were off is older than
+    this moment and is baselined instead of dialed. Staying on does not
+    move the timestamp.
     """
     with store.connect() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS splice_workflow_enablement (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                enabled_at TEXT NOT NULL
+                enabled_at TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
             )"""
         )
+        columns = {
+            str(info[1])
+            for info in conn.execute("PRAGMA table_info(splice_workflow_enablement)")
+        }
+        if "enabled" not in columns:
+            conn.execute(
+                "ALTER TABLE splice_workflow_enablement "
+                "ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
         row = conn.execute(
-            "SELECT enabled_at FROM splice_workflow_enablement WHERE id=1"
+            "SELECT enabled_at, enabled FROM splice_workflow_enablement WHERE id=1"
         ).fetchone()
-        if row is not None:
-            return str(row["enabled_at"] or "")
         if not enabled:
+            if row is None:
+                conn.execute(
+                    "INSERT INTO splice_workflow_enablement "
+                    "(id, enabled_at, enabled) VALUES (1, '', 0)"
+                )
+            elif int(row["enabled"] or 0) != 0:
+                conn.execute(
+                    "UPDATE splice_workflow_enablement SET enabled=0 WHERE id=1"
+                )
             return ""
-        conn.execute(
-            "INSERT INTO splice_workflow_enablement (id, enabled_at) VALUES (1, ?)",
-            (now,),
-        )
+        if (
+            row is not None
+            and int(row["enabled"] or 0) == 1
+            and str(row["enabled_at"] or "").strip()
+        ):
+            return str(row["enabled_at"])
+        if row is None:
+            conn.execute(
+                "INSERT INTO splice_workflow_enablement "
+                "(id, enabled_at, enabled) VALUES (1, ?, 1)",
+                (now,),
+            )
+        else:
+            conn.execute(
+                "UPDATE splice_workflow_enablement "
+                "SET enabled_at=?, enabled=1 WHERE id=1",
+                (now,),
+            )
     return now
 
 

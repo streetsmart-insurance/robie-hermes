@@ -57,7 +57,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
     task: Dict[str, Any] = {
         "Task ID": "TASK-1",
         "Task Subject": "Please call about renewal",
-        "Task Description": "Please call John about his renewal. Be friendly.",
+        "Task Description": "Please call John about his renewal. Be friendly. Call at 732-668-8161.",
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
@@ -357,6 +357,7 @@ class TestNameMismatch(unittest.TestCase):
         # Naming a different person than the applicant is now a hard gate:
         # no dial, clarification note filed, task left open.
         task = make_task(**{
+            "Activity Labels": "Robie Lead Follow Up",
             "Task Description": "Call Mary Smith about her renewal.",
         })
         ports = make_ports()
@@ -376,9 +377,9 @@ class TestContentDedup(unittest.TestCase):
     def test_same_instruction_different_task_ids_suppressed(self):
         ports = make_ports()
         t1 = make_task(**{"Task ID": "TASK-A",
-                          "Task Description": "Call about the renewal docs."})
+                          "Task Description": "Call about the renewal docs. Call at 732-668-8161."})
         t2 = make_task(**{"Task ID": "TASK-B",
-                          "Task Description": "Call about the renewal docs."})
+                          "Task Description": "Call about the renewal docs. Call at 732-668-8161."})
         r1 = handle_robie_call_task(t1, live_config(), ports)
         self.assertTrue(r1["ok"])
         r2 = handle_robie_call_task(t2, live_config(), ports)
@@ -390,9 +391,9 @@ class TestContentDedup(unittest.TestCase):
     def test_case_and_punctuation_variants_still_dedup(self):
         ports = make_ports()
         t1 = make_task(**{"Task ID": "TASK-A",
-                          "Task Description": "Call about the renewal!"})
+                          "Task Description": "Call about the renewal! Call at 732-668-8161."})
         t2 = make_task(**{"Task ID": "TASK-B",
-                          "Task Description": "CALL ABOUT THE RENEWAL"})
+                          "Task Description": "CALL ABOUT THE RENEWAL. CALL AT 732-668-8161."})
         handle_robie_call_task(t1, live_config(), ports)
         r2 = handle_robie_call_task(t2, live_config(), ports)
         self.assertTrue(r2.get("duplicate_suppressed"))
@@ -401,9 +402,9 @@ class TestContentDedup(unittest.TestCase):
     def test_different_instructions_both_dial(self):
         ports = make_ports()
         t1 = make_task(**{"Task ID": "TASK-A",
-                          "Task Description": "Call about the renewal."})
+                          "Task Description": "Call about the renewal. Call at 732-668-8161."})
         t2 = make_task(**{"Task ID": "TASK-B",
-                          "Task Description": "Call about the audit."})
+                          "Task Description": "Call about the audit. Call at 908-555-0199."})
         handle_robie_call_task(t1, live_config(), ports)
         handle_robie_call_task(t2, live_config(), ports)
         self.assertEqual(len(ports.bland.calls), 2)
@@ -412,9 +413,9 @@ class TestContentDedup(unittest.TestCase):
         ports = make_ports(phone_lookup=FakePhonePort(
             {TEST_APPLICANT: "732-668-8161", "999": "732-000-0000"}))
         t1 = make_task(**{"Task ID": "TASK-A",
-                          "Task Description": "Call about the renewal."})
+                          "Task Description": "Call about the renewal. Call at 732-668-8161."})
         t2 = make_task(**{"Task ID": "TASK-B", "Applicant ID": "999",
-                          "Task Description": "Call about the renewal."})
+                          "Task Description": "Call about the renewal. Call at 732-668-8161."})
         handle_robie_call_task(t1, live_config(), ports)
         handle_robie_call_task(t2, live_config(), ports)
         self.assertEqual(len(ports.bland.calls), 2)
@@ -511,7 +512,7 @@ class TestSpokenNormalization(unittest.TestCase):
     def test_all_caps_task_uses_normalized_spoken_parts(self):
         task = make_task(**{
             "Task Subject": "CALL ABOUT RENEWAL",
-            "Task Description": "PLEASE CALL JOHN ABOUT HIS RENEWAL DOCUMENTS",
+            "Task Description": "PLEASE CALL JOHN ABOUT HIS RENEWAL DOCUMENTS. CALL AT 732-668-8161.",
         })
         ports = make_ports()
         handle_robie_call_task(task, live_config(), ports)
