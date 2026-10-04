@@ -1,0 +1,28 @@
+[Unit]
+Description=ROBIE Production EZLynx keepalive (lease-gated; no login)
+After=network-online.target robie-ezlynx-browser.service
+Wants=network-online.target robie-ezlynx-browser.service
+ConditionHost=hermes-poc-01.c.streetsmart-hermes-poc.internal
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes/robie-job-engine/data/ezlynx-session.lock
+ExecCondition=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_driver_gate check
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_keepalive --json
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
