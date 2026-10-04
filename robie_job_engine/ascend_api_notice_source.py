@@ -652,41 +652,19 @@ class EventKeyStore:
                     episode_id TEXT PRIMARY KEY,
                     seen_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS unmatched_notices (
-                    event_key TEXT PRIMARY KEY,
-                    insured_name TEXT NOT NULL DEFAULT '',
-                    program_id TEXT NOT NULL DEFAULT '',
-                    loan_id TEXT NOT NULL DEFAULT '',
-                    policy_numbers TEXT NOT NULL DEFAULT '[]',
-                    notice_type TEXT NOT NULL DEFAULT '',
-                    amount_cents INTEGER,
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    resolved_at TEXT,
-                    suggestion_client TEXT NOT NULL DEFAULT '',
-                    suggestion_policy TEXT NOT NULL DEFAULT '',
-                    aged_out_notified_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
-                    policy_key TEXT NOT NULL,
-                    policy_number TEXT NOT NULL,
-                    applicant_name TEXT NOT NULL DEFAULT '',
-                    applicant_id TEXT NOT NULL,
-                    PRIMARY KEY (policy_key, applicant_id)
-                );
-                CREATE TABLE IF NOT EXISTS ezlynx_policy_index_meta (
-                    name TEXT PRIMARY KEY,
-                    built_at TEXT NOT NULL,
-                    calls INTEGER NOT NULL,
-                    row_count INTEGER NOT NULL,
-                    total_size INTEGER,
-                    complete INTEGER NOT NULL,
-                    pages INTEGER NOT NULL
-                );
                 """
             )
             _ensure_filed_identity_columns(conn)
+            try:
+                _ensure_unmatched_tables(conn)
+            except sqlite3.Error as exc:
+                # The poller unit must keep running when the accounting
+                # tables cannot be added. CREATE IF NOT EXISTS is idempotent
+                # and does not require the digest timer to be installed.
+                logger.warning(
+                    "unmatched notice tables were not created: %s",
+                    type(exc).__name__,
+                )
 
     def is_filed(self, event_key: str) -> bool:
         with self._connect() as conn:
@@ -1091,6 +1069,46 @@ class EventKeyStore:
                 """
             ).fetchall()
         return [dict(row) for row in fetched], dict(meta_row)
+
+
+def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
+    """Add the accounting tables. Safe to run on a database that already has them."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS unmatched_notices (
+            event_key TEXT PRIMARY KEY,
+            insured_name TEXT NOT NULL DEFAULT '',
+            program_id TEXT NOT NULL DEFAULT '',
+            loan_id TEXT NOT NULL DEFAULT '',
+            policy_numbers TEXT NOT NULL DEFAULT '[]',
+            notice_type TEXT NOT NULL DEFAULT '',
+            amount_cents INTEGER,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            resolved_at TEXT,
+            suggestion_client TEXT NOT NULL DEFAULT '',
+            suggestion_policy TEXT NOT NULL DEFAULT '',
+            aged_out_notified_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
+            policy_key TEXT NOT NULL,
+            policy_number TEXT NOT NULL,
+            applicant_name TEXT NOT NULL DEFAULT '',
+            applicant_id TEXT NOT NULL,
+            PRIMARY KEY (policy_key, applicant_id)
+        );
+        CREATE TABLE IF NOT EXISTS ezlynx_policy_index_meta (
+            name TEXT PRIMARY KEY,
+            built_at TEXT NOT NULL,
+            calls INTEGER NOT NULL,
+            row_count INTEGER NOT NULL,
+            total_size INTEGER,
+            complete INTEGER NOT NULL,
+            pages INTEGER NOT NULL
+        );
+        """
+    )
 
 
 def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[dict[str, str]]:
@@ -2272,7 +2290,25 @@ def run_once(
     if hasattr(ctx, "planned_category_discussions"):
         ctx.planned_category_discussions.clear()
 
-    from .ascend_unmatched_digest import persist_unmatched_notice, resolve_unmatched_notice
+    try:
+        from .ascend_unmatched_digest import persist_unmatched_notice, resolve_unmatched_notice
+    except Exception as exc:  # noqa: BLE001 - the poll files even if the digest is absent
+        logger.warning("unmatched digest helpers unavailable: %s", type(exc).__name__)
+        persist_unmatched_notice = None
+        resolve_unmatched_notice = None
+
+    def _remember_unmatched(action: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        if fn is None:
+            return None
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - one store error must not stop the poll
+            logger.warning("unmatched notice %s failed: %s", action, type(exc).__name__)
+            return None
+
+    def _resolve_keys(notice: ApiNotice) -> None:
+        for key in (notice.event_key, *notice.alias_keys):
+            _remember_unmatched("resolve", resolve_unmatched_notice, store, key, seen_at)
 
     results: list[dict[str, Any]] = []
     lines: list[str] = []
@@ -2280,7 +2316,7 @@ def run_once(
     seen_at = _iso(moment)
     for notice in notices:
         if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
-            resolve_unmatched_notice(store, notice.event_key, seen_at)
+            _resolve_keys(notice)
             results.append(
                 {
                     "event_key": notice.event_key,
@@ -2296,7 +2332,15 @@ def run_once(
             outcome = _file_through_driver(ctx, notice)
         results.append(outcome)
         if str(outcome.get("reason") or "").startswith("applicant_unresolved"):
-            plain = persist_unmatched_notice(store, notice, outcome, seen_at=seen_at)
+            plain = _remember_unmatched(
+                "persist",
+                persist_unmatched_notice,
+                store,
+                notice,
+                outcome,
+                seen_at=seen_at,
+            )
+            detail = outcome.get("detail") if isinstance(outcome.get("detail"), dict) else {}
             ask.append(
                 {
                     "event_key": notice.event_key,
@@ -2304,14 +2348,18 @@ def run_once(
                     "program_id": notice.program_id,
                     "insured_name": notice.insured_name,
                     "reason": str(outcome.get("reason") or ""),
-                    "unmatched_reason": plain,
+                    "unmatched_reason": str(plain or detail.get("unmatched_reason") or ""),
                 }
             )
+        elif str(outcome.get("status") or "") in {"dry_run", "done"}:
+            # Matched on this poll, including a dry run that would file and
+            # a live file. The email driver resolves its own filings.
+            _resolve_keys(notice)
         if outcome.get("status") in {"dry_run", "done"}:
             lines.append(_would_file_line(notice, outcome.get("detail") or {}))
             if live and outcome.get("status") == "done":
                 store.record_filed(notice)
-                resolve_unmatched_notice(store, notice.event_key, seen_at)
+                _resolve_keys(notice)
         elif outcome.get("reason") == "remittance_target_unconfigured":
             logger.info(
                 "skip %s remittance_target_unconfigured",

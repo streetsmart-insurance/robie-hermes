@@ -512,6 +512,15 @@ class EzlynxApiClient:
         self._token_expires_at = now + max(expires_in - TOKEN_EXPIRY_SKEW_SECONDS, 60)
         return self._token
 
+    def clear_cached_token(self) -> None:
+        """Drop the cached bearer so the next call grants again.
+
+        PolicyApi paging uses this once after HTTP 401. It does not write
+        a policy and does not log the token.
+        """
+        self._token = None
+        self._token_expires_at = 0.0
+
     def _post_form(
         self, url: str, form: dict[str, str], *, authenticated: bool
     ) -> dict[str, Any]:

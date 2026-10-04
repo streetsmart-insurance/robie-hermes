@@ -2309,6 +2309,13 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
+    if result.status == "done" and not str(notice.message_id or "").startswith("api:"):
+        _resolve_unmatched_after_email_file(
+            notice_type=notice_type,
+            program_id=program_uuid,
+            policy_numbers=[str(item) for item in (triaged.get("policy_numbers") or [])],
+            insured_name=str(triaged.get("insured_name") or ""),
+        )
     if notice_type == triage.CANCELLATION:
         result.detail["label"] = {
             "status": "label_skipped_by_policy",
@@ -2345,6 +2352,31 @@ def _driver_gate_refusal() -> str:
     except EzlynxDriverGateRefused as exc:
         return f"driver_gate_refused: {exc}"
     return ""
+
+
+def _resolve_unmatched_after_email_file(
+    *,
+    notice_type: str,
+    program_id: str,
+    policy_numbers: list[str],
+    insured_name: str,
+) -> None:
+    """Drop the accounting row once this email is filed. A store error stays a log line."""
+    try:
+        from .ascend_api_notice_source import _iso, _now
+        from .ascend_unmatched_digest import resolve_unmatched_filed_by_email
+
+        resolve_unmatched_filed_by_email(
+            notice_type=notice_type,
+            program_id=program_id,
+            policy_numbers=policy_numbers,
+            insured_name=insured_name,
+            seen_at=_iso(_now()),
+        )
+    except Exception as exc:  # noqa: BLE001 - the note is already filed
+        logger.warning(
+            "unmatched resolve after email file failed: %s", type(exc).__name__
+        )
 
 
 def _api_source_already_filed(

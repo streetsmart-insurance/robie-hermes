@@ -20,15 +20,20 @@ The bounded read is one paged GET of the book:
     GET /PolicyApi/policy/v1/search?pageIndex={n}&pageSize=100
 
 Pages are 1-based, matching the ``pageIndex`` field on the search envelope.
-Calls stop once ``totalSize`` is covered, on an empty page, when a page
-repeats (paging ignored), or at 2,000 pages. A short page does not stop
-the read while ``totalSize`` is still larger, because a smaller page size
-must not hide a second candidate. Each page waits 0.25 seconds. A
-38,000-policy book at 100 rows a page is 380 read-only calls, once on a
-weekday morning when the saved index is older than 20 hours. The
-15-minute poll does not page the book: a suggestion is a local comparison
-against the last complete index, which is zero extra PolicyApi calls. An
-incomplete index produces no suggestions.
+Calls stop once ``totalSize`` is covered by the raw rows fetched, on an
+empty page, when a page repeats (paging ignored), at 2,000 pages, or at
+the 20-minute budget. A short page is not treated as the end unless an
+empty page follows or ``totalSize`` is already covered. A missing
+``totalSize`` never counts as a complete book on a guess. Rows that lack
+a policy number or client id still count toward ``totalSize``; only
+usable rows are stored for suggestions. HTTP 429 and 5xx back off. One
+401 clears the cached token and grants again. Each page otherwise waits
+0.25 seconds. A 38,000-policy book at 100 rows a page is 380 read-only
+calls, once on a weekday morning when the saved index is older than 20
+hours. The 15-minute poll does not page the book: a suggestion is a local
+comparison against the last complete index, which is zero extra PolicyApi
+calls. An incomplete index produces no suggestions. A suggestion requires
+exactly one EZLynx policy one character off whose client name also matches.
 """
 
 from __future__ import annotations
@@ -86,6 +91,11 @@ INDEX_PAGE_SIZE = 100
 # is about 1,300 calls. 2,000 leaves headroom and still stops a runaway.
 INDEX_MAX_PAGES = 2000
 INDEX_PAUSE_S = 0.25
+# Stay well under the unit TimeoutStartSec of 45 minutes so the state
+# file is written even when PolicyApi is slow.
+INDEX_TIME_BUDGET_S = 20 * 60
+# One 401 re-grant, then these waits on 429 and 5xx.
+PAGE_BACKOFF_S = (1.0, 2.0, 4.0)
 DEADLINE_HOUR = 9
 DEADLINE_MINUTE = 30
 DEFAULT_STATE_PATH = Path(
@@ -277,6 +287,102 @@ def resolve_unmatched_notice(store: EventKeyStore, event_key: str, seen_at: str)
     store.resolve_unmatched(event_key, seen_at)
 
 
+def rows_matching_filed_email(
+    rows: list[dict[str, Any]],
+    *,
+    notice_type: str,
+    program_id: str,
+    policy_numbers: list[str],
+    insured_name: str,
+) -> list[dict[str, Any]]:
+    """Open rows the email driver just filed.
+
+    Policy numbers that overlap win. When the number was corrected and no
+    longer overlaps, exactly one same-name row is closed. Two candidates
+    with no shared policy number stay open.
+    """
+    kind = str(notice_type or "").strip().lower()
+    program = str(program_id or "").strip().lower()
+    wanted = {policy_compare_key(number) for number in policy_numbers}
+    wanted.discard("")
+    open_rows = [
+        row
+        for row in rows
+        if not str(row.get("resolved_at") or "").strip()
+        and str(row.get("notice_type") or "").strip().lower() == kind
+    ]
+    if program:
+        open_rows = [
+            row
+            for row in open_rows
+            if not str(row.get("program_id") or "").strip()
+            or str(row.get("program_id") or "").strip().lower() == program
+        ]
+
+    def name_ok(row: dict[str, Any]) -> bool:
+        row_name = str(row.get("insured_name") or "").strip()
+        if not row_name or not str(insured_name or "").strip():
+            return True
+        return insured_names_match(insured_name, row_name)
+
+    named = [row for row in open_rows if name_ok(row)]
+    if wanted:
+        overlapped = []
+        for row in named:
+            keys = {policy_compare_key(number) for number in row.get("policy_numbers") or []}
+            keys.discard("")
+            if keys & wanted:
+                overlapped.append(row)
+        if overlapped:
+            return overlapped
+        if len(named) == 1:
+            return named
+        return []
+    if len(named) == 1:
+        return named
+    return []
+
+
+def resolve_unmatched_filed_by_email(
+    *,
+    notice_type: str,
+    program_id: str,
+    policy_numbers: list[str],
+    insured_name: str,
+    seen_at: str,
+    stores: list[EventKeyStore] | None = None,
+) -> int:
+    """Close open rows after the email driver files the notice.
+
+    Only store files that already exist are opened. A missing digest unit
+    and a missing database are left alone. Nothing is written to EZLynx.
+    """
+    opened = stores
+    if opened is None:
+        opened = []
+        for path in digest_store_paths():
+            if path.is_file():
+                opened.append(EventKeyStore(path))
+    closed = 0
+    for store in opened:
+        try:
+            matches = rows_matching_filed_email(
+                store.list_unmatched(),
+                notice_type=notice_type,
+                program_id=program_id,
+                policy_numbers=policy_numbers,
+                insured_name=insured_name,
+            )
+            for row in matches:
+                store.resolve_unmatched(str(row.get("event_key") or ""), seen_at)
+                closed += 1
+        except Exception as exc:  # noqa: BLE001 - filing already happened
+            logger.warning(
+                "unmatched resolve after email file failed: %s", type(exc).__name__
+            )
+    return closed
+
+
 def notice_words(event_type: str) -> str:
     key = str(event_type or "").strip().lower()
     if key in _NOTICE_WORDS:
@@ -320,15 +426,26 @@ def item_line(item: dict[str, Any]) -> str:
     return sentence
 
 
+def digest_subject(count: int, when: datetime) -> str:
+    """Subject includes the ET date so the 24-hour same-subject guard can send tomorrow."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    local = when.astimezone(EASTERN)
+    stamp = f"{local.strftime('%B')} {local.day}, {local.year}"
+    return f"Ascend notices Robie couldn't match ({count}) for {stamp}"
+
+
 def render_digest(
     current: list[dict[str, Any]],
     aged: list[dict[str, Any]],
+    *,
+    when: datetime | None = None,
 ) -> tuple[str, str] | None:
     """Subject and body, or None when there is nothing to send."""
     if not current and not aged:
         return None
     count = len(current) if current else len(aged)
-    subject = f"Ascend notices Robie couldn't match ({count})"
+    subject = digest_subject(count, when or _now())
     lines = [item_line(item) for item in current]
     if aged:
         bits = []
@@ -451,11 +568,18 @@ def index_is_fresh(meta: dict[str, Any], now: datetime) -> bool:
     return now - built < INDEX_STALE
 
 
-def rows_from_policy_page(payload: Any) -> tuple[list[dict[str, str]], int | None]:
-    """Policy number, applicant name, and applicant id from one search page."""
+def rows_from_policy_page(
+    payload: Any,
+) -> tuple[list[dict[str, str]], int, int | None]:
+    """Usable rows, the raw row count, and totalSize.
+
+    A row with no policy number or no client id is not usable. It still
+    counts in the raw total so a dropped row cannot keep the index incomplete.
+    """
     total = _page_total(payload)
+    raw = list(_policy_rows(payload))
     found: list[dict[str, str]] = []
-    for row in _policy_rows(payload):
+    for row in raw:
         number = _row_policy_number(row)
         applicant_id = _first_present(row, _APPLICANT_ID_KEYS)
         name = _first_present(row, _IDENTITY_NAME_KEYS)
@@ -470,7 +594,62 @@ def rows_from_policy_page(payload: Any) -> tuple[list[dict[str, str]], int | Non
                 "applicant_id": applicant_id,
             }
         )
-    return found, total
+    return found, len(raw), total
+
+
+def page_signature(payload: Any) -> tuple[tuple[str, str], ...]:
+    """Identity of every raw row, including ones that cannot be suggested."""
+    signature: list[tuple[str, str]] = []
+    for row in _policy_rows(payload):
+        number = policy_compare_key(_row_policy_number(row))
+        applicant_id = str(_first_present(row, _APPLICANT_ID_KEYS) or "").strip()
+        signature.append((number, applicant_id))
+    return tuple(signature)
+
+
+def _clear_cached_token(client: Any) -> bool:
+    method = getattr(client, "clear_cached_token", None)
+    if not callable(method):
+        return False
+    method()
+    return True
+
+
+def fetch_policy_page(
+    client: Any,
+    page_index: int,
+    page_size: int,
+    *,
+    pause: Callable[[float], None],
+) -> tuple[Any, int]:
+    """One PolicyApi page and how many GETs it took.
+
+    Back off on 429/5xx. Re-grant once on 401. The only client methods used
+    are ``search_policy_page`` and ``clear_cached_token``. No policy is written.
+    """
+    search = getattr(client, "search_policy_page", None)
+    if search is None:
+        raise RuntimeError("no_page_search")
+    reauthed = False
+    backoff_used = 0
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return search(page_index, page_size), attempts
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            retryable = bool(getattr(exc, "retryable", False)) or status == 429 or (
+                isinstance(status, int) and status >= 500
+            )
+            if status == 401 and not reauthed and _clear_cached_token(client):
+                reauthed = True
+                continue
+            if retryable and status != 401 and backoff_used < len(PAGE_BACKOFF_S):
+                pause(PAGE_BACKOFF_S[backoff_used])
+                backoff_used += 1
+                continue
+            raise
 
 
 def refresh_policy_index(
@@ -482,18 +661,24 @@ def refresh_policy_index(
     max_pages: int = INDEX_MAX_PAGES,
     pause_s: float = INDEX_PAUSE_S,
     sleep: Callable[[float], None] | None = None,
+    budget_s: float = INDEX_TIME_BUDGET_S,
+    clock: Callable[[], float] | None = None,
 ) -> dict[str, Any]:
     """Page the policy book read-only. Save it only when the read is complete.
 
     The only method called is ``search_policy_page``. A repeated page means
     paging was ignored: the old index is kept and suggestions stay off until
-    a complete read exists.
+    a complete read exists. Completeness uses the raw row count, not the
+    usable subset. A short page without ``totalSize`` is not a complete book.
     """
     moment = now or _now()
     pause = sleep or time.sleep
+    ticks = clock or time.monotonic
+    started = ticks()
     calls = 0
     collected: list[dict[str, str]] = []
-    previous: tuple[str, ...] | None = None
+    raw_seen = 0
+    previous: tuple[tuple[str, str], ...] | None = None
     total_size: int | None = None
     complete = False
     stopped = "page_cap"
@@ -505,46 +690,46 @@ def refresh_policy_index(
             "complete": False,
             "saved": False,
             "rows": 0,
+            "raw_rows": 0,
             "total_size": None,
             "stopped": "no_page_search",
+            "pages": 0,
         }
     while pages < max_pages:
+        if ticks() - started >= budget_s:
+            stopped = "time_budget"
+            complete = False
+            break
         pages += 1
         if pages > 1 and pause_s > 0:
             pause(pause_s)
-        payload = search(pages, page_size)
-        calls += 1
-        rows, total = rows_from_policy_page(payload)
+        payload, attempts = fetch_policy_page(client, pages, page_size, pause=pause)
+        calls += attempts
+        rows, raw_count, total = rows_from_policy_page(payload)
         if total is not None:
             total_size = total
-        keys = tuple(sorted(row["policy_key"] for row in rows))
-        if previous is not None and keys == previous and keys:
+        signature = page_signature(payload)
+        if previous is not None and signature == previous and signature:
             stopped = "paging_ignored"
             complete = False
             break
-        previous = keys
+        previous = signature
         collected.extend(rows)
-        if not rows:
-            if total_size is not None and len(collected) < total_size:
+        raw_seen += raw_count
+        if raw_count == 0:
+            if total_size is not None and raw_seen < total_size:
                 stopped = "short_of_total"
                 complete = False
             else:
                 stopped = "empty_page"
                 complete = True
             break
-        if total_size is not None and len(collected) >= total_size:
+        if total_size is not None and raw_seen >= total_size:
             stopped = "covered_total"
             complete = True
             break
-        # A short page is the last page only once totalSize is covered.
-        # PolicyApi may return fewer rows than pageSize and still have
-        # more pages. Stopping there would hide a second near match.
-        if len(rows) < page_size and total_size is None:
-            stopped = "short_page"
-            complete = True
-            break
     else:
-        complete = total_size is not None and len(collected) >= total_size
+        complete = total_size is not None and raw_seen >= total_size
         stopped = "covered_total" if complete else "page_cap"
     saved = False
     if complete and stores:
@@ -567,6 +752,7 @@ def refresh_policy_index(
         "complete": complete,
         "saved": saved,
         "rows": len(collected),
+        "raw_rows": raw_seen,
         "total_size": total_size,
         "stopped": stopped,
         "pages": pages,
@@ -690,7 +876,7 @@ def run_digest(
         index_complete=int(meta.get("complete") or 0) == 1,
     )
     current, aged = split_window(open_rows, moment)
-    rendered = render_digest(current, aged)
+    rendered = render_digest(current, aged, when=moment)
     result: dict[str, Any] = {
         "dry_run": not sending,
         "live": sending,
@@ -713,7 +899,6 @@ def run_digest(
     if not sending:
         print_digest(subject, body)
         result["printed"] = True
-        _mark_aged(aged, _iso(moment))
         logger.info(
             "dry-run: printed unmatched digest with %s notice(s)",
             len(current),
@@ -722,18 +907,9 @@ def run_digest(
     sender = mailer or default_mailer
     try:
         sender(to=[ACCOUNTING_TO], subject=subject, text_body=body)
-    except ValueError as exc:
-        if "duplicate" in str(exc).lower():
-            logger.info("unmatched digest already sent")
-            result["sent"] = False
-            result["error"] = ""
-            _mark_aged(aged, _iso(moment))
-            return result
+    except Exception as exc:  # noqa: BLE001 - refused and failed sends both alert
         result["error"] = type(exc).__name__
-        logger.warning("unmatched digest send failed: %s", type(exc).__name__)
-        return result
-    except Exception as exc:  # noqa: BLE001 - the health file records the failure
-        result["error"] = type(exc).__name__
+        result["sent"] = False
         logger.warning("unmatched digest send failed: %s", type(exc).__name__)
         return result
     result["sent"] = True
@@ -746,18 +922,28 @@ def evaluate_digest_health(
     path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Quiet until the digest has run once. After that, a missed business day alerts.
+    """Alert when the digest failed or skipped a weekday after 9:30 AM ET.
 
-    A recorded failure alerts any day. A missing run alerts on a weekday
-    after 9:30 AM ET, an hour past the 8:30 timer. Weekends do not require
-    a new run. A missing state file means the unit is not installed yet.
+    A recorded failure alerts any day. A run that is still inside the
+    45-minute unit timeout stays quiet. A missing state file alerts on a
+    weekday after 9:30 AM ET. Weekends and the hour before 9:30 do not
+    require a run.
     """
     moment = now or _now()
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     target = path or state_path()
     local = moment.astimezone(EASTERN)
+    deadline = local.replace(
+        hour=DEADLINE_HOUR, minute=DEADLINE_MINUTE, second=0, microsecond=0
+    )
     if not target.is_file():
+        if local.weekday() < 5 and local >= deadline:
+            return {
+                "ok": False,
+                "installed": False,
+                "detail": "the Ascend unmatched-notice digest did not run today",
+            }
         return {
             "ok": True,
             "installed": False,
@@ -780,12 +966,18 @@ def evaluate_digest_health(
     exit_code = parsed.get("exit_code")
     run_at = parse_time(parsed.get("run_at"))
     if exit_code != 0:
-        return {
-            "ok": False,
-            "installed": True,
-            "detail": "the Ascend unmatched-notice digest failed",
-            "run_at": parsed.get("run_at") or "",
-        }
+        still_running = (
+            str(parsed.get("error") or "") == "started"
+            and run_at is not None
+            and moment - run_at < timedelta(minutes=50)
+        )
+        if not still_running:
+            return {
+                "ok": False,
+                "installed": True,
+                "detail": "the Ascend unmatched-notice digest failed",
+                "run_at": parsed.get("run_at") or "",
+            }
     if local.weekday() >= 5:
         return {
             "ok": True,
@@ -793,9 +985,6 @@ def evaluate_digest_health(
             "detail": "weekend; no digest expected",
             "run_at": parsed.get("run_at") or "",
         }
-    deadline = local.replace(
-        hour=DEADLINE_HOUR, minute=DEADLINE_MINUTE, second=0, microsecond=0
-    )
     if local < deadline:
         return {
             "ok": True,
@@ -855,7 +1044,11 @@ def sample_digest() -> tuple[str, str]:
             "notice_type": "payment_confirmation",
         }
     ]
-    rendered = render_digest(current, aged)
+    rendered = render_digest(
+        current,
+        aged,
+        when=datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc),
+    )
     if rendered is None:
         return "", ""
     return rendered
@@ -896,6 +1089,19 @@ def main(argv: list[str] | None = None) -> int:
         print_digest(subject, body)
         return 0
     moment = _now()
+    # Written before PolicyApi paging so a killed run still leaves a record.
+    # A finished run replaces this. Health treats a fresh "started" row as
+    # still running and an old one as a failure.
+    write_last_run(
+        {
+            "run_at": _iso(moment),
+            "exit_code": 1,
+            "dry_run": not live_enabled(),
+            "sent": False,
+            "open_count": 0,
+            "error": "started",
+        }
+    )
     try:
         client = None
         if not args.no_refresh:

@@ -4,17 +4,24 @@
 # Does not set ASCEND_API_SOURCE_LIVE. Does not email unless --live is passed,
 # and even then the verification start runs before the live drop-in exists.
 #
-# Preview one dry run and leave the timer enabled (still not sending):
+# Preview one dry run. Does not enable the weekday timer, so it does not
+# page PolicyApi every morning:
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --release-dir /opt/streetsmart-hermes/current \
 #     --dry-run-once
+#
+# Separate step: enable the weekday timer. That is the daily PolicyApi
+# paging. Mail stays a journal print until --live:
+#   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
+#     --release-dir /opt/streetsmart-hermes/current \
+#     --enable-timer
 #
 # After Carlo's explicit go to email accounting@:
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --release-dir /opt/streetsmart-hermes/current \
 #     --live
 #
-# Rollback (timer left stopped; the old unit is in the backup):
+# Rollback disables the timer before the timer file is removed:
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --rollback /root/robie-ascend-unmatched-digest-YYYYMMDDTHHMMSSZ
 #
@@ -35,11 +42,12 @@ BACKUP_ROOT=""
 ROLLBACK=""
 DO_LIVE=0
 DRY_ONCE=0
+ENABLE_TIMER=0
 SYSTEMCTL="${ASCEND_DIGEST_INSTALL_SYSTEMCTL:-systemctl}"
 ANALYZE="${ASCEND_DIGEST_INSTALL_ANALYZE:-systemd-analyze}"
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -67,6 +75,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run-once)
       DRY_ONCE=1
+      shift
+      ;;
+    --enable-timer)
+      ENABLE_TIMER=1
       shift
       ;;
     --live)
@@ -169,7 +181,11 @@ restore_from_backup() {
   [[ -d "$backup" ]] || die "backup dir not found: ${backup}"
   [[ -f "${backup}/manifest.txt" ]] || die "backup is missing manifest.txt: ${backup}"
   echo "restoring ${UNIT} from ${backup}"
-  stop_timer
+  # Disable while the timer unit file is still on disk. Removing it first
+  # makes systemd forget the unit and leave it active.
+  echo "STEP disable --now"
+  "${SYSTEMCTL}" disable --now "$TIMER" || true
+  echo "STEP replace unit files"
   mkdir -p "$ETC"
   if grep -qx "unit" "${backup}/manifest.txt"; then
     install_file "${backup}/${UNIT}" "${ETC}/${UNIT}"
@@ -233,7 +249,14 @@ install_release() {
     "${SYSTEMCTL}" daemon-reload
   fi
 
-  "${SYSTEMCTL}" enable --now "$TIMER"
+  # --dry-run-once does not enable the weekday timer. That timer is the
+  # daily PolicyApi page. --enable-timer is the separate step. --live
+  # enables it after the dry verification start.
+  if [[ "$DO_LIVE" -eq 1 || "$ENABLE_TIMER" -eq 1 ]]; then
+    "${SYSTEMCTL}" enable --now "$TIMER"
+  else
+    echo "TIMER_NOT_ENABLED"
+  fi
   echo "INSTALLED=${UNIT}"
   if [[ "$DO_LIVE" -eq 1 ]]; then
     echo "LIVE=1"
@@ -245,15 +268,15 @@ install_release() {
 require_real_root
 
 if [[ -n "$ROLLBACK" ]]; then
-  if [[ "$DO_LIVE" -eq 1 || "$DRY_ONCE" -eq 1 ]]; then
-    die "--rollback cannot be combined with --live or --dry-run-once"
+  if [[ "$DO_LIVE" -eq 1 || "$DRY_ONCE" -eq 1 || "$ENABLE_TIMER" -eq 1 ]]; then
+    die "--rollback cannot be combined with --live, --dry-run-once, or --enable-timer"
   fi
   restore_from_backup "$ROLLBACK"
   exit 0
 fi
 
-if [[ "$DO_LIVE" -eq 0 && "$DRY_ONCE" -eq 0 ]]; then
-  die "pass --dry-run-once, --live, or --rollback"
+if [[ "$DO_LIVE" -eq 0 && "$DRY_ONCE" -eq 0 && "$ENABLE_TIMER" -eq 0 ]]; then
+  die "pass --dry-run-once, --enable-timer, --live, or --rollback"
 fi
 
 install_release

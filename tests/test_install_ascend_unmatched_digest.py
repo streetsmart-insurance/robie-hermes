@@ -78,7 +78,8 @@ class InstallAscendUnmatchedDigestTests(unittest.TestCase):
             text = log.read_text(encoding="utf-8")
             self.assertIn("DRY_AT_START", text)
             self.assertNotIn("LIVE_PRESENT_AT_START", text)
-            self.assertIn("enable --now robie-ascend-unmatched-digest.timer", text)
+            self.assertNotIn("enable --now robie-ascend-unmatched-digest.timer", text)
+            self.assertIn("TIMER_NOT_ENABLED", result.stdout)
             unit = (prefix / "etc" / "systemd" / "system" / UNIT).read_text(encoding="utf-8")
             self.assertIn("WorkingDirectory=/", unit)
             self.assertIn("/opt/streetsmart-hermes/venv/bin/python", unit)
@@ -88,6 +89,19 @@ class InstallAscendUnmatchedDigestTests(unittest.TestCase):
             self.assertIn("08:30:00 America/New_York", timer)
             live = prefix / "etc" / "systemd" / "system" / f"{UNIT}.d" / "30-live.conf"
             self.assertFalse(live.exists())
+
+    def test_enable_timer_is_a_separate_step_without_live_mail(self):
+        with self._tmpdir() as raw:
+            prefix = Path(raw)
+            log = prefix / "stub.log"
+            result = self._run(prefix, log, "--enable-timer")
+            text = log.read_text(encoding="utf-8")
+            live = prefix / "etc" / "systemd" / "system" / f"{UNIT}.d" / "30-live.conf"
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("enable --now robie-ascend-unmatched-digest.timer", text)
+        self.assertNotIn("DRY_AT_START", text)
+        self.assertFalse(live.exists())
+        self.assertIn("LIVE=0", result.stdout)
 
     def test_live_installs_the_drop_in_after_the_dry_start(self):
         with self._tmpdir() as raw:
@@ -141,6 +155,10 @@ class InstallAscendUnmatchedDigestTests(unittest.TestCase):
         self.assertEqual(rolled.returncode, 0, rolled.stderr + rolled.stdout)
         self.assertEqual(restored, "OLD-UNIT\n")
         self.assertIn(f"disable --now {TIMER}", log_text)
+        self.assertLess(
+            rolled.stdout.index("STEP disable --now"),
+            rolled.stdout.index("STEP replace unit files"),
+        )
 
     def _tmpdir(self):
         import tempfile
