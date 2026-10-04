@@ -2324,7 +2324,8 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.status = "dry_run" if ctx.dry_run else "done"
     # The notice driver cannot write the API store. Its unit is
     # ProtectSystem=strict and ReadWritePaths covers only
-    # /var/lib/robie-ascend-notice-driver. The digest rechecks open rows.
+    # /var/lib/robie-ascend-notice-driver. The digest marks a match ready
+    # to file; the API poll files it.
     if notice_type == triage.CANCELLATION:
         result.detail["label"] = {
             "status": "label_skipped_by_policy",

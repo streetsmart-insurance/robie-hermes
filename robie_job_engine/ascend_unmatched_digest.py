@@ -60,6 +60,7 @@ from .ascend_api_notice_source import (
     db_path,
     dry_run_db_path,
     live_db_path,
+    live_enabled as api_source_live,
     parse_time,
 )
 from .ascend_notice_driver import (
@@ -96,9 +97,12 @@ INDEX_PAGE_SIZE = 100
 # is about 1,300 calls. 2,000 leaves headroom and still stops a runaway.
 INDEX_MAX_PAGES = 2000
 INDEX_PAUSE_S = 0.25
-# Stay well under the unit TimeoutStartSec of 45 minutes so the state
-# file is written even when PolicyApi is slow.
+# Standalone index refresh budget. A digest run uses RUN_DEADLINE_S for
+# paging and the re-check together.
 INDEX_TIME_BUDGET_S = 20 * 60
+# Shared by index paging and the per-row re-check. TimeoutStartSec is 45
+# minutes, so 30 minutes still leaves room to write the state file and send.
+RUN_DEADLINE_S = 30 * 60
 # One 401 re-grant, then these waits on 429 and 5xx.
 PAGE_BACKOFF_S = (1.0, 2.0, 4.0)
 DEADLINE_HOUR = 9
@@ -150,7 +154,11 @@ _NOTICE_WORDS = {
 _POLICY_IGNORABLE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014]+")
 _FIX_LINE = (
     "Fix the policy number in EZLynx or Ascend and it drops off this list "
-    "once Robie can match it."
+    "once Robie matches it and files the note."
+)
+_READY_WHEN_NOTES_OFF = "Ready, will file once Robie's Ascend notes are on."
+_READY_WHEN_NOTES_ON = (
+    "Robie matched one client and will file this on the next Ascend run."
 )
 
 
@@ -374,31 +382,90 @@ def _policy_numbers_of(row: dict[str, Any]) -> list[str]:
     return [str(number).strip() for number in raw if str(number or "").strip()]
 
 
+class PolicyBudgetExpired(Exception):
+    """Index paging and the re-check share one deadline. Time ran out."""
+
+
+class _BackoffPolicySearch:
+    """Policy-number search with the same backoff the page loop uses.
+
+    ``_resolve_by_policy_numbers`` swallows search errors, so a deadline
+    stop is recorded on ``expired`` and re-raised by the caller.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        pause: Callable[[float], None],
+        deadline: float | None,
+        clock: Callable[[], float] | None,
+    ) -> None:
+        self._client = client
+        self._pause = pause
+        self._deadline = deadline
+        self._clock = clock
+        self.expired = False
+
+    def search_policy_by_number(self, number: str) -> Any:
+        if self._past_deadline():
+            self.expired = True
+            raise PolicyBudgetExpired()
+        try:
+            payload, _attempts = call_with_policy_backoff(
+                self._client,
+                lambda: self._client.search_policy_by_number(number),
+                pause=self._pause,
+                deadline=self._deadline,
+                clock=self._clock,
+            )
+        except PolicyBudgetExpired:
+            self.expired = True
+            raise
+        return payload
+
+    def _past_deadline(self) -> bool:
+        if self._deadline is None:
+            return False
+        ticks = self._clock or time.monotonic
+        return ticks() >= self._deadline
+
+
 def _resolve_open_row(
     row: dict[str, Any],
     *,
     ezlynx_client: Any | None,
     index_rows: list[dict[str, Any]],
     index_complete: bool,
+    pause: Callable[[float], None],
+    deadline: float | None,
+    clock: Callable[[], float] | None,
 ) -> bool:
     """True when this open row now belongs to exactly one EZLynx client.
 
-    A live PolicyApi search wins. Zero rows, several clients, or a failed
-    search stay open and do not fall back to the saved index. With no
-    client, only a complete index can resolve the row. Nothing here files
-    a note or writes a policy.
+    A live PolicyApi search wins and uses the paging backoff. Zero rows,
+    several clients, or a failed search stay open and do not fall back to
+    the saved index. With no client, only a complete index can match the
+    row. Nothing here files a note or writes a policy.
     """
     numbers = _policy_numbers_of(row)
     if not numbers:
         return False
     if ezlynx_client is not None:
+        wrapped = _BackoffPolicySearch(
+            ezlynx_client, pause=pause, deadline=deadline, clock=clock
+        )
         try:
             resolution, _reason, _fall_through = _resolve_by_policy_numbers(
-                ezlynx_client, numbers
+                wrapped, numbers
             )
+        except PolicyBudgetExpired:
+            raise
         except Exception as exc:  # noqa: BLE001 - leave the row on the list
             logger.warning("digest recheck search failed: %s", type(exc).__name__)
             return False
+        if wrapped.expired:
+            raise PolicyBudgetExpired()
         return resolution is not None
     if not index_complete:
         return False
@@ -412,22 +479,49 @@ def recheck_open_unmatched(
     index_rows: list[dict[str, Any]],
     index_complete: bool,
     now: datetime,
+    persist: bool,
+    notes_on: bool,
+    pause: Callable[[float], None] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Resolve open rows that now match one client, and return the rest.
+    """Mark an exact one-client match ready to file. Leave every row open.
 
-    Filing stays with the poll and the notice driver. This only updates
-    the local unmatched table so a corrected policy drops off the email.
+    A live digest writes ``ready_at``. A dry run does not write ready or
+    resolved state. Filing waits for the API poll. When the deadline has
+    passed, the remaining rows stay open and unmarked.
     """
     moment = _iso(now)
+    sleeper = pause or time.sleep
+    ticks = clock or time.monotonic
     still_open: list[dict[str, Any]] = []
-    resolved = 0
+    ready = 0
+    stopped = False
     for row in rows:
-        if not _resolve_open_row(
-            row,
-            ezlynx_client=ezlynx_client,
-            index_rows=index_rows,
-            index_complete=index_complete,
-        ):
+        if stopped or (deadline is not None and ticks() >= deadline):
+            stopped = True
+            still_open.append(row)
+            continue
+        try:
+            matched = _resolve_open_row(
+                row,
+                ezlynx_client=ezlynx_client,
+                index_rows=index_rows,
+                index_complete=index_complete,
+                pause=sleeper,
+                deadline=deadline,
+                clock=ticks,
+            )
+        except PolicyBudgetExpired:
+            stopped = True
+            still_open.append(row)
+            continue
+        if not matched:
+            still_open.append(row)
+            continue
+        row["ready_to_file"] = True
+        row["api_notes_live"] = notes_on
+        if not persist:
             still_open.append(row)
             continue
         store = row.get("_store")
@@ -436,13 +530,15 @@ def recheck_open_unmatched(
             still_open.append(row)
             continue
         try:
-            store.resolve_unmatched(key, moment)
+            store.mark_ready_to_file(key, moment)
         except Exception as exc:  # noqa: BLE001 - keep the row on the email
-            logger.warning("digest recheck could not resolve %s: %s", key, type(exc).__name__)
+            logger.warning("digest recheck could not mark %s ready: %s", key, type(exc).__name__)
             still_open.append(row)
             continue
-        resolved += 1
-    return still_open, resolved
+        row["ready_at"] = moment
+        ready += 1
+        still_open.append(row)
+    return still_open, ready
 
 
 def notice_words(event_type: str) -> str:
@@ -476,6 +572,9 @@ def item_line(item: dict[str, Any]) -> str:
     phrase = _policy_phrase(list(item.get("policy_numbers") or []))
     if phrase:
         parts.append(phrase)
+    if item.get("ready_to_file") or str(item.get("ready_at") or "").strip():
+        waiting = _READY_WHEN_NOTES_ON if item.get("api_notes_live") else _READY_WHEN_NOTES_OFF
+        return ", ".join(parts) + ". " + waiting
     reason = _REASON_WORDS.get(
         str(item.get("reason") or ""),
         "Robie could not match this notice to one client.",
@@ -669,6 +768,50 @@ def page_signature(payload: Any) -> tuple[tuple[str, str], ...]:
     return tuple(signature)
 
 
+def call_with_policy_backoff(
+    client: Any,
+    call: Callable[[], Any],
+    *,
+    pause: Callable[[float], None],
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> tuple[Any, int]:
+    """One PolicyApi call. Back off on 429/5xx. Re-grant once on 401.
+
+    Index paging and the digest re-check both use this. No policy is written.
+    ``clear_cached_token`` is the only other client method. A passed
+    ``deadline`` (monotonic) stops the wait instead of running long.
+    """
+    ticks = clock or time.monotonic
+    reauthed = False
+    backoff_used = 0
+    attempts = 0
+    while True:
+        if deadline is not None and ticks() >= deadline:
+            raise PolicyBudgetExpired()
+        attempts += 1
+        try:
+            return call(), attempts
+        except PolicyBudgetExpired:
+            raise
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            retryable = bool(getattr(exc, "retryable", False)) or status == 429 or (
+                isinstance(status, int) and status >= 500
+            )
+            if status == 401 and not reauthed and _clear_cached_token(client):
+                reauthed = True
+                continue
+            if retryable and status != 401 and backoff_used < len(PAGE_BACKOFF_S):
+                wait = PAGE_BACKOFF_S[backoff_used]
+                backoff_used += 1
+                if deadline is not None and ticks() + wait > deadline:
+                    raise PolicyBudgetExpired() from exc
+                pause(wait)
+                continue
+            raise
+
+
 def _clear_cached_token(client: Any) -> bool:
     method = getattr(client, "clear_cached_token", None)
     if not callable(method):
@@ -683,6 +826,8 @@ def fetch_policy_page(
     page_size: int,
     *,
     pause: Callable[[float], None],
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[Any, int]:
     """One PolicyApi page and how many GETs it took.
 
@@ -692,26 +837,13 @@ def fetch_policy_page(
     search = getattr(client, "search_policy_page", None)
     if search is None:
         raise RuntimeError("no_page_search")
-    reauthed = False
-    backoff_used = 0
-    attempts = 0
-    while True:
-        attempts += 1
-        try:
-            return search(page_index, page_size), attempts
-        except Exception as exc:
-            status = getattr(exc, "status", None)
-            retryable = bool(getattr(exc, "retryable", False)) or status == 429 or (
-                isinstance(status, int) and status >= 500
-            )
-            if status == 401 and not reauthed and _clear_cached_token(client):
-                reauthed = True
-                continue
-            if retryable and status != 401 and backoff_used < len(PAGE_BACKOFF_S):
-                pause(PAGE_BACKOFF_S[backoff_used])
-                backoff_used += 1
-                continue
-            raise
+    return call_with_policy_backoff(
+        client,
+        lambda: search(page_index, page_size),
+        pause=pause,
+        deadline=deadline,
+        clock=clock,
+    )
 
 
 def refresh_policy_index(
@@ -725,6 +857,7 @@ def refresh_policy_index(
     sleep: Callable[[float], None] | None = None,
     budget_s: float = INDEX_TIME_BUDGET_S,
     clock: Callable[[], float] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Page the policy book read-only. Save it only when the read is complete.
 
@@ -737,6 +870,7 @@ def refresh_policy_index(
     pause = sleep or time.sleep
     ticks = clock or time.monotonic
     started = ticks()
+    limit = deadline if deadline is not None else started + budget_s
     calls = 0
     collected: list[dict[str, str]] = []
     raw_seen = 0
@@ -758,14 +892,21 @@ def refresh_policy_index(
             "pages": 0,
         }
     while pages < max_pages:
-        if ticks() - started >= budget_s:
+        if ticks() >= limit:
             stopped = "time_budget"
             complete = False
             break
         pages += 1
         if pages > 1 and pause_s > 0:
             pause(pause_s)
-        payload, attempts = fetch_policy_page(client, pages, page_size, pause=pause)
+        try:
+            payload, attempts = fetch_policy_page(
+                client, pages, page_size, pause=pause, deadline=limit, clock=ticks
+            )
+        except PolicyBudgetExpired:
+            stopped = "time_budget"
+            complete = False
+            break
         calls += attempts
         rows, raw_count, total = rows_from_policy_page(payload)
         if total is not None:
@@ -840,6 +981,8 @@ def apply_suggestions(
     if not index_complete:
         return
     for row in rows:
+        if row.get("ready_to_file") or str(row.get("ready_at") or "").strip():
+            continue
         if str(row.get("reason") or "") != POLICY_OUTCOME_NOT_IN_EZLYNX:
             row["suggestion_client"] = ""
             row["suggestion_policy"] = ""
@@ -903,12 +1046,18 @@ def run_digest(
     refresh: bool = True,
     pause_s: float = INDEX_PAUSE_S,
     sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+    deadline_s: float | None = None,
 ) -> dict[str, Any]:
     """Compose the accounting email. Send only when live and the list is non-empty."""
     moment = now or _now()
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     sending = live_enabled() if live is None else live
+    notes_on = api_source_live()
+    ticks = clock or time.monotonic
+    deadline = ticks() + (RUN_DEADLINE_S if deadline_s is None else deadline_s)
+    pause = sleep or time.sleep
     opened = stores if stores is not None else open_digest_stores()
     index_report: dict[str, Any] | None = None
     if refresh and ezlynx_client is not None and opened:
@@ -920,7 +1069,9 @@ def run_digest(
                     opened,
                     now=moment,
                     pause_s=pause_s,
-                    sleep=sleep,
+                    sleep=pause,
+                    clock=ticks,
+                    deadline=deadline,
                 )
             except Exception as exc:  # noqa: BLE001 - the email still goes out
                 logger.warning("policy index refresh failed: %s", type(exc).__name__)
@@ -933,13 +1084,22 @@ def run_digest(
     index_rows, meta, _store = best_policy_index(opened)
     index_complete = int(meta.get("complete") or 0) == 1
     open_rows = collect_open(opened)
-    open_rows, resolved_count = recheck_open_unmatched(
+    open_rows, ready_count = recheck_open_unmatched(
         open_rows,
         ezlynx_client=ezlynx_client,
         index_rows=index_rows,
         index_complete=index_complete,
         now=moment,
+        persist=sending,
+        notes_on=notes_on,
+        pause=pause,
+        deadline=deadline,
+        clock=ticks,
     )
+    for row in open_rows:
+        if row.get("ready_to_file") or str(row.get("ready_at") or "").strip():
+            row["ready_to_file"] = True
+            row["api_notes_live"] = notes_on
     apply_suggestions(
         open_rows,
         index_rows,
@@ -955,7 +1115,8 @@ def run_digest(
         "printed": False,
         "open_count": len(current),
         "aged_count": len(aged),
-        "resolved_count": resolved_count,
+        "ready_count": ready_count,
+        "resolved_count": 0,
         "index": index_report,
         "subject": "",
         "body": "",

@@ -63,6 +63,8 @@ from .secrets import redact_text
 logger = logging.getLogger(__name__)
 
 LIVE_ENV = "ASCEND_API_SOURCE_LIVE"
+# Ready-to-file rows the digest has matched. One poll files at most this many.
+READY_FILE_LIMIT = 25
 REMITTANCE_APPLICANT_ENV = "ASCEND_API_REMITTANCE_APPLICANT_ID"
 DB_ENV = "ASCEND_API_NOTICE_DB"
 DRY_RUN_DB_ENV = "ASCEND_API_NOTICE_DRY_RUN_DB"
@@ -891,8 +893,8 @@ class EventKeyStore:
                     event_key, insured_name, program_id, loan_id, policy_numbers,
                     notice_type, amount_cents, first_seen, last_seen, reason,
                     resolved_at, suggestion_client, suggestion_policy,
-                    aged_out_notified_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+                    aged_out_notified_at, subject, body, program_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
                 ON CONFLICT(event_key) DO UPDATE SET
                     insured_name=excluded.insured_name,
                     program_id=excluded.program_id,
@@ -903,6 +905,10 @@ class EventKeyStore:
                     last_seen=excluded.last_seen,
                     reason=excluded.reason,
                     resolved_at=NULL,
+                    ready_at=NULL,
+                    subject=excluded.subject,
+                    body=excluded.body,
+                    program_json=excluded.program_json,
                     suggestion_client=CASE WHEN ? = 1 THEN excluded.suggestion_client
                         ELSE unmatched_notices.suggestion_client END,
                     suggestion_policy=CASE WHEN ? = 1 THEN excluded.suggestion_policy
@@ -927,6 +933,9 @@ class EventKeyStore:
                     reason,
                     suggestion_client,
                     suggestion_policy,
+                    str(notice.subject or ""),
+                    str(notice.body or ""),
+                    json.dumps(notice.program or {}, default=str),
                     flag,
                     flag,
                 ),
@@ -957,22 +966,45 @@ class EventKeyStore:
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
-        rows: list[dict[str, Any]] = []
-        for row in fetched:
-            item = dict(row)
-            try:
-                parsed = json.loads(item.get("policy_numbers") or "[]")
-            except json.JSONDecodeError:
-                parsed = []
-            item["policy_numbers"] = (
-                [str(number) for number in parsed if str(number or "").strip()]
-                if isinstance(parsed, list)
-                else []
+        return [_unmatched_row(row) for row in fetched]
+
+    def mark_ready_to_file(self, event_key: str, ready_at: str) -> None:
+        """Remember that one client matched. Does not file and does not resolve."""
+        key = str(event_key or "").strip()
+        moment = str(ready_at or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET ready_at=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (moment, key),
             )
-            if item.get("amount_cents") is not None:
-                item["amount_cents"] = int(item["amount_cents"])
-            rows.append(item)
-        return rows
+
+    def list_ready_to_file(self, limit: int = READY_FILE_LIMIT) -> list[dict[str, Any]]:
+        """Open rows the digest matched, oldest first. At most ``limit``."""
+        cap = max(0, int(limit))
+        if cap == 0:
+            return []
+        with self._connect() as conn:
+            try:
+                fetched = conn.execute(
+                    """
+                    SELECT * FROM unmatched_notices
+                    WHERE (resolved_at IS NULL OR resolved_at='')
+                      AND ready_at IS NOT NULL AND ready_at != ''
+                      AND subject != '' AND body != ''
+                    ORDER BY ready_at, event_key
+                    LIMIT ?
+                    """,
+                    (cap,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [_unmatched_row(row) for row in fetched]
 
     def mark_aged_out_notified(self, event_keys: list[str], notified_at: str) -> None:
         moment = str(notified_at or "").strip()
@@ -1089,7 +1121,11 @@ def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
             resolved_at TEXT,
             suggestion_client TEXT NOT NULL DEFAULT '',
             suggestion_policy TEXT NOT NULL DEFAULT '',
-            aged_out_notified_at TEXT
+            aged_out_notified_at TEXT,
+            ready_at TEXT,
+            subject TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            program_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
             policy_key TEXT NOT NULL,
@@ -1109,6 +1145,37 @@ def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_unmatched_columns(conn)
+
+
+def _ensure_unmatched_columns(conn: sqlite3.Connection) -> None:
+    """Add filing columns on a store created before ready-to-file existed."""
+    have = {str(row[1]) for row in conn.execute("PRAGMA table_info(unmatched_notices)")}
+    additions = (
+        ("ready_at", "TEXT"),
+        ("subject", "TEXT NOT NULL DEFAULT ''"),
+        ("body", "TEXT NOT NULL DEFAULT ''"),
+        ("program_json", "TEXT NOT NULL DEFAULT '{}'"),
+    )
+    for name, ddl in additions:
+        if name not in have:
+            conn.execute(f"ALTER TABLE unmatched_notices ADD COLUMN {name} {ddl}")
+
+
+def _unmatched_row(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        parsed = json.loads(item.get("policy_numbers") or "[]")
+    except json.JSONDecodeError:
+        parsed = []
+    item["policy_numbers"] = (
+        [str(number) for number in parsed if str(number or "").strip()]
+        if isinstance(parsed, list)
+        else []
+    )
+    if item.get("amount_cents") is not None:
+        item["amount_cents"] = int(item["amount_cents"])
+    return item
 
 
 def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[dict[str, str]]:
@@ -2366,6 +2433,16 @@ def run_once(
                 notice.event_key,
             )
 
+    ready_results: list[dict[str, Any]] = []
+    if live:
+        ready_results = _file_ready_unmatched(
+            ctx,
+            store,
+            programs=programs,
+            seen_at=seen_at,
+        )
+        results.extend(ready_results)
+
     ok = not errors
     streak = store.note_poll_result(
         ok=ok,
@@ -2394,6 +2471,8 @@ def run_once(
         "would_file_count": len(lines),
         "ask": ask,
         "results": results,
+        "ready_checked": len(ready_results),
+        "ready_filed": sum(1 for row in ready_results if row.get("status") == "done"),
     }
     for line in lines:
         logger.warning("%s", line)
@@ -2547,6 +2626,98 @@ class _SnapshotPrograms:
             if wanted in numbers:
                 return {"program": dict(program), "program_id": program_id}
         return None
+
+
+def _notice_from_ready_row(row: dict[str, Any]) -> ApiNotice | None:
+    """Rebuild the notice the digest stored. Empty text cannot be filed."""
+    subject = str(row.get("subject") or "").strip()
+    body = str(row.get("body") or "")
+    if not subject or not str(body).strip():
+        return None
+    try:
+        program = json.loads(row.get("program_json") or "{}")
+    except json.JSONDecodeError:
+        program = {}
+    if not isinstance(program, dict):
+        program = {}
+    numbers = row.get("policy_numbers") or []
+    if isinstance(numbers, str):
+        numbers = [numbers]
+    return ApiNotice(
+        event_key=str(row.get("event_key") or "").strip(),
+        event_type=str(row.get("notice_type") or "").strip(),
+        program_id=str(row.get("program_id") or "").strip(),
+        anchor=str(row.get("first_seen") or "").strip(),
+        occurred_at=str(row.get("first_seen") or "").strip(),
+        policy_numbers=tuple(str(number) for number in numbers if str(number or "").strip()),
+        insured_name=str(row.get("insured_name") or "").strip(),
+        program=program,
+        subject=subject,
+        body=body,
+        amount_cents=row.get("amount_cents"),
+    )
+
+
+def _file_ready_unmatched(
+    ctx: Any,
+    store: EventKeyStore,
+    *,
+    programs: list[dict[str, Any]],
+    seen_at: str,
+    limit: int = READY_FILE_LIMIT,
+) -> list[dict[str, Any]]:
+    """File digest matches through the same path as a notice from the feed.
+
+    Live only. The caller must not invoke this while the API source is
+    dry-run. At most ``limit`` rows. A row is resolved only after filing
+    returns done. Write scope, dedupe, and discussion ownership stay inside
+    ``_file_through_driver``.
+    """
+    if not live_enabled():
+        return []
+    ready = store.list_ready_to_file(limit)
+    extra: list[dict[str, Any]] = []
+    queued: list[tuple[dict[str, Any], ApiNotice]] = []
+    for row in ready:
+        notice = _notice_from_ready_row(row)
+        if notice is None or not notice.event_key:
+            continue
+        if notice.program:
+            extra.append(notice.program)
+        queued.append((row, notice))
+    ctx.ascend_client = _SnapshotPrograms([*extra, *programs])
+    filed: list[dict[str, Any]] = []
+    for _row, notice in queued:
+        try:
+            if store.is_filed(notice.event_key):
+                store.resolve_unmatched(notice.event_key, seen_at)
+                filed.append(
+                    {
+                        "event_key": notice.event_key,
+                        "event_type": notice.event_type,
+                        "status": "skipped",
+                        "reason": "api_already_filed",
+                    }
+                )
+                continue
+            outcome = _file_through_driver(ctx, notice)
+            filed.append(outcome)
+            if outcome.get("status") == "done":
+                store.record_filed(notice)
+                store.resolve_unmatched(notice.event_key, seen_at)
+        except Exception as exc:  # noqa: BLE001 - one row must not stop the poll
+            logger.warning(
+                "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
+            )
+            filed.append(
+                {
+                    "event_key": notice.event_key,
+                    "event_type": notice.event_type,
+                    "status": "skipped",
+                    "reason": f"error: {type(exc).__name__}",
+                }
+            )
+    return filed
 
 
 def _file_through_driver(ctx: Any, notice: ApiNotice) -> dict[str, Any]:
