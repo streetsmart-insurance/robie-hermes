@@ -219,6 +219,11 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     from .bland_prod_wiring import build_call_dependencies
 
     phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
+    from .call_opt_in import CallOptInStore
+    from .call_opt_out import CallOptOutStore
+    from .call_pickup import CallDedupeStore
+
+    store_dir = os.path.dirname(store.path)
     worker = TaskAssignmentWorker(
         discussion_client=discussion_client,
         task_reassigner=reassigner,
@@ -227,6 +232,9 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         bland_client=bland_client,
         call_dry_run=call_dry_run,
         transfer_lookup=transfer_lookup,
+        opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
+        opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
+        call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
     )
     verifier = TaskIntakeVerifier(
         discussion_client=discussion_client, task_reassigner=reassigner

@@ -23,6 +23,42 @@ from .robie_call_handler import bland_payload_spec
 
 logger = logging.getLogger(__name__)
 
+REAL_CLIENTS_ENV = "ROBIE_PHONE_REAL_CLIENTS"
+JAKE_CELL_SECRET = "robie-test-jake-cell"
+
+
+def select_dial_target(
+    phone: str,
+    *,
+    env: Mapping[str, str] | None,
+    secret_reader: Callable[[str], str] | None,
+) -> tuple[str | None, str | None]:
+    """The number to post, or an error.
+
+    Real client numbers require ROBIE_PHONE_REAL_CLIENTS=1. Otherwise the
+    only number that can be posted is the test cell from Secret Manager
+    secret robie-test-jake-cell. That value is never hardcoded and the
+    full number is never logged.
+    """
+    source = {} if env is None else env
+    if source.get(REAL_CLIENTS_ENV) == "1":
+        text = str(phone or "").strip()
+        dial = to_e164_us(text) if text.startswith("+") else None
+        if not dial:
+            return None, "real-client dial refused; value is not E.164"
+        return dial, None
+    if secret_reader is None:
+        return None, "test mode has no Jake cell reader; not dialing"
+    try:
+        raw = str(secret_reader(JAKE_CELL_SECRET) or "").strip()
+    except Exception:
+        return None, "test mode could not read the Jake cell secret; not dialing"
+    target = to_e164_us(raw) if raw.startswith("+") else None
+    if not target:
+        return None, "test mode Jake cell secret is not E.164; not dialing"
+    logger.info("test mode: dialing the configured test cell ending %s", target[-4:])
+    return target, None
+
 
 class BlandTransportCallPort:
     """BlandCallPort implemented on the existing transport."""
@@ -62,16 +98,23 @@ class BlandTransportCallPort:
         if kill_switch_engaged(self.env, self.secret_reader):
             logger.warning("not dialing; bland-dispatcher-kill-switch is engaged")
             return {"success": False, "error": "kill switch engaged", "call_ids": []}
-        text = str(phone or "").strip()
-        dial = to_e164_us(text) if text.startswith("+") else None
-        if not dial:
-            logger.warning("refusing dial; value is not a validated E.164 phone")
-            return {"success": False, "error": "refused non-E.164 phone", "call_ids": []}
+        dial, target_error = select_dial_target(
+            phone, env=self.env, secret_reader=self.secret_reader,
+        )
+        if target_error or not dial:
+            logger.warning("not dialing: %s", target_error or "no dial target")
+            return {"success": False, "error": target_error or "no dial target", "call_ids": []}
         if self.execute is not True:
             return {"success": False, "error": "execute is off", "call_ids": []}
         cap = max_duration_minutes(self.env)
+        transfer = None
+        if isinstance(metadata, dict):
+            raw_transfer = str(metadata.get("transfer_phone_number") or "").strip()
+            if raw_transfer.startswith("+"):
+                transfer = raw_transfer
         body = bland_payload_spec(
-            dial, task_text, first_sentence, voicemail_message, 1, metadata=metadata,
+            dial, task_text, first_sentence, voicemail_message, 1,
+            metadata=metadata, transfer_phone_number=transfer,
         )
         body["max_duration"] = int(cap) if cap == int(cap) else cap
         logger.info("placing Bland call to a number ending %s", dial[-4:])

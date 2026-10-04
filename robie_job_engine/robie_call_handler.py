@@ -114,6 +114,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Protocol
 from zoneinfo import ZoneInfo
 
+from .business_calendar import us_federal_holidays
+from .call_opt_out import pressed_opt_out
 from .bland_config import (
     CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
@@ -363,6 +365,9 @@ class RobieCallPorts:
     task_status: Optional[TaskStatusPort] = None  # skip already-closed tasks
     job_checkpoint: Optional[CallJobCheckpointPort] = None  # durable restart recovery
     transfer_lookup: Optional[TransferLookupPort] = None  # assignee DID for live transfers
+    opt_out_store: Optional[Any] = None  # press 6 stops later automated calls
+    opt_in_store: Optional[Any] = None  # marketing workflows require a recorded opt-in
+    call_dedupe: Optional[Any] = None  # one automated call per note per day
 
 
 @dataclass
@@ -387,6 +392,8 @@ class RobieCallConfig:
     calling_window_tz: Optional[str] = None
     # Test seam. Production leaves this unset and uses the real clock.
     now: Optional[datetime] = None
+    # Press 2 is offered only when this is true and the number is mobile.
+    sms_configured: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +456,10 @@ _TASK_FIELD_ALIASES: Dict[str, List[str]] = {
         "Applicant Data Assigned Producer",
     ],
     "due_date": ["Task Due Date", "Due Date", "due_date"],
+    "activity_labels": ["Activity Labels", "activity_labels"],
+    "workflow": ["Workflow", "workflow"],
+    "discussion_id": ["Discussion ID", "discussion_id", "DiscussionID"],
+    "phone_is_mobile": ["Phone Is Mobile", "phone_is_mobile"],
 }
 
 
@@ -466,6 +477,14 @@ def is_call_task(task: Dict[str, Any]) -> bool:
     are NOT call tasks (substring matching caused false positives that
     could have dialed a client for a non-call task).
     """
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(
+        _pick(task, "activity_labels"),
+        _pick(task, "subject") + " " + _pick(task, "description"),
+    )
+    if decision.action in ("workflow", "freeform"):
+        return True
     text = _pick(task, "subject") + " " + _pick(task, "description")
     return bool(_CALL_KEYWORD_RE.search(text))
 
@@ -519,6 +538,19 @@ def _instruction_ambiguity(instruction: str) -> Optional[str]:
         return (f"the instruction {text.strip()!r} doesn't say what "
                 "the call is about")
     return None
+
+
+def _phone_is_mobile(ports: RobieCallPorts, task: Dict[str, Any], applicant_id: str) -> bool:
+    flag = _pick(task, "phone_is_mobile").lower()
+    if flag in ("1", "true", "yes"):
+        return True
+    method = getattr(ports.phone_lookup, "is_mobile", None)
+    if method is None:
+        return False
+    try:
+        return bool(method(applicant_id))
+    except Exception:  # noqa: BLE001 — no text offer when the lookup fails
+        return False
 
 
 def _normalize_spoken(text: str) -> str:
@@ -819,6 +851,11 @@ def _outside_calling_window(config: RobieCallConfig) -> Optional[str]:
     if current.weekday() >= 5:
         return (
             f"weekend; outbound calls run weekdays "
+            f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
+        )
+    if current.date() in us_federal_holidays(current.year):
+        return (
+            f"federal holiday; outbound calls run weekdays "
             f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
         )
     minute_of_day = current.hour * 60 + current.minute
@@ -1760,10 +1797,32 @@ def _handle_call_task(
             "duplicate_reason": "same instruction already handled for applicant",
         }
 
+    # Robie Call is free-form. Only the lead follow-up label uses a script.
+    # The nine Splice workflows stay available to render, and a label cannot
+    # select them.
+    from .call_pickup import (
+        LEAD_WORKFLOW_ID,
+        CallPickup,
+        calling_day,
+        classify_call_request,
+        note_dedupe_key,
+    )
+    from .splice_scripts import get_workflow
+
+    decision = classify_call_request(_pick(task, "activity_labels"), instruction)
+    explicit = _pick(task, "workflow")
+    if explicit == LEAD_WORKFLOW_ID and decision.action != "freeform":
+        decision = CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
+    workflow = None
+    if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
+        workflow = get_workflow(LEAD_WORKFLOW_ID)
+    note_topic = workflow.title if workflow is not None else instruction
+
     # ---- 3c. Ambiguity guard ------------------------------------------------
     # "call him" with no topic: do NOT guess. Leave the task open and file
     # a clarification note so staff can fix the instruction.
-    ambiguity = _instruction_ambiguity(instruction)
+    # A resolved workflow already has its script, so a short label is enough.
+    ambiguity = None if workflow is not None else _instruction_ambiguity(instruction)
     if ambiguity:
         log.warning("ambiguous instruction for task %s: %s", task_id, ambiguity)
         clar_note = (
@@ -1865,7 +1924,7 @@ def _handle_call_task(
                 return _recover_interrupted_call(
                     task, config, ports, log, fail,
                     task_id, applicant_id, applicant_name, assigned_by,
-                    instruction, [found_id], checkpoint,
+                    note_topic, [found_id], checkpoint,
                 )
         # No recent call found — the dial likely never went through, but
         # we do NOT auto-redial. Fail closed for human review.
@@ -2078,6 +2137,35 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
+    opt_outs = getattr(ports, "opt_out_store", None)
+    if opt_outs is not None and opt_outs.is_opted_out(applicant_id):
+        log.info("task %s skipped; applicant opted out of automated calls", task_id)
+        skip_note = (
+            "Robie did not call. This client opted out of automated phone "
+            "calls. Automated calls stay off until a person turns them back on."
+        )
+        wb = _writeback_once(
+            ports, task_id, "opt_out_skip",
+            applicant_id, skip_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "client opted out of automated calls; not dialed",
+            writeback=wb,
+        )
+    if workflow is not None and workflow.marketing:
+        opt_ins = getattr(ports, "opt_in_store", None)
+        recorded = opt_ins is not None and opt_ins.has_opt_in(applicant_id)
+        if not recorded:
+            log.info(
+                "task %s skipped; %s requires a recorded opt-in and this "
+                "client has none",
+                task_id, workflow.title,
+            )
+            return fail(
+                "no recorded opt-in; marketing call not dialed",
+                skipped_opt_in=True,
+            )
     # No outbound dials outside the calling window. Queue the task (leave
     # it open, do not mark it processed) and say so once. Never dial.
     window_block = _outside_calling_window(config)
@@ -2113,23 +2201,74 @@ def _handle_call_task(
     # Transfer target only when a lookup resolves one. Otherwise Eva takes
     # a message. There is no placeholder transfer number.
     transfer_number = _resolve_transfer_number(ports, producer_name) or ""
-    eva_task = _build_eva_task(
-        instruction, applicant_name,
-        on_behalf_of=on_behalf_of,
-        called_party=called_party,
-        producer_name=producer_name,
-        transfer_to_name=producer_name if transfer_number else "",
-        transfer_number=transfer_number,
-    )
-    first_sentence = _normalize_spoken(
-        _build_first_sentence(instruction, producer_name))
-    voicemail_message = _normalize_spoken(
-        _build_voicemail_message(instruction, producer_name))
+    if workflow is not None:
+        from .splice_scripts import (
+            render_live,
+            render_text,
+            render_voicemail,
+            spoken_first_name,
+            text_option_allowed,
+        )
+
+        first = spoken_first_name(applicant_name)
+        offer_text = text_option_allowed(
+            workflow,
+            mobile=_phone_is_mobile(ports, task, applicant_id),
+            sms_configured=bool(config.sms_configured),
+        )
+        live = render_live(
+            workflow,
+            first_name=first,
+            agent=producer_name,
+            transfer_number=transfer_number,
+            offer_text=offer_text,
+        )
+        first_sentence = f"Hi {first}," if first else "Hi,"
+        voicemail_message = render_voicemail(
+            workflow, first_name=first, agent=producer_name,
+        )
+        operator = []
+        if transfer_number:
+            operator.append(
+                f"When the caller presses 1, transfer to {producer_name} "
+                f"at {transfer_number}."
+            )
+        else:
+            operator.append(
+                "Do not transfer this call. If the caller presses 1, take a "
+                f"message and ask them to call {CALLBACK_NUMBER}."
+            )
+        if offer_text:
+            operator.append("When the caller presses 2, send this text and nothing else:")
+            operator.append(render_text(workflow) or "")
+        else:
+            operator.append("Do not offer or send a text message.")
+        operator.append("When the caller presses 4, repeat the spoken script.")
+        operator.append(
+            "When the caller presses 6, they opted out of automated calls. "
+            "Confirm that and end the call."
+        )
+        eva_task = live + "\n\n" + "\n".join(operator)
+    else:
+        eva_task = _build_eva_task(
+            instruction, applicant_name,
+            on_behalf_of=on_behalf_of,
+            called_party=called_party,
+            producer_name=producer_name,
+            transfer_to_name=producer_name if transfer_number else "",
+            transfer_number=transfer_number,
+        )
+        first_sentence = _normalize_spoken(
+            _build_first_sentence(instruction, producer_name))
+        voicemail_message = _normalize_spoken(
+            _build_voicemail_message(instruction, producer_name))
     metadata = {"task_id": task_id, "applicant_id": applicant_id, "source": "robie-call-task",
                 "transfer_to": producer_name if transfer_number else None,
+                "transfer_phone_number": transfer_number or None,
                 "on_behalf_of": on_behalf_of,
                 "called_party": called_party or applicant_name or None,
-                "on_behalf_of_producer": producer_name}
+                "on_behalf_of_producer": producer_name,
+                "workflow": workflow.id if workflow is not None else None}
 
     # ---- 6a. Durable call intent (BEFORE the dial) --------------------------
     # Save the intent to dial BEFORE the Bland POST. If the POST times out,
@@ -2213,12 +2352,47 @@ def _handle_call_task(
         # on /v1/calls, so a retried timeout could double-dial the client.
         # A failed task stays OPEN and is redelivered on the next 30-min
         # report cycle, with human visibility via the chat alert below.
+        dedupe = getattr(ports, "call_dedupe", None)
+        if dedupe is not None:
+            day = calling_day(_calling_now(config))
+            dedupe_key = note_dedupe_key(
+                applicant_id, _pick(task, "discussion_id"), instruction, task_id,
+            )
+            if dedupe.already_called(dedupe_key, day):
+                log.info(
+                    "task %s already called for this note today; not dialing",
+                    task_id,
+                )
+                wb = _writeback_once(
+                    ports, task_id, "same_day_dedupe", applicant_id,
+                    "Robie did not call again. This note was already called today.",
+                    title_hint=None,
+                )
+                _mark_processed(task_id)
+                _mark_content_processed(applicant_id, instruction)
+                return {
+                    "ok": True,
+                    "task_id": task_id,
+                    "applicant_id": applicant_id,
+                    "call": {"success": False, "call_ids": []},
+                    "writeback": wb,
+                    "recording": None,
+                    "reassigned": False,
+                    "chat_alerted": False,
+                    "error": None,
+                    "duplicate_suppressed": True,
+                }
+            dedupe.record(dedupe_key, day)
         try:
             call_result = ports.bland.place_call_with_double_dial(
                 phone, eva_task, first_sentence, voicemail_message, metadata
             )
         except Exception as exc:  # noqa: BLE001
             call_result = {"success": False, "error": str(exc)[:300], "call_ids": []}
+
+    if opt_outs is not None and pressed_opt_out(call_result):
+        opt_outs.record_opt_out(applicant_id, source="press-6")
+        log.info("applicant %s opted out of automated calls", applicant_id)
 
     tripped = _bland_record(bool(call_result.get("success")))
     if tripped:
@@ -2297,7 +2471,7 @@ def _handle_call_task(
         # keeps the call_ids so the next cycle reconciles instead of
         # redialing.
         note_body = _format_outcome_note(
-            applicant_name, instruction, call_result, "skipped",
+            applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
         )
@@ -2341,7 +2515,7 @@ def _handle_call_task(
             for cid in call_ids
         ]
         note_body = _format_outcome_note(
-            applicant_name, instruction, call_result, "skipped",
+            applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
         )
@@ -2395,11 +2569,11 @@ def _handle_call_task(
     # ok: the human now owns the objective.
     if transferred:
         note_body = _format_transfer_note(
-            applicant_name, instruction, call_result, assigned_by,
+            applicant_name, note_topic, call_result, assigned_by,
             producer_name=producer_name)
     else:
         note_body = _format_outcome_note(
-            applicant_name, instruction, call_result, recording_status,
+            applicant_name, note_topic, call_result, recording_status,
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
         )
