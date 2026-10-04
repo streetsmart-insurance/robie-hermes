@@ -12,9 +12,10 @@ Pipeline per email::
       -> triage_notice()                       (read-only classification)
       -> resolve applicant_id                  (EZLynx PolicyApi, normalized policy number)
       -> resolve CSR login                    (cancellation only; Ascend producer)
-      -> file_note_to_existing_discussion()    (EXISTING discussion only)
-      -> build_cancellation_task_payload()     (cancellation notices only)
-      -> zapier_tasks.fire_task()              (Zapier catch-hook Zap)
+      -> one titled discussion per category    (find, or POST v8/discussions/with-note)
+      -> file the note on that discussion
+      -> Zapier task                           (non-pay cancellation CSR, or
+                                               disputed-charge accounting login)
 
 Safety (non-negotiable):
 
@@ -34,8 +35,10 @@ Safety (non-negotiable):
   own unit and workflow set ``ROBIE_EZLYNX_WRITE_SCOPE=all`` (honored with
   ``ROBIE_PLAYGROUND=1``). The compiled default in ``ezlynx_write_scope``
   stays the test account. The guard has no per-action switch, so this
-  driver refuses every write that is not a note on an existing titled
-  discussion.
+  driver allows exactly three writes: a note on an existing category
+  discussion, creating that category discussion with its first note, and
+  a task (non-pay cancellation CSR, or disputed-charge accounting).
+  Everything else is refused. Dry-run does not create discussions or tasks.
 - Cancellations are notes only. The driver does not list or apply the
   Ascend NOC label. That label sends client email and text, and Robie
   does not send those. The result says ``label_skipped_by_policy``.
@@ -46,10 +49,13 @@ Safety (non-negotiable):
   runs, including for applicants the write allowlist blocks, and a note
   already on the discussion is not filed again.
 - Never deletes anything. Never invents an applicant_id or a CSR username.
-- Live note writes go through ``file_note_to_existing_discussion``, which
-  enforces the EZLynx write-scope allowlist and the driver lease. Dry-run
-  checks the same allowlist and does not take the lease. Anything outside
-  the allowlist is logged as ``write_scope_refused`` and skipped.
+- Live notes on an existing category discussion go through
+  ``file_note_to_existing_discussion``. A missing category discussion is
+  created with ``create_discussion_with_note`` (``POST v8/discussions/with-note``).
+  Both enforce the EZLynx write-scope allowlist and the driver lease.
+  Dry-run checks the same allowlist, validates the payload, and does not
+  take the lease or POST. Anything outside the allowlist is logged as
+  ``write_scope_refused`` and skipped.
 - Gmail is read-only except in LIVE mode, where a fully processed email is
   marked read (UNREAD label removed) so the next run does not re-file the
   same note. Dry-run never touches labels.
@@ -141,11 +147,6 @@ _TERM_SUFFIX_RE = re.compile(r"-\d{1,2}$")
 _LOB_SUFFIX_RE = re.compile(r"\s+[A-Z]{2,4}\s*$")
 
 _NOTICE_DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
-_PAST_DUE_DATE_RE = re.compile(
-    r"past[- ]due date\s*:?\s*(\d{2}/\d{2}/\d{4})",
-    re.IGNORECASE,
-)
-_TITLE_DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
 _EFFECTIVE_DATE_PREFIX_RE = re.compile(r"effective\s*date\s*$", re.IGNORECASE)
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
@@ -168,12 +169,14 @@ class MailboxAllowlistError(ValueError):
 
 
 class NonNoteWriteRefused(RuntimeError):
-    """Raised when this driver is asked for any write other than a note.
+    """Raised when this driver is asked for a write it does not own.
 
     ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is applicant-wide. The write-scope
-    guard has no per-action switch, so the driver refuses document
-    uploads, discussion creates, labels, policy writes, bind, and delete
-    itself.
+    guard has no per-action switch, so the driver itself allows only a
+    note on an existing category discussion, creating that category
+    discussion with the note, and a cancellation or disputed-charge task.
+    Document uploads, untitled discussions, labels, policy writes, bind,
+    and delete stay refused.
     """
 
 
@@ -754,6 +757,9 @@ class DriverContext:
     today: date = field(default_factory=date.today)
     # In-run collapse. Cleared at the start of each run_driver call.
     seen_notice_events: list[dict[str, Any]] = field(default_factory=list)
+    # (applicant id, canonical category title) -> discussion id, or a
+    # planned-create token when this run has not created it yet.
+    planned_category_discussions: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 @dataclass
@@ -769,20 +775,177 @@ def _due_date(today: date, due_days: int) -> str:
     return (today + timedelta(days=max(int(due_days), 0))).isoformat()
 
 
-def discussion_title_hint(notice_type: str) -> str | None:
-    """Prefer the SOP-titled card for this notice; never Untitled.
+# One discussion per applicant per category. Titles are exact when created.
+# An existing row matches after strip and case-fold.
+CATEGORY_PAYMENTS = "payments"
+CATEGORY_CANCELLATION_NOTICES = "cancellation_notices"
+CATEGORY_RETURN_PREMIUM = "return_premium"
+CATEGORY_UNDERWRITING = "underwriting"
 
-    Substring match against existing titles. ``cancellation`` hits both
-    ``Cancellation`` and ``Service-Cancellation``. ``noc`` hits ``Ascend NOC``.
-    Other notice types leave the hint empty so a single titled discussion wins.
+CATEGORY_TITLES: dict[str, str] = {
+    CATEGORY_PAYMENTS: "Ascend - Payments",
+    CATEGORY_CANCELLATION_NOTICES: "Ascend - Cancellation Notices",
+    CATEGORY_RETURN_PREMIUM: "Ascend - Return Premium",
+    CATEGORY_UNDERWRITING: "Ascend - Underwriting",
+}
+_CATEGORY_TITLE_KEYS = {title.casefold(): title for title in CATEGORY_TITLES.values()}
+
+NOTICE_CATEGORY: dict[str, str] = {
+    triage.LATE_PAYMENT: CATEGORY_PAYMENTS,
+    triage.PAYMENT_CONFIRMATION: CATEGORY_PAYMENTS,
+    triage.PROCESSING_PAYMENT: CATEGORY_PAYMENTS,
+    triage.PAID_OFF: CATEGORY_PAYMENTS,
+    triage.DISPUTED_CHARGE: CATEGORY_PAYMENTS,
+    triage.INTENT_TO_CANCEL: CATEGORY_CANCELLATION_NOTICES,
+    triage.CANCELLATION: CATEGORY_CANCELLATION_NOTICES,
+    triage.REINSTATEMENT: CATEGORY_CANCELLATION_NOTICES,
+    triage.RETURN_PREMIUM: CATEGORY_RETURN_PREMIUM,
+    triage.UNDERWRITING: CATEGORY_UNDERWRITING,
+}
+
+TASK_KIND_CANCELLATION = "cancellation"
+TASK_KIND_DISPUTED_CHARGE = "disputed_charge"
+TASK_KIND_INTENT_TO_CANCEL = "intent_to_cancel"
+_ALLOWED_TASK_KINDS = frozenset(
+    {TASK_KIND_CANCELLATION, TASK_KIND_DISPUTED_CHARGE, TASK_KIND_INTENT_TO_CANCEL}
+)
+
+ACCOUNTING_ASSIGNEE_UNKNOWN = "accounting assignee id unknown"
+NO_MATCHING_CATEGORY = "no matching category"
+INTENT_CSR_TASK_ENV = "ROBIE_ASCEND_INTENT_TO_CANCEL_CSR_TASK"
+
+# Markley1 as copied from streetsmart-insurance/streetsmart-phone-watchdog
+# src/ezlynx/ezlynx_users.py at main eca8cba27574021b7b0e924b9cf389d720cce745.
+# That file's 22 confirmed ids are the ezlynx_user_id fields read back from
+# the EZLynx API on 2026-10-03. Markley1 is in the directory and has no
+# ezlynx_user_id. Do not invent one. ezlynx_user_id_for returns None for
+# this entry, and the disputed-charge task stays in human review.
+ACCOUNTING_EZLYNX_USER: dict[str, Any] = {
+    "user_name": "Markley1",
+    "first_name": "Accounting",
+    "last_name": "Team",
+    "email": "accounting@streetsmart.insurance",
+    "role": "Accounting / Financial Operations",
+    "source": (
+        "streetsmart-insurance/streetsmart-phone-watchdog "
+        "src/ezlynx/ezlynx_users.py eca8cba27574021b7b0e924b9cf389d720cce745"
+    ),
+}
+
+
+def category_for(notice_type: str) -> str:
+    """Category key for a notice type. Empty when this driver does not file it."""
+    return NOTICE_CATEGORY.get(str(notice_type or "").strip(), "")
+
+
+def category_title(category: str) -> str:
+    """Canonical discussion title for a category. Empty when unknown."""
+    return CATEGORY_TITLES.get(str(category or "").strip(), "")
+
+
+def canonical_category_title(title: str) -> str:
+    """Canonical title when ``title`` is one of the four, ignoring case and ends."""
+    return _CATEGORY_TITLE_KEYS.get(str(title or "").strip().casefold(), "")
+
+
+def _planned_discussion_token(applicant_id: str, title: str) -> str:
+    return f"planned:{applicant_id}:{title}"
+
+
+def intent_to_cancel_csr_task_enabled() -> bool:
+    """Off unless ``ROBIE_ASCEND_INTENT_TO_CANCEL_CSR_TASK`` is truthy.
+
+    Off: intent-to-cancel is a note only. On: also create the CSR task.
     """
-    if notice_type == triage.CANCELLATION:
-        return "cancellation"
-    # Late payment and intent-to-cancel are notes on the Ascend NOC card.
-    # Intent-to-cancel never uses the cancellation hint and never gets the label.
-    if notice_type in {triage.LATE_PAYMENT, triage.INTENT_TO_CANCEL}:
-        return "noc"
-    return None
+    return _truthy(os.environ.get(INTENT_CSR_TASK_ENV))
+
+
+def ezlynx_user_id_for_login(username: str) -> int | None:
+    """Confirmed numeric id, same rule as phone-watchdog ``ezlynx_user_id_for``.
+
+    Match is the accounting login only. A missing or non-positive
+    ``ezlynx_user_id`` returns None. Markley1's copied entry has no id.
+    """
+    key = str(username or "").strip().casefold()
+    stored = str(ACCOUNTING_EZLYNX_USER.get("user_name") or "").strip().casefold()
+    if not key or key != stored:
+        return None
+    raw = ACCOUNTING_EZLYNX_USER.get("ezlynx_user_id")
+    if isinstance(raw, bool) or raw is None or raw == "":
+        return None
+    try:
+        user_id = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if user_id <= 0:
+        return None
+    return user_id
+
+
+def accounting_assigned_user_id() -> tuple[int | None, str]:
+    """Numeric EZLynx user id for the disputed-charge task.
+
+    The login comes from ``ROBIE_ACCOUNTING_ASSIGNEE`` (default Markley1,
+    the same default ``ascend_sync`` uses; Production sets that variable).
+    ``requester_login`` maps "accounting team" and "markley" to Markley1.
+    The id is looked up the way the phone watchdog looks up
+    ``ezlynx_user_id``. No id means ``accounting assignee id unknown``.
+    """
+    from .confirmation_notify import requester_login
+
+    raw = os.environ.get("ROBIE_ACCOUNTING_ASSIGNEE", "Markley1")
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return None, ""
+    mapped = requester_login(text)
+    login = mapped or (text if _LOGIN_USERNAME_RE.fullmatch(text) else "")
+    if not login or not _LOGIN_USERNAME_RE.fullmatch(str(login)):
+        return None, ""
+    return ezlynx_user_id_for_login(str(login)), str(login)
+
+
+def build_disputed_task_note(
+    *,
+    assigned_user_id: int,
+    title: str,
+    description: str,
+    due: str,
+) -> dict[str, Any]:
+    """TaskCreationNote body from the phone watchdog's direct task API.
+
+    Same shape as ``build_task_note`` in streetsmart-phone-watchdog
+    ``src/ezlynx/direct_task_api.py`` at eca8cba: ``assignedUserId`` is an
+    integer inside ``task``. A ``/notes`` body does not send applicantId.
+    ``due`` is the ISO date the cancellation task already uses; the phone
+    watchdog converts that date to 10:00 PM America/New_York as UTC Z.
+    """
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+
+    user_id = int(assigned_user_id)
+    if user_id <= 0:
+        raise ValueError("assigned_user_id must be a positive integer")
+    day = zapier_tasks.validate_due_date(due)
+    local = datetime.strptime(day, "%Y-%m-%d").replace(
+        hour=22, minute=0, second=0, microsecond=0, tzinfo=ZoneInfo("America/New_York")
+    )
+    due_utc = local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    text_parts = [part.strip() for part in (title, description) if str(part or "").strip()]
+    return {
+        "type": "TaskCreationNote",
+        "body": "\n\n".join(text_parts),
+        "task": {
+            "due": due_utc,
+            "assignedUserId": user_id,
+            "reminders": [
+                {
+                    "scheduled": due_utc,
+                    "remindees": {"myself": False, "assignee": True, "followers": False},
+                    "types": {"email": False, "text": False, "notification": True},
+                }
+            ],
+        },
+    }
 
 
 def due_or_cancel_dates(body: str) -> frozenset[str]:
@@ -805,22 +968,6 @@ def normalize_notice_body(body: str) -> str:
     """Case-folded email body with collapsed whitespace. Not an EZLynx read."""
     cleaned = _ZERO_WIDTH_RE.sub("", str(body or ""))
     return " ".join(cleaned.casefold().split())
-
-
-def notice_event_dates(subject: str, body: str) -> frozenset[str]:
-    """Cancel, due, and past-due dates in a notice. Policy effective dates stay out."""
-    text = f"{subject or ''}\n{body or ''}"
-    found: set[str] = set()
-    for value in (
-        triage.cancel_effective_date(text),
-        triage._due_on_date(text),
-        triage._future_cancel_date(text),
-    ):
-        if value:
-            found.add(value)
-    for match in _PAST_DUE_DATE_RE.finditer(text):
-        found.add(match.group(1))
-    return frozenset(found)
 
 
 def notice_event_key(
@@ -926,23 +1073,6 @@ def discussions_for_applicant(
     ]
 
 
-def _policy_title_token(policy_number: str) -> str:
-    """Uppercase policy number with one trailing LOB suffix (`` APD``) removed."""
-    return normalize_policy_number(strip_ezlynx_lob_suffix(policy_number))
-
-
-def _title_has_policy(title: str, policy_number: str) -> bool:
-    token = _policy_title_token(policy_number)
-    if not token:
-        return False
-    return token in normalize_policy_number(title)
-
-
-def _title_is_finance(title: str) -> bool:
-    folded = str(title or "").casefold()
-    return "ascend" in folded or "premium finance" in folded
-
-
 def _discussion_recency(row: dict[str, Any]) -> tuple[int, float, str]:
     """Newest updated discussion sorts last. Undated rows sort first."""
     raw = discussions._discussion_stamp(row)
@@ -965,60 +1095,30 @@ def _discussion_recency(row: dict[str, Any]) -> tuple[int, float, str]:
     return (0, 0.0, discussion_id)
 
 
-def _title_dates(title: str) -> set[str]:
-    return set(_TITLE_DATE_RE.findall(str(title or "")))
-
-
-def _finance_title_matches_notice(title: str, event_dates: frozenset[str]) -> bool:
-    """An Ascend or premium-finance fallback needs a matching notice date.
-
-    The date in the title has to be the notice's cancel date, due date, or
-    past-due date. An undated finance title does not qualify.
-    """
-    if not _title_is_finance(title):
-        return False
-    if not event_dates:
-        return False
-    return bool(_title_dates(title) & set(event_dates))
-
-
-def select_notice_discussion(
+def choose_category_discussion(
     rows: list[dict[str, Any]] | None,
-    policy_number: str,
-    *,
-    event_dates: frozenset[str] | None = None,
-) -> dict[str, Any] | None:
-    """Pick one existing titled discussion. Never an untitled card.
+    title: str,
+) -> tuple[dict[str, Any] | None, int]:
+    """The newest discussion whose title is exactly this category.
 
-    Prefer a title that contains the normalized policy number (a trailing
-    `` APD``-style suffix already removed). Several policy matches: the most
-    recently updated one. Otherwise the newest titled Ascend or
-    premium-finance discussion whose title contains a cancel, due, or
-    past-due date from the notice. Nothing else qualifies.
+    Comparison is strip plus case-fold. Untitled rows never match. Several
+    rows with the same title: the newest, and the count is greater than one
+    so the caller can log it. No match returns ``(None, 0)``.
     """
-    titled = [
+    wanted = str(title or "").strip().casefold()
+    if not wanted or wanted == "untitled":
+        return None, 0
+    hits = [
         row
         for row in (rows or [])
         if isinstance(row, dict)
         and discussions.discussion_id_of(row)
         and not discussions.is_untitled_discussion(row)
+        and discussions.discussion_title_of(row).strip().casefold() == wanted
     ]
-    policy_hits = [
-        row
-        for row in titled
-        if _title_has_policy(discussions.discussion_title_of(row), policy_number)
-    ]
-    if policy_hits:
-        return max(policy_hits, key=_discussion_recency)
-    dates = event_dates or frozenset()
-    finance_hits = [
-        row
-        for row in titled
-        if _finance_title_matches_notice(discussions.discussion_title_of(row), dates)
-    ]
-    if not finance_hits:
-        return None
-    return max(finance_hits, key=_discussion_recency)
+    if not hits:
+        return None, 0
+    return max(hits, key=_discussion_recency), len(hits)
 
 
 def _read_existing_note(
@@ -1136,26 +1236,78 @@ def _prepare_dry_run_note(
     }
 
 
+def _prepare_dry_run_create(
+    applicant_id: str,
+    title: str,
+    note_body: str,
+) -> dict[str, Any]:
+    """Validate a category discussion create. No POST and no driver gate.
+
+    ``create_discussion_with_note`` always takes the write gate, including
+    its own dry-run branch. Dry-run uses ``build_with_note_payload`` only.
+    """
+    from .chat_write_boundary import assert_chat_applicant
+    from .ezlynx_write_scope import normalize_applicant_id
+
+    applicant = normalize_applicant_id(applicant_id)
+    refusal = _write_scope_refusal_reason(applicant)
+    if refusal:
+        raise EzlynxWriteScopeError(refusal.removeprefix("write_scope_refused: "))
+    assert_chat_applicant(applicant)
+    payload = discussions.build_with_note_payload(
+        applicant,
+        title,
+        discussions.reject_phone_numbers(note_body),
+    )
+    return {
+        "status": "dry_run",
+        "reason_code": None,
+        "reason": "dry run: create payload validated, nothing written",
+        "applicant_id": applicant,
+        "discussion_id": None,
+        "discussion_title": payload["title"],
+        "note_id": None,
+    }
+
+
 def authorize_notice_write(
-    action: str, *, discussion_id: str = "", discussion_title: str = ""
+    action: str,
+    *,
+    discussion_id: str = "",
+    discussion_title: str = "",
+    task_kind: str = "",
 ) -> None:
-    """Allow one note on an existing titled discussion. Refuse every other write.
+    """Allow a category note, a category create-with-note, or one task kind.
 
     The EZLynx write-scope guard decides which applicant may be written. It
     does not accept an action. This check is the driver's own limit.
     """
     name = str(action or "").strip()
-    if name != "discussion_note":
-        raise NonNoteWriteRefused(f"non_note_write_refused: {name or 'missing'}")
-    if not str(discussion_id or "").strip():
-        raise NonNoteWriteRefused(
-            "non_note_write_refused: discussion_note requires an existing discussion"
-        )
     title = str(discussion_title or "").strip()
-    if not title or title.casefold() == "untitled":
-        raise NonNoteWriteRefused(
-            "non_note_write_refused: discussion_note requires a titled discussion"
-        )
+    if name == "discussion_note":
+        if not str(discussion_id or "").strip():
+            raise NonNoteWriteRefused(
+                "non_note_write_refused: discussion_note requires an existing discussion"
+            )
+        if not canonical_category_title(title):
+            raise NonNoteWriteRefused(
+                "non_note_write_refused: discussion_note requires a category discussion"
+            )
+        return
+    if name == "discussion_create_with_note":
+        if title not in CATEGORY_TITLES.values():
+            raise NonNoteWriteRefused(
+                "non_note_write_refused: discussion_create_with_note requires a category title"
+            )
+        return
+    if name == "task_create":
+        kind = str(task_kind or "").strip()
+        if kind not in _ALLOWED_TASK_KINDS:
+            raise NonNoteWriteRefused(
+                f"non_note_write_refused: task_create {kind or 'missing'}"
+            )
+        return
+    raise NonNoteWriteRefused(f"non_note_write_refused: {name or 'missing'}")
 
 
 def _write_scope_refusal_reason(applicant_id: str) -> str:
@@ -1224,15 +1376,29 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = "unknown_notice_type"
         return result
 
-    resolution, reason = resolve_applicant(
-        ctx.ezlynx_client,
-        [str(p) for p in (triaged.get("policy_numbers") or [])],
-        triaged.get("insured_name"),
-    )
-    if resolution is None:
-        result.reason = reason
+    category = category_for(notice_type)
+    canonical = category_title(category)
+    if category:
+        result.detail["category"] = category
+        result.detail["discussion_title"] = canonical
+
+    if not category:
+        result.reason = NO_MATCHING_CATEGORY
+        result.detail["needs_human_review"] = True
         return result
-    if notice_type == triage.CANCELLATION:
+    else:
+        resolution, reason = resolve_applicant(
+            ctx.ezlynx_client,
+            [str(p) for p in (triaged.get("policy_numbers") or [])],
+            triaged.get("insured_name"),
+        )
+        if resolution is None:
+            result.reason = reason
+            return result
+    needs_csr_task = notice_type == triage.CANCELLATION or (
+        notice_type == triage.INTENT_TO_CANCEL and intent_to_cancel_csr_task_enabled()
+    )
+    if needs_csr_task:
         csr_login, csr_reason = resolve_cancellation_csr(triaged.get("program"))
         if not csr_login:
             result.reason = csr_reason
@@ -1250,6 +1416,32 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     if resolution.csr_username:
         result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
+
+    if notice_type == triage.CANCELLATION:
+        result.detail["task"] = {
+            "type": TASK_KIND_CANCELLATION,
+            "assignee": resolution.csr_username,
+        }
+    elif (
+        notice_type == triage.INTENT_TO_CANCEL and intent_to_cancel_csr_task_enabled()
+    ):
+        result.detail["task"] = {
+            "type": TASK_KIND_INTENT_TO_CANCEL,
+            "assignee": resolution.csr_username,
+        }
+    elif notice_type == triage.DISPUTED_CHARGE:
+        user_id, login = accounting_assigned_user_id()
+        if user_id is None:
+            result.reason = ACCOUNTING_ASSIGNEE_UNKNOWN
+            result.detail["needs_human_review"] = True
+            if login:
+                result.detail["accounting_login"] = login
+            return result
+        result.detail["task"] = {
+            "type": TASK_KIND_DISPUTED_CHARGE,
+            "assignee": login,
+            "assigned_user_id": user_id,
+        }
 
     note_text = signed_notice_note(str(triaged.get("note_text") or "").strip())
     if not note_text:
@@ -1275,28 +1467,49 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         return result
     ctx.seen_notice_events.append(event)
 
-    # One GET of this applicant's discussions. The query is the same
-    # by-applicant?applicantId= call the other readers use. A policy title
-    # wins. An Ascend or premium-finance title wins only when it carries a
-    # cancel, due, or past-due date from this notice.
-    try:
-        listed = ctx.discussion_client.get_discussions(resolution.applicant_id)
-    except Exception as exc:  # noqa: BLE001 - fail closed, do not write
-        result.reason = f"discussion_error: {type(exc).__name__}: {exc}"
-        return result
-    chosen = select_notice_discussion(
-        discussions_for_applicant(listed, resolution.applicant_id),
-        resolution.policy_number,
-        event_dates=notice_event_dates(notice.subject, notice.body),
-    )
-    if chosen is None:
-        result.reason = "no matching discussion"
-        result.detail["needs_human_review"] = True
-        return result
-    chosen_id = discussions.discussion_id_of(chosen)
-    result.detail["discussion_id"] = chosen_id
-    result.detail["discussion_title"] = discussions.discussion_title_of(chosen)
-    event["discussion_id"] = chosen_id
+    # One category discussion per applicant. Reuse it when the title matches
+    # (trim, case-insensitive). Otherwise this run creates that title once.
+    plan_key = (resolution.applicant_id, canonical)
+    remembered = ctx.planned_category_discussions.get(plan_key)
+    chosen_id = ""
+    display_title = canonical
+    if remembered is not None:
+        discussion_plan = "use_existing"
+        if not str(remembered).startswith("planned:"):
+            chosen_id = str(remembered)
+    else:
+        try:
+            listed = ctx.discussion_client.get_discussions(resolution.applicant_id)
+        except Exception as exc:  # noqa: BLE001 - fail closed, do not write
+            result.reason = f"discussion_error: {type(exc).__name__}: {exc}"
+            return result
+        chosen, match_count = choose_category_discussion(
+            discussions_for_applicant(listed, resolution.applicant_id),
+            canonical,
+        )
+        if chosen is not None:
+            discussion_plan = "use_existing"
+            chosen_id = discussions.discussion_id_of(chosen)
+            display_title = discussions.discussion_title_of(chosen) or canonical
+            if match_count > 1:
+                logger.warning(
+                    "applicant %s has %d discussions titled %r; using the newest %s",
+                    resolution.applicant_id,
+                    match_count,
+                    display_title,
+                    chosen_id,
+                )
+            ctx.planned_category_discussions[plan_key] = chosen_id
+        else:
+            discussion_plan = "create"
+            ctx.planned_category_discussions[plan_key] = _planned_discussion_token(
+                resolution.applicant_id, canonical
+            )
+    result.detail["discussion_plan"] = discussion_plan
+    result.detail["discussion_title"] = display_title
+    if chosen_id:
+        result.detail["discussion_id"] = chosen_id
+    event["discussion_id"] = chosen_id or ctx.planned_category_discussions[plan_key]
     # Same rendered note, same applicant, same discussion: one filing.
     # Undated emails with different bodies still collapse here.
     if any(
@@ -1307,14 +1520,17 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["duplicate_in_run"] = True
         return result
 
-    # Existing-note check is a read, including when write scope will refuse.
-    # A matching note is not filed again. A failed read does not invent a match.
-    note_match = _read_existing_note(
-        ctx.discussion_client,
-        resolution.applicant_id,
-        note_text,
-        discussion_id=chosen_id,
-    )
+    # Existing-note check is a read inside the category discussion, including
+    # when write scope will refuse. A create has no notes to compare.
+    if chosen_id:
+        note_match = _read_existing_note(
+            ctx.discussion_client,
+            resolution.applicant_id,
+            note_text,
+            discussion_id=chosen_id,
+        )
+    else:
+        note_match = {"read": False, "duplicate": False, "note_id": "", "reason": ""}
     result.detail["existing_note_read"] = bool(note_match.get("read"))
     result.detail["existing_note_duplicate"] = bool(note_match.get("duplicate"))
     if note_match.get("note_id"):
@@ -1336,42 +1552,71 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 
     # Cancellations are notes only. Do not list or apply Ascend NOC.
     # That label sends client email and text, and Robie does not send those.
-    # Intent-to-cancel is also a note, never a cancellation task.
-
-    # Append to the discussion already chosen. Never untitled, never created.
-    # The write-scope guard refuses non-allowlisted applicants; phone
-    # numbers in the body raise. Both become a skip, never a silent write.
-    # The shared EZLynx seat is gated before a live note and again before
-    # a live Zapier post. Dry-run does not call driver_gate_for_write.
+    # Intent-to-cancel and reinstatement are notes, never a cancellation task.
+    # Dry-run does not POST and does not call driver_gate_for_write.
     try:
-        authorize_notice_write(
-            "discussion_note",
-            discussion_id=chosen_id,
-            discussion_title=str(result.detail.get("discussion_title") or ""),
-        )
-        if ctx.dry_run:
-            filed = _prepare_dry_run_note(
-                ctx.discussion_client,
-                resolution.applicant_id,
-                note_text,
+        if chosen_id:
+            authorize_notice_write(
+                "discussion_note",
                 discussion_id=chosen_id,
+                discussion_title=display_title,
+            )
+            if ctx.dry_run:
+                filed = _prepare_dry_run_note(
+                    ctx.discussion_client,
+                    resolution.applicant_id,
+                    note_text,
+                    discussion_id=chosen_id,
+                )
+            else:
+                from .ezlynx_driver_gate import EzlynxDriverGateRefused
+                from .safety_seal import driver_gate_for_write
+
+                try:
+                    driver_gate_for_write()
+                except EzlynxDriverGateRefused as exc:
+                    result.reason = f"driver_gate_refused: {exc}"
+                    return result
+                filed = discussions.file_note_to_existing_discussion(
+                    ctx.discussion_client,
+                    resolution.applicant_id,
+                    note_text,
+                    discussion_id=chosen_id,
+                    dry_run=False,
+                )
+        elif ctx.dry_run:
+            authorize_notice_write(
+                "discussion_create_with_note",
+                discussion_title=canonical,
+            )
+            filed = _prepare_dry_run_create(
+                resolution.applicant_id,
+                canonical,
+                note_text,
             )
         else:
             from .ezlynx_driver_gate import EzlynxDriverGateRefused
             from .safety_seal import driver_gate_for_write
 
+            authorize_notice_write(
+                "discussion_create_with_note",
+                discussion_title=canonical,
+            )
             try:
                 driver_gate_for_write()
             except EzlynxDriverGateRefused as exc:
                 result.reason = f"driver_gate_refused: {exc}"
                 return result
-            filed = discussions.file_note_to_existing_discussion(
+            filed = discussions.create_discussion_with_note(
                 ctx.discussion_client,
                 resolution.applicant_id,
+                canonical,
                 note_text,
-                discussion_id=chosen_id,
                 dry_run=False,
             )
+            created_id = str(filed.get("discussion_id") or "").strip()
+            if created_id:
+                ctx.planned_category_discussions[plan_key] = created_id
     except NonNoteWriteRefused as exc:
         result.reason = str(exc)
         return result
@@ -1381,7 +1626,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     except discussions.DiscussionApiError as exc:
         result.reason = f"discussion_error: {exc}"
         return result
-    if filed.get("status") not in {"filed", "dry_run"}:
+    if filed.get("status") not in {"filed", "dry_run", "created"}:
         if str(filed.get("reason") or "") == "no matching discussion":
             result.reason = "no matching discussion"
             result.detail["needs_human_review"] = True
@@ -1395,40 +1640,87 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["note_id"] = filed.get("note_id")
     result.detail["note_text"] = note_text
 
-    # Zapier task: only cancellation notices have a builder. Anything else
-    # gets its note and a logged skip — never an invented payload.
-    task_fired: dict[str, Any] | None = None
-    if notice_type == triage.CANCELLATION:
+    # CSR tasks (non-pay cancellation, and intent-to-cancel when the flag
+    # is on) go through Zapier with the login. A disputed charge uses the
+    # phone-watchdog TaskCreationNote and needs a numeric assignedUserId.
+    # Dry-run validates and does not fire or POST.
+    task = result.detail.get("task") if isinstance(result.detail.get("task"), dict) else None
+    if task:
         from .ezlynx_driver_gate import EzlynxDriverGateRefused
 
-        payload = triage.build_cancellation_task_payload(
-            triaged,
-            applicant_id=resolution.applicant_id,
-            account_csr=resolution.csr_username,
-            due_date=_due_date(ctx.today, ctx.due_days),
-        )
+        task_kind = str(task.get("type") or "")
+        try:
+            authorize_notice_write("task_create", task_kind=task_kind)
+            due = _due_date(ctx.today, ctx.due_days)
+            if task_kind == TASK_KIND_CANCELLATION:
+                payload = triage.build_cancellation_task_payload(
+                    triaged,
+                    applicant_id=resolution.applicant_id,
+                    account_csr=str(task.get("assignee") or ""),
+                    due_date=due,
+                )
+            elif task_kind == TASK_KIND_INTENT_TO_CANCEL:
+                payload = triage.build_intent_to_cancel_task_payload(
+                    triaged,
+                    applicant_id=resolution.applicant_id,
+                    account_csr=str(task.get("assignee") or ""),
+                    due_date=due,
+                )
+            else:
+                insured = triaged.get("insured_name") or "unknown insured"
+                payload = build_disputed_task_note(
+                    assigned_user_id=int(task.get("assigned_user_id") or 0),
+                    title=f"Ascend disputed charge - {insured}",
+                    description=str(triaged.get("note_text") or ""),
+                    due=due,
+                )
+        except NonNoteWriteRefused as exc:
+            result.reason = str(exc)
+            return result
+        except (ValueError, TypeError) as exc:
+            result.reason = f"task_not_built: {exc}"
+            return result
         result.detail["task_payload"] = payload
         try:
             if ctx.dry_run:
-                # In-process validation only. Do not spawn zap-trigger and do
-                # not call driver_gate_for_write.
-                checked = dict(payload)
-                zapier_tasks.validate_task_payload(checked)
-                task_fired = {"ok": True, "dry_run": True}
+                if task_kind == TASK_KIND_DISPUTED_CHARGE:
+                    if payload.get("task", {}).get("assignedUserId") != int(
+                        task.get("assigned_user_id") or 0
+                    ):
+                        raise ValueError("disputed task note is missing assignedUserId")
+                else:
+                    checked = dict(payload)
+                    zapier_tasks.validate_task_payload(checked)
             else:
                 from .safety_seal import driver_gate_for_write
 
                 driver_gate_for_write()
-                task_fired = zapier_tasks.fire_task(dict(payload), dry_run=False)
+                if task_kind == TASK_KIND_DISPUTED_CHARGE:
+                    discussion_id = str(result.detail.get("discussion_id") or "").strip()
+                    if not discussion_id:
+                        result.reason = "task_not_built: disputed task has no discussion"
+                        return result
+                    posted = ctx.discussion_client._post(
+                        f"v8/discussions/{discussion_id}/notes",
+                        payload,
+                    )
+                    result.detail["task_result"] = {"ok": True, "response": posted}
+                else:
+                    result.detail["zapier_result"] = zapier_tasks.fire_task(
+                        dict(payload), dry_run=False
+                    )
         except EzlynxDriverGateRefused as exc:
             result.reason = f"driver_gate_refused: {exc}"
             return result
         except (ValueError, RuntimeError) as exc:
-            result.reason = f"zapier_fire_failed: {exc}"
+            result.reason = f"task_not_built: {exc}"
             return result
-        result.detail["zapier_result"] = task_fired
+        if ctx.dry_run and task_kind != TASK_KIND_DISPUTED_CHARGE:
+            result.detail["zapier_result"] = {"ok": True, "dry_run": True}
+        elif ctx.dry_run:
+            result.detail["task_result"] = {"ok": True, "dry_run": True}
     else:
-        result.detail["task_skipped"] = f"no task builder for notice type {notice_type!r}"
+        result.detail["task_skipped"] = f"no task for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
     if notice_type == triage.CANCELLATION:
@@ -1496,8 +1788,18 @@ def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, An
         entry["csr_login"] = str(detail.get("csr_username") or "")
     if detail.get("program_uuid"):
         entry["program_uuid"] = str(detail["program_uuid"])
+    if detail.get("category"):
+        entry["category"] = str(detail["category"])
     if detail.get("discussion_title"):
         entry["discussion_title"] = str(detail["discussion_title"])
+    if detail.get("discussion_plan"):
+        entry["discussion_plan"] = str(detail["discussion_plan"])
+    task = detail.get("task")
+    if isinstance(task, dict) and task.get("type"):
+        entry["task"] = {
+            "type": str(task.get("type") or ""),
+            "assignee": str(task.get("assignee") or ""),
+        }
     if "existing_note_duplicate" in detail:
         entry["existing_note_duplicate"] = bool(detail.get("existing_note_duplicate"))
     if "existing_note_read" in detail:
@@ -1510,6 +1812,7 @@ def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, An
 def run_driver(ctx: DriverContext) -> dict[str, Any]:
     """Process every unread notice; return a JSON-serializable summary."""
     ctx.seen_notice_events.clear()
+    ctx.planned_category_discussions.clear()
     notices = ctx.source.fetch_notices()
     paired: list[tuple[EmailNotice, NoticeResult]] = []
     for notice in notices:

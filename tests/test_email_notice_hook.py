@@ -38,7 +38,9 @@ except ImportError:  # pytest / PYTHONPATH=.
 
 
 def _ctx(*, dry_run=True, discussion_rows=None, policy_rows=None):
-    discussion_rows = discussion_rows or [{"discussionId": "d1", "title": "HO-998877"}]
+    discussion_rows = discussion_rows or [
+        {"discussionId": "d1", "title": "Ascend - Cancellation Notices"}
+    ]
     discussion_client = make_discussion_client(discussion_rows)
     if policy_rows is None:
         policy_rows = {"HO-998877": [policy_row()]}

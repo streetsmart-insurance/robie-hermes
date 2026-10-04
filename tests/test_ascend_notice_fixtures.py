@@ -32,13 +32,16 @@ FAMILY_TYPE = {
     "underwriting_request": triage.UNDERWRITING,
     "underwriting_counteroffer": triage.UNDERWRITING,
     "loan_paid_off": triage.PAID_OFF,
-    "disputed_charge": triage.UNKNOWN,
-    "reinstatement_approved": triage.UNKNOWN,
+    "disputed_charge": triage.DISPUTED_CHARGE,
+    "reinstatement_approved": triage.REINSTATEMENT,
+    "agency_remittance": triage.AGENCY_REMITTANCE,
+    "msa": triage.MSA,
 }
 
 # Frozen Policy ID captures. Spaced ("Policy ID X") and jammed
 # ("Policy IDXEffective") both have to keep these values.
 EXPECTED_POLICY_NUMBERS = {
+    "agency_remittance_01.json": [],
     "disputed_charge_01.json": [],
     "intent_to_cancel_copy_01.json": ["DSLA97258206-00"],
     "intent_to_cancel_copy_02.json": ["CPS6534227"],
@@ -52,6 +55,7 @@ EXPECTED_POLICY_NUMBERS = {
     "intent_to_cancel_copy_10.json": ["DSLA97258206-00"],
     "loan_canceled_nonpayment_01.json": ["CPS6534227"],
     "loan_paid_off_01.json": ["PAV1425221"],
+    "msa_01.json": [],
     "past_due_payment_01.json": ["GAT5643640-26"],
     "past_due_payment_02.json": ["NN0851210"],
     "past_due_payment_03.json": ["NN0851210"],
@@ -98,7 +102,7 @@ EXPECTED_POLICY_NUMBERS = {
 
 def _load_all():
     paths = sorted(FIXTURE_DIR.glob("*.json"))
-    assert len(paths) == 54, len(paths)
+    assert len(paths) == 56, len(paths)
     loaded = []
     for path in paths:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -109,7 +113,7 @@ def _load_all():
 
 def test_fixture_count_and_schema():
     loaded = _load_all()
-    assert len(loaded) == 54
+    assert len(loaded) == 56
     assert set(EXPECTED_POLICY_NUMBERS) == {name for name, _ in loaded}
 
 
@@ -169,21 +173,19 @@ def test_ignore_types_do_not_ask_for_human_review():
             raise AssertionError("ignored mail must not call Ascend")
 
     saw_ignore = False
-    saw_unknown = False
     for _name, data in _load_all():
         notice_type = FAMILY_TYPE[data["family"]]
-        if notice_type not in triage.IGNORE_TYPES and notice_type != triage.UNKNOWN:
+        if notice_type not in triage.IGNORE_TYPES:
             continue
         result = triage.triage_notice(_Boom(), data["subject"], data["text_plain"])
         assert result["notice_type"] == notice_type
-        if notice_type in triage.IGNORE_TYPES:
-            saw_ignore = True
-            assert result["needs_human_review"] is False
-            assert result.get("ignored") is True
-        elif notice_type == triage.UNKNOWN:
-            saw_unknown = True
-            assert result["needs_human_review"] is True
-    assert saw_ignore and saw_unknown
+        saw_ignore = True
+        assert result["needs_human_review"] is False
+        assert result.get("ignored") is True
+    assert saw_ignore
+    unknown = triage.triage_notice(_Boom(), "Your monthly statement is ready", "hello")
+    assert unknown["notice_type"] == triage.UNKNOWN
+    assert unknown["needs_human_review"] is True
 
 
 class _ResolvedProgram:
@@ -326,14 +328,22 @@ EXPECTED_NOTES = {
         "Fixture Insured A LLC"
     ),
     "disputed_charge_01.json": (
-        "UNRECOGNIZED notice from Ascend. "
+        "DISPUTED CHARGE notice from Ascend. "
         "A customer disputed a payment of $165.27.\n"
         "Fixture Insured A LLC"
     ),
     "reinstatement_approved_01.json": (
-        "UNRECOGNIZED notice from Ascend. "
-        "A reinstatement was requested. The carrier still has to accept it.\n"
+        "REINSTATEMENT notice from Ascend. "
+        "A reinstatement was approved. The carrier still has to accept it.\n"
         "Fixture Insured A LLC"
+    ),
+    "agency_remittance_01.json": (
+        "AGENCY REMITTANCE notice from Ascend. "
+        "A payment of $1,250.00 was remitted to the agency."
+    ),
+    "msa_01.json": (
+        "MSA notice from Ascend. "
+        "This is a master service agreement message."
     ),
 }
 
@@ -348,7 +358,11 @@ class _NoApi:
 
 def _triage_fixture(data):
     notice_type = FAMILY_TYPE[data["family"]]
-    if notice_type in triage.IGNORE_TYPES or notice_type == triage.UNKNOWN:
+    if (
+        notice_type in triage.IGNORE_TYPES
+        or notice_type == triage.UNKNOWN
+        or notice_type == triage.AGENCY_REMITTANCE
+    ):
         client = _NoApi()
     else:
         client = _ResolvedProgram("active")
@@ -419,7 +433,22 @@ def test_sign_in_and_msa_are_explicit_ignores():
     assert (
         triage.classify_notice("", "Master service agreement attached") == triage.MSA
     )
-    for subject in ("Sign in to Ascend", "MSA update"):
+    assert (
+        triage.classify_notice(
+            "Updates to Your Ascend Master Services Agreement", ""
+        )
+        == triage.MSA
+    )
+    assert (
+        triage.classify_notice("Document request for Fixture Insured A LLC", "")
+        == triage.UNDERWRITING
+    )
+    for subject in (
+        "Sign in to Ascend",
+        "MSA update",
+        "Remittance Notification - Payment of $10.00 for StreetSmart Insurance Agency",
+        "Updates to Your Ascend Master Services Agreement",
+    ):
         result = triage.triage_notice(object(), subject, "")
         assert result["needs_human_review"] is False
         assert result["ignored"] is True

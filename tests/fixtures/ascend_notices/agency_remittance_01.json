@@ -1,0 +1,11 @@
+{
+  "family": "agency_remittance",
+  "from": "accounting@useascend.com",
+  "subject": "Remittance Notification - Payment of $1,250.00 for StreetSmart Insurance Agency",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (420b)",
+    "  text/html (9800b)"
+  ],
+  "text_plain": "Hello,\r\n\r\nRemittance Notification - Payment of $1,250.00 for StreetSmart Insurance Agency.\r\n\r\nThis payment was sent to the agency. It is not tied to one insured.\r\n\r\nPowered by Ascend"
+}

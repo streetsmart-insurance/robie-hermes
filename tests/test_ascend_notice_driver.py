@@ -225,7 +225,7 @@ def make_ctx(
     discussion_rows = (
         discussion_rows
         if discussion_rows is not None
-        else [{"discussionId": "d1", "title": "HO-998877"}]
+        else [{"discussionId": "d1", "title": "Ascend - Cancellation Notices"}]
     )
     discussion_client = make_discussion_client(
         discussion_rows, discussion_detail=discussion_detail
@@ -334,7 +334,10 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert entry["applicant_id"] == ALLOWED_APPLICANT
     assert entry["csr_login"] == "KarlaSS"
     assert entry["program_uuid"] == "prog-1"
-    assert entry["discussion_title"] == "HO-998877"
+    assert entry["category"] == driver.CATEGORY_CANCELLATION_NOTICES
+    assert entry["discussion_title"] == "Ascend - Cancellation Notices"
+    assert entry["discussion_plan"] == "use_existing"
+    assert entry["task"] == {"type": "cancellation", "assignee": "KarlaSS"}
     assert "insured" not in entry
     assert summary["would_file_if_write_scope_allowed_count"] == 0
     assert summary["would_file_if_write_scope_allowed"] == []
@@ -601,7 +604,9 @@ def test_in_run_dedupe_collapses_same_event_without_a_second_note_read(no_zap_fi
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
+        discussion_rows=[
+            {"discussionId": "d-noc", "title": "Ascend - Cancellation Notices"}
+        ],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )
     summary = driver.run_driver(ctx)
@@ -652,7 +657,7 @@ def test_in_run_dedupe_collapses_identical_rendered_notes_without_dates(no_zap_f
     ctx, discussion_client = make_ctx(
         notices=[first, second],
         policy_rows={"GL-112233": [policy_row(number="GL-112233")]},
-        discussion_rows=[{"discussionId": "d-gl", "title": "GL-112233"}],
+        discussion_rows=[{"discussionId": "d-gl", "title": "Ascend - Payments"}],
         ascend_client=FakeAscendClient(program={"status": "past_due"}),
     )
     summary = driver.run_driver(ctx)
@@ -681,7 +686,9 @@ def test_in_run_dedupe_keeps_a_different_due_date(no_zap_fire):
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
+        discussion_rows=[
+            {"discussionId": "d-noc", "title": "Ascend - Cancellation Notices"}
+        ],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )
     summary = driver.run_driver(ctx)
@@ -699,7 +706,9 @@ def test_existing_note_duplicate_is_not_filed(no_zap_fire):
         policy_rows={
             "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
         },
-        discussion_rows=[{"discussionId": "d-noc", "title": "ABC123-00"}],
+        discussion_rows=[
+            {"discussionId": "d-noc", "title": "Ascend - Cancellation Notices"}
+        ],
         discussion_detail={
             "discussionId": "d-noc",
             "notes": [{"noteId": "n-already", "body": signed}],
@@ -749,7 +758,9 @@ def test_dry_run_reports_existing_note_duplicate_for_blocked_applicant(no_zap_fi
     assert blocked["applicant_id"] == "175448994"
     assert blocked["existing_note_duplicate"] is True
     assert blocked["existing_note_id"] == "n-existing"
-    assert blocked["discussion_title"] == "HO-998877"
+    assert blocked["discussion_title"] == "Ascend - Cancellation Notices"
+    assert blocked["discussion_plan"] == "use_existing"
+    assert blocked["task"]["type"] == "cancellation"
     assert summary["would_file"] == []
     assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.ezlynx_client.applied_labels == []
@@ -815,23 +826,23 @@ def test_cancellation_live_files_note_without_calling_the_label_api(no_zap_fire)
     assert ctx.source.marked == ["m1"]
 
 
-def test_cancellation_prefers_the_newest_policy_titled_discussion(no_zap_fire):
+def test_duplicate_category_titles_use_the_newest(no_zap_fire, caplog):
     rows = [
         {"discussionId": "d0", "title": "Untitled", "updatedAt": "2026-12-01T00:00:00Z"},
         {"discussionId": "d1", "title": "New Business", "updatedAt": "2026-08-01T00:00:00Z"},
         {
             "discussionId": "d-old",
-            "title": "HO-998877 APD",
+            "title": "ascend - cancellation notices",
             "updatedAt": "2026-01-01T00:00:00Z",
         },
         {
             "discussionId": "d2",
-            "title": "Policy HO-998877",
+            "title": "Ascend - Cancellation Notices",
             "updatedAt": "2026-09-01T00:00:00Z",
         },
         {
-            "discussionId": "d-ascend",
-            "title": "Ascend",
+            "discussionId": "d-policy",
+            "title": "Policy HO-998877",
             "updatedAt": "2026-11-01T00:00:00Z",
         },
     ]
@@ -841,11 +852,14 @@ def test_cancellation_prefers_the_newest_policy_titled_discussion(no_zap_fire):
         discussion_rows=rows,
         dry_run=False,
     )
-    summary = driver.run_driver(ctx)
+    with caplog.at_level("WARNING"):
+        summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "done"
     assert result["detail"]["discussion_id"] == "d2"
-    assert result["detail"]["discussion_title"] == "Policy HO-998877"
+    assert result["detail"]["discussion_title"] == "Ascend - Cancellation Notices"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert "using the newest d2" in caplog.text
     assert driver.ROBIE_WAS_HERE in result["detail"]["note_text"]
     posts = discussion_client._urlopen.posts_to("/notes")
     assert len(posts) == 1
@@ -860,7 +874,7 @@ def test_cancellation_prefers_the_newest_policy_titled_discussion(no_zap_fire):
     assert ctx.ezlynx_client.applied_labels == []
 
 
-def test_untitled_only_discussions_are_not_filed(no_zap_fire):
+def test_untitled_discussions_do_not_receive_the_note(no_zap_fire):
     rows = [{"discussionId": "d1", "title": "Untitled"}]
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
@@ -869,10 +883,17 @@ def test_untitled_only_discussions_are_not_filed(no_zap_fire):
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert result["reason"] == "no matching discussion"
-    assert result["detail"]["needs_human_review"] is True
+    assert result["status"] == "dry_run"
+    assert result["detail"]["discussion_plan"] == "create"
+    assert result["detail"]["discussion_title"] == "Ascend - Cancellation Notices"
+    assert result["detail"].get("discussion_id") in (None, "")
+    assert summary["would_file"][0]["discussion_plan"] == "create"
+    assert summary["would_file"][0]["task"] == {
+        "type": "cancellation",
+        "assignee": "KarlaSS",
+    }
     assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
     assert no_zap_fire == []
 
 
@@ -914,13 +935,14 @@ def test_signed_notice_note_is_plain_and_idempotent():
     assert signed.endswith(driver.ROBIE_WAS_HERE)
     assert driver.signed_notice_note(signed) == signed
     assert driver.signed_notice_note("") == ""
-    assert driver.discussion_title_hint(triage.CANCELLATION) == "cancellation"
-    assert driver.discussion_title_hint(triage.LATE_PAYMENT) == "noc"
-    assert driver.discussion_title_hint(triage.INTENT_TO_CANCEL) == "noc"
-    assert driver.discussion_title_hint(triage.RETURN_PREMIUM) is None
+    assert driver.category_for(triage.CANCELLATION) == driver.CATEGORY_CANCELLATION_NOTICES
+    assert driver.category_title(driver.CATEGORY_PAYMENTS) == "Ascend - Payments"
+    assert driver.category_for(triage.LATE_PAYMENT) == driver.CATEGORY_PAYMENTS
+    assert driver.category_for(triage.RETURN_PREMIUM) == driver.CATEGORY_RETURN_PREMIUM
+    assert driver.category_for(triage.NEW_PROGRAM) == ""
 
 
-def test_ambiguous_discussions_are_pending_not_filed(no_zap_fire):
+def test_non_category_titles_do_not_receive_the_note(no_zap_fire):
     rows = [
         {"discussionId": "d1", "title": "PCR"},
         {"discussionId": "d2", "title": "COI"},
@@ -932,15 +954,16 @@ def test_ambiguous_discussions_are_pending_not_filed(no_zap_fire):
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
-    assert result["status"] == "skipped"
-    assert result["reason"] == "no matching discussion"
-    assert result["detail"]["needs_human_review"] is True
-    assert summary["would_file"] == []
+    assert result["status"] == "dry_run"
+    assert result["detail"]["discussion_plan"] == "create"
+    assert result["detail"]["discussion_title"] == "Ascend - Cancellation Notices"
+    assert summary["would_file"][0]["discussion_plan"] == "create"
     assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
     assert no_zap_fire == []
 
 
-def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
+def test_category_title_match_ignores_case_and_other_ascend_titles(no_zap_fire):
     rows = [
         {
             "discussionId": "d-old",
@@ -949,7 +972,7 @@ def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
         },
         {
             "discussionId": "d-new",
-            "title": "Ascend NOC 09/23/2026",
+            "title": "  ascend - cancellation notices  ",
             "updatedAt": "2026-08-01T00:00:00Z",
         },
         {
@@ -972,8 +995,9 @@ def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
     result = summary["results"][0]
     assert result["status"] == "dry_run"
     assert result["detail"]["discussion_id"] == "d-new"
-    assert result["detail"]["discussion_title"] == "Ascend NOC 09/23/2026"
-    assert summary["would_file"][0]["discussion_title"] == "Ascend NOC 09/23/2026"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert result["detail"]["discussion_title"] == "ascend - cancellation notices"
+    assert summary["would_file"][0]["discussion_title"] == "ascend - cancellation notices"
 
 
 def test_fallback_keeps_220111302_when_title_cancel_date_matches(no_zap_fire, monkeypatch):
@@ -1013,7 +1037,7 @@ def test_fallback_keeps_220111302_when_title_cancel_date_matches(no_zap_fire, mo
             },
             {
                 "discussionId": "d-match",
-                "title": "Ascend cancel date 10/14/2026",
+                "title": "Ascend - Cancellation Notices",
                 "updatedAt": "2026-08-01T00:00:00Z",
             },
         ],
@@ -1024,8 +1048,10 @@ def test_fallback_keeps_220111302_when_title_cancel_date_matches(no_zap_fire, mo
     assert result["status"] == "dry_run"
     assert result["detail"]["applicant_id"] == "220111302"
     assert result["detail"]["discussion_id"] == "d-match"
-    assert result["detail"]["discussion_title"] == "Ascend cancel date 10/14/2026"
-    assert summary["would_file"][0]["discussion_title"] == "Ascend cancel date 10/14/2026"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert result["detail"]["discussion_title"] == "Ascend - Cancellation Notices"
+    assert result["detail"]["category"] == driver.CATEGORY_CANCELLATION_NOTICES
+    assert summary["would_file"][0]["discussion_title"] == "Ascend - Cancellation Notices"
     assert discussion_client._urlopen.posts_to("/notes") == []
 
 
@@ -1065,24 +1091,30 @@ def test_fallback_refuses_175448994_when_title_date_does_not_match(no_zap_fire):
     result = summary["results"][0]
     assert "Past Due Date: 09/06/2026" in title
     assert result["status"] == "skipped"
-    assert result["reason"] == "no matching discussion"
-    assert result["detail"]["needs_human_review"] is True
+    assert result["reason"].startswith("write_scope_refused")
     assert result["detail"]["applicant_id"] == "175448994"
+    assert result["detail"]["discussion_plan"] == "create"
+    assert result["detail"]["discussion_title"] == "Ascend - Cancellation Notices"
     assert summary["would_file"] == []
+    blocked = summary["would_file_if_write_scope_allowed"][0]
+    assert blocked["discussion_plan"] == "create"
+    assert blocked["discussion_title"] == "Ascend - Cancellation Notices"
+    assert blocked["task"]["type"] == "cancellation"
     assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
 
 
-def test_other_applicants_rows_do_not_win_the_policy_title(no_zap_fire):
+def test_other_applicants_rows_do_not_win_the_category_title(no_zap_fire):
     rows = [
         {
             "discussionId": "d-other",
-            "title": "HO-998877",
+            "title": "Ascend - Cancellation Notices",
             "applicantId": "999999999",
             "updatedAt": "2026-12-01T00:00:00Z",
         },
         {
             "discussionId": "d-ours",
-            "title": "Ascend 09/23/2026",
+            "title": "Ascend - Cancellation Notices",
             "applicantId": ALLOWED_APPLICANT,
             "updatedAt": "2026-01-01T00:00:00Z",
         },
@@ -1098,7 +1130,8 @@ def test_other_applicants_rows_do_not_win_the_policy_title(no_zap_fire):
     )
     summary = driver.run_driver(ctx)
     assert summary["results"][0]["detail"]["discussion_id"] == "d-ours"
-    assert summary["would_file"][0]["discussion_title"] == "Ascend 09/23/2026"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend - Cancellation Notices"
+    assert summary["would_file"][0]["discussion_plan"] == "use_existing"
 
 
 def test_discussion_base_url_is_host_only():
@@ -1131,24 +1164,28 @@ def test_late_payment_files_note_but_skips_task(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[notice],
         policy_rows={"GL-112233": [row]},
-        discussion_rows=[{"discussionId": "d-gl", "title": "GL-112233"}],
+        discussion_rows=[{"discussionId": "d-gl", "title": "Ascend - Payments"}],
         ascend_client=FakeAscendClient(program={"status": "past_due"}),
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "dry_run"
-    assert result["detail"]["discussion_title"] == "GL-112233"
+    assert result["detail"]["discussion_title"] == "Ascend - Payments"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert result["detail"]["category"] == driver.CATEGORY_PAYMENTS
     assert result["detail"]["notice_type"] == triage.LATE_PAYMENT
     assert result["detail"]["applicant_id"] == ALLOWED_APPLICANT
     assert "csr_username" not in result["detail"]
     assert discussion_client._urlopen.posts_to("/notes") == []  # dry-run: validated only
     assert no_zap_fire == []  # no task builder for late_payment
-    assert "no task builder" in result["detail"]["task_skipped"]
+    assert "no task for notice type" in result["detail"]["task_skipped"]
     assert "label" not in result["detail"]
     assert ctx.ezlynx_client.applied_labels == []
     entry = summary["would_file"][0]
     assert entry["notice_type"] == triage.LATE_PAYMENT
-    assert entry["discussion_title"] == "GL-112233"
+    assert entry["discussion_title"] == "Ascend - Payments"
+    assert entry["category"] == driver.CATEGORY_PAYMENTS
+    assert "task" not in entry
     assert "csr_login" not in entry
 
 
@@ -1554,7 +1591,8 @@ def test_matched_row_without_account_id_fails_closed():
     assert "accountId" in reason
 
 
-def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire):
+def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire, monkeypatch):
+    monkeypatch.delenv(driver.INTENT_CSR_TASK_ENV, raising=False)
     notice = make_notice(
         subject=(
             "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
@@ -1574,7 +1612,7 @@ def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire):
         },
         discussion_rows=[
             {"discussionId": "d-can", "title": "Service-Cancellation"},
-            {"discussionId": "d-noc", "title": "Ascend NOC 10/14/2026"},
+            {"discussionId": "d-noc", "title": "Ascend - Cancellation Notices"},
         ],
         ascend_client=FakeAscendClient(program={"status": "overdue"}),
     )
@@ -1606,8 +1644,8 @@ def test_informational_mail_is_ignored_not_skipped(no_zap_fire):
             raise AssertionError("ignored mail must not call Ascend")
 
     notice = make_notice(
-        subject="Processing payment for Fixture Insured A LLC",
-        body="Your customer has just initiated their payment.",
+        subject="Updates to Your Ascend Master Services Agreement",
+        body="The master services agreement was updated.",
         message_id="ign-1",
     )
     ctx, discussion_client = make_ctx(
@@ -1623,7 +1661,7 @@ def test_informational_mail_is_ignored_not_skipped(no_zap_fire):
     assert summary["skipped"] == 0
     assert summary["would_file"] == []
     assert summary["breakdown"]["ignored"] == 1
-    assert summary["breakdown"]["by_notice_type"]["processing_payment"] == 1
+    assert summary["breakdown"]["by_notice_type"]["msa"] == 1
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert ctx.ezlynx_client.searched == []
     assert no_zap_fire == []
@@ -1741,9 +1779,16 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
     assert "os.environ.setdefault" not in scope_source
 
 
-def test_driver_refuses_non_note_writes():
-    allowed = dict(discussion_id="d1", discussion_title="HO-998877")
+def test_driver_refuses_writes_outside_category_note_create_and_task():
+    allowed = dict(discussion_id="d1", discussion_title="Ascend - Payments")
     driver.authorize_notice_write("discussion_note", **allowed)
+    driver.authorize_notice_write(
+        "discussion_create_with_note",
+        discussion_title="Ascend - Cancellation Notices",
+    )
+    driver.authorize_notice_write("task_create", task_kind="cancellation")
+    driver.authorize_notice_write("task_create", task_kind="disputed_charge")
+    driver.authorize_notice_write("task_create", task_kind="intent_to_cancel")
     for action in (
         "document_upload",
         "discussion_create",
@@ -1758,10 +1803,169 @@ def test_driver_refuses_non_note_writes():
             driver.authorize_notice_write(action, **allowed)
     with pytest.raises(driver.NonNoteWriteRefused, match="existing discussion"):
         driver.authorize_notice_write(
-            "discussion_note", discussion_id="", discussion_title="HO-998877"
+            "discussion_note",
+            discussion_id="",
+            discussion_title="Ascend - Payments",
         )
-    for title in ("", "Untitled", "untitled"):
-        with pytest.raises(driver.NonNoteWriteRefused, match="titled discussion"):
+    for title in ("", "Untitled", "untitled", "HO-998877", "Ascend NOC"):
+        with pytest.raises(driver.NonNoteWriteRefused, match="category discussion"):
             driver.authorize_notice_write(
                 "discussion_note", discussion_id="d1", discussion_title=title
             )
+    with pytest.raises(driver.NonNoteWriteRefused, match="category title"):
+        driver.authorize_notice_write(
+            "discussion_create_with_note",
+            discussion_title="Untitled",
+        )
+    with pytest.raises(driver.NonNoteWriteRefused, match="task_create"):
+        driver.authorize_notice_write("task_create", task_kind="refund")
+
+
+def _disputed_notice():
+    return make_notice(
+        subject="[Action Needed] Disputed charge for Fixture Insured A LLC",
+        body=(
+            "Your customer, Fixture Insured A LLC, disputed the following payment.\n"
+            "Payment amount $165.27\n"
+            "Policy ID HO-998877\n"
+        ),
+        message_id="dispute-1",
+    )
+
+
+def test_agency_remittance_is_ignored(no_zap_fire):
+    class _RaisingAscend:
+        def get_program(self, *_args, **_kwargs):
+            raise AssertionError("remittance must not call Ascend")
+
+        def find_program_by_policy(self, *_args, **_kwargs):
+            raise AssertionError("remittance must not call Ascend")
+
+    notice = make_notice(
+        subject="Remittance Notification - Payment of $1,250.00 for StreetSmart Insurance Agency",
+        body="Remittance Notification - Payment of $1,250.00 for the agency.",
+        message_id="remit-1",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        ascend_client=_RaisingAscend(),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "ignored"
+    assert result["reason"] == "ignored"
+    assert "needs_human_review" not in result["reason"]
+    assert summary["would_file"] == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+    assert "ROBIE_ASCEND_AGENCY_APPLICANT_ID" not in Path(driver.__file__).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_disputed_charge_fails_closed_without_markley_user_id(no_zap_fire, monkeypatch):
+    monkeypatch.delenv("ROBIE_ACCOUNTING_ASSIGNEE", raising=False)
+    assert driver.ezlynx_user_id_for_login("Markley1") is None
+    assert "eca8cba27574021b7b0e924b9cf389d720cce745" in driver.ACCOUNTING_EZLYNX_USER["source"]
+    assert "ezlynx_user_id" not in driver.ACCOUNTING_EZLYNX_USER
+    ctx, discussion_client = make_ctx(
+        notices=[_disputed_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=[{"discussionId": "d-pay", "title": "Ascend - Payments"}],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert result["reason"] == "accounting assignee id unknown"
+    assert result["detail"]["needs_human_review"] is True
+    assert result["detail"]["accounting_login"] == "Markley1"
+    assert summary["would_file"] == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+
+
+def test_disputed_charge_tasks_when_the_user_id_is_known(no_zap_fire, monkeypatch):
+    monkeypatch.setitem(driver.ACCOUNTING_EZLYNX_USER, "ezlynx_user_id", 424242)
+    ctx, discussion_client = make_ctx(
+        notices=[_disputed_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=[{"discussionId": "d-pay", "title": "Ascend - Payments"}],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["category"] == driver.CATEGORY_PAYMENTS
+    assert result["detail"]["discussion_title"] == "Ascend - Payments"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert "DISPUTED CHARGE notice from Ascend." in result["detail"]["note_text"]
+    entry = summary["would_file"][0]
+    assert entry["task"] == {"type": "disputed_charge", "assignee": "Markley1"}
+    note = result["detail"]["task_payload"]
+    assert note["type"] == "TaskCreationNote"
+    assert note["task"]["assignedUserId"] == 424242
+    assert "applicantId" not in note
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+
+
+def test_intent_to_cancel_csr_task_flag_off_is_note_only(no_zap_fire, monkeypatch):
+    monkeypatch.delenv(driver.INTENT_CSR_TASK_ENV, raising=False)
+    notice = make_notice(
+        subject=(
+            "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
+            "Policy(s) at risk for cancellation"
+        ),
+        body=(
+            "Notice of Intent to Cancel. Your loan payment of $525.30 was due on 09/21/2026.\n"
+            "Policy ID HO-998877\n"
+        ),
+        message_id="intent-off",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={"HO-998877": [policy_row()]},
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["notice_type"] == triage.INTENT_TO_CANCEL
+    assert "task_payload" not in result["detail"]
+    assert "task" not in summary["would_file"][0]
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert no_zap_fire == []
+
+
+def test_intent_to_cancel_csr_task_flag_on_assigns_the_csr(no_zap_fire, monkeypatch):
+    monkeypatch.setenv(driver.INTENT_CSR_TASK_ENV, "1")
+    notice = make_notice(
+        subject=(
+            "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
+            "Policy(s) at risk for cancellation"
+        ),
+        body=(
+            "Notice of Intent to Cancel. Your loan payment of $525.30 was due on 09/21/2026.\n"
+            "Policy ID HO-998877\n"
+        ),
+        message_id="intent-on",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={"HO-998877": [policy_row()]},
+        ascend_client=FakeAscendClient(program={"status": "overdue", "producer": _mapped_producer()}),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["csr_username"] == "KarlaSS"
+    assert summary["would_file"][0]["task"] == {
+        "type": "intent_to_cancel",
+        "assignee": "KarlaSS",
+    }
+    assert result["detail"]["task_payload"]["assignee"] == "KarlaSS"
+    assert result["detail"]["task_payload"]["notice_type"] == triage.INTENT_TO_CANCEL
+    assert "label" not in result["detail"]
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert no_zap_fire == []
