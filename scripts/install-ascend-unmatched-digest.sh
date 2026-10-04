@@ -25,6 +25,11 @@
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --rollback /root/robie-ascend-unmatched-digest-YYYYMMDDTHHMMSSZ
 #
+# --enable-timer and --live write unmatched-digest-installed under
+# data/ascend-api. Health watches the digest only when that marker exists
+# or the timer is enabled. --dry-run-once does not write the marker.
+# --rollback removes it.
+#
 # Tests pass --prefix and stub --systemctl / --systemd-analyze. --prefix is
 # not for Production.
 
@@ -47,7 +52,7 @@ SYSTEMCTL="${ASCEND_DIGEST_INSTALL_SYSTEMCTL:-systemctl}"
 ANALYZE="${ASCEND_DIGEST_INSTALL_ANALYZE:-systemd-analyze}"
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -116,6 +121,12 @@ else
 fi
 
 DROPIN_DIR="${ETC}/${DROPIN_NAME}"
+MARKER_REL="opt/streetsmart-hermes/robie-job-engine/data/ascend-api/unmatched-digest-installed"
+if [[ -n "$PREFIX" ]]; then
+  MARKER="${PREFIX}/${MARKER_REL}"
+else
+  MARKER="/${MARKER_REL}"
+fi
 
 require_real_root() {
   if [[ -n "$PREFIX" ]]; then
@@ -203,8 +214,26 @@ restore_from_backup() {
   fi
   "${SYSTEMCTL}" daemon-reload
   "${SYSTEMCTL}" disable --now "$TIMER" || true
+  remove_installed_marker
   echo "ROLLBACK=${backup}"
   echo "timer left stopped"
+}
+
+write_installed_marker() {
+  local dir
+  dir="$(dirname "$MARKER")"
+  mkdir -p "$dir"
+  if [[ "$(basename "$dir")" == "ascend-api" ]]; then
+    chmod 0755 "$dir"
+  fi
+  printf 'enabled %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MARKER"
+  chmod 0644 "$MARKER"
+  echo "MARKER_WRITTEN"
+}
+
+remove_installed_marker() {
+  rm -f "$MARKER"
+  echo "MARKER_REMOVED"
 }
 
 install_release() {
@@ -254,6 +283,7 @@ install_release() {
   # enables it after the dry verification start.
   if [[ "$DO_LIVE" -eq 1 || "$ENABLE_TIMER" -eq 1 ]]; then
     "${SYSTEMCTL}" enable --now "$TIMER"
+    write_installed_marker
   else
     echo "TIMER_NOT_ENABLED"
   fi

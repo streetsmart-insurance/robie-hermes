@@ -1451,11 +1451,13 @@ def check_test_stuck_job_leases() -> tuple[bool, str, dict]:
 
 
 def check_ascend_unmatched_digest() -> tuple[bool, str, dict]:
-    """Alert when the accounting digest failed or skipped a business day.
+    """Alert when an installed accounting digest failed or skipped a business day.
 
     Reads the digest's last-run file (or ``ASCEND_UNMATCHED_DIGEST_STATE``).
-    A missing file is quiet: the unit is not installed yet. This probe does
-    not read the journal and does not send email.
+    Quiet unless the weekday timer is enabled or the installer marker exists.
+    A missing file after --dry-run-once, after rollback, or before the digest
+    is installed does not page. This probe does not read the journal and does
+    not send email.
     """
     extra: dict = {}
     try:

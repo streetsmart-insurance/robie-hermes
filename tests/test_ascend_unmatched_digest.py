@@ -165,6 +165,8 @@ def test_near_match_requires_one_candidate_and_the_same_name():
     assert digest.suggest_near_match([other_name], ["HO-998877"], "Fixture Hauling LLC") is None
     assert digest.suggest_near_match([close, second], ["HO-998877"], "Fixture Hauling LLC") is None
     assert digest.suggest_near_match([close], ["HO-998877"], "Somebody Else LLC") is None
+    other = _index_row("HO-998879", "Other Hauling LLC", "220250094")
+    assert digest.suggest_near_match([close, other], ["HO-998877"], "Fixture Hauling LLC") is None
 
 
 def test_unmatched_row_is_stored_and_a_later_filing_resolves_it(tmp_path, monkeypatch):
@@ -419,7 +421,7 @@ def test_sample_digest_is_plain_english():
     assert "Ascend did not include a policy number." in body
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
-        "Correct the policy number in EZLynx or Ascend, and Robie files it automatically on its next run."
+        "Fix the policy number in EZLynx or Ascend and it drops off this list once Robie can match it."
     )
     for forbidden in ("event_key", "program_id", "late_payment", "applicant_id", "unmatched_reason"):
         assert forbidden not in subject
@@ -557,11 +559,15 @@ def test_index_refresh_counts_calls_and_refuses_a_repeated_page(tmp_path):
     assert fresh.policy_index()[0] == []
 
 
-def test_digest_health_alerts_on_failure_and_a_missed_business_day(tmp_path):
+def test_digest_health_alerts_on_failure_and_a_missed_business_day(tmp_path, monkeypatch):
     path = tmp_path / "unmatched-digest-last-run.json"
+    marker = tmp_path / "unmatched-digest-installed"
+    marker.write_text("enabled\n", encoding="utf-8")
+    monkeypatch.setenv(digest.MARKER_ENV, str(marker))
+    monkeypatch.setattr(digest, "timer_is_enabled", lambda: False)
     missing_early = digest.evaluate_digest_health(path, now=datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc))
     assert missing_early["ok"] is True
-    assert missing_early["installed"] is False
+    assert missing_early["installed"] is True
     missing_late = digest.evaluate_digest_health(path, now=NOW)
     assert missing_late["ok"] is False
     assert "did not run today" in missing_late["detail"]
@@ -600,6 +606,8 @@ def test_digest_health_alerts_on_failure_and_a_missed_business_day(tmp_path):
     assert "ascend_unmatched_digest" in health.PROD_ONLY_CHECK_NAMES
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("ASCEND_UNMATCHED_DIGEST_STATE", str(path))
+        patch.setenv(digest.MARKER_ENV, str(marker))
+        patch.setattr(digest, "timer_is_enabled", lambda: False)
         path.write_text(
             json.dumps({"run_at": "2026-10-02T12:30:00Z", "exit_code": 0}),
             encoding="utf-8",
@@ -611,9 +619,14 @@ def test_digest_health_alerts_on_failure_and_a_missed_business_day(tmp_path):
             encoding="utf-8",
         )
         ok, detail, extra = health.check_ascend_unmatched_digest()
+        patch.setenv(digest.MARKER_ENV, str(tmp_path / "absent-marker"))
+        quiet_ok, quiet_detail, quiet_extra = health.check_ascend_unmatched_digest()
     assert ok is False
     assert "failed" in detail
     assert extra["installed"] is True
+    assert quiet_ok is True
+    assert quiet_extra["installed"] is False
+    assert "not installed" in quiet_detail
 
 
 def test_live_digest_sends_once_through_the_mailer(tmp_path):
@@ -860,64 +873,163 @@ def test_a_later_match_resolves_without_a_live_file(tmp_path, monkeypatch):
     assert store.is_filed(store.list_unmatched()[0]["event_key"]) is False
 
 
-def test_email_file_resolves_one_notice_and_a_near_name_miss_does_not(tmp_path, monkeypatch):
-    helpers_path = Path(__file__).with_name("test_ascend_notice_driver.py")
-    spec = importlib.util.spec_from_file_location("ascend_driver_notice_helpers", helpers_path)
-    helpers = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helpers)
-    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
-    filed = source.ApiNotice(
-        event_key="filed",
-        event_type="cancellation",
-        program_id="prog-1",
-        anchor="2026-10-01T00:00:00Z",
-        occurred_at="2026-10-01T00:00:00Z",
-        policy_numbers=("HO-998877",),
-        insured_name="Stafford Adult Softball League LLC",
+def _open_unmatched(store, *, key, policy, name, notice_type="late_payment"):
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key=key,
+            event_type=notice_type,
+            program_id="prog-1",
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=(policy,) if policy else (),
+            insured_name=name,
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
     )
-    other = source.ApiNotice(
-        event_key="other",
-        event_type="cancellation",
-        program_id=HELPERS._pid(2),
-        anchor="2026-10-01T00:00:00Z",
-        occurred_at="2026-10-01T00:00:00Z",
-        policy_numbers=("CA-100200",),
-        insured_name="Northwind Trucking Inc",
-    )
-    store.upsert_unmatched(filed, reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX, seen_at="2026-10-01T00:00:00Z")
-    store.upsert_unmatched(other, reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX, seen_at="2026-10-01T00:00:00Z")
-    monkeypatch.setenv(digest.DB_ENV, str(store.path))
-    monkeypatch.setattr(driver.zapier_tasks, "fire_task", lambda payload, *, dry_run=False: {"ok": True})
-    dry_ctx, _discussion = helpers.make_ctx(
-        notices=[helpers.make_notice()],
-        policy_rows={"HO-998877": [helpers.policy_row()]},
-        dry_run=True,
-    )
-    dry = driver.run_driver(dry_ctx)
-    assert dry["results"][0]["status"] == "dry_run"
-    assert store.list_unmatched()[0]["resolved_at"] in (None, "")
-    live_ctx, _discussion = helpers.make_ctx(
-        notices=[helpers.make_notice()],
-        policy_rows={"HO-998877": [helpers.policy_row()]},
-        dry_run=False,
-    )
-    live = driver.run_driver(live_ctx)
-    assert live["results"][0]["status"] == "done"
-    rows = {row["event_key"]: row for row in store.list_unmatched()}
-    assert rows["filed"]["resolved_at"]
-    assert rows["other"]["resolved_at"] in (None, "")
 
-    two = [
-        {"event_key": "a", "notice_type": "cancellation", "program_id": "p", "insured_name": "Same LLC", "policy_numbers": ["HO-1"], "resolved_at": ""},
-        {"event_key": "b", "notice_type": "cancellation", "program_id": "p", "insured_name": "Same LLC", "policy_numbers": ["HO-2"], "resolved_at": ""},
-    ]
-    assert digest.rows_matching_filed_email(
-        two, notice_type="cancellation", program_id="p", policy_numbers=["HO-9"], insured_name="Same LLC"
-    ) == []
-    one = digest.rows_matching_filed_email(
-        two[:1], notice_type="cancellation", program_id="p", policy_numbers=["HO-9"], insured_name="Same LLC"
+
+class _PolicySearch:
+    """PolicyApi number search only. Any write, including a note, fails the test."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls: list[str] = []
+
+    def search_policy_by_number(self, policy_number):
+        self.calls.append(policy_number)
+        page = self.pages.get(policy_number, {"data": [], "totalSize": 0})
+        if isinstance(page, Exception):
+            raise page
+        return page
+
+    def __getattr__(self, name):
+        raise AssertionError(f"digest recheck must not call {name}")
+
+
+def _policy_hit(number, applicant, name="Fixture Hauling"):
+    return {
+        "data": [
+            {
+                "PolicyNumber": number,
+                "ApplicantId": applicant,
+                "ApplicantName": name,
+            }
+        ],
+        "totalSize": 1,
+    }
+
+
+def test_digest_recheck_resolves_one_client_and_leaves_it_out_of_the_email(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    _open_unmatched(store, key="matched", policy="HO-998877", name="Fixture Hauling LLC")
+    _open_unmatched(store, key="still-open", policy="CA-100200", name="Northwind Trucking Inc")
+    client = _PolicySearch({"HO-998877": _policy_hit("HO-998877", "220250093")})
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=False,
+        ezlynx_client=client,
+        refresh=False,
     )
-    assert [row["event_key"] for row in one] == ["a"]
+    rows = {row["event_key"]: row for row in store.list_unmatched()}
+    assert rows["matched"]["resolved_at"]
+    assert rows["still-open"]["resolved_at"] in (None, "")
+    assert result["resolved_count"] == 1
+    assert "Fixture Hauling LLC" not in result["body"]
+    assert "Northwind Trucking Inc" in result["body"]
+    assert "drops off this list once Robie can match it." in result["body"]
+    assert client.calls == ["HO-998877", "CA-100200"]
+
+
+def test_digest_recheck_leaves_two_candidates_and_a_failed_search_open(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    _open_unmatched(store, key="two", policy="HO-998877", name="Fixture Hauling LLC")
+    _open_unmatched(store, key="down", policy="CA-100200", name="Northwind Trucking Inc")
+    _save_index(store, [_index_row("HO-998877", "Fixture Hauling", "220250093")])
+    client = _PolicySearch(
+        {
+            "HO-998877": {
+                "data": [
+                    {"PolicyNumber": "HO-998877", "ApplicantId": "1"},
+                    {"PolicyNumber": "HO-998877", "ApplicantId": "2"},
+                ],
+                "totalSize": 2,
+            },
+            "CA-100200": RuntimeError("policy api down"),
+        }
+    )
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=False,
+        ezlynx_client=client,
+        refresh=False,
+    )
+    rows = {row["event_key"]: row for row in store.list_unmatched()}
+    assert rows["two"]["resolved_at"] in (None, "")
+    assert rows["down"]["resolved_at"] in (None, "")
+    assert result["resolved_count"] == 0
+    assert "Fixture Hauling LLC" in result["body"]
+    assert "Northwind Trucking Inc" in result["body"]
+
+
+def test_digest_recheck_uses_a_complete_index_and_ignores_a_zero_search(tmp_path):
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    _open_unmatched(store, key="indexed", policy="HO-998877", name="Fixture Hauling LLC")
+    _open_unmatched(store, key="two-index", policy="CA-100200", name="Northwind Trucking Inc")
+    _save_index(
+        store,
+        [
+            _index_row("HO-998877", "Fixture Hauling", "220250093"),
+            _index_row("CA-100200", "Northwind", "1"),
+            _index_row("CA-100200", "Other Wind", "2"),
+        ],
+    )
+    from_index = digest.run_digest(stores=[store], now=NOW, live=False, refresh=False)
+    rows = {row["event_key"]: row for row in store.list_unmatched()}
+    assert rows["indexed"]["resolved_at"]
+    assert rows["two-index"]["resolved_at"] in (None, "")
+    assert from_index["resolved_count"] == 1
+    assert "Fixture Hauling LLC" not in from_index["body"]
+
+    missed = source.EventKeyStore(tmp_path / "ascend-api" / "missed.db")
+    _open_unmatched(missed, key="stale", policy="HO-998877", name="Fixture Hauling LLC")
+    _save_index(missed, [_index_row("HO-998877", "Fixture Hauling", "220250093")])
+    client = _PolicySearch({})
+    stayed = digest.run_digest(
+        stores=[missed],
+        now=NOW,
+        live=False,
+        ezlynx_client=client,
+        refresh=False,
+    )
+    assert missed.list_unmatched()[0]["resolved_at"] in (None, "")
+    assert stayed["resolved_count"] == 0
+    assert "Fixture Hauling LLC" in stayed["body"]
+
+
+def test_health_stays_quiet_when_the_digest_is_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(digest, "timer_is_enabled", lambda: False)
+    marker = tmp_path / "unmatched-digest-installed"
+    monkeypatch.setenv(digest.MARKER_ENV, str(marker))
+    state = tmp_path / "unmatched-digest-last-run.json"
+    missing = digest.evaluate_digest_health(state, now=NOW)
+    assert missing["ok"] is True
+    assert missing["installed"] is False
+    assert "not installed" in missing["detail"]
+    state.write_text(
+        json.dumps({"run_at": "2026-10-05T12:30:00Z", "exit_code": 1, "error": "send failed"}),
+        encoding="utf-8",
+    )
+    leftover = digest.evaluate_digest_health(state, now=NOW)
+    assert leftover["ok"] is True
+    assert leftover["installed"] is False
+    monkeypatch.setattr(digest, "timer_is_enabled", lambda: True)
+    watched = digest.evaluate_digest_health(state, now=NOW)
+    assert watched["ok"] is False
+    assert watched["installed"] is True
+    assert "failed" in watched["detail"]
 
 
 def test_existing_database_gains_unmatched_tables(tmp_path):

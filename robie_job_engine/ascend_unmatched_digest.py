@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -71,7 +72,9 @@ from .ascend_notice_driver import (
     _first_present,
     _page_total,
     _policy_rows,
+    _resolve_by_policy_numbers,
     _row_policy_number,
+    _rows_matching_policy,
     insured_name_cores,
     insured_names_match,
 )
@@ -82,6 +85,8 @@ logger = logging.getLogger(__name__)
 LIVE_ENV = "ASCEND_UNMATCHED_DIGEST_LIVE"
 STATE_ENV = "ASCEND_UNMATCHED_DIGEST_STATE"
 DB_ENV = "ASCEND_UNMATCHED_DIGEST_DB"
+MARKER_ENV = "ASCEND_UNMATCHED_DIGEST_MARKER"
+TIMER_UNIT = "robie-ascend-unmatched-digest.timer"
 ACCOUNTING_TO = "accounting@streetsmart.insurance"
 EASTERN = ZoneInfo("America/New_York")
 WINDOW = timedelta(days=14)
@@ -101,6 +106,10 @@ DEADLINE_MINUTE = 30
 DEFAULT_STATE_PATH = Path(
     "/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/"
     "unmatched-digest-last-run.json"
+)
+DEFAULT_MARKER_PATH = Path(
+    "/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/"
+    "unmatched-digest-installed"
 )
 STORE_FILE_MODE = 0o644
 STORE_DIR_NAME = "ascend-api"
@@ -140,8 +149,8 @@ _NOTICE_WORDS = {
 
 _POLICY_IGNORABLE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014]+")
 _FIX_LINE = (
-    "Correct the policy number in EZLynx or Ascend, and Robie files it "
-    "automatically on its next run."
+    "Fix the policy number in EZLynx or Ascend and it drops off this list "
+    "once Robie can match it."
 )
 
 
@@ -155,6 +164,44 @@ def state_path() -> Path:
     if override:
         return Path(override)
     return DEFAULT_STATE_PATH
+
+
+def marker_path() -> Path:
+    """Installer marker. Present only after --enable-timer or --live."""
+    override = str(os.environ.get(MARKER_ENV) or "").strip()
+    if override:
+        return Path(override)
+    return DEFAULT_MARKER_PATH
+
+
+def timer_is_enabled() -> bool:
+    """True when systemd reports the weekday digest timer as enabled."""
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-enabled", TIMER_UNIT],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def digest_watch_installed() -> bool:
+    """Health watches the digest only after install, not on a missing file.
+
+    The installer writes the marker on --enable-timer and --live and removes
+    it on rollback. --dry-run-once writes nothing. An enabled timer counts
+    even if the marker was removed by hand.
+    """
+    try:
+        if marker_path().is_file():
+            return True
+    except OSError:
+        return False
+    return timer_is_enabled()
 
 
 def policy_compare_key(value: str) -> str:
@@ -204,10 +251,12 @@ def suggest_near_match(
     policy_numbers: list[str],
     insured_name: str,
 ) -> NearMatch | None:
-    """One client when both the policy is one character off and the name matches.
+    """Exactly one EZLynx policy is one character off, and that client's name matches.
 
-    Zero or two candidates return nothing. The caller must pass a complete
-    index. This function does not call EZLynx.
+    Count one-character policies first. Two policies one character off return
+    nothing even when only one of those names matches. Zero candidates return
+    nothing. The caller must pass a complete index. This function does not
+    call EZLynx.
     """
     if not index_rows or not insured_name_cores(insured_name):
         return None
@@ -220,18 +269,20 @@ def suggest_near_match(
         key = policy_compare_key(str(row.get("policy_number") or ""))
         if not key or not any(one_character_apart(key, target) for target in wanted):
             continue
-        client_name = str(row.get("applicant_name") or "").strip()
         applicant_id = str(row.get("applicant_id") or "").strip()
-        if not applicant_id or not insured_names_match(insured_name, client_name):
+        if not applicant_id:
             continue
         found[(applicant_id, key)] = NearMatch(
-            client_name=client_name,
+            client_name=str(row.get("applicant_name") or "").strip(),
             policy_number=str(row.get("policy_number") or "").strip(),
             applicant_id=applicant_id,
         )
     if len(found) != 1:
         return None
-    return next(iter(found.values()))
+    match = next(iter(found.values()))
+    if not insured_names_match(insured_name, match.client_name):
+        return None
+    return match
 
 
 def fallback_reason(raw: str, policy_numbers: list[str] | tuple[str, ...]) -> str:
@@ -287,100 +338,111 @@ def resolve_unmatched_notice(store: EventKeyStore, event_key: str, seen_at: str)
     store.resolve_unmatched(event_key, seen_at)
 
 
-def rows_matching_filed_email(
+def exact_applicant_from_index(
+    index_rows: list[dict[str, Any]],
+    policy_numbers: list[str],
+) -> str | None:
+    """One applicant id when the saved index has an exact policy hit.
+
+    The same rule as PolicyApi search: exact normalized number, then a
+    term-suffix match. Two rows or two applicants return nothing.
+    """
+    numbers = [str(number or "").strip() for number in policy_numbers if str(number or "").strip()]
+    if not numbers or not index_rows:
+        return None
+    found: list[str] = []
+    for number in numbers:
+        matched = _rows_matching_policy(index_rows, number)
+        if not matched:
+            continue
+        if len(matched) != 1:
+            return None
+        applicant_id = _first_present(matched[0], _APPLICANT_ID_KEYS)
+        if not applicant_id:
+            return None
+        found.append(applicant_id)
+    unique = set(found)
+    if len(unique) != 1:
+        return None
+    return found[0]
+
+
+def _policy_numbers_of(row: dict[str, Any]) -> list[str]:
+    raw = row.get("policy_numbers") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(number).strip() for number in raw if str(number or "").strip()]
+
+
+def _resolve_open_row(
+    row: dict[str, Any],
+    *,
+    ezlynx_client: Any | None,
+    index_rows: list[dict[str, Any]],
+    index_complete: bool,
+) -> bool:
+    """True when this open row now belongs to exactly one EZLynx client.
+
+    A live PolicyApi search wins. Zero rows, several clients, or a failed
+    search stay open and do not fall back to the saved index. With no
+    client, only a complete index can resolve the row. Nothing here files
+    a note or writes a policy.
+    """
+    numbers = _policy_numbers_of(row)
+    if not numbers:
+        return False
+    if ezlynx_client is not None:
+        try:
+            resolution, _reason, _fall_through = _resolve_by_policy_numbers(
+                ezlynx_client, numbers
+            )
+        except Exception as exc:  # noqa: BLE001 - leave the row on the list
+            logger.warning("digest recheck search failed: %s", type(exc).__name__)
+            return False
+        return resolution is not None
+    if not index_complete:
+        return False
+    return exact_applicant_from_index(index_rows, numbers) is not None
+
+
+def recheck_open_unmatched(
     rows: list[dict[str, Any]],
     *,
-    notice_type: str,
-    program_id: str,
-    policy_numbers: list[str],
-    insured_name: str,
-) -> list[dict[str, Any]]:
-    """Open rows the email driver just filed.
+    ezlynx_client: Any | None,
+    index_rows: list[dict[str, Any]],
+    index_complete: bool,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], int]:
+    """Resolve open rows that now match one client, and return the rest.
 
-    Policy numbers that overlap win. When the number was corrected and no
-    longer overlaps, exactly one same-name row is closed. Two candidates
-    with no shared policy number stay open.
+    Filing stays with the poll and the notice driver. This only updates
+    the local unmatched table so a corrected policy drops off the email.
     """
-    kind = str(notice_type or "").strip().lower()
-    program = str(program_id or "").strip().lower()
-    wanted = {policy_compare_key(number) for number in policy_numbers}
-    wanted.discard("")
-    open_rows = [
-        row
-        for row in rows
-        if not str(row.get("resolved_at") or "").strip()
-        and str(row.get("notice_type") or "").strip().lower() == kind
-    ]
-    if program:
-        open_rows = [
-            row
-            for row in open_rows
-            if not str(row.get("program_id") or "").strip()
-            or str(row.get("program_id") or "").strip().lower() == program
-        ]
-
-    def name_ok(row: dict[str, Any]) -> bool:
-        row_name = str(row.get("insured_name") or "").strip()
-        if not row_name or not str(insured_name or "").strip():
-            return True
-        return insured_names_match(insured_name, row_name)
-
-    named = [row for row in open_rows if name_ok(row)]
-    if wanted:
-        overlapped = []
-        for row in named:
-            keys = {policy_compare_key(number) for number in row.get("policy_numbers") or []}
-            keys.discard("")
-            if keys & wanted:
-                overlapped.append(row)
-        if overlapped:
-            return overlapped
-        if len(named) == 1:
-            return named
-        return []
-    if len(named) == 1:
-        return named
-    return []
-
-
-def resolve_unmatched_filed_by_email(
-    *,
-    notice_type: str,
-    program_id: str,
-    policy_numbers: list[str],
-    insured_name: str,
-    seen_at: str,
-    stores: list[EventKeyStore] | None = None,
-) -> int:
-    """Close open rows after the email driver files the notice.
-
-    Only store files that already exist are opened. A missing digest unit
-    and a missing database are left alone. Nothing is written to EZLynx.
-    """
-    opened = stores
-    if opened is None:
-        opened = []
-        for path in digest_store_paths():
-            if path.is_file():
-                opened.append(EventKeyStore(path))
-    closed = 0
-    for store in opened:
+    moment = _iso(now)
+    still_open: list[dict[str, Any]] = []
+    resolved = 0
+    for row in rows:
+        if not _resolve_open_row(
+            row,
+            ezlynx_client=ezlynx_client,
+            index_rows=index_rows,
+            index_complete=index_complete,
+        ):
+            still_open.append(row)
+            continue
+        store = row.get("_store")
+        key = str(row.get("event_key") or "").strip()
+        if not isinstance(store, EventKeyStore) or not key:
+            still_open.append(row)
+            continue
         try:
-            matches = rows_matching_filed_email(
-                store.list_unmatched(),
-                notice_type=notice_type,
-                program_id=program_id,
-                policy_numbers=policy_numbers,
-                insured_name=insured_name,
-            )
-            for row in matches:
-                store.resolve_unmatched(str(row.get("event_key") or ""), seen_at)
-                closed += 1
-        except Exception as exc:  # noqa: BLE001 - filing already happened
-            logger.warning(
-                "unmatched resolve after email file failed: %s", type(exc).__name__
-            )
-    return closed
+            store.resolve_unmatched(key, moment)
+        except Exception as exc:  # noqa: BLE001 - keep the row on the email
+            logger.warning("digest recheck could not resolve %s: %s", key, type(exc).__name__)
+            still_open.append(row)
+            continue
+        resolved += 1
+    return still_open, resolved
 
 
 def notice_words(event_type: str) -> str:
@@ -869,11 +931,19 @@ def run_digest(
                     "stopped": type(exc).__name__,
                 }
     index_rows, meta, _store = best_policy_index(opened)
+    index_complete = int(meta.get("complete") or 0) == 1
     open_rows = collect_open(opened)
+    open_rows, resolved_count = recheck_open_unmatched(
+        open_rows,
+        ezlynx_client=ezlynx_client,
+        index_rows=index_rows,
+        index_complete=index_complete,
+        now=moment,
+    )
     apply_suggestions(
         open_rows,
         index_rows,
-        index_complete=int(meta.get("complete") or 0) == 1,
+        index_complete=index_complete,
     )
     current, aged = split_window(open_rows, moment)
     rendered = render_digest(current, aged, when=moment)
@@ -885,6 +955,7 @@ def run_digest(
         "printed": False,
         "open_count": len(current),
         "aged_count": len(aged),
+        "resolved_count": resolved_count,
         "index": index_report,
         "subject": "",
         "body": "",
@@ -922,13 +993,22 @@ def evaluate_digest_health(
     path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Alert when the digest failed or skipped a weekday after 9:30 AM ET.
+    """Alert when an installed digest failed or skipped a weekday after 9:30 AM ET.
 
-    A recorded failure alerts any day. A run that is still inside the
+    Quiet unless the weekday timer is enabled or the installer marker
+    exists. A missing state file on a host that never installed the digest,
+    after --dry-run-once, or after rollback, does not page. Once installed,
+    a recorded failure alerts any day. A run that is still inside the
     45-minute unit timeout stays quiet. A missing state file alerts on a
     weekday after 9:30 AM ET. Weekends and the hour before 9:30 do not
     require a run.
     """
+    if not digest_watch_installed():
+        return {
+            "ok": True,
+            "installed": False,
+            "detail": "unmatched digest is not installed",
+        }
     moment = now or _now()
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -941,12 +1021,12 @@ def evaluate_digest_health(
         if local.weekday() < 5 and local >= deadline:
             return {
                 "ok": False,
-                "installed": False,
+                "installed": True,
                 "detail": "the Ascend unmatched-notice digest did not run today",
             }
         return {
             "ok": True,
-            "installed": False,
+            "installed": True,
             "detail": "unmatched digest has not run yet",
         }
     try:
