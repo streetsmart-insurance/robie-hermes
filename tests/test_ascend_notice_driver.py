@@ -147,16 +147,27 @@ class FakeUrlopen:
     def posts_to(self, needle):
         return [c for c in self.calls if needle in c["url"] and c["data"]]
 
+    def discussion_detail_gets(self):
+        return [
+            c
+            for c in self.calls
+            if "v8/discussions/" in c["url"]
+            and "by-applicant" not in c["url"]
+            and not c["data"]
+        ]
 
-def make_discussion_client(discussion_rows, note_id="n7"):
+
+def make_discussion_client(discussion_rows, note_id="n7", discussion_detail=None):
+    detail = (
+        discussion_detail
+        if discussion_detail is not None
+        else {"discussionId": "d1", "notes": [{"noteId": note_id, "body": "filed"}]}
+    )
     routes = [
         ("connect/token", {"access_token": "tok123", "expires_in": 3600}),
         ("by-applicant", discussion_rows),
         ("/notes", {"noteId": note_id}),
-        (
-            "v8/discussions/",
-            {"discussionId": "d1", "notes": [{"noteId": note_id, "body": "filed"}]},
-        ),
+        ("v8/discussions/", detail),
     ]
     config = discussions.DiscussionApiConfig(
         discussion_base_url=API_BASE,
@@ -209,13 +220,16 @@ def make_ctx(
     org_labels=None,
     apply_label_error=None,
     label_list_error=None,
+    discussion_detail=None,
 ):
     discussion_rows = (
         discussion_rows
         if discussion_rows is not None
         else [{"discussionId": "d1", "title": "PCR"}]
     )
-    discussion_client = make_discussion_client(discussion_rows)
+    discussion_client = make_discussion_client(
+        discussion_rows, discussion_detail=discussion_detail
+    )
     ctx = driver.DriverContext(
         ascend_client=ascend_client or FakeAscendClient(),
         ezlynx_client=FakeEzlynxClient(
@@ -517,6 +531,167 @@ def test_write_scope_refusal_fails_closed(no_zap_fire):
     assert blocked["notice_type"] == triage.CANCELLATION
     assert blocked["policy_number"] == "HO-998877"
     assert blocked["csr_login"] == "KarlaSS"
+    # Dry-run still reads the existing note for a blocked applicant.
+    assert blocked["existing_note_read"] is True
+    assert blocked["existing_note_duplicate"] is False
+    assert len(discussion_client._urlopen.discussion_detail_gets()) == 1
+    assert discussion_client._urlopen.posts_to("/notes") == []
+
+
+def _intent_notice(body, message_id="m1", mailbox="hello@streetsmart.insurance"):
+    return make_notice(
+        subject=(
+            "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: "
+            "Policy(s) at risk for cancellation"
+        ),
+        body=body,
+        message_id=message_id,
+        mailbox=mailbox,
+        gmail_message_id=message_id,
+    )
+
+
+_INTENT_BODY = (
+    "Hi Mike,\n"
+    "Your loan payment of $525.30 was due on 09/21/2026. "
+    "Please see the attached Notice of Intent to Cancel document. "
+    "Failure to pay will result in the cancelation of your coverage on 10/14/2026.\n"
+    "Policy ID ABC123-00\n"
+    "Effective date 08/21/2026\n"
+)
+
+
+def test_due_or_cancel_dates_ignore_effective_date():
+    dates = driver.due_or_cancel_dates(_INTENT_BODY)
+    assert dates == frozenset({"09/21/2026", "10/14/2026"})
+    assert "08/21/2026" not in dates
+
+
+def test_in_run_dedupe_collapses_same_event_without_a_second_note_read(no_zap_fire):
+    first = _intent_notice(_INTENT_BODY, message_id="m1", mailbox="mike@streetsmart.insurance")
+    # Same due and cancel dates, different greeting and mailbox. Not an EZLynx read.
+    second_body = _INTENT_BODY.replace("Hi Mike,", "Hi Taylor,")
+    second = _intent_notice(
+        second_body, message_id="m2", mailbox="taylor@streetsmart.insurance"
+    )
+    # Byte-identical copy of the first.
+    third = _intent_notice(_INTENT_BODY, message_id="m3", mailbox="mike@streetsmart.insurance")
+    ctx, discussion_client = make_ctx(
+        notices=[first, second, third],
+        policy_rows={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        },
+        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["would_file_count"] == 1
+    assert summary["duplicate_in_run"] == 2
+    assert summary["breakdown"]["duplicate_in_run"] == 2
+    assert [item["reason"] for item in summary["results"]] == [
+        "ok",
+        "duplicate_in_run",
+        "duplicate_in_run",
+    ]
+    collapsed = summary["duplicate_in_run_notices"]
+    assert {item["gmail_message_id"] for item in collapsed} == {"m2", "m3"}
+    assert all(item["applicant_id"] == ALLOWED_APPLICANT for item in collapsed)
+    assert all(item["notice_type"] == triage.INTENT_TO_CANCEL for item in collapsed)
+    # Only the keeper reads EZLynx. Collapsed copies do not.
+    assert len(discussion_client._urlopen.discussion_detail_gets()) == 1
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert no_zap_fire == []
+    assert ctx.source.marked == []
+
+
+def test_in_run_dedupe_keeps_a_different_due_date(no_zap_fire):
+    first = _intent_notice(_INTENT_BODY, message_id="m1")
+    other = _intent_notice(
+        _INTENT_BODY.replace("09/21/2026", "10/02/2026").replace(
+            "10/14/2026", "10/28/2026"
+        ).replace("Hi Mike,", "Hi Sandy,"),
+        message_id="m2",
+        mailbox="sandy@streetsmart.insurance",
+    )
+    ctx, _ = make_ctx(
+        notices=[first, other],
+        policy_rows={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        },
+        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["duplicate_in_run"] == 0
+    assert summary["would_file_count"] == 2
+    assert {item["gmail_message_id"] for item in summary["would_file"]} == {"m1", "m2"}
+
+
+def test_existing_note_duplicate_is_not_filed(no_zap_fire):
+    notice = _intent_notice(_INTENT_BODY)
+    triaged = triage.triage_notice(FakeAscendClient(program={"status": "overdue"}), notice.subject, notice.body)
+    signed = driver.signed_notice_note(triaged["note_text"])
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={
+            "ABC123-00": [{"policyNumber": "ABC123", "accountId": ALLOWED_APPLICANT}]
+        },
+        discussion_rows=[{"discussionId": "d-noc", "title": "Ascend NOC"}],
+        discussion_detail={
+            "discussionId": "d-noc",
+            "notes": [{"noteId": "n-already", "body": signed}],
+        },
+        ascend_client=FakeAscendClient(program={"status": "overdue"}),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert result["reason"].startswith("existing_note_duplicate")
+    assert result["detail"]["existing_note_id"] == "n-already"
+    assert summary["would_file"] == []
+    assert summary["duplicate_in_run"] == 0
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert len(discussion_client._urlopen.discussion_detail_gets()) == 1
+    assert no_zap_fire == []
+
+
+def test_dry_run_reports_existing_note_duplicate_for_blocked_applicant(no_zap_fire, monkeypatch):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("dry-run write gate called during note read")
+
+    monkeypatch.setattr("robie_job_engine.safety_seal.driver_gate_for_write", _boom)
+    notice = make_notice()
+    triaged = triage.triage_notice(FakeAscendClient(), notice.subject, notice.body)
+    signed = driver.signed_notice_note(triaged["note_text"])
+    ctx, discussion_client = make_ctx(
+        notices=[notice],
+        policy_rows={"HO-998877": [policy_row(applicant_id="175448994")]},
+        discussion_detail={
+            "discussionId": "d1",
+            "notes": [{"noteId": "n-existing", "body": signed}],
+        },
+    )
+    with mock.patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({ALLOWED_APPLICANT}),
+    ):
+        summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert "write_scope_refused" in result["reason"]
+    assert result["detail"]["existing_note_read"] is True
+    assert result["detail"]["existing_note_duplicate"] is True
+    assert result["detail"]["existing_note_id"] == "n-existing"
+    blocked = summary["would_file_if_write_scope_allowed"][0]
+    assert blocked["applicant_id"] == "175448994"
+    assert blocked["existing_note_duplicate"] is True
+    assert blocked["existing_note_id"] == "n-existing"
+    assert summary["would_file"] == []
+    assert ctx.ezlynx_client.label_list_calls == 0
+    assert ctx.ezlynx_client.applied_labels == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert len(discussion_client._urlopen.discussion_detail_gets()) == 1
+    assert no_zap_fire == []
 
 
 def test_label_list_unavailable_still_would_file_without_inventing_an_id(no_zap_fire):

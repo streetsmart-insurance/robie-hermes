@@ -37,6 +37,12 @@ Safety (non-negotiable):
   counts it as would-file) and the result says ``label_not_applied``. No
   label id is invented. A list that succeeds but has no unique
   ``Ascend NOC`` still skips the notice.
+- One run files one note per applicant, policy, notice type, and due or
+  cancel date (or the same normalized email body). Later copies in that
+  run are ``duplicate_in_run`` and are not filed. That collapse does not
+  read EZLynx. A separate read of the existing discussion note still
+  runs, including for applicants the write allowlist blocks, and a note
+  already on the discussion is not filed again.
 - Never deletes anything. Never invents an applicant_id or a CSR username.
 - Live note writes go through ``file_note_to_existing_discussion``, which
   enforces the EZLynx write-scope allowlist and the driver lease. Dry-run
@@ -132,6 +138,10 @@ _TERM_SUFFIX_RE = re.compile(r"-\d{1,2}$")
 # Trailing EZLynx line-of-business code, separated by whitespace: "DSLA123 APD".
 # 2-4 uppercase letters only. Applied to the EZLynx row, not the Ascend number.
 _LOB_SUFFIX_RE = re.compile(r"\s+[A-Z]{2,4}\s*$")
+
+_NOTICE_DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
+_EFFECTIVE_DATE_PREFIX_RE = re.compile(r"effective\s*date\s*$", re.IGNORECASE)
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 # Policy-row fields that may carry the bound applicant id.
 _APPLICANT_ID_KEYS = (
@@ -726,6 +736,8 @@ class DriverContext:
     dry_run: bool = True
     due_days: int = DEFAULT_DUE_DAYS
     today: date = field(default_factory=date.today)
+    # In-run collapse. Cleared at the start of each run_driver call.
+    seen_notice_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -755,6 +767,127 @@ def discussion_title_hint(notice_type: str) -> str | None:
     if notice_type in {triage.LATE_PAYMENT, triage.INTENT_TO_CANCEL}:
         return "noc"
     return None
+
+
+def due_or_cancel_dates(body: str) -> frozenset[str]:
+    """Due and cancel dates in an Ascend notice. Policy effective dates stay out.
+
+    ``Effective date 08/21/2026`` is the policy term, not the event. A
+    payment due date and a cancel effective date are the event.
+    """
+    text = str(body or "")
+    found: set[str] = set()
+    for match in _NOTICE_DATE_RE.finditer(text):
+        prefix = text[max(0, match.start() - 40) : match.start()]
+        if _EFFECTIVE_DATE_PREFIX_RE.search(prefix):
+            continue
+        found.add(match.group(1))
+    return frozenset(found)
+
+
+def normalize_notice_body(body: str) -> str:
+    """Case-folded email body with collapsed whitespace. Not an EZLynx read."""
+    cleaned = _ZERO_WIDTH_RE.sub("", str(body or ""))
+    return " ".join(cleaned.casefold().split())
+
+
+def notice_event_key(
+    *,
+    applicant_id: str,
+    policy_number: str,
+    notice_type: str,
+    body: str,
+) -> dict[str, Any]:
+    """Identity for collapsing repeated notices inside one driver run."""
+    return {
+        "applicant_id": str(applicant_id or "").strip(),
+        "policy": strip_policy_term_suffix(policy_number),
+        "notice_type": str(notice_type or "").strip(),
+        "dates": tuple(sorted(due_or_cancel_dates(body))),
+        "body": normalize_notice_body(body),
+    }
+
+
+def same_notice_event(kept: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """True when two notices are one filing event.
+
+    Same applicant, policy, and notice type, plus the same due/cancel
+    date or the same normalized body. A date match requires both sides
+    to have extracted a date, so two undated different bodies stay apart.
+    """
+    if str(kept.get("applicant_id") or "") != str(candidate.get("applicant_id") or ""):
+        return False
+    if str(kept.get("policy") or "") != str(candidate.get("policy") or ""):
+        return False
+    if str(kept.get("notice_type") or "") != str(candidate.get("notice_type") or ""):
+        return False
+    kept_dates = tuple(kept.get("dates") or ())
+    candidate_dates = tuple(candidate.get("dates") or ())
+    if kept_dates and candidate_dates and kept_dates == candidate_dates:
+        return True
+    kept_body = str(kept.get("body") or "")
+    candidate_body = str(candidate.get("body") or "")
+    return bool(kept_body) and kept_body == candidate_body
+
+
+def _note_id_from(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for key in ("noteId", "NoteId", "id", "Id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _read_existing_note(
+    client: Any,
+    applicant_id: str,
+    note_body: str,
+    *,
+    title_hint: str | None,
+) -> dict[str, Any]:
+    """Read the discussion and compare note text. No write, no driver gate.
+
+    Write-scope is not checked here. Dry-run uses this for applicants the
+    allowlist blocks so a reviewer can see an existing duplicate.
+    """
+    outcome = {"read": False, "duplicate": False, "note_id": "", "reason": ""}
+    try:
+        rows = client.get_discussions(applicant_id)
+        record = discussions.select_discussion_for_note(rows, title_hint=title_hint)
+    except discussions.DiscussionSelectionError as exc:
+        outcome["reason"] = f"{exc.code}: {exc}"
+        return outcome
+    except Exception as exc:  # noqa: BLE001 - read failed; caller decides
+        outcome["reason"] = f"{type(exc).__name__}: {exc}"
+        return outcome
+    discussion_id = discussions.discussion_id_of(record)
+    if not discussion_id:
+        outcome["reason"] = "selected discussion has no id"
+        return outcome
+    detail: Any = None
+    getter = getattr(client, "get_discussion", None)
+    if callable(getter):
+        try:
+            detail = getter(discussion_id)
+            outcome["read"] = True
+        except Exception as exc:  # noqa: BLE001 - report the miss, do not write
+            outcome["reason"] = f"{type(exc).__name__}: {exc}"
+    else:
+        detail = record
+        outcome["read"] = True
+    matched = discussions.find_identical_note(detail, note_body) if detail is not None else None
+    if matched is None:
+        matched = discussions.find_identical_note(record, note_body)
+        if matched is not None:
+            outcome["read"] = True
+    if matched is None:
+        return outcome
+    outcome["duplicate"] = True
+    outcome["note_id"] = _note_id_from(matched)
+    outcome["read"] = True
+    return outcome
 
 
 def signed_notice_note(note_text: str) -> str:
@@ -933,11 +1066,46 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = f"discussion_error: {exc}"
         return result
 
+    # In-run collapse uses the mail we already have. It does not read EZLynx.
+    event = notice_event_key(
+        applicant_id=resolution.applicant_id,
+        policy_number=resolution.policy_number,
+        notice_type=notice_type,
+        body=notice.body,
+    )
+    if any(same_notice_event(kept, event) for kept in ctx.seen_notice_events):
+        result.reason = "duplicate_in_run"
+        result.detail["duplicate_in_run"] = True
+        return result
+    ctx.seen_notice_events.append(event)
+
+    # Existing-note check is a read, including when write scope will refuse.
+    # A matching note is not filed again. A failed read does not invent a match.
+    title_hint = discussion_title_hint(notice_type)
+    note_match = _read_existing_note(
+        ctx.discussion_client,
+        resolution.applicant_id,
+        note_text,
+        title_hint=title_hint,
+    )
+    result.detail["existing_note_read"] = bool(note_match.get("read"))
+    result.detail["existing_note_duplicate"] = bool(note_match.get("duplicate"))
+    if note_match.get("note_id"):
+        result.detail["existing_note_id"] = note_match["note_id"]
+    if note_match.get("reason") and not note_match.get("read"):
+        result.detail["existing_note_read_reason"] = note_match["reason"]
+
     # Write scope before any label lookup. A narrow allowlist must not hide
     # a real match behind a label-list failure, and must not call the list.
     scope_refusal = _write_scope_refusal_reason(resolution.applicant_id)
     if scope_refusal:
         result.reason = scope_refusal
+        return result
+    if note_match.get("duplicate"):
+        note_id = str(note_match.get("note_id") or "").strip()
+        result.reason = (
+            f"existing_note_duplicate: {note_id}" if note_id else "existing_note_duplicate"
+        )
         return result
 
     # Cancellation notices also get the exact org label "Ascend NOC" on
@@ -972,7 +1140,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # caught below and become a skip, never a silent write.
     # The shared EZLynx seat is gated before a live note and again before
     # a live Zapier post. Dry-run does not call driver_gate_for_write.
-    title_hint = discussion_title_hint(notice_type)
+    # title_hint was chosen above for the existing-note read.
     try:
         if ctx.dry_run:
             filed = _prepare_dry_run_note(
@@ -1131,11 +1299,18 @@ def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, An
     }
     if entry["notice_type"] == triage.CANCELLATION:
         entry["csr_login"] = str(detail.get("csr_username") or "")
+    if "existing_note_duplicate" in detail:
+        entry["existing_note_duplicate"] = bool(detail.get("existing_note_duplicate"))
+    if "existing_note_read" in detail:
+        entry["existing_note_read"] = bool(detail.get("existing_note_read"))
+    if detail.get("existing_note_id"):
+        entry["existing_note_id"] = str(detail["existing_note_id"])
     return entry
 
 
 def run_driver(ctx: DriverContext) -> dict[str, Any]:
     """Process every unread notice; return a JSON-serializable summary."""
+    ctx.seen_notice_events.clear()
     notices = ctx.source.fetch_notices()
     paired: list[tuple[EmailNotice, NoticeResult]] = []
     for notice in notices:
@@ -1163,6 +1338,11 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
         and _reason_prefix(item.reason) == "write_scope_refused"
         and str((item.detail or {}).get("applicant_id") or "")
     ]
+    duplicate_in_run = [
+        _would_file_entry(notice, item)
+        for notice, item in paired
+        if _reason_prefix(item.reason) == "duplicate_in_run"
+    ]
     ignored = sum(1 for item in results if item.status == "ignored")
     summary = {
         "dry_run": ctx.dry_run,
@@ -1176,11 +1356,14 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
         "would_file": would_file,
         "would_file_if_write_scope_allowed_count": len(would_file_if_write_scope_allowed),
         "would_file_if_write_scope_allowed": would_file_if_write_scope_allowed,
+        "duplicate_in_run": len(duplicate_in_run),
+        "duplicate_in_run_notices": duplicate_in_run,
         "skipped_by_reason": skipped_by_reason,
         "breakdown": {
             "by_notice_type": dict(by_notice_type),
             "would_file": len(would_file),
             "would_file_if_write_scope_allowed": len(would_file_if_write_scope_allowed),
+            "duplicate_in_run": len(duplicate_in_run),
             "ignored": ignored,
             "skipped_by_reason": dict(skipped_by_reason),
         },
