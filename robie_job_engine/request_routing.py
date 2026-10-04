@@ -20,6 +20,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.submission_audit": "submission-audit",
     "ezlynx.overdue_submission_reports": "overdue-submission-reports",
     "ezlynx.session_refresh": "session-refresh",
+    "ezlynx.policy_setup": "ezlynx-policy-setup",
     "filesystem.skill_update": "hermes-cua",
     "appsheet.smart_reward": "hermes-cua",
     "appsheet.qa_audit": "hermes-cua",
