@@ -7,11 +7,20 @@ Wants=network-online.target
 Type=oneshot
 User=streetsmart-hermes
 Group=streetsmart-hermes
-UMask=0077
+# 0022 so the sqlite store is mode 0644. A 0077 umask made it mode 0600, which the
+# email driver cannot read when it is not this process. The email unit on
+# main is User=streetsmart-hermes. The readiness branch that would confirm
+# a different user is not pushed.
+UMask=0022
 WorkingDirectory=/opt/streetsmart-hermes/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes/current
 Environment=ROBIE_ENV=PRODUCTION
 Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+# These three match the email driver unit. They let the GET client start.
+# They do not file notes. Live filing is still ASCEND_API_SOURCE_LIVE=1.
+Environment=ROBIE_ASCEND_API_ENABLED=1
+Environment=ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com
+Environment=ROBIE_ASCEND_API_PRODUCTION_ENABLED=1
 Environment=ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-prod-api-key/versions/latest
 # GET only. The poller uses ascend_sync.AscendApiClient, the same secret the
 # hourly robie-ascend-sync unit uses. Do not set ASCEND_API_SOURCE_LIVE here.
@@ -25,7 +34,10 @@ Environment=ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-pro
 # does not enable live filing; that is still ASCEND_API_SOURCE_LIVE=1.
 Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
 Environment=ROBIE_PLAYGROUND=1
+# Live filings. The email driver reads this file. Dry-run uses the other
+# path so a dry-run cannot reset the live stall streak or loan episodes.
 Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db
+Environment=ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db
 # streetsmart-hermes cannot exec the carlo-owned mode-0700 .hermes tree
 # (systemd 203/EXEC). Use the shared venv, same User= as the email driver.
 ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_api_notice_source

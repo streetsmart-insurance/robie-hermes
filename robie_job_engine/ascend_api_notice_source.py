@@ -18,17 +18,25 @@ or, against the current tree. Start in ``/`` so a stray
 stays: ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is ignored unless Playground
 guardrails are active, and without it the dry-run falls back to test
 applicant ``220250093``. The flag does not turn on live filing. Live
-filing is still ``ASCEND_API_SOURCE_LIVE=1``. The interpreter is the
-shared venv. The ``.hermes`` tree is mode 0700 and owned by carlo, so
-``User=streetsmart-hermes`` fails with 203/EXEC on that path::
+filing is still ``ASCEND_API_SOURCE_LIVE=1``. ``ROBIE_ASCEND_API_ENABLED``,
+``ROBIE_ASCEND_API_BASE_URL``, and ``ROBIE_ASCEND_API_PRODUCTION_ENABLED``
+only let the GET client start; they do not file notes. The interpreter
+is the shared venv. The ``.hermes`` tree is mode 0700 and owned by carlo,
+so ``User=streetsmart-hermes`` fails with 203/EXEC on that path. Dry-run
+state goes to ``ascend_api_notice_events.dry-run.db``, not the live store
+the email driver reads::
 
     cd /
     sudo env PYTHONPATH=/opt/streetsmart-hermes/current \\
       ROBIE_ENV=PRODUCTION \\
       ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest \\
       ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-prod-api-key/versions/latest \\
+      ROBIE_ASCEND_API_ENABLED=1 \\
+      ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com \\
+      ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 \\
       ROBIE_EZLYNX_WRITE_SCOPE=all \\
       ROBIE_PLAYGROUND=1 \\
+      ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db \\
       /opt/streetsmart-hermes/venv/bin/python \\
       -m robie_job_engine.ascend_api_notice_source
 """
@@ -55,11 +63,19 @@ logger = logging.getLogger(__name__)
 LIVE_ENV = "ASCEND_API_SOURCE_LIVE"
 REMITTANCE_APPLICANT_ENV = "ASCEND_API_REMITTANCE_APPLICANT_ID"
 DB_ENV = "ASCEND_API_NOTICE_DB"
+DRY_RUN_DB_ENV = "ASCEND_API_NOTICE_DRY_RUN_DB"
 LOOKBACK_ENV = "ASCEND_API_SOURCE_LOOKBACK_MINUTES"
 
 DEFAULT_DB_PATH = Path(
     "/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db"
 )
+DEFAULT_DRY_RUN_DB_PATH = Path(
+    "/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db"
+)
+# Group and other can read the store. The email driver has to open it even
+# when it is not the process that created the file. Not world-writable.
+STORE_FILE_MODE = 0o644
+STORE_DIR_MODE = 0o755
 DEFAULT_LOOKBACK_MINUTES = 20
 CURSOR_OVERLAP_MINUTES = 5
 PAGE_SIZE = 25
@@ -71,6 +87,7 @@ FEED_PROGRAMS = "/v1/programs"
 FEED_LOANS = "/v1/loans"
 FEED_INVOICES = "/v1/invoices"
 FEED_PAYOUTS = "/v1/payouts"
+FEED_BILLABLES = "/v1/billables"
 FEEDS = (FEED_PROGRAMS, FEED_LOANS, FEED_INVOICES, FEED_PAYOUTS)
 
 # Names a later webhook receiver can pass in. Processing and voided are
@@ -143,11 +160,57 @@ def remittance_applicant_id() -> str:
     return str(os.environ.get(REMITTANCE_APPLICANT_ENV) or "").strip()
 
 
-def db_path() -> Path:
+class ApiNoticeStoreUnavailable(RuntimeError):
+    """The live dedupe store is missing or cannot be read."""
+
+
+def live_db_path() -> Path:
+    """Where live filings are recorded. The email driver reads this file."""
     override = str(os.environ.get(DB_ENV) or "").strip()
     if override:
         return Path(override)
     return DEFAULT_DB_PATH
+
+
+def dry_run_db_path() -> Path:
+    """Dry-run episodes and stall history. Never the live filing store."""
+    override = str(os.environ.get(DRY_RUN_DB_ENV) or "").strip()
+    if override:
+        return Path(override)
+    return DEFAULT_DRY_RUN_DB_PATH
+
+
+def db_path() -> Path:
+    """Live runs and dry-runs do not share a state file.
+
+    A dry-run records loan episodes and the stall streak. Sharing the live
+    file would let that dry-run reset the live stall counter and invent a
+    reinstatement the live poller had not seen. Filed keys exist only on
+    the live path, which is what the email driver reads.
+    """
+    return live_db_path() if live_enabled() else dry_run_db_path()
+
+
+def publish_store_permissions(path: Path) -> None:
+    """Make the store and its directory readable by the email-driver user.
+
+    ``UMask=0077`` created a mode-0600 file. A driver running as a different
+    user then could not open it and would file the notice again. Mode 0644
+    on the file and 0755 on the directory stay readable by
+    ``streetsmart-hermes`` and by whatever user the email unit still runs
+    as. The readiness branch that sets that unit's ``User=`` is not pushed;
+    the unit on main is already ``User=streetsmart-hermes``.
+    """
+    try:
+        if path.is_file():
+            os.chmod(path, STORE_FILE_MODE)
+        parent = path.parent
+        if parent.is_dir() and parent != parent.parent:
+            os.chmod(parent, STORE_DIR_MODE)
+    except OSError as exc:
+        logger.warning(
+            "could not publish notice store permissions: %s", type(exc).__name__
+        )
 
 
 def make_event_key(program_id: str, event_type: str, anchor: str) -> str:
@@ -272,14 +335,14 @@ def insured_name_of(program: dict[str, Any] | None, fallback: str = "") -> str:
 
 
 def policy_numbers_of(*records: dict[str, Any] | None) -> list[str]:
+    """Carrier policy numbers only. A billable identifier is not a policy number."""
     found: list[str] = []
     for record in records:
         if not isinstance(record, dict):
             continue
-        for key in ("policy_number", "billable_identifier"):
-            value = str(record.get(key) or "").strip()
-            if value and value not in found:
-                found.append(value)
+        value = str(record.get("policy_number") or "").strip()
+        if value and value not in found:
+            found.append(value)
         for container in ("billables", "quotes"):
             rows = record.get(container)
             if not isinstance(rows, list):
@@ -287,11 +350,26 @@ def policy_numbers_of(*records: dict[str, Any] | None) -> list[str]:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                for key in ("policy_number", "billable_identifier"):
-                    value = str(row.get(key) or "").strip()
-                    if value and value not in found:
-                        found.append(value)
+                nested = str(row.get("policy_number") or "").strip()
+                if nested and nested not in found:
+                    found.append(nested)
     return found
+
+
+def insured_email_of(*records: dict[str, Any] | None) -> str:
+    """Insured email from a program or invoice. Empty when it is not an address."""
+    candidates: list[Any] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        insured = record.get("insured") if isinstance(record.get("insured"), dict) else {}
+        candidates.extend(insured.get(key) for key in ("email", "business_email"))
+        candidates.extend(record.get(key) for key in ("payer_email", "insured_email", "email"))
+    for value in candidates:
+        text = str(value or "").strip()
+        if "@" in text and " " not in text:
+            return text
+    return ""
 
 
 def _line_labels(invoice: dict[str, Any]) -> list[str]:
@@ -332,10 +410,19 @@ def _dashboard(program_id: str) -> str:
     return f"https://dashboard.useascend.com/programs/{program_id}"
 
 
-def _policy_line(policy_numbers: list[str]) -> str:
-    if not policy_numbers:
-        return ""
-    return "Policy ID " + policy_numbers[0]
+def invoice_anchor(invoice: dict[str, Any]) -> tuple[str, str]:
+    """Human invoice number when the API has one, otherwise the invoice UUID.
+
+    Past-due emails print ``Invoice No.`` as the human number. Keying the
+    API event on the UUID meant the email driver never saw a match.
+    The second value is the UUID, kept so a body that only has the UUID
+    still matches.
+    """
+    invoice_id = _record_id(invoice)
+    number = str(invoice.get("invoice_number") or invoice.get("number") or "").strip()
+    if number:
+        return number, invoice_id
+    return invoice_id, invoice_id
 
 
 @dataclass
@@ -413,13 +500,15 @@ def _render_common(
     insured: str,
     policy_numbers: list[str],
     extra_lines: list[str],
+    insured_email: str = "",
 ) -> str:
     lines = list(extra_lines)
-    policy = _policy_line(policy_numbers)
-    if policy:
-        lines.append(policy)
+    for number in policy_numbers:
+        lines.append("Policy ID " + number)
     if insured:
         lines.append(f"Customer {insured}")
+    if insured_email:
+        lines.append(f"Email {insured_email}")
     if program_id and program_id != AGENCY_PROGRAM:
         lines.append(_dashboard(program_id))
     return "\n".join(line for line in lines if line)
@@ -432,6 +521,7 @@ class EventKeyStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
+        publish_store_permissions(self.path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -469,6 +559,11 @@ class EventKeyStore:
                 CREATE TABLE IF NOT EXISTS cursors (
                     name TEXT PRIMARY KEY,
                     cursor_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS program_policies (
+                    program_id TEXT PRIMARY KEY,
+                    policy_numbers TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -564,6 +659,43 @@ class EventKeyStore:
                 )
         return proposed_text
 
+    def cached_policy_numbers(self, program_id: str) -> list[str] | None:
+        """Cached billable policy numbers. None means this program was not cached."""
+        key = str(program_id or "").strip().lower()
+        if not key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT policy_numbers FROM program_policies WHERE program_id=?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            parsed = json.loads(str(row["policy_numbers"] or "[]"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [str(item).strip() for item in parsed if str(item or "").strip()]
+
+    def remember_policy_numbers(self, program_id: str, numbers: list[str]) -> None:
+        key = str(program_id or "").strip().lower()
+        cleaned = [str(item).strip() for item in numbers if str(item or "").strip()]
+        if not key or not cleaned:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO program_policies (program_id, policy_numbers, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(program_id) DO UPDATE SET
+                    policy_numbers=excluded.policy_numbers,
+                    updated_at=excluded.updated_at
+                """,
+                (key, json.dumps(cleaned), _iso(_now())),
+            )
+
     def cursor(self) -> datetime | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -616,9 +748,10 @@ def email_covered_by_api(
 ) -> str:
     """Event key when the API poller already filed this email. Empty otherwise.
 
-    Failed-payment mail, underwriting, return premium, refunds, and anything
-    with no filed API key stay with the email driver. A missing store is
-    empty, not a skip.
+    Failed-payment mail, underwriting, return premium, and refunds stay with
+    the email driver. A missing or unreadable live store raises
+    :class:`ApiNoticeStoreUnavailable` so the email driver skips the notice
+    instead of filing it again.
     """
     kind = str(notice_type or "").strip()
     if kind not in API_OWNED_EMAIL_TYPES:
@@ -628,15 +761,17 @@ def email_covered_by_api(
     program = str(program_id or "").strip().lower()
     if not program:
         return ""
-    path = db_path()
+    path = live_db_path()
     if store is None and not path.exists():
-        return ""
+        raise ApiNoticeStoreUnavailable(str(path))
     try:
         keeper = store if store is not None else EventKeyStore(path)
         rows = keeper.filed_for(program, kind)
-    except Exception as exc:  # noqa: BLE001 - email stays responsible
+    except ApiNoticeStoreUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - do not file when the store cannot be read
         logger.warning("api notice dedupe read failed: %s", type(exc).__name__)
-        return ""
+        raise ApiNoticeStoreUnavailable(str(path)) from exc
     if not rows:
         return ""
     needles = _email_anchors(body, program)
@@ -803,6 +938,14 @@ def _episode_anchor(
     return store.episode_anchor(episode_id, status, proposed, persist=persist)
 
 
+def _event_in_window(notice: ApiNotice, since: datetime) -> bool:
+    """Every filed event has to fall inside the poll lookback."""
+    moment = parse_time(notice.occurred_at) or parse_time(notice.anchor)
+    if moment is None:
+        return False
+    return moment >= since
+
+
 def notices_from_snapshot(
     *,
     programs: list[dict[str, Any]],
@@ -812,6 +955,7 @@ def notices_from_snapshot(
     store: EventKeyStore | None = None,
     persist_episodes: bool = False,
     prior_loan_status: dict[str, str] | None = None,
+    since: datetime | None = None,
 ) -> list[ApiNotice]:
     """Map the API shapes from the coverage study. Synthetic callers only."""
     programs_by_id = {
@@ -859,7 +1003,10 @@ def notices_from_snapshot(
         notice = _payout_notice(payout)
         if notice is not None:
             notices.append(notice)
-    return _collapse(notices)
+    collapsed = _collapse(notices)
+    if since is None:
+        return collapsed
+    return [notice for notice in collapsed if _event_in_window(notice, since)]
 
 
 def _program_notices(
@@ -993,6 +1140,7 @@ def _status_notice(
         insured=insured,
         policy_numbers=policies,
         extra_lines=lines,
+        insured_email=insured_email_of(program),
     )
     notice = _notice(
         event_type=event_type,
@@ -1121,6 +1269,7 @@ def _loan_status_notice(
         insured=insured,
         policy_numbers=policies,
         extra_lines=lines,
+        insured_email=insured_email_of(program, loan),
     )
     notice = _notice(
         event_type=event_type,
@@ -1136,17 +1285,26 @@ def _loan_status_notice(
     return [notice] if notice is not None else []
 
 
+def _invoice_alias_keys(
+    program_id: str, event_type: str, anchor: str, invoice_id: str
+) -> tuple[str, ...]:
+    if not invoice_id or invoice_id == anchor:
+        return ()
+    return (make_event_key(program_id, event_type, invoice_id),)
+
+
 def _invoice_notice(
     invoice: dict[str, Any], program: dict[str, Any]
 ) -> ApiNotice | None:
     program_id = _program_id_of(invoice) or _record_id(program)
-    invoice_id = _record_id(invoice)
+    anchor, invoice_id = invoice_anchor(invoice)
     if not program_id or not invoice_id:
         return None
     holder = dict(program or {})
     if not _record_id(holder):
         holder["id"] = program_id
     insured = insured_name_of(holder, str(invoice.get("payer_name") or invoice.get("payee") or ""))
+    email = insured_email_of(holder, invoice)
     policies = policy_numbers_of(holder, invoice)
     amount = cents_to_money(invoice.get("total_amount_cents"))
     updated = str(invoice.get("updated_at") or invoice.get("paid_at") or "")
@@ -1154,13 +1312,17 @@ def _invoice_notice(
         return _notice(
             event_type=triage.DISPUTED_CHARGE,
             program_id=program_id,
-            anchor=invoice_id,
+            anchor=anchor,
+            alias_keys=_invoice_alias_keys(
+                program_id, triage.DISPUTED_CHARGE, anchor, invoice_id
+            ),
             occurred_at=updated or invoice_id,
             subject=f"Disputed charge for {insured}",
             body=_render_common(
                 program_id=program_id,
                 insured=insured,
                 policy_numbers=policies,
+                insured_email=email,
                 extra_lines=[
                     f"Your customer, {insured}, disputed the following payment.",
                     f"Payment amount {amount}" if amount else "Payment amount is on the settlement invoice.",
@@ -1177,13 +1339,17 @@ def _invoice_notice(
         return _notice(
             event_type=triage.REINSTATEMENT,
             program_id=program_id,
-            anchor=invoice_id,
+            anchor=anchor,
+            alias_keys=_invoice_alias_keys(
+                program_id, triage.REINSTATEMENT, anchor, invoice_id
+            ),
             occurred_at=str(invoice.get("paid_at") or updated or invoice_id),
             subject=f"Your reinstatement request has been approved for {insured}",
             body=_render_common(
                 program_id=program_id,
                 insured=insured,
                 policy_numbers=policies,
+                insured_email=email,
                 extra_lines=["A reinstatement was approved. The carrier still has to accept it."],
             ),
             program=holder,
@@ -1203,13 +1369,17 @@ def _invoice_notice(
         return _notice(
             event_type=triage.LATE_PAYMENT,
             program_id=program_id,
-            anchor=invoice_id,
+            anchor=anchor,
+            alias_keys=_invoice_alias_keys(
+                program_id, triage.LATE_PAYMENT, anchor, invoice_id
+            ),
             occurred_at=updated or invoice_id,
             subject=f"Past due payment for {insured}",
             body=_render_common(
                 program_id=program_id,
                 insured=insured,
                 policy_numbers=policies,
+                insured_email=email,
                 extra_lines=[sentence, f"Invoice No. {invoice.get('invoice_number') or invoice_id}"],
             ),
             program=holder,
@@ -1223,13 +1393,17 @@ def _invoice_notice(
         return _notice(
             event_type=triage.PAYMENT_CONFIRMATION,
             program_id=program_id,
-            anchor=invoice_id,
+            anchor=anchor,
+            alias_keys=_invoice_alias_keys(
+                program_id, triage.PAYMENT_CONFIRMATION, anchor, invoice_id
+            ),
             occurred_at=paid_at,
             subject=f"{insured} Policy(s) Payment Confirmation",
             body=_render_common(
                 program_id=program_id,
                 insured=insured,
                 policy_numbers=policies,
+                insured_email=email,
                 extra_lines=[
                     f"Payment of {amount} was received." if amount else "A payment was received.",
                     f"Invoice No. {invoice.get('invoice_number') or invoice_id}",
@@ -1453,6 +1627,7 @@ def run_once(
     invoices = list(feeds.get(FEED_INVOICES) or [])
     payouts = list(feeds.get(FEED_PAYOUTS) or [])
     _hydrate(wrapped, programs, loans, invoices)
+    enrich_policy_numbers(wrapped, programs, store)
     observed = dict(prior_loan_status or {})
     if not errors:
         for loan in loans:
@@ -1467,6 +1642,7 @@ def run_once(
         store=store,
         persist_episodes=live and not errors,
         prior_loan_status=observed,
+        since=window,
     )
     if not errors:
         for loan in loans:
@@ -1563,6 +1739,66 @@ def _alert(message: str, alerter: Callable[[str], bool] | None) -> bool:
     except Exception as exc:  # noqa: BLE001 - the poll failure is already recorded
         logger.warning("stall alert failed: %s", type(exc).__name__)
         return False
+
+
+def enrich_policy_numbers(
+    client: GetOnlyClient,
+    programs: list[dict[str, Any]],
+    store: EventKeyStore | None,
+) -> None:
+    """GET /v1/billables?program_id= for each program and cache the policy numbers.
+
+    Program records do not carry a policy number. The billable does. A later
+    poll reuses the cache. An empty billable list is not cached, so a miss
+    can be retried. Quote identifiers are not treated as policy numbers.
+    """
+    for program in programs:
+        if not isinstance(program, dict):
+            continue
+        program_id = _record_id(program)
+        if not program_id:
+            continue
+        cached = store.cached_policy_numbers(program_id) if store is not None else None
+        if cached:
+            _attach_policy_numbers(program, cached)
+            continue
+        already = policy_numbers_of(program)
+        if already:
+            if store is not None:
+                store.remember_policy_numbers(program_id, already)
+            continue
+        try:
+            payload = client.get(
+                FEED_BILLABLES,
+                {"program_id": program_id, "page_size": PAGE_SIZE},
+            )
+        except Exception as exc:  # noqa: BLE001 - one program must not stall the poll
+            logger.warning(
+                "billable lookup for program %s failed: %s",
+                program_id,
+                type(exc).__name__,
+            )
+            continue
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            rows = []
+        numbers = policy_numbers_of({"billables": [row for row in rows if isinstance(row, dict)]})
+        if not numbers:
+            continue
+        _attach_policy_numbers(program, numbers)
+        if store is not None:
+            store.remember_policy_numbers(program_id, numbers)
+
+
+def _attach_policy_numbers(program: dict[str, Any], numbers: list[str]) -> None:
+    existing = program.get("billables")
+    rows = [row for row in existing if isinstance(row, dict)] if isinstance(existing, list) else []
+    have = {str(row.get("policy_number") or "").strip() for row in rows}
+    for number in numbers:
+        if number and number not in have:
+            rows.append({"policy_number": number})
+            have.add(number)
+    program["billables"] = rows
 
 
 def _hydrate(

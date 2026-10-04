@@ -15,6 +15,7 @@ from urllib import parse
 
 import pytest
 
+from robie_job_engine import ascend_api_notice_source as api_notice_source
 from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import ezlynx_discussions as discussions
@@ -24,6 +25,14 @@ from robie_job_engine.gmail_accountability import (
     GMAIL_MODIFY_SCOPE,
     GMAIL_READONLY_SCOPE,
 )
+
+
+@pytest.fixture(autouse=True)
+def _empty_ascend_api_notice_store(tmp_path, monkeypatch):
+    """An empty live store so API-owned notices are not skipped as missing."""
+    path = tmp_path / "api-notice" / "events.db"
+    api_notice_source.EventKeyStore(path)
+    monkeypatch.setenv(api_notice_source.DB_ENV, str(path))
 
 
 ALLOWED_APPLICANT = "220250093"
@@ -1578,6 +1587,102 @@ def test_two_candidate_rows_fail_closed():
     resolution, reason = driver.resolve_applicant(client, ["ABC123-00"], "Fixture Insured")
     assert resolution is None
     assert reason.startswith("applicant_unresolved:")
+    assert "2 candidate" in reason
+
+
+def test_name_and_email_matches_only_when_unique():
+    class IdentityClient:
+        def __init__(self, rows, total=None):
+            self.rows = rows
+            self.total = total
+
+        def search_policy_by_number(self, policy_number):
+            raise AssertionError("policy search is not the fallback")
+
+        def search_applicants_by_name_and_email(self, name, email):
+            payload = {"data": self.rows}
+            if self.total is not None:
+                payload["totalSize"] = self.total
+            return payload
+
+    one = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            }
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        one, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert resolution.via == "name_and_email"
+
+    two = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": "111",
+            },
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": "222",
+            },
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        two, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+    name_only = IdentityClient(
+        [{"ApplicantName": "Fixture Hauling LLC", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(
+        name_only, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "ambiguous" in reason
+
+    incomplete = IdentityClient(
+        [
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            }
+        ],
+        total=40,
+    )
+    resolution, reason = driver.resolve_applicant(
+        incomplete, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "incomplete" in reason
+
+    resolution, reason = driver.resolve_applicant(
+        one, [], "Fixture Hauling LLC", None
+    )
+    assert resolution is None
+    assert "0 candidate" in reason
+
+
+def test_policy_numbers_that_disagree_do_not_guess():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "AAA111": [{"policyNumber": "AAA111", "accountId": "111"}],
+            "BBB222": [{"policyNumber": "BBB222", "accountId": "222"}],
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["AAA111", "BBB222"], "Fixture")
+    assert resolution is None
     assert "2 candidate" in reason
 
 

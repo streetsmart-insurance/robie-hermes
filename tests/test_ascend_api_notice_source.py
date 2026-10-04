@@ -240,7 +240,10 @@ def test_each_mapper_emits_the_study_event_and_classifies():
     }
     past_due = by_type[triage.LATE_PAYMENT]
     assert past_due.invoice_id == _iid(11)
-    assert past_due.event_key == source.make_event_key(_pid(1), triage.LATE_PAYMENT, _iid(11))
+    assert past_due.event_key == source.make_event_key(
+        _pid(1), triage.LATE_PAYMENT, "INV-3003"
+    )
+    assert source.make_event_key(_pid(1), triage.LATE_PAYMENT, _iid(11)) in past_due.alias_keys
     assert any(source.make_event_key(_pid(1), triage.LATE_PAYMENT, "2026-09-28T00:01:00Z") in key
                or key.endswith("2026-09-28T00:01:00Z")
                for key in past_due.alias_keys)
@@ -738,6 +741,13 @@ def test_timer_polls_every_fifteen_minutes_and_stays_dry_run():
     assert "Environment=ROBIE_PLAYGROUND=1" in service
     assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in drop_in
     assert "Environment=ROBIE_PLAYGROUND=1" in drop_in
+    assert "Environment=ROBIE_ASCEND_API_ENABLED=1" in service
+    assert "Environment=ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com" in service
+    assert "Environment=ROBIE_ASCEND_API_PRODUCTION_ENABLED=1" in service
+    assert "Environment=ASCEND_API_SOURCE_LIVE=1" not in service
+    assert "UMask=0022" in service
+    assert "UMask=0077" not in service
+    assert "ascend_api_notice_events.dry-run.db" in service
     text = (ROOT / "robie_job_engine/ascend_api_notice_source.py").read_text(encoding="utf-8")
     assert "cd /" in text
     assert "/opt/streetsmart-hermes/venv/bin/python" in text
@@ -749,7 +759,7 @@ def test_timer_polls_every_fifteen_minutes_and_stays_dry_run():
 
 def test_main_dry_run_prints_the_would_file_line(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(source.LIVE_ENV, raising=False)
-    monkeypatch.setenv(source.DB_ENV, str(tmp_path / "events.db"))
+    monkeypatch.setenv(source.DRY_RUN_DB_ENV, str(tmp_path / "dry-run.db"))
     monkeypatch.setenv(source.LOOKBACK_ENV, str(60 * 24 * 40))
     programs, loans, invoices, payouts = _snapshot()
     pages = {
@@ -770,3 +780,177 @@ def test_main_dry_run_prints_the_would_file_line(tmp_path, monkeypatch, capsys):
     assert "would-file " in captured.out
     assert "late_payment" in captured.out
     assert "ASCEND_API_SOURCE_LIVE" not in captured.out
+
+
+def test_billables_supply_policy_numbers_and_are_cached(tmp_path):
+    program = _program(1, "payment_overdue", "2026-09-28T00:01:00Z", due_date="2026-09-27")
+    program.pop("policy_number")
+    invoice = {
+        "id": _iid(11),
+        "program_id": _pid(1),
+        "status": "overdue",
+        "due_date": "2026-09-27",
+        "total_amount_cents": 41210,
+        "updated_at": "2026-09-28T00:01:00Z",
+        "invoice_number": "INV-3003",
+        "payer_name": INSURED,
+    }
+    pages = {
+        source.FEED_PROGRAMS: {"data": [program], "meta": {"next": None}},
+        source.FEED_LOANS: {"data": [], "meta": {"next": None}},
+        source.FEED_INVOICES: {"data": [invoice], "meta": {"next": None}},
+        source.FEED_PAYOUTS: {"data": [], "meta": {"next": None}},
+        source.FEED_BILLABLES: {
+            "data": [
+                {"id": "bill-1", "program_id": _pid(1), "policy_number": POLICY},
+                {"id": "bill-2", "billable_identifier": "QUOTE-NOT-A-POLICY"},
+            ],
+            "meta": {"next": None},
+        },
+    }
+    client = FeedClient(pages)
+    store = source.EventKeyStore(tmp_path / "events.db")
+    first = source.run_once(
+        client=client,
+        store=store,
+        driver_ctx=driver_ctx(),
+        since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    billable_calls = [call for call in client.calls if call[0] == source.FEED_BILLABLES]
+    assert len(billable_calls) == 1
+    assert billable_calls[0][1]["program_id"] == _pid(1)
+    assert store.cached_policy_numbers(_pid(1)) == [POLICY]
+    filed = next(row for row in first["results"] if row["status"] == "dry_run")
+    assert filed["detail"]["policy_number"] == POLICY
+    assert "Policy ID " + POLICY in filed["detail"].get("note_text", "") or POLICY in str(
+        filed["detail"]
+    )
+    source.run_once(
+        client=client,
+        store=store,
+        driver_ctx=driver_ctx(),
+        since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    assert len([call for call in client.calls if call[0] == source.FEED_BILLABLES]) == 1
+
+
+def test_past_due_key_uses_the_human_invoice_number(tmp_path):
+    invoice = {
+        "id": _iid(11),
+        "program_id": _pid(1),
+        "status": "overdue",
+        "updated_at": "2026-09-28T00:01:00Z",
+        "invoice_number": "INV-3003",
+        "policy_number": POLICY,
+    }
+    notice = source._invoice_notice(invoice, _program(1, "payment_overdue", "2026-09-28T00:01:00Z"))
+    assert notice is not None
+    assert notice.event_key.endswith("|late_payment|INV-3003")
+    assert notice.invoice_id == _iid(11)
+    assert any(key.endswith(_iid(11)) for key in notice.alias_keys)
+    store = source.EventKeyStore(tmp_path / "events.db")
+    store.record_filed(notice)
+    body = "This policy has a past-due payment of $412.10.\nInvoice No. INV-3003\n"
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date="2026-09-28T12:00:00Z",
+        store=store,
+    ) == notice.event_key
+
+
+def test_lookback_drops_an_old_loan_event_and_keeps_a_recent_one():
+    program = _program(4, "cancelled", "2026-09-24T12:36:00Z")
+    old = _loan(4, 4, "completed", "2024-12-28T00:00:00Z")
+    recent = _loan(8, 4, "completed", "2026-09-24T12:36:00Z")
+    recent["id"] = _iid(8)
+    notices = source.notices_from_snapshot(
+        programs=[program],
+        loans=[old, recent],
+        invoices=[],
+        payouts=[],
+        since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    paid = [item for item in notices if item.event_type == triage.PAID_OFF]
+    assert len(paid) == 1
+    assert "2024-12-28" not in paid[0].event_key
+    assert "2026-09-24" in paid[0].occurred_at
+
+
+def test_dry_run_database_is_separate_and_stall_alert_stays(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"
+    dry = tmp_path / "dry.db"
+    monkeypatch.setenv(source.DB_ENV, str(live))
+    monkeypatch.setenv(source.DRY_RUN_DB_ENV, str(dry))
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    assert source.db_path() == dry
+    assert source.live_db_path() == live
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    assert source.db_path() == live
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    alerts = []
+    store = source.EventKeyStore(dry)
+
+    class Boom:
+        def get(self, path, query=None):
+            raise RuntimeError("feed down")
+
+    for _ in range(source.STALL_RUNS):
+        source.run_once(
+            client=Boom(),
+            store=store,
+            driver_ctx=driver_ctx(),
+            since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            alerter=lambda message: alerts.append(message) or True,
+        )
+    assert alerts
+    assert not live.exists()
+    mode = dry.stat().st_mode & 0o777
+    assert mode == 0o644
+
+
+def test_missing_store_skips_the_email_notice_and_underwriting_still_runs(
+    tmp_path, monkeypatch
+):
+    missing = tmp_path / "missing.db"
+    monkeypatch.setenv(source.DB_ENV, str(missing))
+    body = (
+        f"This policy has a past-due payment of $412.10 which was due on 09/27/2026.\n"
+        f"Policy ID {POLICY}\n"
+        f"Customer {INSURED}\n"
+        f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
+    )
+    ctx = driver_ctx()
+    late = driver.EmailNotice(
+        message_id="mail-late",
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date="2026-09-28T12:00:00Z",
+    )
+    result = driver.process_notice(late, ctx)
+    assert result.status == "skipped"
+    assert result.reason == "api_store_unavailable"
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+    synthetic = driver.EmailNotice(
+        message_id=f"api:{_pid(1)}|late_payment|INV-3003",
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date="2026-09-28T12:00:00Z",
+    )
+    own = driver.process_notice(synthetic, ctx)
+    assert own.reason != "api_store_unavailable"
+    assert own.status == "dry_run"
+    underwriting = driver.EmailNotice(
+        message_id="mail-uw",
+        subject=f"Underwriting request for {INSURED}",
+        body=(
+            "We need the following documents for underwriting.\n"
+            f"Policy ID {POLICY}\n"
+            f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
+        ),
+        internal_date="2026-09-28T12:00:00Z",
+    )
+    kept = driver.process_notice(underwriting, ctx)
+    assert kept.reason != "api_store_unavailable"

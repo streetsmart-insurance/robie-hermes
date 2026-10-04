@@ -735,6 +735,26 @@ class EzlynxApiClient:
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
 
+    def search_applicants_by_name_and_email(self, name: str, email: str) -> dict[str, Any]:
+        """Read-only PolicyApi search by insured name and email.
+
+        Both values are required. The caller accepts the page only when it
+        is complete and every row matches both fields on exactly one
+        applicant. A page that ignores the filters fails that check.
+        """
+        applicant_name = str(name or "").strip()
+        applicant_email = str(email or "").strip()
+        if not applicant_name or "@" not in applicant_email:
+            raise EzlynxApiError(None, "insured name and email are required")
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode({"ApplicantName": applicant_name, "Email": applicant_email})
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
     def create_policy(
         self,
         *,

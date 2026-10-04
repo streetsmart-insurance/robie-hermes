@@ -7,10 +7,13 @@ driver for Ascend-domain mail and leave StreetSmart / finance mail alone.
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest import mock
 
+from robie_job_engine import ascend_api_notice_source as api_notice_source
 from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import email_notice_hook as hook
@@ -72,6 +75,21 @@ class AscendNoticeSenderTests(unittest.TestCase):
 
 
 class WatcherHookTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        path = Path(self._tmpdir.name) / "events.db"
+        api_notice_source.EventKeyStore(path)
+        self._previous_db = os.environ.get(api_notice_source.DB_ENV)
+        os.environ[api_notice_source.DB_ENV] = str(path)
+        self.addCleanup(self._restore_db)
+
+    def _restore_db(self):
+        if self._previous_db is None:
+            os.environ.pop(api_notice_source.DB_ENV, None)
+        else:
+            os.environ[api_notice_source.DB_ENV] = self._previous_db
+
     def test_non_ascend_sender_is_ignored(self):
         ctx, discussion_client = _ctx()
         result = hook.try_process_ascend_notice(

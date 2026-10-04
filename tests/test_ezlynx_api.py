@@ -284,6 +284,27 @@ class DestinationReadClientTests(unittest.TestCase):
         self.assertIn("PolicyNumber=73834086", seen["url"])
         self.assertEqual(seen["auth"], "Bearer tok-p")
 
+    def test_name_and_email_search_is_a_read_only_policyapi_get(self):
+        seen = {}
+
+        def fake_urlopen(url, *, data, headers, timeout):
+            if "connect/token" in url:
+                return FakeResponse(
+                    json.dumps({"access_token": "tok-p", "expires_in": 3600}).encode()
+                )
+            seen["url"] = url
+            seen["data"] = data
+            return FakeResponse(json.dumps({"results": [], "totalSize": 0}).encode())
+
+        client = EzlynxApiClient(_classic_config(), urlopen=fake_urlopen)
+        client.search_applicants_by_name_and_email(
+            "Fixture Hauling LLC", "insured@example.test"
+        )
+        self.assertIn("/PolicyApi/policy/v1/search", seen["url"])
+        self.assertIn("ApplicantName=Fixture", seen["url"])
+        self.assertIn("Email=insured%40example.test", seen["url"])
+        self.assertIsNone(seen["data"])
+
     def test_list_documents_uses_classic_eztoken_not_documentapi_host(self):
         seen = {}
 
