@@ -1011,6 +1011,62 @@ class EzlynxPolicySetupPage:
         if await save_btn.count() > 0:
             await save_btn.click()
 
+    async def ensure_dwelling_location(self, loc: LocationItem | None) -> bool:
+        """True when the policy has a dwelling location (existing or added).
+
+        PROVEN 2026-09-13 (policy 83670183, manual browser run): the
+        FormEntry "Dwelling Information / Coverages" tab silently refuses
+        to open while the Locations grid is empty — every click no-ops.
+        Adding one location unlocks the tab on the first click. Call this
+        BEFORE attempting the Coverages tab. The modal path below
+        ("Add Location" button, uncheck "Same As Mailing", fill by label)
+        is the proven working path; the #add-location-btn id selectors
+        above never matched the live DOM.
+        """
+        for sel in (
+            "#locations-grid tbody tr",
+            "[data-grid='locations'] tbody tr",
+        ):
+            try:
+                if await self.page.locator(sel).count() > 0:
+                    return True
+            except Exception:
+                continue
+        if loc is None:
+            return False
+        add_btn = self.page.get_by_role("button", name="Add Location")
+        if await add_btn.count() == 0:
+            return False
+        await add_btn.first.click()
+        try:
+            same = self.page.get_by_label("Same As Mailing")
+            if await same.count() > 0 and await same.first.is_checked():
+                await same.first.uncheck()
+        except Exception:
+            pass
+        await self.page.get_by_label("Address").first.fill(loc.address or "")
+        await self.page.get_by_label("City").first.fill(loc.city or "")
+        if loc.state:
+            try:
+                await self.page.get_by_label("State").first.fill(loc.state)
+            except Exception:
+                pass
+        await self.page.get_by_label("Zip").first.fill(loc.zip_code or "")
+        save_btn = self.page.get_by_role("button", name="Save")
+        if await save_btn.count() > 0:
+            await save_btn.first.click()
+            await self.page.wait_for_timeout(1500)
+        for sel in (
+            "#locations-grid tbody tr",
+            "[data-grid='locations'] tbody tr",
+        ):
+            try:
+                if await self.page.locator(sel).count() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def add_building(self, bldg: BuildingItem) -> None:
         add_btn = self.page.locator("#add-building-btn, button[data-action='add-building']")
         await add_btn.click()
@@ -1323,6 +1379,31 @@ class EzlynxPolicySetupPage:
                 is_location_section_labels,
                 map_letter_amounts_to_live_labels,
             )
+
+            # PROVEN 2026-09-13 (policy 83670183, manual browser run): the
+            # FormEntry "Dwelling Information / Coverages" tab silently
+            # refuses to open while the Locations grid is empty. Ensure a
+            # dwelling location exists before attempting the tab; fail
+            # closed when the job provided no location instead of hitting
+            # the mysterious tab-stuck failure.
+            first_loc = shell_input.locations[0] if shell_input.locations else None
+            if not await self.ensure_dwelling_location(first_loc):
+                return PolicySetupResult(
+                    success=False,
+                    applicant_id=applicant_id,
+                    policy_number=shell_input.policy_number,
+                    lob=normalized,
+                    phase_reached="location_prerequisite",
+                    error=(
+                        "PLAYWRIGHT_BLOCKED: policy has no dwelling location "
+                        "and the job provided none; the FormEntry Coverages "
+                        "tab cannot open without one"
+                    ),
+                    note_added=False,
+                    stopped_before_bind=True,
+                    policy_id=str(policy_id or ""),
+                )
+            evidence["phases"].append("location_prerequisite")
 
             tab = await aensure_coverages_tab(
                 self.page, gemini_client=self._gemini_client()
