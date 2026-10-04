@@ -114,6 +114,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Protocol
 from zoneinfo import ZoneInfo
 
+from .business_calendar import us_federal_holidays
+from .call_opt_out import pressed_opt_out
 from .bland_config import (
     CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
@@ -363,6 +365,7 @@ class RobieCallPorts:
     task_status: Optional[TaskStatusPort] = None  # skip already-closed tasks
     job_checkpoint: Optional[CallJobCheckpointPort] = None  # durable restart recovery
     transfer_lookup: Optional[TransferLookupPort] = None  # assignee DID for live transfers
+    opt_out_store: Optional[Any] = None  # press 6 stops later automated calls
 
 
 @dataclass
@@ -819,6 +822,11 @@ def _outside_calling_window(config: RobieCallConfig) -> Optional[str]:
     if current.weekday() >= 5:
         return (
             f"weekend; outbound calls run weekdays "
+            f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
+        )
+    if current.date() in us_federal_holidays(current.year):
+        return (
+            f"federal holiday; outbound calls run weekdays "
             f"{_format_hour(start)}–{_format_hour(end)} {zone.key}"
         )
     minute_of_day = current.hour * 60 + current.minute
@@ -2078,6 +2086,22 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
+    opt_outs = getattr(ports, "opt_out_store", None)
+    if opt_outs is not None and opt_outs.is_opted_out(applicant_id):
+        log.info("task %s skipped; applicant opted out of automated calls", task_id)
+        skip_note = (
+            "Robie did not call. This client opted out of automated phone "
+            "calls. Automated calls stay off until a person turns them back on."
+        )
+        wb = _writeback_once(
+            ports, task_id, "opt_out_skip",
+            applicant_id, skip_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "client opted out of automated calls; not dialed",
+            writeback=wb,
+        )
     # No outbound dials outside the calling window. Queue the task (leave
     # it open, do not mark it processed) and say so once. Never dial.
     window_block = _outside_calling_window(config)
@@ -2219,6 +2243,10 @@ def _handle_call_task(
             )
         except Exception as exc:  # noqa: BLE001
             call_result = {"success": False, "error": str(exc)[:300], "call_ids": []}
+
+    if opt_outs is not None and pressed_opt_out(call_result):
+        opt_outs.record_opt_out(applicant_id, source="press-6")
+        log.info("applicant %s opted out of automated calls", applicant_id)
 
     tripped = _bland_record(bool(call_result.get("success")))
     if tripped:

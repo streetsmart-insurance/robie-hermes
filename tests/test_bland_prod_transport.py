@@ -181,8 +181,10 @@ def test_kill_switch_refuses_before_the_socket():
 
 def test_call_port_refuses_a_policy_number_and_posts_an_e164_number():
     seen = []
+    env = dict(PROD_ENV)
+    env["ROBIE_PHONE_REAL_CLIENTS"] = "1"
     port = BlandTransportCallPort(
-        env=PROD_ENV, hostname=PROD_HOST, api_key=SECRET,
+        env=env, hostname=PROD_HOST, api_key=SECRET,
         urlopen=_urlopen_factory(seen), execute=True,
     )
     refused = port.place_call_with_double_dial("7685786571", "task", "hi", "vm")
