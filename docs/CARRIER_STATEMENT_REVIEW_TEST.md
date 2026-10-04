@@ -19,3 +19,11 @@ Use explicit saved attachment paths. Do not derive paths from filenames. Real st
 `python carrier_statements/tests/test_parsers.py`
 
 `PYTHONPATH=. python -m pytest tests/test_carrier_statement_review_contract.py`
+
+## Snapshot intake adapter (stacked Test draft)
+
+`python carrier_statements/intake_snapshot.py --roster <private.json> --documents <private.json> --agency-id <id> --month YYYY-MM`
+
+Joins Insurance Carriers.id to Documents.Insurance Carrier Name. Duplicate/missing IDs and orphan joins are held. Month fields, document dates/names/remarks and Received/Reconciled labels do not prove printed period, statement class, reconciliation or bank landing. Raw billing categories prioritize review only; invoice-only/no-business/own-agency insurance exceptions still need a verified obligation rule.
+
+Source validation needs the actual file, digest, printed period, class and matching carrier/document identity. Snapshot ingest is not an active AppSheet read connector, portal/email downloader or scheduled monthly service. Private roster/document exports are not committed. Bank/financing and EZLynx invoice/receipt connections remain missing. No AppSheet, EZLynx, QBO or mail mutations.
