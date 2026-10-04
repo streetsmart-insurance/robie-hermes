@@ -183,8 +183,14 @@ def test_call_port_refuses_a_policy_number_and_posts_an_e164_number():
     seen = []
     env = dict(PROD_ENV)
     env["ROBIE_PHONE_REAL_CLIENTS"] = "1"
+
+    def kill_switch_off(name: str) -> str:
+        assert name == "bland-dispatcher-kill-switch"
+        return "0"
+
     port = BlandTransportCallPort(
         env=env, hostname=PROD_HOST, api_key=SECRET,
+        secret_reader=kill_switch_off,
         urlopen=_urlopen_factory(seen), execute=True,
     )
     refused = port.place_call_with_double_dial("7685786571", "task", "hi", "vm")

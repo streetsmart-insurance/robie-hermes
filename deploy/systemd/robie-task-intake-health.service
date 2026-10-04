@@ -1,0 +1,30 @@
+[Unit]
+Description=ROBIE Task Check-In intake health (quiet when healthy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+Environment=ROBIE_DASHBOARD_SHEET_ID=1Qj0-i4QJuNkfWtjdfAdpQpI1JmC44KmThr_rrzGG6EQ
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION
+Environment=ROBIE_TASK_INTAKE_CHECK_EFFECTIVE_ENV=1
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.task_intake_health
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

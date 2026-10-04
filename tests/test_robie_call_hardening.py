@@ -57,6 +57,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Account Name": "John Test",
         "Task Created By": "carlo1",
         "Assigned Producer": "Jane Producer",
+        "Activity Labels": "Robie Call",
     }
     task.update(overrides)
     return task

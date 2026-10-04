@@ -51,6 +51,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Account Name": "John Test",
         "Task Created By": "carlo1",
         "Assigned Producer": "Jane Producer",
+        "Activity Labels": "Robie Call",
     }
     task.update(overrides)
     return task
@@ -181,19 +182,23 @@ class TestIsCallTask(unittest.TestCase):
 
     def test_detects_call_keyword(self):
         self.assertTrue(is_call_task(make_task()))
+        self.assertFalse(is_call_task(make_task(**{"Activity Labels": ""})))
 
     def test_detects_phone_keyword(self):
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Follow up", "Task Description": "Phone the client today",
         })))
 
     def test_detects_dial_keyword(self):
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Dial them", "Task Description": "",
         })))
 
     def test_non_call_task(self):
         self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "File paperwork", "Task Description": "Scan the dec page",
         })))
 
@@ -206,6 +211,8 @@ class TestIsCallTask(unittest.TestCase):
             "Notes": "Give them a ring about billing",
             "ApplicantID": TEST_APPLICANT,
         }
+        self.assertFalse(is_call_task(task))
+        task["Activity Labels"] = "Robie Call"
         self.assertTrue(is_call_task(task))
 
 
@@ -230,6 +237,7 @@ class TestValidation(unittest.TestCase):
 
     def test_non_call_task_skipped(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "File paperwork", "Task Description": "Scan the dec page",
         })
         ports = make_ports()
@@ -404,12 +412,61 @@ class TestWriteback(unittest.TestCase):
         import re
         self.assertIsNone(re.search(r"\d{3}[-.\s]?\d{3}[-.\s]?\d{4}", body))
 
+    def test_real_client_outcome_note_uses_the_all_clients_scope(self):
+        applicant = "80026158"
+        for key in ("ROBIE_EZLYNX_WRITE_SCOPE", "ROBIE_PLAYGROUND"):
+            os.environ.pop(key, None)
+        ports = make_ports(phone_lookup=FakePhonePort({applicant: "732-668-8161"}))
+        refused = handle_robie_call_task(
+            make_task(**{"Applicant ID": applicant, "Account Name": "Avery Sample"}),
+            live_config(),
+            ports,
+        )
+        self.assertFalse(refused["ok"])
+        self.assertEqual(ports.discussion_client.appended, [])
+        self.assertIn(
+            "EZLYNX_WRITE_SCOPE_REFUSED",
+            f"{refused.get('error')} {refused.get('writeback')}",
+        )
+
+        os.environ["ROBIE_EZLYNX_WRITE_SCOPE"] = "all"
+        os.environ["ROBIE_PLAYGROUND"] = "1"
+        try:
+            from robie_job_engine.playground_guardrails import classify_playground_request
+
+            blocked = classify_playground_request("delete the policy")
+            self.assertTrue(blocked.blocked)
+            self.assertEqual(blocked.code, "delete_or_cancel")
+            rch._reset_module_state_for_tests()
+            ports = make_ports(phone_lookup=FakePhonePort({applicant: "732-668-8161"}))
+            filed = handle_robie_call_task(
+                make_task(**{
+                    "Applicant ID": applicant,
+                    "Task ID": "TASK-REAL",
+                    "Account Name": "Avery Sample",
+                }),
+                live_config(),
+                ports,
+            )
+            self.assertTrue(filed["ok"], filed.get("error"))
+            self.assertEqual(len(ports.discussion_client.appended), 1)
+            body = ports.discussion_client.appended[0]["body"]
+            self.assertIn("Avery Sample", body)
+            self.assertIn("They answered and I talked to them.", body)
+            self.assertNotIn("The call was successful.", body)
+            self.assertNotIn("..", body)
+            self.assertNotEqual(applicant, "220250093")
+        finally:
+            os.environ.pop("ROBIE_EZLYNX_WRITE_SCOPE", None)
+            os.environ.pop("ROBIE_PLAYGROUND", None)
+
     def test_outcome_note_names_applicant_plain_english(self):
         ports = make_ports()
         handle_robie_call_task(make_task(), live_config(), ports)
         body = ports.discussion_client.appended[0]["body"]
         self.assertIn("John Test", body)
-        self.assertIn("The call was successful.", body)
+        self.assertIn("They answered and I talked to them.", body)
+        self.assertNotIn("The call was successful.", body)
         # No call IDs, no jargon in staff-facing notes.
         self.assertNotIn("call-1", body)
         self.assertNotIn("Bland call id", body)
@@ -697,7 +754,9 @@ class TestCallRequestRound(unittest.TestCase):
         self.assertNotIn("on behalf of Jake", text)
         body = ports.discussion_client.appended[0]["body"]
         self.assertIn("Called Progressive on behalf of Jane Producer", body)
-        self.assertIn("Spoke with someone at Progressive", body)
+        self.assertIn("They answered and I talked to them.", body)
+        self.assertNotIn("Please call", body)
+        self.assertNotIn("..", body)
         self.assertNotIn("Called Mary Smith", body)
         self.assertNotIn("Jake", body)
         self.assertNotIn("800", body)

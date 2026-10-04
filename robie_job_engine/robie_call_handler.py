@@ -1,8 +1,8 @@
 """Freeform "Robie Call" task handler.
 
 When agency staff assign an EZLynx task to "Robie AI" with a freeform call
-instruction (e.g. "Please call John about his renewal"), the 30-minute
-"Robie AI - Task Check-In" Looker schedule emails a CSV of Robie's open
+instruction (e.g. "Please call John about his renewal"), the 5-minute
+"Robie AI - Task Check-In" intake reads the Looker CSV of Robie's open
 tasks to robie@streetsmart.insurance. The task worker (PR #738) parses that
 CSV, acknowledges each task, and routes call tasks here.
 
@@ -90,7 +90,7 @@ RELIABILITY CONTRACT (rock solid):
 - Retries with exponential backoff on transient EZLynx/phone-lookup failures.
   The Bland POST itself is single-attempt (no idempotency key on /v1/calls;
   a retried timeout could double-dial the client). Failed tasks stay OPEN
-  and are redelivered on the next 30-min report cycle.
+  and are redelivered on the next intake run.
 - Circuit breaker on the Bland port: 5 consecutive failures -> 120s cooldown.
 - Call failure -> task stays OPEN, chat alert, NO reassignment (human sees it).
 - Writeback failure with a successful call -> IMMEDIATE chat alert
@@ -161,16 +161,6 @@ def _resolve_transfer_number(ports: RobieCallPorts,
     return None
 
 CALL_KEYWORDS = ("call", "phone", "dial", "ring", "callback", "call back")
-
-# Word-boundary regex for call keywords. Substring matching caused false
-# positives: "recall the policy" (contains "call"), "morning meeting"
-# (contains "ring"), "telephone" (contains "phone"). A mistaken "call task"
-# could dial a client for a non-call task — the exact trust violation
-# Carlo wants eliminated.
-_CALL_KEYWORD_RE = re.compile(
-    r"\b(call|phone|dial|ring|callback|call\s+back)\b",
-    re.IGNORECASE,
-)
 
 PHONE_KEY_PRIORITY = ("CellPhone", "BusinessPhone", "HomePhone", "Phone", "PrimaryPhone")
 
@@ -407,7 +397,7 @@ _processed_tasks: Dict[str, float] = {}  # task_id -> completed_at epoch
 # two different tasks — task_id idempotency alone would dial twice.
 _processed_content: Dict[tuple, float] = {}
 # In-flight claims: task_ids currently being processed in this process.
-# Two overlapping runs (30-min loop + manual trigger) must not dial twice.
+# Two overlapping runs (5-minute intake + manual trigger) must not dial twice.
 _inflight_tasks: set = set()
 _bland_failures: int = 0
 _bland_circuit_open_until: float = 0.0
@@ -460,6 +450,10 @@ _TASK_FIELD_ALIASES: Dict[str, List[str]] = {
     "workflow": ["Workflow", "workflow"],
     "discussion_id": ["Discussion ID", "discussion_id", "DiscussionID"],
     "phone_is_mobile": ["Phone Is Mobile", "phone_is_mobile"],
+    "created_date": [
+        "Created Date", "created_at", "created_at_et", "created_date",
+        "Task Created Date",
+    ],
 }
 
 
@@ -471,22 +465,16 @@ def _pick(task: Dict[str, Any], logical: str) -> str:
 
 
 def is_call_task(task: Dict[str, Any]) -> bool:
-    """True when the task subject/description asks for a phone call.
+    """True only when an Activity Label is exactly Robie Call or lead follow-up.
 
-    Uses word-boundary matching: "recall the policy" and "morning meeting"
-    are NOT call tasks (substring matching caused false positives that
-    could have dialed a client for a non-call task).
+    Title and description text never start a call. "Do not call",
+    "[CALLBACK REQUIRED]", and a Splice label such as "Robie audit"
+    are not call tasks.
     """
     from .call_pickup import classify_call_request
 
-    decision = classify_call_request(
-        _pick(task, "activity_labels"),
-        _pick(task, "subject") + " " + _pick(task, "description"),
-    )
-    if decision.action in ("workflow", "freeform"):
-        return True
-    text = _pick(task, "subject") + " " + _pick(task, "description")
-    return bool(_CALL_KEYWORD_RE.search(text))
+    decision = classify_call_request(_pick(task, "activity_labels"), "")
+    return decision.action in ("workflow", "freeform")
 
 
 def _extract_instruction(task: Dict[str, Any]) -> str:
@@ -1483,6 +1471,23 @@ def _writeback_once(
     return result
 
 
+def _outcome_topic(instruction: str) -> str:
+    """The subject of the call, without the 'please call … about' wrapper.
+
+    A note that says "about Please call the client…." is the wrapper pasted
+    on twice. When the task has an about-clause, only that clause is kept.
+    Otherwise the scrubbed instruction stays, so two different tasks do not
+    file the same sentence. Trailing periods are removed; the caller adds one.
+    """
+    text = re.sub(r"\s+", " ", _scrub_phones(instruction or "")).strip(" .")
+    if not text:
+        return ""
+    match = re.search(r"(?i)\babout\s+(.+)$", text)
+    if match:
+        text = match.group(1).strip(" .")
+    return text
+
+
 def _format_outcome_note(
     applicant_name: str,
     instruction: str,
@@ -1500,15 +1505,12 @@ def _format_outcome_note(
     (unknown answered_by, missing data) is stated plainly; the note never
     pretends an uncertain call went fine.
     """
-    call_ids = ", ".join(call.get("call_ids") or []) or "n/a"
     attempts = call.get("attempts") or []
     who = (called_party or "").strip() or applicant_name or "the client"
     client = applicant_name or "the client"
     behalf = (producer_name or "").strip()
-    first = who.split()[0]
-    # The instruction goes into the note — scrub any phone numbers first
-    # (the Discussion API rejects them).
-    topic = _scrub_phones(instruction[:120].strip())
+    behalf_bit = f" on behalf of {behalf}" if behalf else ""
+    topic = _outcome_topic(instruction)
 
     # Verdict: did the call verifiably happen? A completed call with
     # duration connected, even if answered_by is "unknown" (we know it
@@ -1538,48 +1540,53 @@ def _format_outcome_note(
         bool(call.get("success")) or any(a.get("success") for a in attempts)
     )
 
-    behalf_bit = f" on behalf of {behalf}" if behalf else ""
     if call.get("dry_run"):
-        return (
-            f"DRY RUN: no call was placed{behalf_bit}. "
-            f"Nothing was dialed about {topic}."
-        )
+        if topic:
+            return f"DRY RUN: no call was placed{behalf_bit} about {topic}."
+        return f"DRY RUN: no call was placed{behalf_bit}."
 
+    if topic:
+        opened = f"Called {who}{behalf_bit} about {topic}."
+    else:
+        opened = f"Called {who}{behalf_bit}."
     if connected:
-        lines = [f"Called {who}{behalf_bit} about {topic}.",
-                 "The call was successful."]
-        # What happened, honestly.
-        vm_hit = call.get("voicemail_hit")
-        redialed = call.get("redialed")
+        vm_hit = bool(call.get("voicemail_hit"))
+        redialed = bool(call.get("redialed"))
         answered = ""
         for a in reversed(attempts):
             if a.get("success"):
                 answered = str((a.get("final_status") or {}).get("answered_by")
                                or "").lower()
                 break
-        if redialed and vm_hit:
-            lines.append("The first attempt went to voicemail, so we called "
-                         "back and left a message.")
-        elif vm_hit or answered == "voicemail":
-            lines.append("The call went to voicemail.")
-        elif answered == "human":
-            if called_party and called_party != applicant_name:
-                lines.append(f"Spoke with someone at {who}.")
-            else:
-                lines.append(f"Spoke with {first}.")
-        elif answered == "unknown" or not answered:
-            lines.append("The call connected but we couldn't confirm whether "
-                         "it reached the person or voicemail.")
+        message_left = redialed or any(
+            str(
+                (a.get("final_status") or {}).get("voicemail_action")
+                or a.get("voicemail_action")
+                or ""
+            ) == "leave_message"
+            for a in attempts
+        )
+        if answered == "human":
+            happened = "They answered and I talked to them."
+        elif answered == "voicemail" or vm_hit:
+            happened = (
+                "No answer, left a voicemail."
+                if message_left else "No answer, no message."
+            )
+        else:
+            happened = (
+                "The call connected, but I couldn't confirm whether it "
+                "reached the person or voicemail."
+            )
+        lines = [opened, happened]
     elif unknown:
-        lines = [f"Attempted to call {who}{behalf_bit} about {topic}.",
-                 "We couldn't confirm whether the call went through — the "
-                 "phone system accepted the request but we lost track of the "
-                 "outcome. No message was confirmed left."]
+        lines = [
+            opened,
+            "No answer, no message.",
+            "I couldn't confirm whether the call went through.",
+        ]
     else:
-        err = str(call.get("error") or "the call did not connect")
-        lines = [f"Attempted to call {who}{behalf_bit} about {topic}.",
-                 f"The call was NOT successful: {err}.",
-                 "No message was left."]
+        lines = [opened, "No answer, no message."]
 
     rec = {
         "ok": "The call recording was uploaded.",
@@ -1613,8 +1620,8 @@ def handle_robie_call_task(
 ) -> Dict[str, Any]:
     """Handle one freeform "Robie Call" task. NEVER raises.
 
-    Wrapper: claims the task in-flight so two overlapping runs (the 30-min
-    loop plus a manual trigger) can never dial twice, then delegates.
+    Wrapper: claims the task in-flight so two overlapping runs (the 5-minute
+    intake plus a manual trigger) can never dial twice, then delegates.
     """
     task_id = _pick(task, "task_id") or None
     if task_id and not _claim_inflight(task_id):
@@ -1714,6 +1721,12 @@ def _handle_call_task(
         return fail("task has no applicant_id; refusing to process")
     if not is_call_task(task):
         return fail("task does not look like a call task; skipping")
+    if "dialable" in task and task.get("dialable") is not True:
+        return fail("call job is not dialable; a non-live queue is never dialed")
+    queued_at = str(task.get("queued_at") or "")
+    live_at = str(task.get("live_enabled_at") or "")
+    if live_at and queued_at and queued_at < live_at:
+        return fail("call job was queued before live mode; not dialing")
 
     # ---- 1b. Authorization: the task must be assigned to Robie ---------------
     # An outbound client call is only ever placed for a task explicitly
@@ -1802,17 +1815,13 @@ def _handle_call_task(
     # select them.
     from .call_pickup import (
         LEAD_WORKFLOW_ID,
-        CallPickup,
         calling_day,
         classify_call_request,
         note_dedupe_key,
     )
     from .splice_scripts import get_workflow
 
-    decision = classify_call_request(_pick(task, "activity_labels"), instruction)
-    explicit = _pick(task, "workflow")
-    if explicit == LEAD_WORKFLOW_ID and decision.action != "freeform":
-        decision = CallPickup("workflow", workflow_id=LEAD_WORKFLOW_ID)
+    decision = classify_call_request(_pick(task, "activity_labels"), "")
     workflow = None
     if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
         workflow = get_workflow(LEAD_WORKFLOW_ID)
@@ -2166,6 +2175,18 @@ def _handle_call_task(
                 "no recorded opt-in; marketing call not dialed",
                 skipped_opt_in=True,
             )
+    # Created Date in the report is Central. Convert it to Eastern before
+    # the calling window, the same-day key, and any age check.
+    from .report_clock import age_minutes, report_created_et
+
+    raw_created = _pick(task, "created_date")
+    created_et = report_created_et(raw_created) if raw_created else None
+    if created_et is not None:
+        now_for_age = _calling_now(config)
+        log.info(
+            "task %s created %s ET (age %.0f min)",
+            task_id, created_et.isoformat(), age_minutes(created_et, now_for_age),
+        )
     # No outbound dials outside the calling window. Queue the task (leave
     # it open, do not mark it processed) and say so once. Never dial.
     window_block = _outside_calling_window(config)
@@ -2350,11 +2371,15 @@ def _handle_call_task(
         # Single attempt: the Bland port applies the double-dial internally.
         # We deliberately do NOT retry the POST — Bland has no idempotency key
         # on /v1/calls, so a retried timeout could double-dial the client.
-        # A failed task stays OPEN and is redelivered on the next 30-min
-        # report cycle, with human visibility via the chat alert below.
+        # A failed task stays OPEN and is redelivered on the next intake
+        # run, with human visibility via the chat alert below.
         dedupe = getattr(ports, "call_dedupe", None)
         if dedupe is not None:
-            day = calling_day(_calling_now(config))
+            # Same-day key is the Eastern day. A Created Date is converted
+            # from Central first; otherwise the key is the Eastern call day.
+            day = calling_day(created_et) if created_et is not None else calling_day(
+                _calling_now(config)
+            )
             dedupe_key = note_dedupe_key(
                 applicant_id, _pick(task, "discussion_id"), instruction, task_id,
             )

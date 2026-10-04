@@ -62,6 +62,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Account Name": "John Test",
         "Task Created By": "carlo1",
         "Assigned Producer": "Jane Producer",
+        "Activity Labels": "Robie Call",
     }
     task.update(overrides)
     return task
@@ -189,6 +190,7 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_recall_is_not_call_task(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Recall the policy",
             "Task Description": "Recall the policy from the carrier",
         })
@@ -196,11 +198,14 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_morning_is_not_call_task(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Follow up",
             "Task Description": "Call during the morning meeting is fine",
         })
+        self.assertFalse(is_call_task(task))
         # "morning" contains "ring" as substring — must not match
         task2 = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Morning review",
             "Task Description": "Review in the morning",
         })
@@ -208,6 +213,7 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_telephone_substring_no_match(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Update",
             "Task Description": "Update the telephone log",
         })
@@ -215,13 +221,19 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_real_call_still_detected(self):
         self.assertTrue(is_call_task(make_task()))
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "x", "Task Description": "Please CALL the client"})))
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Dial them", "Task Description": ""})))
+        self.assertTrue(is_call_task(make_task(**{
+            "Activity Labels": "Robie lead follow-up",
+            "Task Subject": "x", "Task Description": "Please CALL the client"})))
 
     def test_recall_task_never_dials(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Recall the policy",
             "Task Description": "Recall the policy from the carrier",
         })
@@ -522,13 +534,17 @@ class TestOutcomeNoteHonesty(unittest.TestCase):
                                            "answered_by": "voicemail"}}],
             "voicemail_hit": True, "redialed": True,
             "recording_url": None, "error": None,
+        }, call_status={
+            "ok": True, "status": "completed", "answered_by": "voicemail",
+            "duration_s": 20,
         })
         ports = make_ports(bland=bland)
         handle_robie_call_task(make_task(), live_config(), ports)
         body = ports.discussion_client.appended[0]["body"]
-        self.assertIn("The call was successful.", body)
-        self.assertIn("voicemail", body.lower())
-        self.assertIn("called back", body.lower())
+        self.assertIn("No answer, left a voicemail.", body)
+        self.assertNotIn("The call was successful.", body)
+        self.assertNotIn("..", body)
+        self.assertNotIn("Please call", body)
 
     def test_failed_note_names_failure(self):
         bland = FakeBlandPort(result={

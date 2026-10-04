@@ -914,6 +914,44 @@ class EzlynxApiClient:
             return parsed
         return {"Records": parsed}
 
+    def get_applicant_phones(self, applicant_id: str) -> dict[str, str]:
+        """Classic GET Applicant/v2 phone fields. Read-only. SSRobie.
+
+        Returns only CellPhone, BusinessPhone, and HomePhone. The rest of
+        the applicant record is not kept. A missing id, a non-object, or
+        a transport error raises so the phone lookup fails closed.
+        """
+        applicant = str(applicant_id or "").strip()
+        if not applicant or not applicant.isdigit():
+            raise EzlynxApiError(None, "applicant id is required")
+        base = str(self._config.classic_base_url or "").strip()
+        if not base:
+            base = self._origin() + "/ezlynxapi/"
+        url = base.rstrip("/") + "/api/Applicant/v2/" + quote(applicant, safe="")
+        parsed = self._request_json(
+            "GET",
+            url,
+            data=None,
+            headers=self._classic_auth_headers(),
+        )
+        if not isinstance(parsed, dict):
+            raise EzlynxApiError(None, "Applicant API returned unexpected shape")
+        body = parsed
+        if not any(key in body for key in ("CellPhone", "BusinessPhone", "HomePhone")):
+            for key in ("Applicant", "applicant", "data", "Data"):
+                inner = parsed.get(key)
+                if isinstance(inner, dict):
+                    body = inner
+                    break
+        returned = str(body.get("Id") or body.get("ApplicantId") or body.get("id") or "").strip()
+        if returned and returned != applicant:
+            raise EzlynxApiError(None, "Applicant API response identifies a different applicant")
+        return {
+            "CellPhone": str(body.get("CellPhone") or ""),
+            "BusinessPhone": str(body.get("BusinessPhone") or ""),
+            "HomePhone": str(body.get("HomePhone") or ""),
+        }
+
     def get_applicant_discussions(
         self,
         applicant_id: str,
