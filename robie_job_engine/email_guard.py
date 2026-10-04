@@ -446,3 +446,4 @@ def _render_email_terminal(
             job_id=job_id,
         )
     )
+

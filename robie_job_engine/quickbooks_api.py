@@ -287,7 +287,7 @@ class QuickBooksApiClient:
             }
 
         return {
-            "status": "success",
-            "message": f"Cleared supplier bill for {wholesaler_name} ($ {amount_dollars:,.2f})",
+            "status": "disabled",
+            "reason": "supplier accounting adapter not implemented; no write",
             "payout_id": payout_id,
         }

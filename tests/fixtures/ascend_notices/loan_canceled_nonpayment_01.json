@@ -1,0 +1,13 @@
+{
+  "family": "loan_canceled_nonpayment",
+  "from": "no-reply@useascend.com",
+  "subject": "The coverage policy for Fixture Insured A LLC has been canceled due to non-pay",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (1504b)",
+    "    text/html (23655b)",
+    "  application/pdf (216154b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "Hi Mike,\r\n\r\nWe want to inform you that Fixture Insured A LLC canceled for non-payment and still has an overdue balance of $133.42. No payment was received and the loan has been canceled effective 09/23/2026.As a result, our system issued the attached notice of cancelation(s) to the carrier/wholesaler for the following policies:\r\n\r\nPolicyGeneral Liability (Tapco Underwriters)Policy IDCPS6534227Effective date01/06/2026 \r\n\r\nNote that the insured will continue to accrue late fees/interest and will not receive refunds until the return premium has been applied to the loan balance. Typically, the carrier will send the returned funds to the finance company. In some cases, the carrier may refund your team, and you are legally obliged to forward funds to the finance company.\r\n\r\nPlease complete the cancelation process here ( https://dashboard.useascend.com/programs/32fadf9b-56e6-44e6-a39d-ec978feaffec ), or if this was an error, please reinstate the loan here ( https://dashboard.useascend.com/programs/32fadf9b-56e6-44e6-a39d-ec978feaffec/reinstate ).\r\n\r\nPlease don't hesitate to reach out to support@useascend.com if you have any questions.\r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by AscendAscend"
+}

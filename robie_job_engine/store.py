@@ -323,6 +323,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def fail_dead_running_jobs(
@@ -380,6 +381,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def fail_gateway_restart_orphans(
@@ -436,6 +438,7 @@ class JobStore:
                         stamp,
                     ),
                 )
+        self._stop_capture(job_ids)
         return job_ids
 
     def retarget_unattempted(
@@ -571,15 +574,25 @@ class JobStore:
         resume_status: JobStatus | None = None,
         release_lease: bool = False,
         authority: str = "job-engine",
+        lease_owner: str | None = None,
     ) -> dict[str, Any]:
+        """Move a Job between statuses.
+
+        `lease_owner` fences the move: it applies only while that worker still
+        holds the Job's lease, checked in the same transaction as the update.
+        A worker whose lease lapsed and was recovered cannot overwrite the
+        replacement's state. Omitted, behaviour is unchanged.
+        """
         now = utc_now()
         with self.transaction() as conn:
-            row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = conn.execute("SELECT status, lease_owner FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise KeyError(job_id)
             current = JobStatus(row["status"])
             if expected is not None and current not in expected:
                 raise RuntimeError(f"invalid transition {current} -> {status}")
+            if lease_owner is not None and row["lease_owner"] != lease_owner:
+                raise RuntimeError("job lease is missing or owned by another worker")
             if status == JobStatus.COMPLETE:
                 evidence = conn.execute(
                     """SELECT locator,expected_json,observed_json,captured_at,
@@ -660,7 +673,70 @@ class JobStore:
                     job_id,
                 ),
             )
-            return self.get_job(job_id, conn=conn)
+            job = self.get_job(job_id, conn=conn)
+        if status in TERMINAL_STATUSES:
+            self._stop_capture([job_id])
+            self._release_turn_lock(job_id)
+            if status == JobStatus.CANCELLED or (
+                status == JobStatus.FAILED and "cancel" in str(error or "").casefold()
+            ):
+                self._clear_cancelled_conversation_link(job_id)
+        return job
+
+    def _clear_cancelled_conversation_link(self, job_id: str) -> None:
+        """A cancelled job must not stay the active conversation link.
+
+        Preflight treats an active link to a terminal job as a failure.
+        /stop used to leave that row active=1.
+        """
+        try:
+            from .chat_queue import DurableChatEventQueue
+
+            DurableChatEventQueue(str(self.path)).deactivate_job_links(job_id)
+        except Exception:
+            return
+
+    def _release_turn_lock(self, job_id: str) -> None:
+        """A terminal job does not keep the Chat turn lock.
+
+        Interrupt the running agent now. Job 598820fc stayed COMPLETE for
+        about a minute while its turn kept calling tools. Kill registered
+        tool processes. Do not set the /stop flag: a normal finish is not a
+        stop, and the confirmation send still has to post.
+        """
+        try:
+            from .chat_turn_control import (
+                kill_agent_processes,
+                release_finished_job_session,
+            )
+
+            status = ""
+            try:
+                status = str((self.get_job(job_id) or {}).get("status") or "")
+            except Exception:
+                status = ""
+            # CANCELLED sets the stop flag so a later tool call cannot write.
+            # COMPLETE and UNVERIFIED do not: the confirmation send still posts.
+            # Every terminal status still drops the session lease and the clarify.
+            release_finished_job_session(
+                self.path,
+                job_id,
+                stop_agent=status == "CANCELLED",
+            )
+            kill_agent_processes(job_id)
+        except Exception:
+            logger.debug("turn lock release failed job=%s", job_id, exc_info=True)
+
+    def _stop_capture(self, job_ids: list[str]) -> None:
+        """A terminal job writes the browser_capture stop file."""
+        if not job_ids:
+            return
+        try:
+            from .recording import touch_browser_capture_stop_files
+        except Exception:
+            return
+        for job_id in job_ids:
+            touch_browser_capture_stop_files(self.path, job_id)
 
     def increment(self, job_id: str, field: str) -> int:
         if field not in {"attempt_count", "verification_count"}:

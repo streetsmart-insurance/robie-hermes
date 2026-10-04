@@ -1,0 +1,13 @@
+{
+  "family": "payment_confirmation_copy",
+  "from": "no-reply@useascend.com",
+  "subject": "Fixture Insured A LLC Policy(s) Payment Confirmation",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (1342b)",
+    "    text/html (30157b)",
+    "  application/pdf (42454b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "JF\r\n\r\nJake Ferrara\r\njake@streetsmart.insurance\r\n(555) 010-0000\r\n\r\nHi Fixture Person,\r\n\r\nWe've received your payment of $567.65 for StreetSmart Insurance Agency. Here's the summary of your payment:\r\n\r\nCustomer\r\nFixture Insured B LLC\r\n\r\nReference\r\nIFIXTURE10\r\n\r\nSubtotal $525.30\r\nTransaction fee $3.97\r\nTotal (Visa •••• 0000) $567.65\r\n\r\nYour policy(s):\r\n\r\nPolicy Auto Physical Damage (Diesel Insurance Solutions Inc.)\r\nPolicy ID DSLA97258206-00\r\nEffective date 08/21/2026\r\n \r\n\r\nManage your payments and invoices anytime in our Customer Portal ( https://portal.useascend.com/streetsmart_insurance_agency ). \r\n\r\nWe've also attached your invoice to this email. Please note that the attached invoice may become outdated if changes are made to your policy.\r\n\r\nIf you need any further assistance, feel free to contact us using the details below.\r\n\r\nSincerely,\r\n\r\nStreetSmart Insurance Agency\r\njake@streetsmart.insurance\r\n(555) 010-0000\r\n\r\nSubmitting payment through StreetSmart Insurance Agency and its insurance provider affiliates does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by Ascend Ascend"
+}

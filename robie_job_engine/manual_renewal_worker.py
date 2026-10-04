@@ -57,7 +57,6 @@ import logging
 import os
 import re
 import sqlite3
-import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -96,7 +95,6 @@ MAX_FOLLOWUPS = 2  # quiet checks after the initial email, then the voice branch
 # carrier_voice_attempted once-only guard still apply.
 VOICE_ENABLED_DEFAULT = True
 VOICE_CALLER_ID_DEFAULT = "+17322986745"  # Robie line (old system default)
-BLAND_CALLS_URL = "https://api.bland.ai/v1/calls"
 BLAND_QUEUE_ERROR_STATUSES = frozenset({"pre_queue_error", "queue_error"})
 BLAND_CALL_PLACED_STATUSES = frozenset(
     {"queued", "ringing", "in_progress", "in-progress", "completed", "ended"}
@@ -1286,35 +1284,30 @@ def build_carrier_call_prompt(
     )
 
 
-def _bland_post(url: str, payload: dict[str, Any], api_key: str, timeout: int = 15) -> tuple[int, dict[str, Any]]:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Authorization": api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
+def _bland_post(payload: dict[str, Any], api_key: str, timeout: int = 15) -> tuple[int, dict[str, Any]]:
+    """One POST through bland_transport. This module does not open the vendor host."""
+    del timeout
+    from .bland_transport import BlandTransportError, post_call
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = int(getattr(resp, "status", 200) or 200)
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-            return status, data if isinstance(data, dict) else {}
-    except urllib.error.HTTPError as exc:  # noqa: F821 - imported via urllib.request
-        try:
-            data = json.loads(exc.read().decode("utf-8") or "{}")
-        except Exception:
-            data = {}
-        return int(exc.code or 0), data if isinstance(data, dict) else {}
+        data = post_call(payload, api_key=api_key, execute=True)
+    except BlandTransportError as exc:
+        if exc.status is None:
+            raise
+        return int(exc.status), dict(exc.body)
+    return 200, data if isinstance(data, dict) else {}
 
 
-def _bland_get(url: str, api_key: str, timeout: int = 15) -> dict[str, Any]:
-    req = urllib.request.Request(url, headers={"Authorization": api_key}, method="GET")
+def _bland_get(call_id: str, api_key: str, timeout: int = 15) -> dict[str, Any]:
+    """One GET through bland_transport. Ambiguous reads stay empty; no retry here."""
+    del timeout
+    from .bland_transport import get_call
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8") or "{}")
-            return data if isinstance(data, dict) else {}
+        data = get_call(call_id, api_key=api_key, execute=True)
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _classify_bland_readback(data: dict[str, Any]) -> dict[str, Any]:
@@ -1353,8 +1346,12 @@ def dispatch_carrier_voice_call(
     """Dispatch exactly one carrier call via the Bland path (ported semantics).
 
     * dry_run or missing API key -> simulation record; NO live call placed.
-    * Live: POST /v1/calls (voice nat, model enhanced, record on), retry once
-      without 'from' on 400/422, then GET /v1/calls/{id} queue-status
+    * Live: POST /v1/calls through bland_transport. The voice value is the
+      explicit ``ROBIE_BLAND_VOICE_ID`` config (no name fallback). ``max_duration``
+      is ``ROBIE_BLAND_MAX_DURATION_MINUTES`` and must be 1. Missing either
+      refuses before any vendor call. Transport gates still refuse unless
+      ROBIE_ENV=TEST, the host is hermes-test-01, and ROBIE_PHONE_LIVE_CALLS=1.
+    * Retry once without 'from' on 400/422, then GET the call once per
       readback (pre_queue_error/queue_error = failed, never claimed placed).
     * Never raises: transport failures return success=False.
     * The API key is never logged.
@@ -1383,10 +1380,22 @@ def dispatch_carrier_voice_call(
             "status": "SIMULATED_NO_LIVE_CALL",
             "reason": "dry_run" if dry_run else "VOICE_AI_API_KEY not configured - no live call placed",
         }
+    voice_id = str(os.environ.get("ROBIE_BLAND_VOICE_ID") or "").strip()
+    duration_text = str(os.environ.get("ROBIE_BLAND_MAX_DURATION_MINUTES") or "").strip()
+    if not voice_id or duration_text != "1":
+        return {
+            **base,
+            "success": False,
+            "mode": "LIVE_BLAND_AI",
+            "call_placed": False,
+            "status": "VOICE_CONFIG_REFUSED",
+            "reason": "explicit Bland voice ID and a one-minute max_duration are required",
+        }
     payload: dict[str, Any] = {
         "phone_number": phone_e164,
         "task": prompt,
-        "voice": "nat",
+        "voice": voice_id,
+        "max_duration": 1,
         "model": "enhanced",
         "record": True,
         "answered_by_enabled": True,
@@ -1408,10 +1417,10 @@ def dispatch_carrier_voice_call(
         "from": from_number,
     }
     try:
-        status, data = _bland_post(BLAND_CALLS_URL, payload, api_key)
+        status, data = _bland_post(payload, api_key)
         if status in (400, 422) and "from" in payload:
             payload.pop("from", None)
-            status, data = _bland_post(BLAND_CALLS_URL, payload, api_key)
+            status, data = _bland_post(payload, api_key)
         if status not in (200, 201):
             return {
                 **base,
@@ -1432,13 +1441,17 @@ def dispatch_carrier_voice_call(
         }
         # Queue-status readback: POST acceptance is not proof the phone rang.
         for _ in range(3):
-            readback = _bland_get(f"{BLAND_CALLS_URL}/{call_id}", api_key)
+            readback = _bland_get(call_id, api_key)
             classified = _classify_bland_readback(readback)
             result.update(classified)
             if classified.get("call_placed") or classified.get("status") == "QUEUE_ERROR":
                 break
         return result
     except Exception as exc:  # noqa: BLE001 - transport failure is data
+        from .bland_transport import BlandTransportRefused
+        if isinstance(exc, BlandTransportRefused):
+            return {**base, "success": False, "mode": "LIVE_BLAND_AI", "call_placed": False,
+                    "status": "LIVE_GATES_REFUSED"}
         return {**base, "success": False, "mode": "LIVE_BLAND_AI", "call_placed": False,
                 "status": "TRANSPORT_ERROR", "error": f"{type(exc).__name__}"}
 

@@ -13,6 +13,13 @@ registry's last-known state rules (fail-closed toward REUSE, never CREATE).
 
 Nothing here invents a hook path: a missing ``~/.config/zapier/hook_path``
 (or the skill script) raises instead of firing into the void.
+
+The direct EZLynx Task API (:mod:`robie_job_engine.ezlynx_task_api`) runs
+first, on the discussion the certificate note was just filed to. A task
+read back from EZLynx is its own proof (``verified=True``), so no Zap or
+callback is involved. Zapier runs only when the direct path wrote nothing.
+A direct POST that was not confirmed raises instead of firing the Zap,
+because both could land and make a duplicate.
 """
 
 from __future__ import annotations
@@ -41,6 +48,13 @@ class ZapResult:
     #: Unique per-fire nonce. The Zap's callback step must echo it back so
     #: the worker can tie the callback to THIS fire (see cert_callback).
     filing_id: str = ""
+    #: "direct_api" or "zapier".
+    method: str = "zapier"
+    #: True only when the direct Task API read the new task back.
+    verified: bool = False
+    task_id: str = ""
+    note_id: str = ""
+    direct_api: dict[str, Any] = field(default_factory=dict)
 
 
 def certificate_due_date(days: int = 3) -> str:
@@ -83,17 +97,53 @@ class CertZapierClient:
             payload=payload,
         )
 
+    def _create_direct(self, *, applicant_id: int, title: str,
+                       note_text: str, due_date: str,
+                       discussion_id: str) -> ZapResult | None:
+        """Direct Task API. A ZapResult when it decided, None to use Zapier."""
+        from . import ezlynx_task_api
+
+        try:
+            direct = ezlynx_task_api.create_task(
+                applicant_id=applicant_id, title=title,
+                description=note_text, assignee=self.assignee,
+                due_date=due_date, discussion_id=discussion_id,
+                dry_run=self.dry_run)
+        except Exception as exc:  # noqa: BLE001 - raised before any POST
+            direct = {"status": "error", "reason": type(exc).__name__}
+        if direct.get("status") == ezlynx_task_api.CREATED:
+            return ZapResult(
+                fired=True, reason="direct_api created", method="direct_api",
+                verified=True, task_id=str(direct.get("task_id") or ""),
+                note_id=str(direct.get("note_id") or ""), direct_api=direct)
+        if direct.get("status") == ezlynx_task_api.UNVERIFIED:
+            raise RuntimeError(
+                "direct EZLynx task POST was not confirmed "
+                f"({direct.get('reason')}); not firing the Zap on top of it")
+        self._last_direct = direct
+        return None
+
     def create_task(self, *, applicant_id: int, title: str,
                     email_subject: str, note_text: str,
-                    due_date: str = "") -> ZapResult:
-        """Fire the EZLynx follow-up-task Zap for a new certificate request.
+                    due_date: str = "", discussion_id: str = "") -> ZapResult:
+        """Create the certificate review task: direct API, else the Zap.
 
-        Mints a ``filing_id`` nonce and includes it in the payload: the
-        Zap's callback step must echo it back (see
-        :mod:`robie_job_engine.cert_callback`). The created task's ID comes
-        back via that callback; this call alone never invents one.
+        Direct: a read-back task on ``discussion_id`` returns
+        ``verified=True`` with its ids. Zap: mints a ``filing_id`` nonce
+        and includes it in the payload: the Zap's callback step must echo
+        it back (see :mod:`robie_job_engine.cert_callback`). The created
+        task's ID comes back via that callback; this call alone never
+        invents one.
         """
         from .cert_callback import new_filing_id
+
+        due = due_date or certificate_due_date()
+        self._last_direct: dict[str, Any] = {}
+        direct = self._create_direct(
+            applicant_id=applicant_id, title=title, note_text=note_text,
+            due_date=due, discussion_id=discussion_id)
+        if direct is not None:
+            return direct
 
         filing_id = new_filing_id()
         payload = {
@@ -102,12 +152,13 @@ class CertZapierClient:
             "assignee": self.assignee,
             "source": "certificates-intake",
             "email_subject": email_subject,
-            "due_date": due_date or certificate_due_date(),
+            "due_date": due,
             "note_text": note_text,
             "filing_id": filing_id,
         }
         result = self._fire(payload, applicant_verified=True)
         result.filing_id = filing_id
+        result.direct_api = self._last_direct
         # Delayed verification (2026-09-27): when the Zap actually fires, queue
         # the expected task for the verifier. Creation is NOT delayed — only
         # the completion-status check waits. Never let this break the firing.

@@ -10,7 +10,7 @@ text plus the document id when there is one.
 
 A note that was sent but could not be confirmed is stored as
 ``sent, unconfirmed``. That row blocks another post until a person says yes
-or the 24-hour "already added" window passes. A write that does not land
+after reviewing the uncertain outcome. Elapsed time cannot authorize a retry. A write that does not land
 is a failure: the caller must not post.
 """
 
@@ -24,6 +24,10 @@ import re
 import socket
 import sys
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -54,6 +58,65 @@ KNOWN_POSTED_DOCUMENT_IDS = (
 
 class DiscussionNoteLedgerError(RuntimeError):
     """The local ledger could not be read. Nothing was sent."""
+
+
+_LEDGER_LOCKS: dict[str, threading.RLock] = {}
+_LEDGER_LOCKS_GUARD = threading.Lock()
+_LEDGER_LOCK_DEPTH = threading.local()
+
+
+@contextmanager
+def serialized_ledger(ledger_path=None):
+    """Serialize reservation, POST and confirmation across threads/processes.
+
+    Lock the stable sibling file, never the atomically replaced JSON inode.
+    Nested ledger operations reuse the outer lock. A wait timeout fails closed.
+    """
+    import fcntl
+
+    path = resolve_ledger_path(ledger_path).expanduser().resolve()
+    key = str(path)
+    with _LEDGER_LOCKS_GUARD:
+        lock = _LEDGER_LOCKS.setdefault(key, threading.RLock())
+    if not lock.acquire(timeout=30):
+        raise DiscussionNoteLedgerError("The note ledger is busy; nothing was sent.")
+    depths = getattr(_LEDGER_LOCK_DEPTH, "paths", None)
+    if depths is None:
+        depths = _LEDGER_LOCK_DEPTH.paths = {}
+    handle = None
+    try:
+        if not depths.get(key):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                handle = path.with_name(path.name + ".lock").open("a+b")
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise DiscussionNoteLedgerError("The note ledger is busy; nothing was sent.")
+                        time.sleep(0.02)
+            except OSError as exc:
+                raise DiscussionNoteLedgerError("The note ledger cannot be locked; nothing was sent.") from exc
+        depths[key] = depths.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+    finally:
+        if handle is not None:
+            handle.close()
+        lock.release()
+
+
+def with_serialized_ledger(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with serialized_ledger(kwargs.get("ledger_path")):
+            return function(*args, **kwargs)
+    return wrapped
 
 
 NOTE_REPEAT_HOURS = 24
@@ -223,6 +286,8 @@ def find_recent_same_text(
         stored_legacy = str(row.get("note_text_sha256") or "").strip()
         if stored_norm != norm and not (legacy and stored_legacy == legacy and not stored_norm):
             continue
+        if note_was_unconfirmed(row):
+            return dict(row)
         posted = _parse_stamp(row.get("posted_at"))
         if posted is None:
             continue
@@ -231,6 +296,7 @@ def find_recent_same_text(
     return None
 
 
+@with_serialized_ledger
 def record_posted_note(
     applicant_id: str,
     discussion_id: str,
@@ -301,6 +367,7 @@ def record_posted_note(
     return row
 
 
+@with_serialized_ledger
 def begin_unconfirmed_note(
     applicant_id: str,
     discussion_id: str,
@@ -341,6 +408,7 @@ def begin_unconfirmed_note(
     return dict(previous) if previous else None
 
 
+@with_serialized_ledger
 def undo_unconfirmed_note(
     applicant_id: str,
     discussion_id: str,
@@ -396,20 +464,8 @@ def note_still_blocks_repost(
     now: datetime | None = None,
     within_hours: int = NOTE_REPEAT_HOURS,
 ) -> bool:
-    """An unconfirmed send still blocks until the repeat window passes.
-
-    A missing timestamp keeps blocking. Confirmed rows are not handled here.
-    """
-
-    if not note_was_unconfirmed(row):
-        return False
-    posted = _parse_stamp((row or {}).get("posted_at"))
-    if posted is None:
-        return True
-    clock = now or datetime.now(timezone.utc)
-    if clock.tzinfo is None:
-        clock = clock.replace(tzinfo=timezone.utc)
-    return timedelta(0) <= (clock - posted) <= timedelta(hours=within_hours)
+    """Uncertainty does not expire; only explicit review can permit a repost."""
+    return note_was_unconfirmed(row)
 
 
 def record_known_posted_notes(ledger_path: Path | str | None = None) -> list[dict[str, Any]]:
@@ -616,7 +672,14 @@ def _write_file(path: Path, payload: dict[str, Any]) -> None:
         with handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(handle.name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except Exception:
         try:
             os.unlink(handle.name)

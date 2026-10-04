@@ -21,6 +21,7 @@ Correlates events with EZLynx accounts and policies, applying:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -65,8 +66,9 @@ def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> b
       (a known incoming webhook for the agency ops space);
     - there is no credential fallback and no second identity: an unconfigured
       URL returns False and nothing is posted anywhere;
-    - it is used only for low-risk operational notices (agreement signed,
-      reinstatement paid), never for HITL and never for operator fail-notify;
+    - it is used for low-risk operational notices (agreement signed,
+      reinstatement paid) and for the ascend-sync alert that an EZLynx
+      task was not created. It is never used for HITL;
     - webhook posts appear under the webhook's own app name, never as Robie.
     """
     target_url = webhook_url or os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
@@ -85,6 +87,26 @@ def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> b
     except Exception as exc:
         logger.warning("Failed to send Google Chat webhook alert: %s", exc)
         return False
+
+
+def ezlynx_task_was_created(result: Any) -> bool:
+    """True only when create_task reported a real success."""
+    return (
+        isinstance(result, dict)
+        and str(result.get("status") or "").strip().lower() == "success"
+    )
+
+
+def ezlynx_task_failure_reason(result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("reason", "error", "message"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        status = result.get("status")
+        if status:
+            return str(status)
+    return "task not created"
 
 
 def _now_iso() -> str:
@@ -225,7 +247,51 @@ class AscendSyncStore:
                     last_error TEXT,
                     total_synced INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS ascend_sync_retry_notes (
+                    event_id TEXT NOT NULL,
+                    note_key TEXT NOT NULL,
+                    note_id TEXT NOT NULL DEFAULT '',
+                    body_sha256 TEXT NOT NULL,
+                    posted_at TEXT NOT NULL,
+                    PRIMARY KEY (event_id, note_key)
+                );
                 """
+            )
+
+    def get_retry_note(self, event_id: str, note_key: str) -> Optional[sqlite3.Row]:
+        """The discussion note already posted for an event that is still pending."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT note_id, body_sha256, posted_at
+                FROM ascend_sync_retry_notes
+                WHERE event_id = ? AND note_key = ?
+                """,
+                (event_id, note_key),
+            ).fetchone()
+
+    def record_retry_note(
+        self,
+        event_id: str,
+        note_key: str,
+        note_id: str,
+        body_sha256: str,
+    ) -> None:
+        """Remember a discussion note so a later poll does not post it again."""
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ascend_sync_retry_notes
+                (event_id, note_key, note_id, body_sha256, posted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(event_id, note_key) DO UPDATE SET
+                    note_id=excluded.note_id,
+                    body_sha256=excluded.body_sha256,
+                    posted_at=excluded.posted_at
+                """,
+                (event_id, note_key, note_id, body_sha256, now),
             )
 
     def is_event_processed(self, event_id: str) -> bool:
@@ -362,8 +428,8 @@ class AscendApiClient:
 
     def fetch_cancelation_returns(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch cancellation returns containing return premiums and cancellation docs."""
-        data = self.get("/v1/cancelation_returns", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/cancelation_returns", page_size)
 
     def fetch_billable(self, billable_id: str) -> Dict[str, Any]:
         """Fetch billable details (carrier, policy number, coverage, program ID)."""
@@ -379,23 +445,23 @@ class AscendApiClient:
 
     def fetch_invoices(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch invoices."""
-        data = self.get("/v1/invoices", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/invoices", page_size)
 
     def fetch_programs(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch programs."""
-        data = self.get("/v1/programs", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/programs", page_size)
 
     def fetch_loans(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch loans."""
-        data = self.get("/v1/loans", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/loans", page_size)
 
     def fetch_payouts(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch payouts (supplier remittances and agency commissions)."""
-        data = self.get("/v1/payouts", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/payouts", page_size)
 
     def fetch_program_billables(self, program_id: str) -> List[Dict[str, Any]]:
         """List billables for a program via GET /v1/billables?program_id=…
@@ -497,9 +563,190 @@ class AscendEZLynxSyncManager:
         self.matcher = matcher or EZLynxAccountMatcher()
         self.poster = poster or EZLynxAgreementPoster()
         self.qb = quickbooks_client or QuickBooksApiClient()
+        self._task_failures: List[str] = []
+
+    def _leave_pending_after_task_failure(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        result: Any,
+        applicant_id: Optional[str] = None,
+    ) -> None:
+        """Log, alert, and leave the event unrecorded so the next poll retries it."""
+        reason = ezlynx_task_failure_reason(result)
+        message = (
+            f"EZLynx task NOT created for {event_type} {event_id} "
+            f"(applicant {applicant_id or 'n/a'}): {reason}. "
+            "Event left pending for retry."
+        )
+        logger.error(message)
+        self._task_failures.append(message)
+        send_google_chat_alert(
+            "⚠️ *Ascend sync: EZLynx task not created*\n"
+            f"• Event: {event_type} {event_id}\n"
+            f"• Applicant: {applicant_id or 'n/a'}\n"
+            f"• Reason: {reason}\n"
+            "• The event was not marked done and will be retried."
+        )
+
+    def _post_discussion_note_once(
+        self,
+        *,
+        event_id: str,
+        note_key: str,
+        applicant_id: str,
+        title: str,
+        note_text: str,
+        policy_number: Optional[str] = None,
+        line_of_business: Optional[str] = None,
+        carrier_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Post the event's discussion note at most once across poll retries.
+
+        A failed task create leaves the event pending. The next poll must
+        not file the same note again. The posted note id (or the body hash
+        when the poster returns no id) is stored in the retry table.
+        """
+        digest = hashlib.sha256(note_text.encode("utf-8")).hexdigest()
+        existing = self.store.get_retry_note(str(event_id), note_key)
+        if existing is not None:
+            same_body = str(existing["body_sha256"] or "") == digest
+            prior_id = str(existing["note_id"] or "")
+            if prior_id or same_body:
+                logger.info(
+                    "discussion note already posted for %s %s (note_id %s); not re-posting",
+                    note_key, event_id, prior_id or "n/a",
+                )
+                return {
+                    "status": "filed",
+                    "note_id": prior_id,
+                    "duplicate_suppressed": True,
+                }
+        post_kwargs: Dict[str, Any] = {
+            "applicant_id": applicant_id,
+            "title": title,
+            "note_text": note_text,
+        }
+        if policy_number is not None:
+            post_kwargs["policy_number"] = policy_number
+        if line_of_business is not None:
+            post_kwargs["line_of_business"] = line_of_business
+        if carrier_name is not None:
+            post_kwargs["carrier_name"] = carrier_name
+        result = self.poster.post_custom_note(**post_kwargs)
+        if not isinstance(result, dict):
+            return {"status": "error", "reason": "note post returned no result"}
+        status = str(result.get("status") or "").strip().lower()
+        note_id = ""
+        for key in ("note_id", "noteId", "ezlynx_note_id", "id", "Id"):
+            value = result.get(key)
+            if value:
+                note_id = str(value).strip()
+                break
+        posted = bool(note_id) or status in {"filed", "success", "posted"}
+        if status in {"error", "failed", "pending", "held"}:
+            posted = False
+        if posted:
+            self.store.record_retry_note(str(event_id), note_key, note_id, digest)
+        return result
 
     def sync_once(self) -> Dict[str, Any]:
-        """Perform one full synchronization run of all Ascend event feeds."""
+        raise RuntimeError("ASCEND_SYNC_DISABLED: stage-only candidate; use preview_once explicitly; no scheduled delivery")
+
+    def preview_once(self) -> Dict[str, Any]:
+        """Read and stage only. Live destinations deliberately not wired.
+
+        Replays use injected ports in ascend_delivery_state. Never resume legacy
+        writes from an existence-only checkpoint. No legacy ledger edits.
+        """
+        from .ascend_delivery_state import candidate_events, ReliableDelivery
+        events = candidate_events(self.api)
+        ledger = {}
+        delivery = ReliableDelivery(ledger)
+        reasons = {}
+        for event in events:
+            # Only reads through the existing matcher; no note/task methods.
+            if event['kind'] in ('cancellation', 'agreement_signed'):
+                app, _ = self.matcher.match_account(
+                    policy_number=event.get('policy_number'),
+                    insured_name=event.get('insured_name'))
+                event['applicant_id'] = app
+            reason = delivery.process(event)
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return {'mode': 'read_only_candidate', 'source_seen': len(events),
+                'delivered': 0, 'writes': 0, 'reasons': reasons,
+                'legacy_ledger_modified': False,
+                'live_destination_adapters': 'disabled_pending_Test_readback'}
+
+    def deliver_test_once(
+        self,
+        *,
+        ledger_path: str,
+        destination: Any = None,
+        ezlynx_client: Any = None,
+        realm_id: Optional[str] = None,
+        allow_applicants: tuple = ("26356199",),
+        include_payouts: bool = False,
+    ) -> Dict[str, Any]:
+        """Explicit Test-only delivery through live ports, with readback.
+
+        Not scheduled and not reachable from sync_once/daemon. Refuses
+        outside ROBIE_ENV=TEST. Only events mapped to an applicant in
+        ``allow_applicants`` (Buster Brown by default) get ``destination``;
+        everything else is staged only. ``destination=None`` is a dry run.
+        COMPLETE means ReliableDelivery's ``delivered_readback`` and nothing
+        else: every component was read back from the destination with the
+        source key and binding.
+        """
+        from .ascend_delivery_state import DurableLedger, ReliableDelivery, candidate_events
+        from .ascend_destination_mapping import map_event
+        from .runtime_env import TEST_ENV_NAME, current_robie_env
+
+        if current_robie_env() != TEST_ENV_NAME:
+            raise RuntimeError("ASCEND_DELIVERY_TEST_ONLY: refusing outside ROBIE_ENV=TEST")
+        allowed = {str(a) for a in allow_applicants}
+        ledger = DurableLedger(ledger_path)
+        live = ReliableDelivery(ledger, destination)
+        staged = ReliableDelivery(ledger, None)
+        reasons: Dict[str, int] = {}
+        complete: List[Dict[str, Any]] = []
+        mapping: Dict[str, int] = {}
+        try:
+            for event in candidate_events(self.api):
+                mapped = map_event(event, ezlynx_client=ezlynx_client, realm_id=realm_id)
+                why = mapped.pop("mapping_reason", "")
+                if why:
+                    mapping[why] = mapping.get(why, 0) + 1
+                    if mapped["kind"] in ("cancellation", "agreement_signed", "accounting_issue"):
+                        mapped["applicant_id"] = None
+                kind = mapped["kind"]
+                in_scope = (
+                    (kind == "commission_payout" and include_payouts and not why)
+                    or (kind != "commission_payout" and str(mapped.get("applicant_id") or "") in allowed)
+                )
+                runner = live if (destination is not None and in_scope) else staged
+                reason = runner.process(mapped)
+                reasons[reason] = reasons.get(reason, 0) + 1
+                state = ledger[mapped["key"]]
+                if reason == "delivered_readback" and state.delivered:
+                    complete.append({"key": mapped["key"], "kind": kind,
+                                     "destination_ids": dict(state.destination_ids)})
+        finally:
+            ledger.close()
+        return {
+            "mode": "test_delivery" if destination is not None else "test_dry_run",
+            "allow_applicants": sorted(allowed),
+            "reasons": reasons,
+            "mapping_reasons": mapping,
+            "complete": complete,
+            "complete_requires": "delivered_readback (destination ids read back with source key and binding)",
+        }
+
+    def _legacy_sync_once_DISABLED(self) -> Dict[str, Any]:
+        raise RuntimeError("legacy orchestration disabled: no destination readback")
+        """Retained for review only; unreachable legacy implementation."""
+        self._task_failures = []
         started_at = _now_iso()
         stats = {
             "started_at": started_at,
@@ -560,6 +807,9 @@ class AscendEZLynxSyncManager:
         except Exception as exc:
             logger.error("Accounting payouts sync error: %s", exc, exc_info=True)
             stats["errors"].append(f"Accounting Payouts: {exc}")
+
+        if self._task_failures:
+            stats["errors"].extend(self._task_failures)
 
         completed_at = _now_iso()
         stats["completed_at"] = completed_at
@@ -643,8 +893,10 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                # 1. Post discussion note
-                self.poster.post_custom_note(
+                # 1. Post discussion note (once across task-create retries)
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="cancellation",
                     applicant_id=applicant_id,
                     title=f"🚨 Cancellation Notice - {event.carrier_name} - Policy #{event.policy_number}",
                     note_text=note_text,
@@ -666,13 +918,21 @@ class AscendEZLynxSyncManager:
                     f"1) Review notice terms and unearned return calculation.\n"
                     f"2) Follow up with insured and carrier prior to cancellation effective date ({event.due_date_text})."
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="cancellation",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
             else:
                 logger.info(
                     "Policy %s (%s) not found in EZLynx. Event recorded as UNMATCHED.",
@@ -857,7 +1117,9 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                self.poster.post_custom_note(
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="agreement_signed",
                     applicant_id=applicant_id,
                     title=f"🎉 Agreement Signed & Checked Out - {carrier_name} - {policy_num}",
                     note_text=note_text,
@@ -875,13 +1137,21 @@ class AscendEZLynxSyncManager:
                     f"Overview: {prog_url}\n\n"
                     f"Coverage is ready to bind with carrier {carrier_name}!"
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="agreement_signed",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
 
             chat_msg = (
                 f"🎉 *Agreement Signed & Checked Out! Ready to Bind:*\n"
@@ -969,7 +1239,9 @@ class AscendEZLynxSyncManager:
             )
 
             if applicant_id:
-                self.poster.post_custom_note(
+                self._post_discussion_note_once(
+                    event_id=str(event_id),
+                    note_key="reinstatement_paid",
                     applicant_id=applicant_id,
                     title=f"✅ Reinstatement Paid - {policy_num} - {amount_paid_text}",
                     note_text=note_text,
@@ -984,13 +1256,21 @@ class AscendEZLynxSyncManager:
                     f"Subject: {email_draft['subject']}\n\n"
                     f"{email_draft['body']}"
                 )
-                self.poster.create_task(
+                task_result = self.poster.create_task(
                     applicant_id=applicant_id,
                     title=task_title,
                     description=task_desc,
                     assigned_user=assigned_rep,
                     due_days_out=0,
                 )
+                if not ezlynx_task_was_created(task_result):
+                    self._leave_pending_after_task_failure(
+                        event_id=str(event_id),
+                        event_type="reinstatement_paid",
+                        result=task_result,
+                        applicant_id=applicant_id,
+                    )
+                    continue
 
             chat_msg = (
                 f"🚨 *REINSTATEMENT PAYMENT RECEIVED!*\n"
@@ -1111,14 +1391,24 @@ class AscendEZLynxSyncManager:
                         ascend_reference_url=f"https://app.useascend.com/payouts/{payout_id}",
                     )
                     # Discrepancy escalation:
-                    # High priority EZLynx Task assigned to Accounting (no Google Chat alert per user directive)
-                    self.poster.create_task(
+                    # High priority EZLynx task assigned to Accounting.
+                    # A task that was actually created does not also page Google Chat.
+                    # A failed create leaves the payout pending and sends the failure alert.
+                    task_result = self.poster.create_task(
                         applicant_id="0",
                         title=f"⚠️ ACCOUNTING AUDIT: {status.upper()} Supplier Payout to {owner_name} ({amount_text})",
                         description=task_text,
                         assigned_user=accounting_assignee,
                         due_days_out=1,
                     )
+                    if not ezlynx_task_was_created(task_result):
+                        self._leave_pending_after_task_failure(
+                            event_id=str(event_id),
+                            event_type="accounting_issue",
+                            result=task_result,
+                            applicant_id="0",
+                        )
+                        continue
                     logger.info(
                         "Dispatched Accounting audit task in EZLynx for %s supplier payout %s to %s",
                         status.upper(),
@@ -1245,22 +1535,7 @@ class AscendEZLynxSyncManager:
 
 
 def run_daemon(interval_seconds: int = 3600, db_path: Optional[str] = None) -> None:
-    """Run synchronization daemon on a recurring interval (default 1 hour)."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    logger.info("Starting Ascend to EZLynx Sync Daemon (Interval: %ds)", interval_seconds)
-
-    store = AscendSyncStore(db_path or DEFAULT_DB_PATH)
-    manager = AscendEZLynxSyncManager(store=store)
-
-    while True:
-        try:
-            logger.info("Executing scheduled Ascend-EZLynx sync cycle...")
-            manager.sync_once()
-        except Exception as exc:
-            logger.error("Daemon cycle error: %s", exc, exc_info=True)
-
-        logger.info("Sleeping for %d seconds...", interval_seconds)
-        time.sleep(interval_seconds)
+    raise RuntimeError("ASCEND_SYNC_DISABLED: daemon cannot run a stage-only candidate")
 
 
 def main() -> None:
@@ -1271,14 +1546,8 @@ def main() -> None:
     parser.add_argument("--db-path", type=str, default=str(DEFAULT_DB_PATH), help="Path to sqlite sync database")
     args = parser.parse_args()
 
-    if args.daemon:
-        run_daemon(interval_seconds=args.interval, db_path=args.db_path)
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        store = AscendSyncStore(args.db_path)
-        manager = AscendEZLynxSyncManager(store=store)
-        res = manager.sync_once()
-        print(json.dumps(res, indent=2))
+    # Stop before opening a store, matcher, secret client or destination adapter.
+    parser.exit(2, "ASCEND_SYNC_DISABLED: stage-only candidate is not an operational sync\n")
 
 
 if __name__ == "__main__":

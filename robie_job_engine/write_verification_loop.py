@@ -150,8 +150,24 @@ def plan_prompt_for_job(job: dict[str, Any]) -> str:
         "target.discussion is the existing title, and values.note_text is the exact note. "
         "target must name the account, policy, or discussion. "
         "values must list each field that will change.\n"
-        "Request:\n"
+        + _named_note_plan_line(job)
+        + "Request:\n"
         + _job_text(job)
+    )
+
+
+def _named_note_plan_line(job: dict[str, Any]) -> str:
+    """Tell the planner the note is only the text after the colon."""
+    from .request_routing import parse_named_discussion_note
+
+    parsed = parse_named_discussion_note(_job_text(job)) or {}
+    body = str(parsed.get("body") or "").strip()
+    if not body:
+        return ""
+    return (
+        "The note text is only the words after the colon. "
+        "Do not repeat the request in the note.\n"
+        f"note_text: {body}\n"
     )
 
 
@@ -222,8 +238,28 @@ def _loads_object(text: str) -> dict[str, Any] | None:
     return data
 
 
+def _numeric_applicant_id(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if text.isdigit():
+        return text
+    return ""
+
+
+def bound_applicant_id(job: Mapping[str, Any] | None) -> str:
+    """The account id this job's name search already bound. A name is not an id."""
+    payload = dict((job or {}).get("payload") or {})
+    for key in ("applicant_id", "ezlynx_applicant_id", "account_id"):
+        found = _numeric_applicant_id(payload.get(key))
+        if found:
+            return found
+    return ""
+
+
 def _normalize_target(target_raw: Any) -> dict[str, str]:
-    """A string target is an account id, a policy number, or a discussion."""
+    """A string target is an account id, a policy number, or a discussion.
+
+    ``applicant_id`` is digits only. A person's name is not an account id.
+    """
     if isinstance(target_raw, str):
         text = " ".join(target_raw.split()).strip()
         if not text:
@@ -236,11 +272,45 @@ def _normalize_target(target_raw: Any) -> dict[str, str]:
         return {"discussion": text}
     if not isinstance(target_raw, Mapping):
         return {}
-    return {
-        key: " ".join(str(target_raw.get(key) or "").split()).strip()
-        for key in _TARGET_KEYS
-        if str(target_raw.get(key) or "").strip()
-    }
+    target: dict[str, str] = {}
+    for key in _TARGET_KEYS:
+        text = " ".join(str(target_raw.get(key) or "").split()).strip()
+        if not text:
+            continue
+        if key == "applicant_id" and not text.isdigit():
+            continue
+        target[key] = text
+    return target
+
+
+def plan_with_bound_applicant(
+    raw: str | Mapping[str, Any] | None,
+    job: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """A locked-ready plan whose applicant id came from the name search."""
+    data = raw if isinstance(raw, Mapping) else _plan_object(raw, repair=True)
+    bound = bind_plan_applicant(data, job)
+    if bound is None:
+        return None
+    try:
+        return _validated_statement(bound)
+    except ValueError:
+        return None
+
+
+def bind_plan_applicant(statement: Mapping[str, Any] | None, job: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Use the id from the name search. Never keep a name in ``applicant_id``."""
+    if not isinstance(statement, Mapping):
+        return None
+    data = dict(statement)
+    target = _normalize_target(data.get("target"))
+    if not _numeric_applicant_id(target.get("applicant_id")):
+        target.pop("applicant_id", None)
+        bound = bound_applicant_id(job)
+        if bound:
+            target["applicant_id"] = bound
+    data["target"] = target
+    return data
 
 
 def _clean_values(values_raw: Any) -> dict[str, Any]:
@@ -310,18 +380,40 @@ def _coerce_write(write: Any) -> str:
     return " ".join(str(write).split()).strip()
 
 
+def _saved_note_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    """The plan stores the note the tool will write, not the whole request."""
+    cleaned = dict(values)
+    for key, raw in list(cleaned.items()):
+        if str(key).casefold() not in {"note_text", "note", "body", "text", "note_body"}:
+            continue
+        exact = _exact_note_text(str(raw))
+        if exact:
+            cleaned[key] = exact
+    return cleaned
+
+
+def _exact_note_text(text: str) -> str:
+    """Drop a repeated 'Add a note ...:' prompt. Keep the text after the colon."""
+    from .request_routing import discussion_note_body
+
+    cleaned = discussion_note_body(text)
+    return cleaned or " ".join(str(text or "").split()).strip()
+
+
 def _coerce_values_field(values_raw: Any, args: Mapping[str, Any]) -> Any:
     """values is an object. A string is the note the model already stated."""
     if isinstance(values_raw, str):
-        text = " ".join(values_raw.split()).strip()
+        text = _exact_note_text(values_raw)
         if text:
             return {"note_text": text}
         values_raw = {}
     if isinstance(values_raw, Mapping):
         cleaned = _clean_values(values_raw)
         if cleaned:
+            if "note_text" in cleaned:
+                cleaned["note_text"] = _exact_note_text(str(cleaned.get("note_text") or ""))
             return cleaned
-    note = " ".join(str(args.get("note_text") or "").split()).strip()
+    note = _exact_note_text(str(args.get("note_text") or ""))
     if note and (values_raw is None or isinstance(values_raw, (str, Mapping))):
         return {"note_text": note}
     return values_raw
@@ -348,7 +440,7 @@ def coerce_tool_plan(statement: Any, args: Mapping[str, Any] | None = None) -> A
         title = " ".join(str(tool_args.get("title_hint") or "").split()).strip()
         if title:
             target = {"discussion": title}
-            applicant = " ".join(str(tool_args.get("applicant_id") or "").split()).strip()
+            applicant = _numeric_applicant_id(tool_args.get("applicant_id"))
             if applicant:
                 target["applicant_id"] = applicant
             data["target"] = target
@@ -407,7 +499,8 @@ def lock_stated_plan(store: Any, job: Mapping[str, Any], statement: Mapping[str,
     existing = get_locked_plan(store, job_id)
     if existing is not None:
         return existing
-    clean = _validated_statement(statement)
+    clean = _validated_statement(bind_plan_applicant(statement, job) or statement)
+    clean["values"] = _saved_note_values(clean["values"])
     record = {
         "locked": True,
         "source": "model",
@@ -455,6 +548,7 @@ def prepare_write_plan(
         if retried:
             raw = retried
         statement = parse_model_plan(raw)
+    statement = plan_with_bound_applicant(statement if statement is not None else raw, job)
     if statement is None:
         return remember_unlocked_plan(store, job, str(raw or ""))
     return lock_stated_plan(store, job, statement)
@@ -912,6 +1006,11 @@ def write_landed(store: Any, job: Mapping[str, Any]) -> bool:
         return False
     note = store.get_checkpoint(job_id, "discussion_note") or {}
     status = str(note.get("status") or "")
+    note_id = str(note.get("note_id") or "").strip()
+    # A copied earlier note id (already on the ledger) is not a write this job made.
+    matched_prior = status == "already_posted" or bool(note.get("idempotent"))
+    if note_id and not matched_prior and note.get("wrote") is not False:
+        return True
     if status == "filed" and (note.get("read_back") or note.get("note_id")):
         return True
     for kind in ("document_upload", "uploaded_document", "ezlynx_document"):
@@ -955,15 +1054,20 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     """
     import os as _os
 
+    from .turn_finalization import bound_model_context
+
+    owner, _generation, owner_db = bound_model_context()
     kwargs = dict(kwargs or {})
     args = dict(args or {})
-    job_id = str(
-        kwargs.get("job_id")
-        or _os.environ.get("ROBIE_JOB_ID")
-        or _os.environ.get("JOB_ID")
-        or ""
+    from .live_turn_guard import acting_job_id
+
+    # The bound model turn wins. Otherwise use the acting job, which a
+    # card click sets and which does not prefer a leftover environment id
+    # over that resume.
+    job_id = str(owner or acting_job_id(dict(kwargs)) or "").strip()
+    db_path = str(
+        owner_db or kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or ""
     ).strip()
-    db_path = str(kwargs.get("db_path") or _os.environ.get("ROBIE_JOB_DB") or "").strip()
     if not job_id or not db_path:
         return NO_ACTIVE_JOB_WRITE
     from .store import JobStore
@@ -993,7 +1097,37 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
         return blocked
     if not is_ezlynx_write_job(job):
         return None
+    from .client_name_lookup import trusted_applicant_ids, write_client_name
+    from .live_turn_guard import person_named_in_job, refuse_untrusted_applicant
+
+    from .live_turn_guard import refuse_tab_applicant
+
+    applicant = str(args.get("applicant_id") or "").strip()
+    tab_refusal = refuse_tab_applicant(store, job, applicant)
+    if tab_refusal:
+        return tab_refusal
+    if (
+        (person_named_in_job(job) or write_client_name(job))
+        and applicant
+        and applicant not in trusted_applicant_ids(store, job)
+    ):
+        return (
+            "EZLYNX_APPLICANT_UNTRUSTED: resolve this job's applicant from its "
+            f"request or an authorized name search; never use fixture id {applicant}. "
+            "Do not ask the user for an applicant id."
+        )
+
+    if person_named_in_job(job):
+        from .client_name_lookup import prepare_named_write_client
+
+        held = prepare_named_write_client(store, job_id)
+        if held:
+            return held
+        job = store.get_job(job_id)
     if plan_is_locked(store, job_id):
+        untrusted = refuse_untrusted_applicant(store, job, applicant)
+        if untrusted:
+            return untrusted
         return None
     statement = coerce_tool_plan(args.get("plan"), args)
     problem = plan_field_problem(statement)
@@ -1014,4 +1148,16 @@ def refuse_tool_write(args: Mapping[str, Any] | None, kwargs: Mapping[str, Any] 
     )
     if count >= MAX_SAME_REFUSAL:
         return plan_stop_refusal(problem)
+    from .live_turn_guard import name_placed_in_applicant_id, person_named_in_job
+
+    named = person_named_in_job(job) or name_placed_in_applicant_id(
+        args.get("applicant_id")
+    )
+    if named and problem in {"target", "plan"}:
+        return (
+            "The plan field target is wrong. "
+            f"The request names {named}. Search EZLynx for that name. "
+            "Do not ask the user for an applicant id. "
+            "Do not put the name in applicant_id. The write was not sent."
+        )
     return plan_refusal(problem)

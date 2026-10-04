@@ -1,26 +1,43 @@
-"""Read-only triage for Ascend notice emails landing in the hello inbox.
+"""Read-only triage for Ascend notice emails.
 
-Covers the three notice families Carlo asked for plus the closely related
-return-premium notice:
+Actionable families:
 
-- late_payment   -- "Past due payment for {Insured}"
-- cancellation   -- "{Insured} canceled for non-payment ..." (loan canceled)
-- return_premium -- "Return premium received for Policy {id}"
-- new_program    -- new premium-finance program created
-- unknown        -- anything else; always routed to human review
+- late_payment         -- "Past due payment" / "Payment failed"
+- payment_confirmation -- payment received
+- processing_payment   -- payment is processing
+- paid_off             -- loan paid in full
+- disputed_charge      -- "[Action Needed] Disputed charge". Note plus an
+                          accounting task. The driver assigns that task.
+- intent_to_cancel     -- "[URGENT] ... Policy(s) at risk for cancellation"
+                          (Notice of Intent to Cancel). Note only. Never a
+                          cancellation task and never the Ascend NOC label.
+- cancellation         -- "canceled for non-payment" / "loan has been canceled"
+- reinstatement        -- reinstatement approved. Note only.
+- return_premium       -- "Return premium received"
+- underwriting         -- underwriting request, counteroffer, document request
+- new_program          -- new premium-finance program created. No category
+                          discussion; the driver sends it to human review.
+
+Informational mail (refund to the customer, potential policies, programs
+ready, sign-in, MSA, and agency remittance) is an explicit ignore type:
+status ``ignored``, not a note and not a human-review item. There is no
+house client for remittance.
+
+- unknown -- anything else; always routed to human review
 
 The module never writes to Ascend or EZLynx.  It classifies the email,
 resolves the Ascend program (preferring the program UUID embedded in the
 email's dashboard link, falling back to a policy-number search), reads the
-program back, and returns a structured triage recommendation: which EZLynx
-workflow/label to use and what note to file.  A notice is only marked
-actionable when the program resolved cleanly; every failure mode sets
-``needs_human_review`` instead of failing silently.
+program back, and returns a structured triage recommendation.  A notice is
+only marked actionable when the program resolved cleanly; every failure
+mode sets ``needs_human_review`` instead of failing silently.  Ignored
+types return before any API call.
 """
 
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 from uuid import UUID
 
@@ -28,38 +45,113 @@ from .ascend_api import AscendApiClient, AscendApiError
 from .zapier_tasks import validate_due_date
 
 LATE_PAYMENT = "late_payment"
+INTENT_TO_CANCEL = "intent_to_cancel"
 CANCELLATION = "cancellation"
 RETURN_PREMIUM = "return_premium"
 NEW_PROGRAM = "new_program"
+PROCESSING_PAYMENT = "processing_payment"
+PAYMENT_CONFIRMATION = "payment_confirmation"
+DISPUTED_CHARGE = "disputed_charge"
+REINSTATEMENT = "reinstatement"
+AGENCY_REMITTANCE = "agency_remittance"
+REFUND = "refund"
+POTENTIAL_POLICIES = "potential_policies"
+PROGRAMS_READY = "programs_ready"
+UNDERWRITING = "underwriting"
+PAID_OFF = "paid_off"
+SIGN_IN = "sign_in"
+MSA = "msa"
 UNKNOWN = "unknown"
 
-NOTICE_TYPES = (LATE_PAYMENT, CANCELLATION, RETURN_PREMIUM, NEW_PROGRAM, UNKNOWN)
+# Informational Ascend mail. The driver records status "ignored" and does
+# not open a human-review item. UNKNOWN stays needs_human_review.
+# Payment confirmation, processing payment, paid off, and underwriting
+# file notes. Refund-to-customer, potential policies, programs ready,
+# sign-in, MSA, and agency remittance stay ignored.
+IGNORE_TYPES = frozenset(
+    {
+        REFUND,
+        POTENTIAL_POLICIES,
+        PROGRAMS_READY,
+        SIGN_IN,
+        MSA,
+        AGENCY_REMITTANCE,
+    }
+)
+
+NOTICE_TYPES = (
+    LATE_PAYMENT,
+    INTENT_TO_CANCEL,
+    CANCELLATION,
+    RETURN_PREMIUM,
+    NEW_PROGRAM,
+    PROCESSING_PAYMENT,
+    PAYMENT_CONFIRMATION,
+    DISPUTED_CHARGE,
+    REINSTATEMENT,
+    UNDERWRITING,
+    PAID_OFF,
+    *tuple(sorted(IGNORE_TYPES)),
+    UNKNOWN,
+)
 
 # Source tag sent with every Zapier-fired task so the Zap (and the audit log)
 # can tell inbox-triage tasks apart from other task creators.
 ZAPIER_SOURCE = "inbox-triage"
 
-# Subject-line patterns observed in real Ascend mail (Sep 2026).  Kept as
-# ordered (pattern, type) pairs so the first match wins; the unknown fallback
-# is intentional -- an unrecognized notice must go to a human, never be
-# auto-filed.
+# Subject-line patterns. First match wins. Intent-to-cancel is listed
+# before any cancellation pattern: "[URGENT] ... Policy(s) at risk for
+# cancellation" contains the word "cancellation" and must not become a
+# cancellation task. Cancellation itself is only the two non-payment
+# phrases, not a bare "cancellation".
 _SUBJECT_PATTERNS: tuple[tuple[str, str], ...] = (
+    # These subjects also contain "payment", "refund", or "cancel". They
+    # have to win before the looser patterns below.
+    (r"disputed charge", DISPUTED_CHARGE),
+    (r"remittance notification", AGENCY_REMITTANCE),
+    (r"reinstatement", REINSTATEMENT),
     (r"past[ -]?due payment", LATE_PAYMENT),
     (r"payment failed|failed payment", LATE_PAYMENT),
+    (r"policy\(s\) at risk for cancellation|at risk for cancellation", INTENT_TO_CANCEL),
+    (r"notice of intent to cancel", INTENT_TO_CANCEL),
     (r"canceled? (for|due to) non[- ]?pay", CANCELLATION),
-    (r"notice of cancel", CANCELLATION),
-    (r"loan has been canceled|cancellation", CANCELLATION),
+    (r"loan has been canceled", CANCELLATION),
     (r"return premium received", RETURN_PREMIUM),
     (r"program created|new program|finance agreement", NEW_PROGRAM),
+    (r"processing payment", PROCESSING_PAYMENT),
+    (r"payment confirmation", PAYMENT_CONFIRMATION),
+    (r"\brefund\b", REFUND),
+    (r"potential polic", POTENTIAL_POLICIES),
+    (r"programs ready", PROGRAMS_READY),
+    (r"underwriting request|counteroffer|document request", UNDERWRITING),
+    (r"paid off", PAID_OFF),
+    (r"\bsign[- ]?in\b", SIGN_IN),
+    (r"\bmsa\b|master services? agreement", MSA),
 )
 
 _BODY_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"disputed charge|disputed the following payment", DISPUTED_CHARGE),
+    (r"remittance notification", AGENCY_REMITTANCE),
+    (r"reinstatement", REINSTATEMENT),
+    (r"notice of intent to cancel", INTENT_TO_CANCEL),
+    (r"failure to pay will result in the cancelation", INTENT_TO_CANCEL),
     (r"past-due payment of", LATE_PAYMENT),
     (r"has a past[ -]?due payment", LATE_PAYMENT),
     (r"canceled for non-payment", CANCELLATION),
     (r"loan has been canceled effective", CANCELLATION),
     (r"return premium of \$", RETURN_PREMIUM),
     (r"will be applied toward the loan", RETURN_PREMIUM),
+    (r"processing payment", PROCESSING_PAYMENT),
+    (r"payment confirmation", PAYMENT_CONFIRMATION),
+    # Specific refund sentences only. A disputed-charge notice mentions
+    # "refund" in passing and is classified above.
+    (r"a refund (?:of|has been|to your customer)|refund has been initiated", REFUND),
+    (r"potential polic", POTENTIAL_POLICIES),
+    (r"programs ready", PROGRAMS_READY),
+    (r"underwriting request|counteroffer|document request", UNDERWRITING),
+    (r"has been paid off", PAID_OFF),
+    (r"\bsign[- ]?in\b", SIGN_IN),
+    (r"\bmsa\b|master services? agreement", MSA),
 )
 
 _DASHBOARD_PROGRAM_RE = re.compile(
@@ -73,7 +165,10 @@ _POLICY_ID_RE = re.compile(
     r"(?=Effective\b|[^A-Za-z0-9\-/]|$)"
 )
 _MONEY_RE = re.compile(r"\$\s?([\d,]+\.\d{2})")
-_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+_CANCEL_EFFECTIVE_RE = re.compile(
+    r"canceled effective\s*(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
 
 
 def classify_notice(subject: str, body: str) -> str:
@@ -114,43 +209,412 @@ def extract_policy_numbers(body: str) -> list[str]:
     return seen
 
 
+_SUBJECT_INSURED_RES = (
+    re.compile(r"Past due payment for (.+)$", re.IGNORECASE),
+    re.compile(r"Payment failed for (.+)$", re.IGNORECASE),
+    re.compile(r"Return premium received for (.+)$", re.IGNORECASE),
+    re.compile(r"Processing payment for (.+)$", re.IGNORECASE),
+    re.compile(r"Programs ready for (.+)$", re.IGNORECASE),
+    re.compile(
+        r"(?:Underwriting request|A counteroffer to your underwriting request) for (.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"A refund(?: has been initiated)? for (.+)$", re.IGNORECASE),
+    re.compile(r"A refund to your customer,\s*(.+?),", re.IGNORECASE),
+    re.compile(r"Disputed charge for (.+)$", re.IGNORECASE),
+    re.compile(r"reinstatement request has been approved for (.+)$", re.IGNORECASE),
+    re.compile(r"coverage policy for (.+?) has been canceled", re.IGNORECASE),
+    re.compile(r"coverage policy for (.+?) has been paid off", re.IGNORECASE),
+    re.compile(r"\[URGENT\]\s+(.+?)\s+-\s+", re.IGNORECASE),
+    re.compile(r"^(.+?)\s+Policy\(s\)\s+Payment Confirmation\s*$", re.IGNORECASE),
+)
+
+
+def _clean_party_name(value: str | None) -> str | None:
+    """Drop a field label that got jammed onto the name (``Policy``, ``Reference``)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    # Labels in these emails are often jammed onto the name with no space
+    # ("LLCPolicy", "LLCReference"). Split on the label even then.
+    text = re.split(
+        r"(?:Policy|Reference|Identifier|Email|Effective)",
+        text,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    text = text.strip(" \t.,-:")
+    return text or None
+
+
 def extract_insured_name(subject: str, body: str) -> str | None:
-    """Best-effort insured name from the subject or body."""
+    """Best-effort insured name from the customer block, then the subject."""
+    body_text = body or ""
+    for pattern in (
+        r"^Customer\s*([^\n\r]+)",
+        r"^Insured\s*([^\n\r]+)",
+        r"your customer,\s*([^,\n]+)",
+        r"loan for your customer\s+(.+?)\s+has been",
+        r"coverage policy for (.+?) has been canceled",
+    ):
+        match = re.search(pattern, body_text, re.IGNORECASE | re.MULTILINE)
+        cleaned = _clean_party_name(match.group(1) if match else None)
+        if cleaned:
+            return cleaned
     subject_text = subject or ""
-    match = re.search(r"Past due payment for (.+)$", subject_text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    match = re.search(
-        r"[Cc]overage policy for (.+?) has been canceled", subject_text, re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
-    match = re.search(
-        r"coverage policy for (.+?) has been canceled", body or "", re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"^Customer\s*([^\n\r]+)", body or "", re.IGNORECASE | re.MULTILINE)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"^Insured\s*([^\n\r]+)", body or "", re.IGNORECASE | re.MULTILINE)
-    if match:
-        return match.group(1).strip()
+    for pattern in _SUBJECT_INSURED_RES:
+        match = pattern.search(subject_text)
+        cleaned = _clean_party_name(match.group(1) if match else None)
+        if cleaned:
+            return cleaned
     return None
+
+
+def format_money_amount(raw: str | None) -> str | None:
+    """Render a dollar amount as short US currency, with cents.
+
+    ``$0,241.00`` and ``0,241.00`` become ``$241.00``. Amounts of
+    ``$1,000`` and up keep a thousands separator. Cents are always two
+    digits.
+    """
+    text = str(raw or "").strip().replace("$", "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not amount.is_finite():
+        return None
+    amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"${amount:,.2f}"
 
 
 def _first_money(body: str) -> str | None:
     match = _MONEY_RE.search(body or "")
-    return f"${match.group(1)}" if match else None
+    if not match:
+        return None
+    return format_money_amount(match.group(1))
 
 
-def _first_date(body: str) -> str | None:
-    match = _DATE_RE.search(body or "")
+def _money_matching(body: str, pattern: str) -> str | None:
+    match = re.search(pattern, body or "", re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return format_money_amount(match.group(1))
+
+
+_DUE_ON_RE = re.compile(
+    r"(?:which was due on|was due on|due on)\s+(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_FUTURE_CANCEL_RE = re.compile(
+    r"(?:cancelation of your coverage on|no payment is received by)\s+(\d{2}/\d{2}/\d{4})",
+    re.IGNORECASE,
+)
+_PAYMENT_FAILED_RE = re.compile(
+    r"payment failed|couldn'?t process your payment|could not process your payment",
+    re.IGNORECASE,
+)
+
+
+def _due_on_date(body: str) -> str | None:
+    """The payment due date. Policy effective dates are not due dates."""
+    match = _DUE_ON_RE.search(body or "")
     return match.group(1) if match else None
+
+
+def _future_cancel_date(body: str) -> str | None:
+    """The date coverage will cancel if the intent-to-cancel stays unpaid."""
+    match = _FUTURE_CANCEL_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def _payment_failed(subject: str, body: str) -> bool:
+    return _PAYMENT_FAILED_RE.search(f"{subject or ''}\n{body or ''}") is not None
+
+
+_NOTICE_HEADINGS = {
+    LATE_PAYMENT: "LATE PAYMENT",
+    INTENT_TO_CANCEL: "INTENT TO CANCEL",
+    RETURN_PREMIUM: "RETURN PREMIUM",
+    NEW_PROGRAM: "NEW PROGRAM",
+    PROCESSING_PAYMENT: "PROCESSING PAYMENT",
+    PAYMENT_CONFIRMATION: "PAYMENT CONFIRMATION",
+    DISPUTED_CHARGE: "DISPUTED CHARGE",
+    REINSTATEMENT: "REINSTATEMENT",
+    AGENCY_REMITTANCE: "AGENCY REMITTANCE",
+    REFUND: "REFUND",
+    POTENTIAL_POLICIES: "POTENTIAL POLICIES",
+    PROGRAMS_READY: "PROGRAMS READY",
+    UNDERWRITING: "UNDERWRITING",
+    PAID_OFF: "LOAN PAID OFF",
+    SIGN_IN: "SIGN IN",
+    MSA: "MSA",
+    UNKNOWN: "UNRECOGNIZED",
+}
+
+
+def cancel_effective_date(body: str) -> str | None:
+    """The loan cancel date, not the policy effective date."""
+    match = _CANCEL_EFFECTIVE_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def _policy_phrase(policy_numbers: list[str]) -> str:
+    policies = [str(item).strip() for item in policy_numbers if str(item or "").strip()]
+    if len(policies) == 1:
+        return f"Policy {policies[0]}"
+    if len(policies) > 1:
+        return "Policies " + ", ".join(policies)
+    return "The policy"
+
+
+def build_cancellation_note(
+    *,
+    body: str,
+    policy_numbers: list[str],
+    insured_name: str | None,
+    amount: str | None,
+) -> str:
+    """Staff-facing cancellation note. Plain sentences, no field labels.
+
+    The first line names the non-pay cancellation, the policy, and the
+    cancel date. Robie does not apply the Ascend NOC label.
+    """
+    policy_phrase = _policy_phrase(policy_numbers)
+    when = cancel_effective_date(body)
+    if when:
+        first = (
+            "NON-PAY CANCELLATION notice from Ascend. "
+            f"{policy_phrase} was canceled on {when}."
+        )
+    else:
+        first = (
+            "NON-PAY CANCELLATION notice from Ascend. "
+            f"{policy_phrase} was canceled for non-payment."
+        )
+    lines = [first]
+    insured = str(insured_name or "").strip()
+    if insured and amount:
+        lines.append(f"{insured} still has an overdue balance of {amount}.")
+    elif insured:
+        lines.append(f"This notice is for {insured}.")
+    elif amount:
+        lines.append(f"The overdue balance is {amount}.")
+    lines.append("The loan was canceled because the payment was not made.")
+    return "\n".join(lines)
+
+
+def _past_due_sentence(policy_phrase: str, amount: str | None, due: str | None) -> str:
+    if amount and due:
+        return f"{policy_phrase} is past due: {amount} was due {due}."
+    if amount:
+        return f"{policy_phrase} is past due: {amount}."
+    if due:
+        return f"{policy_phrase} is past due. The payment was due {due}."
+    return f"{policy_phrase} is past due."
+
+
+def _failed_payment_sentence(policy_phrase: str, amount: str | None) -> str:
+    if amount:
+        return f"{policy_phrase} payment failed: {amount} could not be processed."
+    return f"{policy_phrase} payment failed."
+
+
+def _intent_sentence(
+    policy_phrase: str,
+    amount: str | None,
+    due: str | None,
+    cancels_on: str | None,
+) -> str:
+    parts = [f"{policy_phrase} is at risk of cancellation."]
+    if amount and due:
+        parts.append(f"{amount} was due {due}.")
+    elif amount:
+        parts.append(f"{amount} is overdue.")
+    elif due:
+        parts.append(f"The payment was due {due}.")
+    if cancels_on:
+        parts.append(f"Coverage cancels on {cancels_on} if it stays unpaid.")
+    return " ".join(parts)
+
+
+def _with_policy(policy_phrase: str, statement: str) -> str:
+    if policy_phrase == "The policy":
+        return statement
+    return f"{policy_phrase}. {statement}"
+
+
+def _notice_detail(
+    notice_type: str,
+    subject: str,
+    body: str,
+    policy_numbers: list[str],
+) -> str:
+    """One plain-English sentence. No field names and no program id."""
+    policy_phrase = _policy_phrase(policy_numbers)
+    text = f"{subject or ''}\n{body or ''}"
+    if notice_type == LATE_PAYMENT and _payment_failed(subject, body):
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            # The failed total is on its own line under "Failed because".
+            # The earlier sentence uses the same words, then the subtotal.
+            amount = _money_matching(
+                body,
+                r"Failed because of[^\n]*\n+\s*\$\s?([\d,]+\.\d{2})",
+            )
+        if amount is None:
+            amount = _first_money(body)
+        return _failed_payment_sentence(policy_phrase, amount)
+    if notice_type == LATE_PAYMENT:
+        amount = _money_matching(body, r"past-due payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        return _past_due_sentence(policy_phrase, amount, _due_on_date(body))
+    if notice_type == INTENT_TO_CANCEL:
+        amount = _money_matching(
+            body,
+            r"(?:loan payment|overdue payment|past-due payment) of\s+\$\s?([\d,]+\.\d{2})",
+        )
+        if amount is None:
+            amount = _first_money(body)
+        return _intent_sentence(
+            policy_phrase, amount, _due_on_date(body), _future_cancel_date(body)
+        )
+    if notice_type == RETURN_PREMIUM:
+        amount = _money_matching(body, r"return premium of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"Ascend received {amount} to apply to the loan."
+        else:
+            statement = "Ascend received a return premium to apply to the loan."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == NEW_PROGRAM:
+        return _with_policy(
+            policy_phrase,
+            "Ascend opened a new premium finance program.",
+        )
+    if notice_type == PAYMENT_CONFIRMATION:
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"Payment of {amount} was received."
+        else:
+            statement = "A payment was received."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == PROCESSING_PAYMENT:
+        amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(body)
+        if amount:
+            statement = f"A payment of {amount} is processing."
+        else:
+            statement = "A payment is processing."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == REFUND:
+        amount = _money_matching(
+            body, r"(?:refund of|Amount)\s+\$\s?([\d,]+\.\d{2})"
+        )
+        if amount is None:
+            amount = _first_money(body)
+        stopped = re.search(r"has been stopped", body or "", re.IGNORECASE)
+        if amount and stopped:
+            statement = f"A refund of {amount} was stopped."
+        elif amount:
+            statement = f"A refund of {amount} was issued."
+        elif stopped:
+            statement = "A refund was stopped."
+        else:
+            statement = "A refund was issued."
+        return _with_policy(policy_phrase, statement)
+    if notice_type == POTENTIAL_POLICIES:
+        return "Some policies produced recently have not been purchased."
+    if notice_type == PROGRAMS_READY:
+        return "Coverage will end within 90 days and can be renewed."
+    if notice_type == UNDERWRITING:
+        if re.search(r"counteroffer", text, re.IGNORECASE):
+            return "A counteroffer was approved on an underwriting request."
+        if re.search(r"document request", text, re.IGNORECASE):
+            return "Ascend asked for documents on an underwriting request."
+        return "An underwriting request is in review."
+    if notice_type == PAID_OFF:
+        return _with_policy(policy_phrase, "The loan is paid in full.")
+    if notice_type == DISPUTED_CHARGE:
+        amount = _first_money(body)
+        if amount:
+            return f"A customer disputed a payment of {amount}."
+        return "A customer disputed a payment."
+    if notice_type == REINSTATEMENT:
+        return "A reinstatement was approved. The carrier still has to accept it."
+    if notice_type == AGENCY_REMITTANCE:
+        amount = _money_matching(text, r"payment of\s+\$\s?([\d,]+\.\d{2})")
+        if amount is None:
+            amount = _first_money(text)
+        if amount:
+            return f"A payment of {amount} was remitted to the agency."
+        return "A payment was remitted to the agency."
+    if notice_type == SIGN_IN:
+        return "This is a sign-in message."
+    if notice_type == MSA:
+        return "This is a master service agreement message."
+    return "A person needs to read this message."
+
+
+def insured_name_line(name: str | None) -> str:
+    """The insured on its own line, with no period added.
+
+    A name that already ends in ``LLC.`` or ``Inc.`` keeps that one period.
+    A name that does not end in a period stays that way.
+    """
+    return str(name or "").strip()
+
+
+def build_staff_note(
+    notice_type: str,
+    subject: str,
+    body: str,
+    policy_numbers: list[str],
+    insured_name: str | None,
+) -> str:
+    """Staff-facing note for every notice type. Plain sentences only.
+
+    The program id is not included. Callers that need it for traceability
+    keep it on the triage result, the driver log, or the job summary.
+    """
+    if notice_type == CANCELLATION:
+        return build_cancellation_note(
+            body=body,
+            policy_numbers=policy_numbers,
+            insured_name=insured_name,
+            amount=_first_money(body),
+        )
+    heading = _NOTICE_HEADINGS.get(notice_type, "UNRECOGNIZED")
+    detail = _notice_detail(notice_type, subject, body, policy_numbers)
+    lines = [f"{heading} notice from Ascend. {detail}"]
+    insured = str(insured_name or "").strip()
+    # A list mail names several insureds. One name on the next line would be wrong.
+    if insured and notice_type != POTENTIAL_POLICIES:
+        lines.append(insured_name_line(insured))
+    return "\n".join(lines)
 
 
 def recommended_action(notice_type: str) -> dict[str, Any]:
     """EZLynx-side recommendation for a notice type (advisory only)."""
+    if notice_type == INTENT_TO_CANCEL:
+        return {
+            "ezlynx_workflow": "Ascend NOC",
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": (
+                "File a note on the existing Ascend NOC workflow. This is a "
+                "Notice of Intent to Cancel: the policy is not canceled. Do "
+                "not apply the Ascend NOC label and do not create a "
+                "cancellation task."
+            ),
+        }
     if notice_type == LATE_PAYMENT:
         return {
             "ezlynx_workflow": "Ascend NOC",
@@ -168,20 +632,20 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
     if notice_type == CANCELLATION:
         return {
             "ezlynx_workflow": "Service-Cancellation",
-            "ezlynx_label": "email received",
+            "ezlynx_label": None,
             "zapier_task": True,
             "instruction": (
-                "Apply the cancellation transaction in EZLynx ONLY if the "
-                "policy is manual -- download policies are handled by the "
-                "carrier download. First check the History of transactions "
+                "File a note only. Do not apply the Ascend NOC label. That "
+                "label emails or texts the client, and Robie does not send "
+                "those. Apply the cancellation transaction in EZLynx ONLY if "
+                "the policy is manual -- download policies are handled by "
+                "the carrier download. First check the History of transactions "
                 "and the Activity notes: if the cancellation was already "
                 "applied, do not apply it again. Cancel type is always "
                 "'Cancel Confirmation'. Enter the return premium from the "
                 "notice; if the notice shows none, enter $0. After applying, "
                 "EZLynx auto-runs a cancellation workflow assigned to the "
-                "CSR -- enter notes there. If the workflow does not trigger "
-                "(EZLynx bug), manually run a cancellation-notice label to "
-                "create it and add notes. Assign an EZLynx follow-up task "
+                "CSR -- enter notes there. Assign an EZLynx follow-up task "
                 "via the Zapier task Zap (build_cancellation_task_payload) "
                 "to the CSR on the account; a human CSR/AP reviews before "
                 "anything is closed."
@@ -203,6 +667,50 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
             "instruction": (
                 "File the new-program notice on the policy workflow and verify "
                 "the program details match the bound policy."
+            ),
+        }
+    if notice_type == DISPUTED_CHARGE:
+        return {
+            "ezlynx_workflow": "Ascend - Payments",
+            "ezlynx_label": None,
+            "zapier_task": True,
+            "instruction": (
+                "File a note on the Ascend - Payments discussion and assign "
+                "an accounting task. Do not message the client."
+            ),
+        }
+    if notice_type == REINSTATEMENT:
+        return {
+            "ezlynx_workflow": "Ascend - Cancellation Notices",
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": (
+                "File a note only. Reinstatement does not create a task and "
+                "does not apply the Ascend NOC label."
+            ),
+        }
+    if notice_type in {PAYMENT_CONFIRMATION, PROCESSING_PAYMENT, PAID_OFF}:
+        return {
+            "ezlynx_workflow": "Ascend - Payments",
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": "File a note on the Ascend - Payments discussion. No task.",
+        }
+    if notice_type == UNDERWRITING:
+        return {
+            "ezlynx_workflow": "Ascend - Underwriting",
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": "File a note on the Ascend - Underwriting discussion. No task.",
+        }
+    if notice_type in IGNORE_TYPES:
+        return {
+            "ezlynx_workflow": None,
+            "ezlynx_label": None,
+            "zapier_task": False,
+            "instruction": (
+                "Informational Ascend mail. Do not file a note, apply a "
+                "label, or create a task."
             ),
         }
     return {
@@ -242,6 +750,19 @@ def triage_notice(
         "review_reason": "",
     }
 
+    # The note is the email in plain English. It does not wait on the
+    # program read, and it never includes the program id or status code.
+    # Ignored and unrecognized mail still get a note for the record. The
+    # driver does not file those.
+    result["note_text"] = build_staff_note(
+        notice_type, subject, body, policy_numbers, insured_name
+    )
+
+    if notice_type in IGNORE_TYPES:
+        result["ignored"] = True
+        result["needs_human_review"] = False
+        return result
+
     if notice_type == UNKNOWN:
         result["needs_human_review"] = True
         result["review_reason"] = "Unrecognized Ascend notice type"
@@ -274,27 +795,6 @@ def triage_notice(
         return result
 
     result["program"] = program
-
-    amount = _first_money(body)
-    date = _first_date(body)
-    lines = [
-        f"Ascend notice: {notice_type.replace('_', ' ')}.",
-        f"Email subject: {(subject or '').strip()}",
-    ]
-    if insured_name:
-        lines.append(f"Insured: {insured_name}")
-    if policy_numbers:
-        lines.append(f"Policies: {', '.join(policy_numbers)}")
-    if amount:
-        lines.append(f"Amount: {amount}")
-    if date:
-        lines.append(f"Date: {date}")
-    if program_uuid:
-        lines.append(f"Ascend program: {program_uuid}")
-    program_status = program.get("status")
-    if program_status:
-        lines.append(f"Ascend program status: {program_status}")
-    result["note_text"] = "\n".join(lines)
     return result
 
 
@@ -318,7 +818,8 @@ def build_cancellation_task_payload(
     if triage_result.get("notice_type") != CANCELLATION:
         raise ValueError(
             "Zapier cancellation tasks are only built for cancellation notices, "
-            f"got {triage_result.get('notice_type')!r}"
+            f"got {triage_result.get('notice_type')!r}. "
+            "Intent-to-cancel is a note, never a cancellation task."
         )
     if not applicant_id or not str(applicant_id).strip():
         raise ValueError("applicant_id is required to assign a cancellation task")
@@ -339,6 +840,45 @@ def build_cancellation_task_payload(
         "due_date": validate_due_date(due_date),
         "email_subject": triage_result.get("email_subject") or "",
         "notice_type": CANCELLATION,
+        "program_uuid": triage_result.get("program_uuid") or "",
+        "note_text": triage_result.get("note_text") or "",
+    }
+
+
+def build_intent_to_cancel_task_payload(
+    triage_result: dict[str, Any],
+    applicant_id: str,
+    account_csr: str,
+    due_date: str,
+) -> dict[str, Any]:
+    """Zapier CSR task for an intent-to-cancel notice.
+
+    Built only when the driver flag is on. The assignee is the same CSR
+    login the non-pay cancellation task uses. This is not a cancellation
+    task and it does not apply the Ascend NOC label.
+    """
+    if triage_result.get("notice_type") != INTENT_TO_CANCEL:
+        raise ValueError(
+            "Intent-to-cancel CSR tasks are only built for intent_to_cancel "
+            f"notices, got {triage_result.get('notice_type')!r}."
+        )
+    if not applicant_id or not str(applicant_id).strip():
+        raise ValueError("applicant_id is required to assign an intent-to-cancel task")
+    if not account_csr or not str(account_csr).strip():
+        raise ValueError(
+            "account_csr is required to assign an intent-to-cancel task"
+        )
+    insured = triage_result.get("insured_name") or "unknown insured"
+    policies = triage_result.get("policy_numbers") or []
+    policy_bits = f" ({', '.join(policies)})" if policies else ""
+    return {
+        "applicant_id": str(applicant_id).strip(),
+        "task_title": f"Ascend intent to cancel - {insured}{policy_bits}",
+        "assignee": str(account_csr).strip(),
+        "source": ZAPIER_SOURCE,
+        "due_date": validate_due_date(due_date),
+        "email_subject": triage_result.get("email_subject") or "",
+        "notice_type": INTENT_TO_CANCEL,
         "program_uuid": triage_result.get("program_uuid") or "",
         "note_text": triage_result.get("note_text") or "",
     }

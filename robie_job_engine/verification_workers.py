@@ -17,10 +17,6 @@ Pipeline per worker run:
   4. NEXT ACTION — per-SOP contact ladder: PORTAL first, then EMAIL, then
      CALL. Carriers/MGAs/mortgage companies ONLY — never clients.
      Business hours only (weekdays 9 AM-5 PM ET). Never bind/quote/cancel.
-     4372 runs mortgagee_enrichment (DocumentApi + structured fields,
-     then Additional Interests browser fallback on API miss; dry-run by
-     default) before planning. Portal/Bland stay out of that scaffold.
-     HITL on source conflict; skip only on proven-zero empty table.
   5. EVIDENCE — every action records destination evidence; in dry-run the
      planned action is recorded as evidence of intent.
   6. DIGEST — done / not done / pending + reason, per policy, grouped by
@@ -34,7 +30,7 @@ MODES:
       hours, no bind/quote/cancel, every action in the morning report).
       Requires --live AND ROBIE_LIVE_OUTREACH=1 in the environment.
 
-Branch: ralph/gmail-scheduled-report-ingestion (PR #495).
+Branch: ralph/gmail-scheduled-report-ingestion (draft PR #495 — no merge).
 """
 
 from __future__ import annotations
@@ -183,6 +179,11 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
     for row in ingested.rows:
         key = ing.identity_value(report_id, row)
         policy = _cell(row, "Policy Number")
+        # TEST-ONLY (2026-09-20): for 4372, identity_value may have extracted
+        # a TEST-HO number from the Note when the Policy Number column was
+        # empty. Keep the WorkItem's policy_number in sync with the key.
+        if not policy and report_id == "4372":
+            policy = key
         if report_id != "4359" and key in seen:
             dup_counts[key] = dup_counts.get(key, 1) + 1
             continue
@@ -213,6 +214,11 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
     return items
 
 
+# --- 4372 stale / prior-cycle exclusion --------------------------------------
+
+STALE_TASK_AGE_DAYS = 60
+
+
 def _4372_closed_reason(item: WorkItem) -> str | None:
     """Return the exclusion reason when a 4372 task is closed; None = keep.
 
@@ -235,6 +241,37 @@ def _4372_closed_reason(item: WorkItem) -> str | None:
     return None
 
 
+def _4372_stale_reason(item: WorkItem, today: date) -> str | None:
+    """Return the exclusion reason when a 4372 item is stale; None = keep.
+
+    Regression rule (2026-09-19): the 4372 export can carry tasks from a
+    prior cycle whose policies still read Active in EZLynx (e.g. Ruth Cruz
+    4217318 Active exp 2026-12-20, Claudia Salgado HONJ046535 Active exp
+    2026-09-24). Active policy status alone does NOT make an old mortgagee
+    task current — the task due date is the authority.
+
+    Exclude when the task due date is more than STALE_TASK_AGE_DAYS in the
+    past (a prior cycle's work), or when it is past AND the policy
+    expiration is parseable from the row and also in the past. Items with
+    no parseable task due date are never excluded by this rule — missing
+    data must not silently drop work.
+    """
+    due = parse_csv_date(_cell(item.row, "Task Due Date"))
+    if due is None:
+        return None
+    exp = parse_csv_date(_cell(item.row, "Policy Expiration Date",
+                               "Expiration Date"))
+    age_days = (today - due).days
+    if exp is not None and exp < today and age_days > 0:
+        return (f"stale prior-cycle task: due {due.isoformat()} "
+                f"({age_days} days ago), policy expired {exp.isoformat()}")
+    if age_days > STALE_TASK_AGE_DAYS:
+        return (f"stale prior-cycle task: due {due.isoformat()} "
+                f"({age_days} days ago); active policy status alone does not "
+                f"make an old mortgagee task current")
+    return None
+
+
 # --- 4246 incremental audit queue ------------------------------------------
 
 
@@ -253,6 +290,11 @@ class AuditQueueEntry:
     escalated: bool = False
     status: str = "open"  # open | closed
     history: list = field(default_factory=list)
+    # The CSV row that created the entry — carries any contact fields the
+    # export had (Applicant ID, carrier desk email/phone) so live adapters
+    # can look them up. Entries written before this field existed load with
+    # an empty row (backwards compatible).
+    source_row: dict = field(default_factory=dict)
 
 
 class AuditQueue:
@@ -309,6 +351,7 @@ class AuditQueue:
                     first_seen=today.isoformat(),
                     next_due=today.isoformat(),
                     history=[f"{today.isoformat()}: entered queue"],
+                    source_row=dict(item.row),
                 )
                 added.append(key)
             elif existing.status == "open":
@@ -522,8 +565,49 @@ class WorkerRun:
     audit_carried: list = field(default_factory=list)
     evidence: list = field(default_factory=list)
     errors: list = field(default_factory=list)
-    excluded_stale: list = field(default_factory=list)
+    excluded_stale: list = field(default_factory=list)  # {"item_key", "policy_number",
+                                                        #  "account_name", "reason"}
     enrichment: list = field(default_factory=list)
+
+
+def _work_item_from_audit_entry(entry: AuditQueueEntry) -> WorkItem:
+    """Build a minimal WorkItem from an audit queue entry for live execution.
+
+    The live adapters read contact context (Carrier Email, Carrier Phone,
+    Lender Phone, Applicant ID) from item.row — the 4246 branch must pass a
+    real WorkItem, never None, so lookup is attempted and fails closed when
+    the contact info is genuinely missing.
+    """
+    row = dict(entry.source_row or {})
+    row.setdefault("Policy Number", entry.policy_number)
+    row.setdefault("Account Name", entry.account_name)
+    row.setdefault("Department", entry.department)
+    row.setdefault("Master Company", entry.carrier)
+    return WorkItem(
+        key=entry.key,
+        report_id="4246",
+        policy_number=entry.policy_number,
+        account_name=entry.account_name,
+        department=entry.department or "Unassigned",
+        carrier=entry.carrier,
+        producer=row.get("Assigned Producer", ""),
+        csr=row.get("CSR", ""),
+        effective_date=entry.renewal_date,
+        row=row,
+    )
+
+
+def _extract_phone(text: str) -> str:
+    """Pull an explicit US desk number out of plan detail/target text.
+
+    Some plans (e.g. the 4246 Pie Insurance call) hardcode the carrier desk
+    number in the action text because the export has no phone column.
+    Returns the matched number as written, or "".
+    """
+    if not text:
+        return ""
+    match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
+    return match.group(0).strip() if match else ""
 
 
 def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
@@ -565,6 +649,14 @@ def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
         to = (item.row.get("Carrier Phone") or item.row.get("Lender Phone")
               or "").strip() if item else ""
         if not to:
+            # Some plans hardcode the carrier desk number in the action
+            # text because the export has no phone column (e.g. the 4246
+            # Pie Insurance plan). An explicit number in the plan
+            # detail/target is carrier-authored contact info — prefer it
+            # over failing.
+            to = (_extract_phone(pa.action.detail)
+                  or _extract_phone(pa.action.target))
+        if not to:
             raise AdapterError(
                 "no carrier/lender phone on file for this item — "
                 "cannot call")
@@ -604,8 +696,7 @@ def _record_evidence(run: WorkerRun, action: PlannedAction, note: str) -> None:
 def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                queue_dir: str = ".", csv_bytes: bytes | None = None,
                gmail_service=None, allow_unverified: bool = False,
-               enrichment_ports: menc.EnrichmentPorts | None = None,
-               test_enrichment: bool = False,
+               enrichment_ports=None, test_enrichment: bool = False,
                browser_read: bool = False) -> WorkerRun:
     """Run one verification worker for one day. Fail-closed throughout."""
     worker = WORKERS[report_id]["name"]
@@ -631,6 +722,10 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         allow_unverified = report_id == "4359"
         got = ing.ingest_daily_reports(gmail_service, day=day,
                                        report_ids=[report_id],
+                                       # 4372's email lives under the mortgagee
+                                       # subject; the generic daily-CSV query
+                                       # would never see it.
+                                       subject_contains=ing.gmail_subject_queries([report_id])[0],
                                        allow_unverified=allow_unverified)
         ingested = got[report_id]
     else:
@@ -648,7 +743,7 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
     if report_id == "4372":
         kept: list[WorkItem] = []
         for item in items:
-            reason = _4372_closed_reason(item)
+            reason = _4372_closed_reason(item) or _4372_stale_reason(item, day)
             if reason:
                 run.excluded_stale.append({
                     "item_key": item.key,
@@ -680,7 +775,24 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             pa = PlannedAction(entry.key, entry.policy_number, entry.account_name,
                                entry.department, worker, action, status, reason, mode)
             run.actions.append(pa)
-            _record_evidence(run, pa, "audit queue state evaluated")
+            if live and status == "due_now":
+                # Live: actually execute via adapters, same as the other
+                # workers. The entry is rebuilt into a WorkItem so contact
+                # lookup runs (and fails closed when genuinely missing) —
+                # never None. Only real destination evidence marks done.
+                try:
+                    entry_item = _work_item_from_audit_entry(entry)
+                    evidence_note = _execute_live_action(pa, entry_item)
+                    pa.status = "done"
+                    pa.reason = evidence_note
+                    _record_evidence(run, pa, evidence_note)
+                except Exception as exc:  # AdapterError and friends
+                    pa.status = "pending"
+                    pa.reason = (f"live execution failed: {exc} — "
+                                 f"original plan: {reason}")
+                    _record_evidence(run, pa, pa.reason)
+            else:
+                _record_evidence(run, pa, "audit queue state evaluated")
         queue.save()
     else:
         planner = {"4247": plan_4247, "4372": plan_4372, "4359": plan_4359}[report_id]
@@ -732,11 +844,13 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             pa = PlannedAction(item.key, item.policy_number, item.account_name,
                                _dept(item), worker, action, status, reason, mode)
             run.actions.append(pa)
-            if live and status == "in_progress":
+            if live and status == "due_now":
                 # Live: actually execute via adapters. Only real destination
                 # evidence marks an action done; any adapter failure leaves
                 # it pending with the error as the reason. Nothing here
                 # ever claims work it didn't do.
+                # ("due_now" is the planners' actionable status; "waiting"
+                # and "blocked" are held by design.)
                 try:
                     evidence_note = _execute_live_action(pa, item)
                     pa.status = "done"
@@ -772,9 +886,10 @@ def build_digest(runs: list[WorkerRun]) -> str:
                          f"{len(run.audit_carried)} carried forward.")
         by_dept: dict[str, dict[str, list]] = {}
         for pa in run.actions:
-            bucket = by_dept.setdefault(pa.department,
-                                        {"due_now": [], "waiting": [], "blocked": []})
-            bucket[pa.status].append(pa)
+            bucket = by_dept.setdefault(pa.department, {})
+            # Every status observed is bucketed — never silently drop one
+            # (live mode adds "done"/"pending" alongside due_now/waiting/blocked).
+            bucket.setdefault(pa.status, []).append(pa)
         for dept in DEPARTMENT_ORDER + sorted(
                 d for d in by_dept if d not in DEPARTMENT_ORDER):
             bucket = by_dept.get(dept)
@@ -782,13 +897,22 @@ def build_digest(runs: list[WorkerRun]) -> str:
                 continue
             lines.append(f"### {dept}")
             for label, key in (("Needs action", "due_now"),
+                               ("Done", "done"),
+                               ("Pending", "pending"),
                                ("Waiting", "waiting"),
                                ("Blocked", "blocked")):
-                for pa in bucket[key]:
+                for pa in bucket.get(key, []):
                     lines.append(
                         f"- [{label}] {pa.policy_number} — {pa.account_name}: "
                         f"{pa.action.detail} (Reason: {pa.reason})"
                     )
+        if run.excluded_stale:
+            lines.append("### Excluded (stale prior-cycle)")
+            for ex in run.excluded_stale:
+                lines.append(
+                    f"- [Excluded] {ex['policy_number']} — {ex['account_name']}: "
+                    f"{ex['reason']}"
+                )
         if run.errors:
             for err in run.errors:
                 lines.append(f"! ERROR: {err}")
@@ -815,13 +939,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="write digest markdown here (default: stdout)")
     parser.add_argument("--allow-unverified", action="store_true",
                         help="bypass the schema gate (4359 until verified)")
-    parser.add_argument("--test-enrichment", action="store_true",
-                        help="bind Test-only EzlynxApiClient (ROBIE_ENV=TEST required; "
-                             "never Production)")
-    parser.add_argument("--browser-read", action="store_true",
-                        help="bind Test-only Additional Interests CDP read "
-                             "(ROBIE_ENV=TEST; attaches existing SSRobie Chrome; "
-                             "never launches a browser; never Production)")
     args = parser.parse_args(argv)
 
     day = datetime.strptime(args.day, "%Y-%m-%d").date()
@@ -831,9 +948,7 @@ def main(argv: list[str] | None = None) -> int:
             csv_bytes = fh.read()
     run = run_worker(args.report, day=day, mode=args.mode,
                      queue_dir=args.queue_dir, csv_bytes=csv_bytes,
-                     allow_unverified=args.allow_unverified,
-                     test_enrichment=args.test_enrichment,
-                     browser_read=args.browser_read)
+                     allow_unverified=args.allow_unverified)
     digest = build_digest([run])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

@@ -67,6 +67,18 @@ class BridgeTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         return main.app.test_client().post(path, json=payload, headers=headers)
 
+    def test_message_test_marker_after_mention_and_argument_text(self):
+        for message in (
+            {"text": "[[robie-test]] hello"},
+            {"text": "<users/bot> [[robie-test]] hello"},
+            {"text": "<users/one> <users/two> [[robie-test]] /stop"},
+            {"argumentText": "<users/one> @robie robie-test: use follow up"},
+            {"text": "@robie hello", "argumentText": "robie-test: hello"},
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(main._routing_attributes({"message": message}, "MESSAGE")["robie_env"], "test")
+        self.assertNotIn("robie_env", main._routing_attributes({"message": {"text": "hello"}}, "MESSAGE"))
+
     def test_addon_message_payload_is_normalized_for_legacy_hermes(self):
         payload = {
             "authorizationEventObject": {"userOAuthToken": "redacted-test-token"},
@@ -578,6 +590,45 @@ class BridgeTests(unittest.TestCase):
             response = self._post("/", payload)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("robie_env", publish.call_args.kwargs)
+
+    def test_robie_test_marker_publishes_test_and_plain_text_does_not(self):
+        received = "google.workspace.chat.event.v1.received"
+        marked = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "space": {"name": "spaces/AAQAZbLJO78"},
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/1",
+                    "text": "[[robie-test]] add a note for Buster Brown",
+                },
+            },
+            received,
+        )
+        self.assertEqual(marked["robie_env"], "test")
+        prefixed = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/2",
+                    "text": "robie-test: look up john smith",
+                },
+            },
+            received,
+        )
+        self.assertEqual(prefixed["robie_env"], "test")
+        plain = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "space": {"name": "spaces/AAQAZbLJO78"},
+                "message": {
+                    "name": "spaces/AAQAZbLJO78/messages/3",
+                    "text": "add a note for Buster Brown",
+                },
+            },
+            received,
+        )
+        self.assertNotIn("robie_env", plain)
+        self.assertEqual(plain, {"ce-type": received})
 
 
 def _signing_material():

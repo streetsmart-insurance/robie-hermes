@@ -205,6 +205,60 @@ class MondayTimerRegressionTests(unittest.TestCase):
         self.assertEqual(rows[0]["Policy Number"], "POL123")
         self.assertEqual(skipped, 1)
 
+    def test_4372_test_ho_empty_policy_recovered_other_report_skipped(self):
+        """4372 TEST-HO note fallback keeps the row; another report skips it.
+
+        (a) A 4372 row with an empty Policy Number and a TEST-HO number in
+        the Note is recovered and is not logged as a skip.
+        (b) The same empty Policy Number on another report is skipped with
+        a warning, and a sibling row with a policy number is kept.
+        """
+        headers_4372 = ing.expected_headers("4372")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers_4372)
+        canary = [""] * len(headers_4372)
+        canary[headers_4372.index("Account Name")] = "ROBIE Test LLC"
+        canary[headers_4372.index("Note")] = (
+            "Task note with TEST-HO-08312026-01 for mortgagee verification"
+        )
+        writer.writerow(canary)
+        with self.assertNoLogs(
+            "robie_job_engine.gmail_report_ingestion", level="WARNING"
+        ):
+            rows, skipped = ing.parse_and_validate_csv(
+                "4372", buffer.getvalue().encode("utf-8"), source_label="unittest"
+            )
+        self.assertEqual(skipped, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Policy Number"], "")
+        self.assertEqual(ing.identity_value("4372", rows[0]), "TEST-HO-08312026-01")
+
+        headers_4247 = ing.expected_headers("4247")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers_4247)
+        kept = [""] * len(headers_4247)
+        kept[headers_4247.index("Policy Number")] = "POL-KEEP"
+        kept[headers_4247.index("Account Name")] = "Kept Account"
+        writer.writerow(kept)
+        empty = [""] * len(headers_4247)
+        empty[headers_4247.index("Account Name")] = "Empty Policy"
+        writer.writerow(empty)
+        with self.assertLogs(
+            "robie_job_engine.gmail_report_ingestion", level="WARNING"
+        ) as logs:
+            rows, skipped = ing.parse_and_validate_csv(
+                "4247", buffer.getvalue().encode("utf-8"), source_label="unittest"
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Policy Number"], "POL-KEEP")
+        self.assertEqual(skipped, 1)
+        self.assertTrue(
+            any("skipping row with empty identity" in message and "4247" in message
+                for message in logs.output)
+        )
+
     def test_all_empty_identity_rows_still_fails_closed(self):
         headers = ing.expected_headers("4372")
         buffer = io.StringIO()

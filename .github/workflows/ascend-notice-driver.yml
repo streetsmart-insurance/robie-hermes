@@ -3,8 +3,11 @@
 # Why this exists: PR #430 put the engine on the box (read-only triage,
 # Discussion API v8 append to an EXISTING discussion, Zapier task firing with
 # a required due date) but nothing ever triggered it. This workflow is the
-# trigger: every 30 minutes it runs robie_job_engine.ascend_notice_driver on
-# the Production box against the hello@ mailbox.
+# trigger: on manual dispatch it runs robie_job_engine.ascend_notice_driver
+# on the Production box. The driver defaults to the 25 staff mailboxes and
+# the Ascend sender filter. The on-box timer is
+# robie-ascend-notice-driver.timer (installed stopped). This workflow's
+# schedule stays commented out.
 #
 # Safety:
 # - DRY-RUN BY DEFAULT. The scheduled run never passes --live, so the driver
@@ -13,7 +16,8 @@
 # - The driver fails closed per email (unresolved applicant, missing CSR
 #   username, triage needs_human_review, API error, phone numbers in note
 #   text, write-scope refusal). Nothing is deleted, ever.
-# - Runs on the release interpreter on hermes-poc-01, not the runner's python.
+# - Runs on /opt/streetsmart-hermes/venv/bin/python on hermes-poc-01.
+#   streetsmart-hermes cannot exec the hermes-agent venv under .hermes.
 #
 # Dispatch ONLY from main: the Production environment's deployment branch
 # policy allows main and nothing else.
@@ -21,8 +25,12 @@
 name: Ascend notice driver
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes; dry-run only (see below)
+  # Schedule stays commented out. The delegation SA is set below, but a
+  # reviewed dry-run has to come back clean before this cron is enabled.
+  # Manual workflow_dispatch remains the only way to run it, and that
+  # dispatch is dry-run unless live=true.
+  # schedule:
+  #   - cron: "*/30 * * * *"   # every 30 minutes; dry-run only (see below)
   workflow_dispatch:
     inputs:
       live:
@@ -58,10 +66,7 @@ jobs:
           set -euo pipefail
           test "${PRODUCTION_VM}" = "hermes-poc-01"
           test "${PROJECT_ID}" = "streetsmart-hermes-poc"
-          # NOTE (2026-09-16): ROBIE_GMAIL_DELEGATION_SA is intentionally NOT set here.
-          # No value exists anywhere in the repo (code search: referenced only by
-          # ascend_notice_driver.py with no default). The driver will fail closed at the
-          # Gmail step until it is supplied. Do not invent a value.
+          # Keyless domain-wide delegation identity. Dry-run requests gmail.readonly only.
           DRIVER_FLAGS="--due-days 2"
           if [ "${LIVE_INPUT}" = "true" ]; then
             DRIVER_FLAGS="${DRIVER_FLAGS} --live"
@@ -74,7 +79,7 @@ jobs:
             --project="${PROJECT_ID}" \
             --zone="${ZONE}" \
             --tunnel-through-iap \
-            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest ROBIE_ASCEND_API_ENABLED=1 ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-api-key/versions/latest /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest ROBIE_ASCEND_API_ENABLED=1 ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-prod-api-key/versions/latest ROBIE_EZLYNX_WRITE_SCOPE=all ROBIE_PLAYGROUND=1 /opt/streetsmart-hermes/venv/bin/python \
               -m robie_job_engine.ascend_notice_driver ${DRIVER_FLAGS}")
           STATUS=$?
           set -e

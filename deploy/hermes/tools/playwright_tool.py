@@ -520,6 +520,11 @@ try:
             "PLAYWRIGHT_BLOCKED: unique-write guard did not install"
         )
     try:
+        from robie_job_engine.client_name_lookup import install_stuck_tab_recovery
+        install_stuck_tab_recovery(scope)
+    except Exception:
+        pass
+    try:
         from robie_job_engine.gemini_field_helper import ask_gemini_unique_field
         scope["ask_gemini_unique_field"] = ask_gemini_unique_field
     except Exception:
@@ -533,6 +538,15 @@ try:
             _trace_mgr.start_tracing(context)
         except Exception:
             _trace_mgr = None
+    try:
+        os.environ["ROBIE_AGENT_CODE"] = "1"
+        from robie_job_engine.safety_seal import install_agent_seal
+        install_agent_seal()
+    except Exception as exc:
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: safety seal did not install; "
+            "refusing to run agent code"
+        ) from exc
     try:
         exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
     except Exception as exc:
@@ -604,20 +618,27 @@ def _kill_process_group(pid: int) -> None:
             return
 
 
-def _communicate_until_stopped(proc, timeout: int, job_id: str | None, payload: str):
-    """Wait on the runner, and kill it when /stop or the ceiling asks.
+def _communicate_until_stopped(
+    proc, timeout: int, job_id: str | None, payload: str, db_path: str | None = None
+):
+    """Wait on the runner, and kill it when the turn must stop.
 
     The full timeout is still one communicate() call. A watcher kills the
-    process group if the job is stopped, which unblocks that call. A
-    TimeoutExpired still propagates so the caller can report it.
+    process group if the job is stopped or already terminal, which unblocks
+    that call. A TimeoutExpired still propagates so the caller can report it.
     """
-    from robie_job_engine.chat_turn_control import agent_stop_requested
+    from robie_job_engine.chat_turn_control import (
+        agent_stop_requested,
+        running_turn_must_stop,
+    )
 
     stop_watch = threading.Event()
+    halted = threading.Event()
 
     def _watch() -> None:
         while not stop_watch.wait(0.2):
-            if job_id and agent_stop_requested(job_id):
+            if job_id and running_turn_must_stop(job_id, db_path):
+                halted.set()
                 _kill_process_group(proc.pid)
                 return
 
@@ -627,7 +648,9 @@ def _communicate_until_stopped(proc, timeout: int, job_id: str | None, payload: 
         stdout, stderr = proc.communicate(input=payload, timeout=timeout)
     finally:
         stop_watch.set()
-    return stdout, stderr, bool(job_id and agent_stop_requested(job_id))
+    return stdout, stderr, halted.is_set() or bool(
+        job_id and agent_stop_requested(job_id)
+    )
 
 
 def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
@@ -666,6 +689,14 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
     stopped = agent_output_blocked(bound_job_id, note_store)
     if stopped:
         return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: {stopped}"))
+    from robie_job_engine.chat_turn_control import running_turn_must_stop
+
+    if running_turn_must_stop(bound_job_id, bound_db):
+        # A finished job does not start another browser step. This is not
+        # the /stop flag, so a confirmation send can still post.
+        return _finish(tool_error(
+            "PLAYWRIGHT_BLOCKED: this job already finished. Do not call another tool."
+        ))
     if job is not None and note_store is not None:
         try:
             from robie_job_engine.client_name_lookup import (
@@ -749,6 +780,7 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
 
     wrapper = _playwright_exec_wrapper()
     env = os.environ.copy()
+    env["ROBIE_AGENT_CODE"] = "1"
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
     if job_id:
         env["ROBIE_JOB_ID"] = job_id
@@ -793,7 +825,7 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         register_agent_process(bound_job_id, proc.pid)
         try:
             stdout, stderr, stopped = _communicate_until_stopped(
-                proc, timeout, bound_job_id, payload
+                proc, timeout, bound_job_id, payload, bound_db
             )
         finally:
             unregister_agent_process(bound_job_id, proc.pid)
