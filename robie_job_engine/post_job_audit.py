@@ -191,6 +191,41 @@ def _read_ppm(payload: bytes) -> tuple[bytes, int]:
     return payload[offset:offset + expected], offset + expected
 
 
+def _timeline_vf(binary: str, video: Path, max_frames: int) -> str:
+    """Build a vf filter that samples evenly across the full recording.
+
+    Plain -frames:v N without an fps/select filter only returns the *first*
+    N decoded frames (~3s at 4fps), which false-fails long Looker jobs whose
+    motion happens after load. Probing the duration and setting
+    fps=<max_frames/duration> spreads the N frames across the timeline.
+    """
+    duration_s = None
+    probe_dur = subprocess.run(
+        [
+            binary,
+            "-hide_banner",
+            "-i",
+            str(video),
+            "-f",
+            "null",
+            "-",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    err = (probe_dur.stderr or b"").decode("utf-8", "replace")
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    if m:
+        duration_s = (
+            int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        )
+    if duration_s and duration_s > 0.5:
+        fps = max(max_frames / duration_s, 0.05)
+        return f"fps={fps:.6f},scale=160:90"
+    return "scale=160:90"
+
+
 def extract_video_frames(
     path: str | Path,
     *,
@@ -237,7 +272,7 @@ def extract_video_frames(
         "-vsync",
         "0",
         "-vf",
-        "scale=160:90",
+        _timeline_vf(binary, video, max_frames),
         "-frames:v",
         str(max_frames),
         "-f",
