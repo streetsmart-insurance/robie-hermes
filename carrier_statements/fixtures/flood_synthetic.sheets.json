@@ -1,0 +1,40 @@
+{
+  "Payments": [
+    [
+      "Status",
+      "Policy Type",
+      "Policy Name",
+      "Policy Number",
+      "Effective Date",
+      "Premium Total Inc Taxes.amount",
+      "Producer 1: Producer/CSR",
+      "Commissionable Premium.amount",
+      "Agency Commission Override %",
+      "Producer 1 Projected Commission.amount"
+    ],
+    [
+      "Active",
+      "Renewal",
+      "Example Transit LLC - Flood",
+      "SYN-POL007",
+      "2025-04-01T00:00:00",
+      100,
+      "Example Agency LLC",
+      100,
+      10,
+      10
+    ],
+    [
+      "TOTAL",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      10
+    ]
+  ]
+}
