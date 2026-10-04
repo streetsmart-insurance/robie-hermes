@@ -486,8 +486,15 @@ class UnitInterpreterTests(unittest.TestCase):
         timer = (ROOT / "deploy/systemd/robie-ascend-notice-driver.timer").read_text(
             encoding="utf-8"
         )
+        self.assertIn("OnBootSec=5min", timer)
+        self.assertIn("OnActiveSec=15min", timer)
         self.assertIn("OnUnitActiveSec=15min", timer)
         self.assertIn("Persistent=true", timer)
+        self.assertIn(
+            "Environment=ASCEND_DRIVER_NOTE_LEDGER="
+            "/var/lib/robie-ascend-notice-driver/discussion-note-ledger.json",
+            driver_unit,
+        )
         example = (
             ROOT
             / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf.example"

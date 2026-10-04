@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -379,6 +380,8 @@ def test_email_skips_api_filed_events_and_keeps_the_gaps(tmp_path, monkeypatch):
         internal_date=email_at,
         store=store,
     ) == past.event_key
+    # The filed row is the program overdue episode and has no invoice id.
+    # Payment failed for that program and policy is the same episode.
     assert source.email_covered_by_api(
         program_id=_pid(1),
         notice_type=triage.LATE_PAYMENT,
@@ -386,7 +389,7 @@ def test_email_skips_api_filed_events_and_keeps_the_gaps(tmp_path, monkeypatch):
         body="We couldn't process your payment of $412.10.\n" + body,
         internal_date=email_at,
         store=store,
-    ) == ""
+    ) == past.event_key
     for notice_type in (triage.UNDERWRITING, triage.RETURN_PREMIUM, triage.REFUND):
         assert source.email_covered_by_api(
             program_id=_pid(1),
@@ -446,8 +449,403 @@ def test_email_skips_api_filed_events_and_keeps_the_gaps(tmp_path, monkeypatch):
         internal_date=email_at,
     )
     failed_result = driver.process_notice(failed, ctx)
-    assert failed_result.reason != "api_already_filed"
+    assert failed_result.reason == "api_already_filed"
+    assert failed_result.detail["event_key"] == past.event_key
     assert failed_result.detail.get("notice_type") == triage.LATE_PAYMENT
+
+
+FAILED_POLICY = "AYMGH-D"
+
+
+def _overdue_invoice(invoice_id: str, *, policy: str, amount_cents: int, due_date: str, number: str) -> dict:
+    return {
+        "id": invoice_id,
+        "program_id": _pid(1),
+        "status": "overdue",
+        "due_date": due_date,
+        "invoice_number": number,
+        "policy_number": policy,
+        "total_amount_cents": amount_cents,
+        "updated_at": "2026-10-04T18:16:00Z",
+    }
+
+
+def _file_overdue(store, invoice: dict):
+    program = _program(
+        1,
+        "payment_overdue",
+        "2026-10-04T18:16:00Z",
+        policy_number=invoice["policy_number"],
+        due_date=invoice["due_date"],
+    )
+    notice = source._invoice_notice(invoice, program)
+    assert notice is not None
+    store.record_filed(notice)
+    return notice
+
+
+def _failed_mail(
+    *,
+    policy: str,
+    invoice_id: str = "",
+    amount: str = "412.10",
+    due: str = "10/03/2026",
+    message_id: str = "mail-failed",
+) -> driver.EmailNotice:
+    invoice_line = ""
+    if invoice_id:
+        invoice_line = (
+            "Make a payment ( https://checkout.useascend.com/agency/invoices/"
+            f"{invoice_id}?s_token=FIXTURE )\n"
+        )
+    due_line = f"The payment was due on {due}.\n" if due else ""
+    body = (
+        "We're writing to let you know that we couldn't process your payment of "
+        f"${amount} for StreetSmart Insurance Agency because of insufficient funds.\n"
+        f"{due_line}"
+        f"Policy ID {policy}\n"
+        f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
+        f"{invoice_line}"
+    )
+    return driver.EmailNotice(
+        message_id=message_id,
+        subject=f"Payment failed for {INSURED}",
+        body=body,
+        internal_date="2026-10-04T22:16:00Z",
+    )
+
+
+def test_payment_failed_skips_same_invoice_files_a_different_one_and_files_when_unmatched(
+    tmp_path, monkeypatch
+):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    monkeypatch.setenv(source.DB_ENV, str(store.path))
+    filed = _file_overdue(
+        store,
+        _overdue_invoice(
+            _iid(21),
+            policy=FAILED_POLICY,
+            amount_cents=41210,
+            due_date="2026-10-03",
+            number="INV-AYM",
+        ),
+    )
+    same = _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21))
+    covered = source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=same.subject,
+        body=same.body,
+        internal_date=same.internal_date,
+        store=store,
+    )
+    assert covered == filed.event_key
+    ctx = driver_ctx()
+    skipped = driver.process_notice(same, ctx)
+    assert skipped.status == "skipped"
+    assert skipped.reason == "api_already_filed"
+    assert skipped.detail["event_key"] == filed.event_key
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+    # Same due date and amount, different invoice. Bill matching must not
+    # swallow an email that names another invoice.
+    other = _failed_mail(
+        policy=FAILED_POLICY,
+        invoice_id=_iid(22),
+        message_id="mail-other-invoice",
+    )
+    other_ctx = driver_ctx()
+    other_result = driver.process_notice(other, other_ctx)
+    assert other_result.reason != "api_already_filed"
+    assert other_result.status == "dry_run"
+    assert other_ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+    empty = source.EventKeyStore(tmp_path / "empty.db")
+    monkeypatch.setenv(source.DB_ENV, str(empty.path))
+    unmatched = _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21), message_id="mail-none")
+    none_ctx = driver_ctx()
+    none_result = driver.process_notice(unmatched, none_ctx)
+    assert none_result.reason != "api_already_filed"
+    assert none_result.status == "dry_run"
+    assert none_result.reason != "api_store_unreadable"
+    assert none_ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_payment_failed_same_bill_without_invoice_id_is_skipped(tmp_path, monkeypatch):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    monkeypatch.setenv(source.DB_ENV, str(store.path))
+    filed = _file_overdue(
+        store,
+        _overdue_invoice(
+            _iid(21),
+            policy=FAILED_POLICY,
+            amount_cents=41210,
+            due_date="2026-10-03",
+            number="INV-AYM",
+        ),
+    )
+    mail = _failed_mail(policy=FAILED_POLICY, invoice_id="", amount="412.10", due="10/03/2026")
+    assert source.email_covered_by_api(
+        program_id="",
+        notice_type=triage.LATE_PAYMENT,
+        subject=mail.subject,
+        body=mail.body,
+        store=store,
+    ) == filed.event_key
+    result = driver.process_notice(mail, driver_ctx())
+    assert result.status == "skipped"
+    assert result.reason == "api_already_filed"
+
+
+def test_payment_failed_matches_policy_from_program_cache_on_an_old_store(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE filed_events (
+            event_key TEXT PRIMARY KEY,
+            program_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            anchor TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            invoice_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            insured_name TEXT NOT NULL DEFAULT '',
+            loan_id TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE program_policies (
+            program_id TEXT PRIMARY KEY,
+            policy_numbers TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    event_key = f"{_pid(1)}|late_payment|{_iid(21)}"
+    conn.execute(
+        """
+        INSERT INTO filed_events (
+            event_key, program_id, event_type, anchor, occurred_at,
+            invoice_id, status, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'filed', ?)
+        """,
+        (
+            event_key,
+            _pid(1),
+            triage.LATE_PAYMENT,
+            "INV-AYM",
+            "2026-10-04T18:16:00Z",
+            _iid(21),
+            "2026-10-04T18:16:00Z",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO program_policies (program_id, policy_numbers, updated_at) VALUES (?, ?, ?)",
+        (_pid(1), json.dumps([FAILED_POLICY]), "2026-10-04T18:16:00Z"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv(source.DB_ENV, str(path))
+    mail = _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21))
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=mail.subject,
+        body=mail.body,
+    ) == event_key
+    result = driver.process_notice(mail, driver_ctx())
+    assert result.reason == "api_already_filed"
+
+
+def test_fixture_04_is_covered_by_the_program_overdue_episode(tmp_path, monkeypatch):
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/ascend_notices/payment_failed_04.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    program_id = "a2786f7c-d081-4b19-a374-72b6fd7ec635"
+    flip = "2026-10-04T15:50:00Z"
+    program = {
+        "id": program_id,
+        "status": "payment_overdue",
+        "updated_at": flip,
+        "insured": {"business_name": "Fixture Insured A LLC"},
+        "policy_number": "CBL58682451P-85",
+        "overdue_amount_cents": 27395,
+    }
+    store = source.EventKeyStore(tmp_path / "events.db")
+    notices = source._program_notices(program, [], store=store, persist=True)
+    assert len(notices) == 1
+    filed = notices[0]
+    assert filed.invoice_id == ""
+    assert filed.event_type == triage.LATE_PAYMENT
+    store.record_filed(filed)
+    body = fixture["text_plain"]
+    assert "$290.87" in body or "290.87" in body
+    assert "due on" not in body.casefold()
+    monkeypatch.setenv(source.DB_ENV, str(store.path))
+    assert source.email_covered_by_api(
+        program_id=program_id,
+        notice_type=triage.LATE_PAYMENT,
+        subject=fixture["subject"],
+        body=body,
+        store=store,
+    ) == filed.event_key
+    assert source.email_covered_by_api(
+        program_id=program_id,
+        notice_type=triage.LATE_PAYMENT,
+        subject=fixture["subject"],
+        body=body,
+    ) == filed.event_key
+    result = driver.process_notice(
+        driver.EmailNotice(
+            message_id="mail-fixture-04",
+            subject=fixture["subject"],
+            body=body,
+            internal_date="2026-10-04T22:16:00Z",
+        ),
+        driver_ctx(),
+    )
+    assert result.reason == "api_already_filed"
+    assert result.detail["event_key"] == filed.event_key
+
+    store.episode_anchor(
+        f"{program_id}|{triage.LATE_PAYMENT}",
+        "active",
+        "2026-10-05T12:00:00Z",
+        persist=True,
+    )
+    assert source.email_covered_by_api(
+        program_id=program_id,
+        notice_type=triage.LATE_PAYMENT,
+        subject=fixture["subject"],
+        body=body,
+        store=store,
+    ) == ""
+
+
+def test_invoice_uuid_covers_payment_failed_without_a_policy(tmp_path):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    notice = source._notice(
+        event_type=triage.LATE_PAYMENT,
+        program_id=_pid(1),
+        anchor="INV-BARE",
+        occurred_at="2026-10-04T18:16:00Z",
+        subject="Past due",
+        body="past due",
+        invoice_id=_iid(21),
+        policy_numbers=[],
+    )
+    assert notice is not None
+    store.record_filed(notice)
+    mail = _failed_mail(policy="OTHER-POLICY-9", invoice_id=_iid(21))
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=mail.subject,
+        body=mail.body,
+        store=store,
+    ) == notice.event_key
+
+
+def test_due_and_amount_fallback_still_requires_the_same_policy(tmp_path):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    _file_overdue(
+        store,
+        _overdue_invoice(
+            _iid(21),
+            policy=FAILED_POLICY,
+            amount_cents=41210,
+            due_date="2026-10-03",
+            number="INV-AYM",
+        ),
+    )
+    mail = _failed_mail(
+        policy="OTHER-POLICY-9",
+        invoice_id="",
+        amount="412.10",
+        due="10/03/2026",
+    )
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=mail.subject,
+        body=mail.body,
+        store=store,
+    ) == ""
+
+
+def test_payment_confirmation_does_not_suppress_payment_failed(tmp_path):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    program = _program(1, "active", "2026-10-04T18:16:00Z", policy_number=FAILED_POLICY)
+    notice = source._invoice_notice(
+        {
+            "id": _iid(21),
+            "program_id": _pid(1),
+            "status": "paid",
+            "paid_at": "2026-10-04T18:16:00Z",
+            "invoice_number": "INV-AYM",
+            "policy_number": FAILED_POLICY,
+            "total_amount_cents": 41210,
+        },
+        program,
+    )
+    assert notice is not None
+    assert notice.event_type == triage.PAYMENT_CONFIRMATION
+    store.record_filed(notice)
+    mail = _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21))
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=mail.subject,
+        body=mail.body,
+        store=store,
+    ) == ""
+
+
+def test_invoice_labels_ignore_date_from_and_amount():
+    body = (
+        "Invoice date 10/03/2026\n"
+        "Invoice from Ascend\n"
+        "Invoice amount $412.10\n"
+        f"Invoice No. INV-AYM\n"
+        f"Invoice # INV-HASH\n"
+        f"Invoice {_iid(21)}\n"
+    )
+    found = source._payment_failed_invoice_ids(body, _pid(1))
+    assert "date" not in found
+    assert "from" not in found
+    assert "amount" not in found
+    assert "inv-aym" in found
+    assert "inv-hash" in found
+    assert _iid(21) in found
+
+
+def test_payment_failed_holds_when_the_store_cannot_be_read(tmp_path, monkeypatch):
+    garbage = tmp_path / "garbage.db"
+    garbage.write_text("not a database", encoding="utf-8")
+    monkeypatch.setenv(source.DB_ENV, str(garbage))
+    mail = _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21))
+    ctx = driver_ctx()
+    result = driver.process_notice(mail, ctx)
+    assert result.status == "skipped"
+    assert result.reason == "api_store_unreadable"
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+    assert garbage.read_text(encoding="utf-8") == "not a database"
+
+    missing = tmp_path / "missing.db"
+    monkeypatch.setenv(source.DB_ENV, str(missing))
+    filed = driver.process_notice(
+        _failed_mail(policy=FAILED_POLICY, invoice_id=_iid(21), message_id="mail-missing"),
+        driver_ctx(),
+    )
+    assert filed.reason != "api_store_unreadable"
+    assert filed.status == "dry_run"
+    assert not missing.exists()
 
 
 def test_invoice_id_dedupes_even_when_the_email_is_the_same_minute(tmp_path):
