@@ -1743,95 +1743,7 @@ def test_an_unreadable_producer_means_the_return_is_unproven(monkeypatch):
     assert intake._confirm_returned(make_task(created_by="Carlo Ferrara")) is False
 
 
-# ---- D. the read-only Test inspection ----------------------------------------------------------------------
-class _LazyInspector:
-    """Imported on first use so a missing module fails each inspector test, not the whole file."""
-    def __getattr__(self, name):
-        import importlib
-        return getattr(importlib.import_module("robie_job_engine.task_field_inspector"), name)
-
-
-inspector = _LazyInspector()
-
-
-class _InspectPanel:
-    def __init__(self, log): self.log = log
-    def evaluate(self, script):
-        self.log.append("panel.evaluate")
-        return [{"tag": "input", "role": "textbox", "name": "Instructions (observed)", "value": "Send the dec page",
-                 "editable": True, "visible": True}]
-    def click(self, *a, **k): self.log.append("PANEL CLICK")
-
-
-class _InspectPage:
-    def __init__(self, log): self.log = log
-    def evaluate(self, script):
-        self.log.append("page.evaluate")
-        return [{"tag": "div", "role": "", "name": "Producer", "value": "Mike Sosa", "editable": False, "visible": True}]
-    def click(self, *a, **k): self.log.append("PAGE CLICK")
-
-
-def _inspect_env(monkeypatch, task_id="63429523", env="TEST"):
-    monkeypatch.setenv("ROBIE_ENV", env)
-    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", task_id)
-
-
-def test_the_inspector_refuses_outside_test_other_applicants_and_unlisted_tasks(monkeypatch, tmp_path):
-    out = tmp_path / "observation.json"
-    _inspect_env(monkeypatch, env="PRODUCTION")
-    with pytest.raises(inspector.InspectionRefused):
-        inspector.run_dom_inspection(task_id="63429523", applicant_id="220250093", output_path=out)
-    _inspect_env(monkeypatch)
-    with pytest.raises(inspector.InspectionRefused):
-        inspector.run_dom_inspection(task_id="63429523", applicant_id="25486692", output_path=out)
-    with pytest.raises(inspector.InspectionRefused):
-        inspector.run_dom_inspection(task_id="70000001", applicant_id="220250093", output_path=out)
-    assert not out.exists()
-
-
-def test_the_inspector_only_reads_and_never_saves(monkeypatch, tmp_path):
-    _inspect_env(monkeypatch)
-    log = []
-    from contextlib import contextmanager
-
-    @contextmanager
-    def fake_page():
-        yield _InspectPage(log)
-
-    monkeypatch.setattr(cdp, "_browser_page", fake_page)
-    monkeypatch.setattr(cdp, "_goto_activity", lambda page, applicant_id: log.append("goto"))
-    monkeypatch.setattr(cdp, "_search_and_open_edit", lambda page, t, a: (log.append("open"), _InspectPanel(log))[1])
-    monkeypatch.setattr(cdp, "_cancel_dialog", lambda panel: log.append("cancel"))
-    out = tmp_path / "observation.json"
-    record = inspector.run_dom_inspection(task_id="63429523", applicant_id="220250093", output_path=out)
-    assert "CLICK" not in " ".join(log) and log[-1] == "cancel"
-    saved = json.loads(out.read_text())
-    assert saved["environment"] == "TEST" and saved["task_id"] == "63429523"
-    assert saved["dialog_elements"][0]["name"] == "Instructions (observed)"
-    assert saved["page_elements"][0]["name"] == "Producer"
-    assert saved["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
-    assert all(value is None for value in saved["meaning_review"]["fields"].values())
-    assert record["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
-    import importlib
-    import inspect as _inspect
-    source = _inspect.getsource(importlib.import_module("robie_job_engine.task_field_inspector"))
-    assert "_click_save" not in source and ".reassign(" not in source and "append_note" not in source
-
-
-def test_the_api_inspection_reads_only_and_summarizes_the_note_shape(monkeypatch, tmp_path):
-    _inspect_env(monkeypatch)
-    class Client:
-        def get_discussion(self, discussion_id):
-            return {"id": discussion_id, "lastModified": "2026-10-06T10:00:00Z",
-                    "notes": [{"id": "1", "type": "TaskCreationNote", "body": "Send the dec page",
-                               "createdDate": "2026-10-06T09:00:00Z", "task": {"assignedUserId": 5}}]}
-        def append_note(self, *a, **k): raise AssertionError("the inspection wrote a note")
-    out = tmp_path / "api.json"
-    record = inspector.run_api_inspection(client=Client(), task_id="63429523", applicant_id="220250093",
-                                          discussion_id="849945654", output_path=out)
-    assert "type" in record["note_keys"] and "createdDate" in record["note_keys"]
-    assert "task.assignedUserId" in record["note_keys"]
-    assert record["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
+# ---- D. the supervised read-only Test inspection: see the section at the end of this file ----
 
 
 def test_the_save_method_itself_refuses_until_the_contract_is_established(monkeypatch):
@@ -1839,3 +1751,408 @@ def test_the_save_method_itself_refuses_until_the_contract_is_established(monkey
     monkeypatch.setenv(cdp.REASSIGN_GATE_ENV, "1")
     with pytest.raises(cdp.FieldContractNotEstablished):  # a browser use would AssertionError
         cdp.PlaywrightTaskReassigner().reassign("63429523", "220250093", "Carlo Ferrara")
+
+
+# ---------------------------------------------------------------------------
+# Clara's sixth review (8988270): narrower inspection capture, keys/types-only API
+# discovery with verified ownership, and a human choice that never bypasses the
+# current-request and identity checks.
+# ---------------------------------------------------------------------------
+from contextlib import contextmanager  # noqa: E402
+
+TEST_HOST = "hermes-test-01.c.streetsmart-hermes-poc.internal"
+ACTIVITY_URL = "https://app.ezlynx.com/web/account/220250093/activity"
+
+
+class _LazyInspector2:
+    def __getattr__(self, name):
+        import importlib
+        return getattr(importlib.import_module("robie_job_engine.task_field_inspector"), name)
+
+
+insp = _LazyInspector2()
+
+
+def _meta(index, name, **over):
+    base = {"index": index, "tag": "input", "type": "text", "role": "textbox", "autocomplete": "",
+            "name": name, "id_hint": "", "class_hint": "", "aria_hidden": "", "hidden": False,
+            "display": "block", "visibility": "visible", "in_view": True, "editable": True}
+    base.update(over)
+    return base
+
+
+class _Dialog:
+    """The Edit Task dialog: describe() sees metadata only; read() sees only what it is asked for."""
+    def __init__(self, metas, values, log):
+        self.metas, self.values, self.log = metas, values, log
+    def evaluate(self, script, arg=None):
+        if arg is None:
+            self.log.append(("describe", "dialog"))
+            return [dict(m) for m in self.metas]
+        self.log.append(("read", "dialog", [item["index"] for item in arg]))
+        return [{"index": item["index"], "name": item.get("name_override", item["name"]),
+                 "value": self.values.get(item["index"], ""), "next_sibling_text": ""} for item in arg]
+
+
+class _AccountPage:
+    def __init__(self, metas, values, log, *, cancel_fails=False):
+        self.metas, self.values, self.log, self.cancel_fails = metas, values, log, cancel_fails
+        self.url = ACTIVITY_URL
+        self.cancelled = False
+    def evaluate(self, script, arg=None):
+        if arg is None:
+            self.log.append(("describe", "page"))
+            return [dict(m) for m in self.metas]
+        self.log.append(("read", "page", [item["index"] for item in arg]))
+        return [{"index": item["index"], "name": item["name"], "value": self.values.get(item["index"], ""),
+                 "next_sibling_text": ""} for item in arg]
+    def get_by_role(self, role, name, exact):
+        outer = self
+        class Loc:
+            def count(self_inner): return 1 if (not outer.cancelled or outer.cancel_fails) else 0
+        return Loc()
+
+
+def _supervised(monkeypatch, tmp_path, *, dialog_metas=None, dialog_values=None, page_metas=None, page_values=None,
+                cancel_fails=False, tabs=None, inventory=None, host=TEST_HOST):
+    """A fully-confirmed, supervised Test setup around fakes; returns (kwargs, log, page)."""
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
+    monkeypatch.delenv("EZLYNX_TASK_REASSIGN_ENABLED", raising=False)
+    monkeypatch.delenv("ROBIE_PHONE_LIVE_CALLS", raising=False)
+    log = []
+    page = _AccountPage(page_metas or [], page_values or {}, log, cancel_fails=cancel_fails)
+    dialog = _Dialog(dialog_metas or [], dialog_values or {}, log)
+
+    @contextmanager
+    def browser(): yield page
+    @contextmanager
+    def session(**kwargs):
+        log.append(("session", "entered")); yield; log.append(("session", "released"))
+
+    monkeypatch.setattr(cdp, "_browser_page", browser)
+    monkeypatch.setattr(cdp, "_goto_activity", lambda page_, applicant_id: log.append(("goto", applicant_id)))
+    monkeypatch.setattr(cdp, "_search_and_open_edit", lambda page_, task_id, applicant_id: (log.append(("open", task_id)), dialog)[1])
+    def cancel(panel):
+        log.append(("cancel", "clicked")); page.cancelled = True
+    monkeypatch.setattr(cdp, "_cancel_dialog", cancel)
+    monkeypatch.setattr(insp, "_hostname", lambda: host)
+    monkeypatch.setattr(insp, "_exclusive_session", session)
+    monkeypatch.setattr(insp, "_job_inventory", lambda db_path=None: [] if inventory is None else inventory)
+    monkeypatch.setattr(insp, "_list_browser_tabs",
+                        lambda: [{"url": ACTIVITY_URL, "title": "Activity"}] if tabs is None else tabs)
+    kwargs = dict(task_id="63429523", applicant_id="220250093", output_path=tmp_path / "observation.json",
+                  operator="Dusty", confirm_browser_owner=True, confirm_exclusive=True)
+    return kwargs, log, page
+
+
+# ---- 1. hidden, invisible and credential controls are never read; capture is limited ---------------
+
+def test_hidden_invisible_and_credential_controls_are_never_read(monkeypatch, tmp_path):
+    metas = [
+        _meta(0, "Instructions", editable=True),
+        _meta(1, "Password", type="password"),
+        _meta(2, "Anything", type="hidden"),
+        _meta(3, "Created by", display="none"),
+        _meta(4, "Created by", aria_hidden="true"),
+        _meta(5, "Created by", visibility="hidden"),
+        _meta(6, "Created by", in_view=False),
+        _meta(7, "Verification", autocomplete="one-time-code"),
+        _meta(8, "Security answer"),
+        _meta(9, "Card number"),
+        _meta(10, "Assign this task"),
+    ]
+    values = {i: f"SECRET-{i}" for i in range(11)}
+    values[0], values[10] = "Send the dec page", "Robie AI"
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=metas, dialog_values=values)
+    record = insp.run_dom_inspection(**kwargs)
+    reads = [entry for entry in log if entry[0] == "read" and entry[1] == "dialog"]
+    assert reads and sorted(reads[0][2]) == [0, 10], "a hidden or credential control was read"
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    assert "SECRET" not in json.dumps(saved)
+    assert saved["excluded"]["hidden_or_invisible"] >= 5 and saved["excluded"]["credential_like"] >= 3
+
+
+def test_values_are_captured_only_for_the_approved_task_fields(monkeypatch, tmp_path):
+    metas = [_meta(0, "Instructions"), _meta(1, "Home phone"), _meta(2, "Producer"), _meta(3, "Email")]
+    values = {0: "Send the dec page", 1: "555-0100", 2: "Mike Sosa", 3: "a@b.example"}
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=metas, dialog_values=values)
+    insp.run_dom_inspection(**kwargs)
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    approved = {item["name"]: item["value"] for item in saved["approved_fields"]}
+    assert approved == {"Instructions": "Send the dec page", "Producer": "Mike Sosa"}
+    assert {c["name"] for c in saved["dialog_controls"]} == {"Instructions", "Home phone", "Producer", "Email"}
+    assert all("value" not in c for c in saved["dialog_controls"]), "a control inventory entry carried a value"
+    assert "555-0100" not in json.dumps(saved) and "a@b.example" not in json.dumps(saved)
+
+
+def test_page_elements_outside_the_approved_fields_are_not_recorded(monkeypatch, tmp_path):
+    page_metas = [_meta(0, "Producer", tag="span", role=""), _meta(1, "Client name", tag="h1", role=""),
+                  _meta(2, "Notes sidebar", tag="div", role="")]
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, page_metas=page_metas,
+                                 page_values={0: "Mike Sosa", 1: "ROBIE Test LLC", 2: "private"})
+    insp.run_dom_inspection(**kwargs)
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    assert [item["name"] for item in saved["approved_fields"] if item["scope"] == "page"] == ["Producer"]
+    assert "private" not in json.dumps(saved) and "ROBIE Test LLC" not in json.dumps(saved)
+    assert "page_elements" not in saved
+
+
+def test_a_read_back_whose_name_changed_is_dropped(monkeypatch, tmp_path):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")],
+                                 dialog_values={0: "Send the dec page"})
+    original = _Dialog.evaluate
+    def shifted(self, script, arg=None):
+        rows = original(self, script, arg)
+        if arg is not None:
+            for row in rows:
+                row["name"] = "Something else entirely"  # the DOM changed between the two reads
+        return rows
+    monkeypatch.setattr(_Dialog, "evaluate", shifted)
+    insp.run_dom_inspection(**kwargs)
+    saved = json.loads((tmp_path / "observation.json").read_text())
+    assert saved["approved_fields"] == [] and saved["excluded"]["changed_between_reads"] == 1
+
+
+def test_credential_and_hidden_classification_is_decided_before_any_value_is_requested():
+    assert insp.exclusion_reason(_meta(0, "Password", type="password")) == "credential_like"
+    assert insp.exclusion_reason(_meta(0, "Instructions", type="hidden")) in ("credential_like", "hidden_or_invisible")
+    assert insp.exclusion_reason(_meta(0, "Instructions", display="none")) == "hidden_or_invisible"
+    assert insp.exclusion_reason(_meta(0, "Instructions", autocomplete="current-password")) == "credential_like"
+    assert insp.exclusion_reason(_meta(0, "Instructions")) is None
+
+
+# ---- 2. API discovery: keys/types only, with verified ownership --------------------------------------
+
+class _ApiClient:
+    def __init__(self, ids=("849945654",), ids_error=None, no_lookup=False):
+        self.reads, self.ids, self.ids_error = [], list(ids), ids_error
+        if not no_lookup:
+            self.get_discussion_ids = self._ids
+    def _ids(self, applicant_id):
+        if self.ids_error:
+            raise self.ids_error
+        return list(self.ids)
+    def get_discussion(self, discussion_id):
+        self.reads.append(discussion_id)
+        return {"id": discussion_id, "lastModified": "2026-10-06T10:00:00Z", "notes": [
+            {"id": "1", "type": "TaskCreationNote", "body": "Send the dec page", "createdDate": "2026-10-06T09:00:00Z",
+             "task": {"assignedUserId": 5}, "apiToken": "tok-123"}]}
+    def append_note(self, *a, **k): raise AssertionError("the inspection wrote a note")
+
+
+def _api_kwargs(tmp_path):
+    return dict(task_id="63429523", applicant_id="220250093", discussion_id="849945654",
+                output_path=tmp_path / "api.json", operator="Dusty")
+
+
+def test_api_discovery_is_keys_and_types_only_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBIE_ENV", "TEST"); monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
+    client = _ApiClient()
+    record = insp.run_api_inspection(client=client, **_api_kwargs(tmp_path))
+    assert record["note_keys"]["task.assignedUserId"] == "int" and record["note_keys"]["body"] == "str"
+    saved = (tmp_path / "api.json").read_text()
+    for forbidden in ("Send the dec page", "tok-123", "2026-10-06T09:00:00Z"):
+        assert forbidden not in saved, f"a value leaked into the default output: {forbidden}"
+    assert "sample_note" not in record and record["values_included"] is False
+
+
+@pytest.mark.parametrize("make_client", [
+    lambda: _ApiClient(no_lookup=True),
+    lambda: _ApiClient(ids_error=RuntimeError("lookup failed")),
+    lambda: _ApiClient(ids=("111",)),
+])
+def test_api_discovery_requires_verified_ownership_and_reads_nothing_otherwise(monkeypatch, tmp_path, make_client):
+    monkeypatch.setenv("ROBIE_ENV", "TEST"); monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
+    client = make_client()
+    with pytest.raises(insp.InspectionRefused):
+        insp.run_api_inspection(client=client, **_api_kwargs(tmp_path))
+    assert client.reads == [] and not (tmp_path / "api.json").exists()
+
+
+def test_api_values_are_opt_in_and_limited_to_approved_non_credential_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBIE_ENV", "TEST"); monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
+    record = insp.run_api_inspection(client=_ApiClient(), include_approved_values=True, **_api_kwargs(tmp_path))
+    assert record["values_included"] is True
+    saved = (tmp_path / "api.json").read_text()
+    assert "tok-123" not in saved, "a credential-like key's value was included"
+    assert record["approved_values"].get("body") == "Send the dec page"
+
+
+# ---- 3. supervised run: preflight, exclusivity, stop conditions --------------------------------------
+
+@pytest.mark.parametrize("breakage,setup", [
+    ("not the Test VM", {"host": "hermes-poc-01.c.streetsmart-hermes-poc.internal"}),
+    ("jobs or leases active", {"inventory": [{"id": "j1", "status": "RUNNING"}]}),
+    ("another client open", {"tabs": [{"url": "https://app.ezlynx.com/web/account/25486692/activity", "title": "x"}]}),
+])
+def test_the_supervised_run_refuses_before_any_browser_step(monkeypatch, tmp_path, breakage, setup):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, **setup)
+    with pytest.raises(insp.InspectionRefused):
+        insp.run_dom_inspection(**kwargs)
+    assert log == [] and not kwargs["output_path"].exists()
+
+
+@pytest.mark.parametrize("env,value", [
+    ("EZLYNX_TASK_REASSIGN_ENABLED", "1"), ("ROBIE_PHONE_LIVE_CALLS", "1"),
+    ("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523,70000001"),
+])
+def test_intake_reassignment_calls_and_extra_tasks_must_all_be_off(monkeypatch, tmp_path, env, value):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path)
+    monkeypatch.setenv(env, value)
+    with pytest.raises(insp.InspectionRefused):
+        insp.run_dom_inspection(**kwargs)
+    assert log == []
+
+
+@pytest.mark.parametrize("missing", ["operator", "confirm_browser_owner", "confirm_exclusive"])
+def test_operator_and_ownership_confirmations_are_required(monkeypatch, tmp_path, missing):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path)
+    kwargs[missing] = "" if missing == "operator" else False
+    with pytest.raises(insp.InspectionRefused):
+        insp.run_dom_inspection(**kwargs)
+    assert log == []
+
+
+def test_browser_ownership_is_taken_through_the_session_lock_and_recorded(monkeypatch, tmp_path):
+    kwargs, log, _ = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")],
+                                 dialog_values={0: "x"})
+    record = insp.run_dom_inspection(**kwargs)
+    assert log[0] == ("session", "entered") and log[-1] == ("session", "released")
+    assert record["preflight"]["operator"] == "Dusty" and record["preflight"]["host"] == TEST_HOST
+    assert record["cancel_verified"] is True and record["stopped"] is None
+
+
+def test_an_unexpected_page_stops_the_inspection(monkeypatch, tmp_path):
+    kwargs, log, page = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")])
+    page.url = "https://app.ezlynx.com/web/account/25486692/activity"
+    with pytest.raises(insp.InspectionAborted):
+        insp.run_dom_inspection(**kwargs)
+    saved = json.loads(kwargs["output_path"].read_text())
+    assert saved["stopped"]["reason"].startswith("unexpected page") and saved["approved_fields"] == []
+
+
+def test_a_failed_cancel_stops_everything_and_is_recorded(monkeypatch, tmp_path):
+    kwargs, log, page = _supervised(monkeypatch, tmp_path, dialog_metas=[_meta(0, "Instructions")],
+                                    dialog_values={0: "x"}, cancel_fails=True)
+    with pytest.raises(insp.CancelFailed):
+        insp.run_dom_inspection(**kwargs)
+    saved = json.loads(kwargs["output_path"].read_text())
+    assert saved["cancel_verified"] is False and "cancel" in saved["stopped"]["reason"].lower()
+    assert not any(entry[0] == "describe" and entry[1] == "page" for entry in log), "kept going after a failed Cancel"
+
+
+def test_the_inspector_has_no_save_reassign_note_or_call_code():
+    import importlib, inspect as _inspect
+    source = _inspect.getsource(importlib.import_module("robie_job_engine.task_field_inspector"))
+    for forbidden in ("_click_save", ".reassign(", "append_note", "build_call_dependencies", "ensure_task_job"):
+        assert forbidden not in source, forbidden
+
+
+# ---- 4. a human choice overrides the return ORDER, not the current-request and identity checks --------
+
+def _answered_job(store, disc, owners, *, assign_to="Mike Sosa", task=None):
+    task = task or make_task(created_by="", assigned_producer="", csr="")
+    first = _work(store, _worker(disc, owners), task)
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task(task.task_id, db_path=store.path, assign_to=assign_to) == 0
+    return first, task
+
+
+def test_a_human_choice_still_needs_the_current_request_to_match(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    owners.live_description = "Please send the ID card instead."  # the request moved on live
+    owners.live_fields = {"created_by": "", "assigned_producer": "", "csr": ""}
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+def test_a_human_choice_still_needs_robie_to_own_the_task_now(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    owners.live_fields = {"assignee": "Someone Else", "created_by": "", "assigned_producer": "", "csr": ""}
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+def test_a_human_choice_needs_a_live_read_of_the_request_at_all(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    owners.state_error = cdp.ReassignError("the task could not be read")
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+def test_a_human_choice_does_not_depend_on_routing_fields_that_changed_live(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    owners.live_fields = {"created_by": "Someone New", "assigned_producer": "Jazmin Molina", "csr": "Mike Sosa"}
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
+    assert owners.calls == ["Mike Sosa"]
+
+
+def test_a_human_choice_still_passes_the_identity_and_ownership_checks(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    disc.ids = ["111"]  # the discussion is no longer one of the applicant's
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == [] and len(disc.posts) == 1
+
+
+def test_a_human_choice_is_invalidated_when_the_approved_request_changes(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    changed, _ = ensure_task_job(store, make_task(created_by="Carlo Ferrara", assigned_producer="", csr="",
+                                                  description="Also email the client.",
+                                                  last_modified="2026-10-05T09:00:00"))
+    assert changed["payload"]["description"] == "Also email the client."
+    owners.live_description = "Also email the client."
+    store.resume(first["id"])
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert "Mike Sosa" not in owners.attempts, "a choice made for the OLD request was used"
+    assert owners.calls == ["Carlo Ferrara"], "the new request should follow the normal return order"
+
+
+def test_a_retry_grant_is_invalidated_with_the_choice_when_the_request_changes(store):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    task = make_task(created_by="", assigned_producer="", csr="")
+    first = _work(store, _worker(disc, owners), task)
+    assert intake.resume_task(task.task_id, db_path=store.path, assign_to="Mike Sosa") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and len(owners.attempts) == 1
+    assert intake.resume_task(task.task_id, db_path=store.path, allow_retry_save=True) == 0
+    ensure_task_job(store, make_task(created_by="", assigned_producer="", csr="", description="A new ask.",
+                                     last_modified="2026-10-05T09:00:00"))
+    owners.live_description = "A new ask."
+    again = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert again["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert len(owners.attempts) == 1, "a grant for the old request authorized a Save"
+
+
+def test_a_new_answer_after_a_changed_request_starts_fresh_not_from_the_old_choice(store):
+    from robie_job_engine.ezlynx_task_jobs import payload_request_fingerprint
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    task = make_task(created_by="", assigned_producer="", csr="")
+    first = _work(store, _worker(disc, owners), task)
+    assert intake.resume_task(task.task_id, db_path=store.path, assign_to="Mike Sosa") == 0
+    paused = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert paused["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    ensure_task_job(store, make_task(created_by="", assigned_producer="", csr="", description="A new ask.",
+                                     last_modified="2026-10-05T09:00:00"))
+    assert store.get_job(first["id"])["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task(task.task_id, db_path=store.path, allow_retry_save=True) == 0
+    answer = store.get_checkpoint(first["id"], "human-answer:0")
+    assert "assign_to" not in answer, "the old choice was carried into the new request"
+    assert answer["request_fp"] == payload_request_fingerprint(store.get_job(first["id"])["payload"])
+
+
+def test_the_verifier_rejects_a_human_choice_recorded_for_a_different_request(store):
+    disc, owners = Discussions(), Owners()
+    first, task = _answered_job(store, disc, owners)
+    owners.live_fields = {"created_by": "", "assigned_producer": "", "csr": ""}
+    done = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert done["status"] == JobStatus.VERIFYING.value, done.get("last_error")
+    store.update_payload(first["id"], {**store.get_job(first["id"])["payload"], "description": "Changed after the fact."})
+    assert _verify(store, first["id"], disc, owners, verifier_store=store)["status"] != JobStatus.COMPLETE.value
