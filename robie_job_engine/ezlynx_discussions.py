@@ -9,7 +9,12 @@ Fail-closed contract (standing agency rules):
   standing authorization for the certificate sweep: when a certificate
   request matches an applicant but no existing discussion safely fits, the
   sweep auto-creates a NAMED discussion (never "Untitled") with the filing
-  note as its first note. Ad-hoc creation anywhere else is still forbidden.
+  note as its first note. The one other exception is Carlo's 2026-10-04
+  authorization for the direct Task API
+  (:func:`robie_job_engine.ezlynx_task_api.create_robie_discussion_with_task`):
+  a discussion titled exactly ``Tasks by Robie``, on allowlisted applicants,
+  with the task note as its first note and a read-back of both. Ad-hoc
+  creation anywhere else is still forbidden.
 - Every creation is fail-closed: the write-scope allowlist and the
   no-phone-number note guard run before the POST, and a fresh GET read-back
   must prove the returned discussion exists, carries the requested title,
