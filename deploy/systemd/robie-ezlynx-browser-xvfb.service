@@ -1,0 +1,36 @@
+[Unit]
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+Description=ROBIE persistent EZLynx Chrome profile (Xvfb GUI Mode)
+After=network-online.target
+Wants=network-online.target
+# PR451: Webshare via optional EnvironmentFile (replaces Requires=robie-proxy-forwarder
+# and hardcoded --proxy-server=http://127.0.0.1:18080).
+
+[Service]
+Type=simple
+User=carlo_streetsmart_insurance
+Group=carlo_streetsmart_insurance
+UMask=0077
+Environment=HOME=/opt/streetsmart-hermes
+# WHY the /bin/sh -c 'exec ...' wrapper: systemd does NOT do shell word-splitting,
+# so a bare ${PROXY_CHROME_FLAGS} in ExecStart expands to an EMPTY argv entry when
+# the env file is absent — and Chrome exits 13 on that empty argument. The '$$'
+# defers expansion to the shell, where an empty/unset variable vanishes under
+# word-splitting instead of becoming an empty argument. 'exec' keeps xvfb-run as
+# the main PID so signal handling is unchanged. /bin/sh stays reachable under
+# ProtectSystem=full (read-only mount, not hidden). --server-args uses double
+# quotes so the Xvfb geometry still works inside the outer single-quoted sh -c.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-browser-proxy.env
+ExecStart=/bin/sh -c 'exec /usr/bin/xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" /usr/bin/google-chrome --no-sandbox --disable-crash-reporter --disable-dev-shm-usage $$PROXY_CHROME_FLAGS --disable-blink-features=AutomationControlled --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx /opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx
+
+[Install]
+WantedBy=multi-user.target
