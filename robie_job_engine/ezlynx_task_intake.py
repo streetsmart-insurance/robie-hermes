@@ -194,25 +194,10 @@ def _record_run(
 
 
 def _build_discussion_client():
-    """DiscussionApiClient from the standard secret path (fail-closed)."""
-    from urllib.parse import urlparse
+    """DiscussionApiClient on the explicit, fail-closed route (see task_discussion_route)."""
+    from .task_discussion_route import build_task_discussion_client
 
-    from .ezlynx_api import load_ezlynx_api_config
-    from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
-
-    api_config = load_ezlynx_api_config()
-    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    config = DiscussionApiConfig(
-        discussion_base_url=origin + "/DiscussionApi/",
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
-    )
-    return DiscussionApiClient(config)
+    return build_task_discussion_client()
 
 
 def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):

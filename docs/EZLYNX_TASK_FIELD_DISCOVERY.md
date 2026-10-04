@@ -39,10 +39,11 @@ Record before starting, and keep with the evidence: the task ID, its discussion 
 ```
 PYTHONPATH=. python scripts/inspect_task_fields.py dom --task-id <TASK> --applicant-id 220250093 \
     --operator "<name>" --confirm-browser-owner --confirm-exclusive --output obs-dom-<date>.json
-PYTHONPATH=. python scripts/inspect_task_fields.py api --task-id <TASK> --applicant-id 220250093 \
-    --discussion-id <DISC> --operator "<name>" --output obs-api-<date>.json
+PYTHONPATH=. ROBIE_TASK_DISCUSSION_ROUTE=<uat|live> python scripts/inspect_task_fields.py api --task-id <TASK> --applicant-id 220250093 \
+    --discussion-id <DISC> --api-route <uat|live> --operator "<name>" --output obs-api-<date>.json
 ```
 - `dom` opens the task's Edit dialog (identity-checked), records the approved fields, **Cancels, and verifies the dialog is gone**, then records approved account-page fields. Add `--approved-fields-only` to omit the names-only list of the dialog's other controls.
+- **Discussion API route is explicit.** `ROBIE_TASK_DISCUSSION_ROUTE` (TEST has no default) and `--api-route` must name the same route, and the route must agree with `ROBIE_EZLYNX_DISCUSSION_API` (`live` iff live). The secret is chosen by the route alone (`uat` = UAT secret, `live` = PRODUCTION secret), its host must match, and any mismatch refuses without trying the other secret. The task flow never uses the shared SSRobie username/password (no password in the token request). The output records the route, host and secret *name*, never a value.
 - `api` GETs ONE discussion after verifying it belongs to the applicant. It records **key names and types only**. `--include-approved-values` adds values for approved, non-credential keys only; leave it off unless the reviewer asks.
 - Output files are created exclusively (never overwritten), mode 0600; Test-account data only; keep them with the Test evidence and do not commit them unreviewed.
 

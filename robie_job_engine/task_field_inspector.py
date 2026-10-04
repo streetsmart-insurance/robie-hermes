@@ -460,10 +460,16 @@ def _approved_values(note: Any, prefix: str = "") -> dict[str, str]:
 
 
 def run_api_inspection(*, client: Any, task_id: str, applicant_id: str, discussion_id: str,
-                       output_path: Any, operator: str, include_approved_values: bool = False) -> dict[str, Any]:
+                       output_path: Any, operator: str, expected_route: str,
+                       include_approved_values: bool = False) -> dict[str, Any]:
     """Read ONE discussion and record key names and TYPES (values only on explicit opt-in, and then
     only for approved, non-credential keys). Ownership must be VERIFIED first; otherwise nothing is read."""
     pre = preflight(task_id=task_id, applicant_id=applicant_id, operator=operator, browser=False)
+    route = getattr(client, "route_record", None)
+    if not isinstance(route, dict) or route.get("route") != expected_route:
+        raise InspectionRefused(
+            f"the client's Discussion API route is {route.get('route') if isinstance(route, dict) else 'unknown'!r}, "
+            f"not the expected {expected_route!r}; nothing was read")
     lookup = getattr(client, "get_discussion_ids", None)
     if lookup is None:
         raise InspectionRefused("the client cannot verify which discussions belong to the applicant; nothing was read")
@@ -482,7 +488,7 @@ def run_api_inspection(*, client: Any, task_id: str, applicant_id: str, discussi
         keys.update(_key_types(note))
     record: dict[str, Any] = {
         "kind": "api", "environment": "TEST", "applicant_id": str(applicant_id), "task_id": str(task_id),
-        "discussion_id": str(discussion_id), "discussion_ownership": "verified",
+        "discussion_id": str(discussion_id), "discussion_ownership": "verified", "discussion_route": dict(route),
         "observed_at": datetime.now(timezone.utc).isoformat(), "preflight": pre,
         "discussion_keys": _key_types(record_in) if isinstance(record_in, dict) else {},
         "note_count": len(notes), "note_keys": dict(sorted(keys.items())),

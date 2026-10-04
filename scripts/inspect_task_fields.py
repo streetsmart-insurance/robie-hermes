@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--applicant-id", required=True)
     parser.add_argument("--discussion-id", help="required for api")
     parser.add_argument("--output", required=True, help="new file; never overwritten")
+    parser.add_argument("--api-route", choices=("uat", "live"),
+                        help="required for api: the Discussion API route you expect (no default); a client on any other route is refused")
     parser.add_argument("--operator", required=True, help="the named person supervising this run")
     parser.add_argument("--confirm-browser-owner", action="store_true",
                         help="dom: I confirm this VM's persistent browser is the one to inspect and I own it for this run")
@@ -40,11 +42,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not args.discussion_id:
                 parser.error("--discussion-id is required for api")
+            if not args.api_route:
+                parser.error("--api-route is required for api (uat or live); there is no default")
             from robie_job_engine.ezlynx_task_intake import _build_discussion_client
 
             inspector.run_api_inspection(
                 client=_build_discussion_client(), task_id=args.task_id, applicant_id=args.applicant_id,
                 discussion_id=args.discussion_id, output_path=args.output, operator=args.operator,
+                expected_route=args.api_route,
                 include_approved_values=args.include_approved_values)
     except inspector.InspectionRefused as exc:
         print(f"REFUSED (nothing was opened): {exc}")
