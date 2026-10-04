@@ -86,6 +86,16 @@ def _lookup_module(monkeypatch):
     return module
 
 
+request_cleanup: list = []
+
+
+@pytest.fixture(autouse=True)
+def _reset_turn_job():
+    yield
+    while request_cleanup:
+        request_cleanup.pop()()
+
+
 def _job_context(tmp_path, monkeypatch, *, via="env"):
     db = tmp_path / "jobs.db"
     store = JobStore(str(db))
@@ -94,7 +104,8 @@ def _job_context(tmp_path, monkeypatch, *, via="env"):
     if via == "env":
         monkeypatch.setenv("ROBIE_JOB_ID", job["id"])
     else:
-        _TURN_JOB.set(job["id"])
+        token = _TURN_JOB.set(job["id"])
+        request_cleanup.append(lambda: _TURN_JOB.reset(token))
     return store, job["id"]
 
 

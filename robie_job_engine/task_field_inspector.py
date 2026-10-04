@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import ezlynx_task_cdp as cdp
+from .task_discussion_route import DiscussionRouteRefused, assert_no_inherited_job_context, safe_failure
 
 TEST_ACCOUNT = "220250093"
 TEST_HOST_PREFIX = "hermes-test-01"
@@ -194,7 +195,7 @@ def _job_inventory(db_path: str | None = None) -> list[dict[str, Any]]:
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        raise InspectionRefused(f"cannot verify exclusivity: the job database is unreadable ({exc})") from exc
+        raise InspectionRefused(f"cannot verify exclusivity: the job database is unreadable ({type(exc).__name__})") from exc
     return [dict(row) for row in rows]
 
 
@@ -209,7 +210,7 @@ def _list_browser_tabs() -> list[dict[str, str]]:
     try:
         tabs = list_cdp_tabs(cdp_url=cdp.CDP_URL)
     except Exception as exc:  # noqa: BLE001
-        raise InspectionRefused(f"cannot list the browser's tabs: {exc}") from exc
+        raise InspectionRefused(f"cannot list the browser's tabs ({type(exc).__name__})") from exc
     return [{"url": str(getattr(tab, "url", "")), "title": str(getattr(tab, "title", ""))} for tab in tabs]
 
 
@@ -361,7 +362,7 @@ def _cancel_and_verify(page: Any, panel: Any) -> None:
     try:
         cdp._cancel_dialog(panel)
     except Exception as exc:  # noqa: BLE001
-        raise CancelFailed(f"cancel failed: the Cancel control could not be used ({exc})") from exc
+        raise CancelFailed(f"cancel failed: the Cancel control could not be used ({type(exc).__name__})") from exc
     if page.get_by_role("dialog", name="Edit Task", exact=True).count() != 0:
         raise CancelFailed("cancel failed: the Edit Task dialog is still open")
 
@@ -392,18 +393,18 @@ def run_dom_inspection(*, task_id: str, applicant_id: str, output_path: Any, ope
         try:
             stack.enter_context(_exclusive_session(timeout_seconds=30))
         except Exception as exc:  # noqa: BLE001 — a held lock or a driver lease we do not own
-            raise InspectionRefused(f"the profile lock or the driver-lease check refused: {exc}") from exc
+            raise InspectionRefused(f"the profile lock or the driver-lease check refused ({type(exc).__name__})") from exc
         with stack:
             with cdp._browser_page() as page:
                 try:
                     cdp._goto_activity(page, applicant_id)
                 except Exception as exc:  # noqa: BLE001 — a login page, an expired session or a load failure
-                    raise InspectionAborted(f"unexpected page: could not reach the activity page ({exc})") from exc
+                    raise InspectionAborted(f"unexpected page: could not reach the activity page ({type(exc).__name__})") from exc
                 _assert_expected_page(page, applicant_id)
                 try:
                     panel = cdp._search_and_open_edit(page, task_id, applicant_id)
                 except Exception as exc:  # noqa: BLE001 — wrong page, missing or ambiguous row or dialog
-                    raise InspectionAborted(f"unexpected page or dialog: {exc}") from exc
+                    raise InspectionAborted(f"unexpected page or dialog ({type(exc).__name__})") from exc
                 try:
                     controls, fields = _capture(panel, "dialog", inventory=dialog_inventory, excluded=excluded)
                     record["dialog_controls"], record["approved_fields"] = controls, fields
@@ -465,6 +466,10 @@ def run_api_inspection(*, client: Any, task_id: str, applicant_id: str, discussi
     """Read ONE discussion and record key names and TYPES (values only on explicit opt-in, and then
     only for approved, non-credential keys). Ownership must be VERIFIED first; otherwise nothing is read."""
     pre = preflight(task_id=task_id, applicant_id=applicant_id, operator=operator, browser=False)
+    try:
+        assert_no_inherited_job_context()
+    except DiscussionRouteRefused as exc:
+        raise InspectionRefused(f"{exc}; nothing was read") from exc
     route = getattr(client, "route_record", None)
     if not isinstance(route, dict) or route.get("route") != expected_route:
         raise InspectionRefused(
@@ -478,7 +483,7 @@ def run_api_inspection(*, client: Any, task_id: str, applicant_id: str, discussi
     try:
         owned = [str(item).strip() for item in lookup(str(applicant_id))]
     except Exception as exc:  # noqa: BLE001
-        raise InspectionRefused(f"ownership could not be verified ({type(exc).__name__}); nothing was read") from exc
+        raise InspectionRefused(f"ownership could not be verified ({safe_failure(exc)}); nothing was read") from exc
     if str(discussion_id).strip() not in owned:
         raise InspectionRefused(f"discussion {discussion_id} is not one of applicant {applicant_id}'s; nothing was read")
     from .ezlynx_discussions import iter_discussion_notes

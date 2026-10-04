@@ -42,6 +42,27 @@ class DiscussionRouteRefused(EzlynxApiConfigurationError):
     """The Discussion API route is not the approved one, or cannot be established. Nothing was called."""
 
 
+def assert_no_inherited_job_context() -> None:
+    """Read-only discovery must not run inside a job: the Discussion client could write a checkpoint to it."""
+    from .live_turn_guard import acting_job_id
+
+    if acting_job_id({}):
+        raise DiscussionRouteRefused("an inherited job context is present; read-only discovery refuses to run inside a job")
+
+
+def safe_failure(exc: BaseException) -> str:
+    """A category (and HTTP status) only: never a response body, exception text or traceback."""
+    from .ezlynx_discussions import DiscussionApiError
+
+    if isinstance(exc, DiscussionApiError):
+        status = getattr(exc, "status", None)
+        return (f"discussion_api_error status={int(status)}" if isinstance(status, int)
+                else "discussion_api_error category=transport_or_parse")
+    if isinstance(exc, DiscussionRouteRefused):
+        return "route_refused"
+    return f"unexpected_error ({type(exc).__name__})"
+
+
 def resolve_route(environ: dict[str, str] | None = None) -> str:
     env = dict(os.environ if environ is None else environ)
     robie_env = str(env.get("ROBIE_ENV") or "").strip().upper()

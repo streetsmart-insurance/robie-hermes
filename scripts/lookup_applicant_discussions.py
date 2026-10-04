@@ -60,8 +60,14 @@ def lookup(client: Any, *, applicant_id: str, task_id: str | None = None) -> dic
     if (not isinstance(route, dict) or route.get("route") != "live" or route.get("password_grant") is not False
             or route.get("browser_cookies") is not False):
         raise SystemExit("REFUSED: the client is not on the approved live, vendor-grant-only, browser-session-free route")
+    from robie_job_engine.task_discussion_route import DiscussionRouteRefused, assert_no_inherited_job_context
+
+    try:
+        assert_no_inherited_job_context()
+    except DiscussionRouteRefused as exc:
+        raise SystemExit(f"REFUSED: {exc}") from exc
     ids = [str(item) for item in client.get_discussion_ids(APPLICANT)]
-    rows = client.get_discussions(APPLICANT)
+    rows = client.get_discussions(APPLICANT, remember_choices=False)
     discussions = []
     for row in rows:
         notes = row.get("notes") or row.get("Notes") or []
@@ -91,13 +97,24 @@ def main(argv: list[str] | None = None, client: Any = None) -> int:
         return 2
     try:
         if client is None:
-            from robie_job_engine.task_discussion_route import build_task_discussion_client
+            from robie_job_engine.task_discussion_route import assert_no_inherited_job_context, build_task_discussion_client
+
+            try:
+                assert_no_inherited_job_context()
+            except Exception as refusal:  # our own refusal text only
+                print(f"REFUSED: {refusal}")
+                return 2
 
             client = build_task_discussion_client()
         result = lookup(client, applicant_id=args.applicant_id, task_id=args.task_id)
     except SystemExit as exc:
         print(exc)
         return 2
+    except Exception as exc:  # noqa: BLE001 - a safe category only: no response body, no text, no traceback
+        from robie_job_engine.task_discussion_route import safe_failure
+
+        print(f"FAILED: {safe_failure(exc)}")
+        return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

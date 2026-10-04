@@ -256,7 +256,8 @@ class FakeApi:
     def __init__(self):
         self.calls = []
     def get_discussion_ids(self, applicant): self.calls.append(("ids", applicant)); return ["849945654", "7"]
-    def get_discussions(self, applicant):
+    def get_discussions(self, applicant, **kw):
+        assert kw == {"remember_choices": False}, kw
         self.calls.append(("by-applicant", applicant))
         return [{"id": 849945654, "title": "SECRET TITLE Jane Doe", "notes": [
                     {"id": "n1", "body": "call 973-555-0100 about policy ABC123", "task": {"id": 63429523, "assignedUserId": 5},

@@ -60,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     except inspector.InspectionAborted as exc:
         print(f"STOPPED: {exc}")
         return 3
+    except Exception as exc:  # noqa: BLE001 - print a safe category only: no body, no text, no traceback
+        from robie_job_engine.task_discussion_route import safe_failure
+
+        print(f"FAILED: {safe_failure(exc)}")
+        return 1
     print(f"Observation written to {args.output}; meaning review is PENDING a person.")
     return 0
 
