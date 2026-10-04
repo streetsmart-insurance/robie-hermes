@@ -1124,11 +1124,8 @@ def check_preflight_alert_delivery(journal: str | None = None) -> tuple[bool, st
     try:
         if journal is None:
             journal = _journal_since("robie-production-preflight.service", "36 hours ago")
-        try:
-            from robie_job_engine.production_preflight import parse_preflight_alert_state
-        except Exception:
-            sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
-            from robie_job_engine.production_preflight import parse_preflight_alert_state
+        _prepend_release_import()
+        from robie_job_engine.production_preflight import parse_preflight_alert_state
 
         text = journal or ""
         parsed = parse_preflight_alert_state(text)
@@ -1425,9 +1422,9 @@ def check_test_stuck_job_leases() -> tuple[bool, str, dict]:
     return True, "no stuck Test job leases", extra
 
 
-# Probes that look at Production phone, EOD, 4359, and Chat units/files.
-# A Test run skips these. Shared probes (disk, code version, EZLynx auth
-# skip, duplicate guard) stay.
+# Probes that look at Production phone, EOD, 4359, Chat, and the Production
+# preflight unit. A Test run skips these. Shared probes (disk, code version,
+# EZLynx auth skip, duplicate guard) stay.
 PROD_ONLY_CHECK_NAMES = frozenset({
     "worker_alive",
     "env_vars",
@@ -1442,6 +1439,7 @@ PROD_ONLY_CHECK_NAMES = frozenset({
     "task_verifier_health",
     "tuesday_4359_proof",
     "chat_intake",
+    "preflight_alert_delivery",
 })
 
 TEST_CHECKS = [
