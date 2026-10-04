@@ -1541,3 +1541,313 @@ def test_the_guessed_dom_labels_are_published_as_unverified():
     assert set(contract["fields"]) == {"description", "created_by", "assigned_producer", "csr", "activity_labels"}
     assert contract["status"] == "UNVERIFIED"
     assert all(contract["fields"][name] for name in contract["fields"])
+
+
+# ---------------------------------------------------------------------------
+# Clara's fifth review (8066e87): fresh routing proof before EVERY Save, an
+# ENFORCED field contract (no guessed selectors), and no blank-on-error reads.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+
+DEFAULT_LIVE = {"assignee": "Robie AI", "description": "Please call the client about their quote.",
+                "created_by": "Carlo Ferrara", "assigned_producer": "", "csr": "", "activity_labels": ""}
+
+
+def _verified(label, *, scope="dialog", read="input_value", column="Note"):
+    return {"scope": scope, "label": label, "read": read, "meaning": f"observed meaning of {label}",
+            "report_column": column,
+            "verified": {"environment": "TEST", "applicant_id": "220250093", "observed_on": "2026-10-06",
+                         "observed_by": "inspector", "evidence": "inspection-2026-10-06.json"}}
+
+
+def _contract_file(tmp_path, monkeypatch, overrides=None, drop=()):
+    fields = {
+        "description": _verified("Instructions (observed)"),
+        "created_by": _verified("Created by (observed)", read="text_content", column="Task Created By"),
+        "assigned_producer": _verified("Producer (observed)", scope="page", read="text_content", column="Assigned Producer"),
+        "csr": _verified("CSR (observed)", scope="page", read="text_content", column="CSR"),
+        "activity_labels": _verified("Labels (observed)", read="text_content", column="Activity Labels"),
+    }
+    fields.update(overrides or {})
+    for name in drop:
+        fields.pop(name, None)
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps({"schema_version": 1, "status": "ESTABLISHED", "fields": fields}))
+    monkeypatch.setenv(cdp.CONTRACT_PATH_ENV, str(path))
+    return path
+
+
+# ---- A. fresh routing proof immediately before every Save ----------------------------------------
+
+def test_the_first_round_save_needs_a_fresh_live_routing_proof(store):
+    disc, owners = Discussions(), Owners()
+    owners.live_fields = {"created_by": "Someone Else"}  # the report row names Carlo; live says otherwise
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert owners.attempts == [] and disc.posts == []
+    assert store.get_checkpoint(result["id"], "task-reassign-intent:0") is None, \
+        "a refused proof must not look like an unknown Save"
+
+
+def test_an_unreadable_routing_field_blocks_the_save(store):
+    disc, owners = Discussions(), Owners()
+    owners.state_error = cdp.ReassignError("assigned_producer could not be read")
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+@pytest.mark.parametrize("field", ["created_by", "assigned_producer", "csr", "activity_labels", "description"])
+def test_a_routing_field_the_live_read_omits_blocks_the_save(store, field):
+    disc, owners = Discussions(), Owners()
+    owners.hide_fields = (field,)
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+def test_a_live_owner_other_than_robie_blocks_the_save(store):
+    disc, owners = Discussions(), Owners()
+    owners.live_fields = {"assignee": "Someone Else"}
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and owners.attempts == []
+
+
+def test_a_human_chosen_return_owner_does_not_depend_on_report_routing_fields(store):
+    disc, owners = Discussions(), Owners()
+    task = make_task(created_by="", assigned_producer="", csr="")
+    first = _work(store, _worker(disc, owners), task)
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task(task.task_id, db_path=store.path, assign_to="Mike Sosa") == 0
+    owners.state_error = cdp.ReassignError("routing fields are unreadable")  # irrelevant to a human's choice
+    second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
+    assert owners.calls == ["Mike Sosa"]
+
+
+def test_the_proof_runs_again_before_an_authorized_retry(store):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and len(owners.attempts) == 1
+    assert intake.resume_task("63429523", db_path=store.path, allow_retry_save=True) == 0
+    owners.live_fields = {"created_by": "Someone Else"}  # routing changed since the first attempt
+    again = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert again["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert len(owners.attempts) == 1, "a retry Save went out on stale routing"
+
+
+def test_the_call_route_save_also_needs_the_live_proof():
+    port = Mock()
+    port.reassign.return_value = "Carlo Ferrara"
+    port.read_assignee.return_value = "Carlo Ferrara"
+    task = make_task()
+    port.read_task_state.return_value = {**DEFAULT_LIVE, "created_by": "Someone Else"}
+    result = _WorkerReassignPortAdapter(port, task).reassign_task(task.task_id, "Carlo Ferrara", "n")
+    assert result["ok"] is False and result["sent"] is False
+    port.reassign.assert_not_called()
+    port.read_task_state.return_value = dict(DEFAULT_LIVE)
+    ok = _WorkerReassignPortAdapter(port, task).reassign_task(task.task_id, "Carlo Ferrara", "n")
+    assert ok["ok"] is True
+    port.reassign.assert_called_once()
+
+
+# ---- B. the field contract is ENFORCED, and nothing guesses a selector ------------------------------
+
+def test_no_guessed_labels_remain_in_the_code():
+    for name in ("TASK_DESCRIPTION_LABELS", "CONSEQUENTIAL_FIELD_LABELS", "unverified_dom_contract"):
+        assert not hasattr(cdp, name), f"{name} is a guessed selector or descriptive-only metadata"
+
+
+def test_the_shipped_field_contract_declares_nothing_verified(monkeypatch):
+    monkeypatch.delenv(cdp.CONTRACT_PATH_ENV, raising=False)
+    status = cdp.field_contract_status()
+    assert status["established"] is False
+    assert set(status["missing"]) == set(cdp.REQUIRED_FIELDS)
+
+
+def test_reading_task_state_is_refused_before_any_browser_use_until_the_contract_is_established(monkeypatch):
+    monkeypatch.delenv(cdp.CONTRACT_PATH_ENV, raising=False)
+    with pytest.raises(cdp.FieldContractNotEstablished):
+        cdp.PlaywrightTaskReassigner().read_task_state("63429523", "220250093")  # a browser use would AssertionError
+
+
+def test_reassignment_stays_disabled_until_the_contract_is_established(store, monkeypatch):
+    monkeypatch.delenv(cdp.CONTRACT_PATH_ENV, raising=False)
+    monkeypatch.setenv("EZLYNX_TASK_REASSIGN_ENABLED", "1")
+    disc = Discussions()
+    result = _work(store, _worker(disc, cdp.PlaywrightTaskReassigner()), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert disc.posts == []
+
+
+def test_a_contract_missing_a_required_field_is_not_established(tmp_path, monkeypatch):
+    _contract_file(tmp_path, monkeypatch, drop=("csr",))
+    status = cdp.field_contract_status()
+    assert status["established"] is False and status["missing"] == ["csr"]
+
+
+@pytest.mark.parametrize("broken", [
+    {"label": ""}, {"read": "innerText"}, {"scope": "frame"}, {"verified": {}},
+    {"verified": {"environment": "TEST", "observed_on": "2026-10-06", "observed_by": "", "evidence": "x"}},
+])
+def test_a_malformed_or_unobserved_entry_is_rejected(tmp_path, monkeypatch, broken):
+    entry = {**_verified("Producer (observed)", scope="page", read="text_content"), **broken}
+    _contract_file(tmp_path, monkeypatch, overrides={"assigned_producer": entry})
+    assert "assigned_producer" in cdp.field_contract_status()["missing"]
+
+
+def test_only_declared_selectors_are_ever_used(tmp_path, monkeypatch):
+    _contract_file(tmp_path, monkeypatch)
+    asked = []
+
+    class Scope:
+        def __init__(self, fields): self.fields = fields
+        def get_by_label(self, name, exact):
+            asked.append(name)
+            return self.fields.get(name, _Field("", count=0))
+
+    panel = Scope({"Instructions (observed)": _Field("Send the dec page"),
+                   "Created by (observed)": _Field("Carlo Ferrara"), "Labels (observed)": _Field("")})
+    page = Scope({"Producer (observed)": _Field("Mike Sosa"), "CSR (observed)": _Field("")})
+    state = cdp._read_consequential_fields(panel, page)
+    assert state == {"description": "Send the dec page", "created_by": "Carlo Ferrara",
+                     "assigned_producer": "Mike Sosa", "csr": "", "activity_labels": ""}
+    assert set(asked) == {"Instructions (observed)", "Created by (observed)", "Labels (observed)",
+                          "Producer (observed)", "CSR (observed)"}
+
+
+# ---- C. an unreadable field is an error, never a blank --------------------------------------------------
+
+class _Raising:
+    def __init__(self, count=1): self.n = count
+    def count(self): return self.n
+    def input_value(self): raise RuntimeError("element detached")
+    def text_content(self): raise RuntimeError("element detached")
+
+
+class _NoneText:
+    def count(self): return 1
+    def text_content(self): return None
+
+
+def _scopes(producer):
+    panel = type("S", (), {"get_by_label": lambda self, name, exact: {
+        "Instructions (observed)": _Field("Send the dec page"), "Created by (observed)": _Field("Carlo"),
+        "Labels (observed)": _Field("")}.get(name, _Field("", count=0))})()
+    page = type("S", (), {"get_by_label": lambda self, name, exact: {
+        "Producer (observed)": producer, "CSR (observed)": _Field("")}.get(name, _Field("", count=0))})()
+    return panel, page
+
+
+def test_a_read_that_raises_is_not_a_blank_field(tmp_path, monkeypatch):
+    _contract_file(tmp_path, monkeypatch)
+    with pytest.raises(cdp.ReassignError, match="assigned_producer"):
+        cdp._read_consequential_fields(*_scopes(_Raising()))
+
+
+def test_text_content_of_none_is_unreadable_not_blank(tmp_path, monkeypatch):
+    _contract_file(tmp_path, monkeypatch)
+    with pytest.raises(cdp.ReassignError, match="assigned_producer"):
+        cdp._read_consequential_fields(*_scopes(_NoneText()))
+
+
+def test_a_successful_empty_read_is_a_real_blank(tmp_path, monkeypatch):
+    _contract_file(tmp_path, monkeypatch)
+    state = cdp._read_consequential_fields(*_scopes(_Field("")))
+    assert state["assigned_producer"] == ""
+
+
+def test_an_unreadable_producer_means_the_return_is_unproven(monkeypatch):
+    owners = Owners(assignee="Robie AI")
+    owners.state_error = cdp.ReassignError("assigned_producer could not be read")
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: owners)
+    assert intake._confirm_returned(make_task(created_by="Carlo Ferrara")) is False
+
+
+# ---- D. the read-only Test inspection ----------------------------------------------------------------------
+class _LazyInspector:
+    """Imported on first use so a missing module fails each inspector test, not the whole file."""
+    def __getattr__(self, name):
+        import importlib
+        return getattr(importlib.import_module("robie_job_engine.task_field_inspector"), name)
+
+
+inspector = _LazyInspector()
+
+
+class _InspectPanel:
+    def __init__(self, log): self.log = log
+    def evaluate(self, script):
+        self.log.append("panel.evaluate")
+        return [{"tag": "input", "role": "textbox", "name": "Instructions (observed)", "value": "Send the dec page",
+                 "editable": True, "visible": True}]
+    def click(self, *a, **k): self.log.append("PANEL CLICK")
+
+
+class _InspectPage:
+    def __init__(self, log): self.log = log
+    def evaluate(self, script):
+        self.log.append("page.evaluate")
+        return [{"tag": "div", "role": "", "name": "Producer", "value": "Mike Sosa", "editable": False, "visible": True}]
+    def click(self, *a, **k): self.log.append("PAGE CLICK")
+
+
+def _inspect_env(monkeypatch, task_id="63429523", env="TEST"):
+    monkeypatch.setenv("ROBIE_ENV", env)
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", task_id)
+
+
+def test_the_inspector_refuses_outside_test_other_applicants_and_unlisted_tasks(monkeypatch, tmp_path):
+    out = tmp_path / "observation.json"
+    _inspect_env(monkeypatch, env="PRODUCTION")
+    with pytest.raises(inspector.InspectionRefused):
+        inspector.run_dom_inspection(task_id="63429523", applicant_id="220250093", output_path=out)
+    _inspect_env(monkeypatch)
+    with pytest.raises(inspector.InspectionRefused):
+        inspector.run_dom_inspection(task_id="63429523", applicant_id="25486692", output_path=out)
+    with pytest.raises(inspector.InspectionRefused):
+        inspector.run_dom_inspection(task_id="70000001", applicant_id="220250093", output_path=out)
+    assert not out.exists()
+
+
+def test_the_inspector_only_reads_and_never_saves(monkeypatch, tmp_path):
+    _inspect_env(monkeypatch)
+    log = []
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_page():
+        yield _InspectPage(log)
+
+    monkeypatch.setattr(cdp, "_browser_page", fake_page)
+    monkeypatch.setattr(cdp, "_goto_activity", lambda page, applicant_id: log.append("goto"))
+    monkeypatch.setattr(cdp, "_search_and_open_edit", lambda page, t, a: (log.append("open"), _InspectPanel(log))[1])
+    monkeypatch.setattr(cdp, "_cancel_dialog", lambda panel: log.append("cancel"))
+    out = tmp_path / "observation.json"
+    record = inspector.run_dom_inspection(task_id="63429523", applicant_id="220250093", output_path=out)
+    assert "CLICK" not in " ".join(log) and log[-1] == "cancel"
+    saved = json.loads(out.read_text())
+    assert saved["environment"] == "TEST" and saved["task_id"] == "63429523"
+    assert saved["dialog_elements"][0]["name"] == "Instructions (observed)"
+    assert saved["page_elements"][0]["name"] == "Producer"
+    assert saved["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
+    assert all(value is None for value in saved["meaning_review"]["fields"].values())
+    assert record["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
+    import importlib
+    import inspect as _inspect
+    source = _inspect.getsource(importlib.import_module("robie_job_engine.task_field_inspector"))
+    assert "_click_save" not in source and ".reassign(" not in source and "append_note" not in source
+
+
+def test_the_api_inspection_reads_only_and_summarizes_the_note_shape(monkeypatch, tmp_path):
+    _inspect_env(monkeypatch)
+    class Client:
+        def get_discussion(self, discussion_id):
+            return {"id": discussion_id, "lastModified": "2026-10-06T10:00:00Z",
+                    "notes": [{"id": "1", "type": "TaskCreationNote", "body": "Send the dec page",
+                               "createdDate": "2026-10-06T09:00:00Z", "task": {"assignedUserId": 5}}]}
+        def append_note(self, *a, **k): raise AssertionError("the inspection wrote a note")
+    out = tmp_path / "api.json"
+    record = inspector.run_api_inspection(client=Client(), task_id="63429523", applicant_id="220250093",
+                                          discussion_id="849945654", output_path=out)
+    assert "type" in record["note_keys"] and "createdDate" in record["note_keys"]
+    assert "task.assignedUserId" in record["note_keys"]
+    assert record["meaning_review"]["status"] == "PENDING HUMAN REVIEW"
