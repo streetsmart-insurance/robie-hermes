@@ -1,0 +1,13 @@
+[Unit]
+Description=Email accounting unmatched Ascend notices on weekday mornings
+
+[Timer]
+# About 8:30 AM ET, Monday through Friday. Persistent so a down host
+# catches up. The service stays a dry run until the live drop-in is installed.
+OnCalendar=Mon..Fri *-*-* 08:30:00 America/New_York
+AccuracySec=1min
+Persistent=true
+Unit=robie-ascend-unmatched-digest.service
+
+[Install]
+WantedBy=timers.target

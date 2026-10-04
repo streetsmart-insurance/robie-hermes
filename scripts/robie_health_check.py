@@ -1450,6 +1450,28 @@ def check_test_stuck_job_leases() -> tuple[bool, str, dict]:
     return True, "no stuck Test job leases", extra
 
 
+def check_ascend_unmatched_digest() -> tuple[bool, str, dict]:
+    """Alert when the accounting digest failed or skipped a business day.
+
+    Reads the digest's last-run file (or ``ASCEND_UNMATCHED_DIGEST_STATE``).
+    A missing file is quiet: the unit is not installed yet. This probe does
+    not read the journal and does not send email.
+    """
+    extra: dict = {}
+    try:
+        _prepend_release_import()
+        from robie_job_engine.ascend_unmatched_digest import evaluate_digest_health
+
+        verdict = evaluate_digest_health()
+    except Exception as exc:
+        extra["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        return True, f"unmatched digest not visible: {type(exc).__name__}", extra
+    extra.update(verdict)
+    if verdict.get("ok"):
+        return True, str(verdict.get("detail") or "unmatched digest ok"), extra
+    return False, str(verdict.get("detail") or "unmatched digest needs attention"), extra
+
+
 # Probes that look at Production phone, EOD, 4359, Chat, and the Production
 # preflight unit. A Test run skips these. Shared probes (disk, code version,
 # EZLynx auth skip, duplicate guard) stay.
@@ -1469,6 +1491,7 @@ PROD_ONLY_CHECK_NAMES = frozenset({
     "chat_intake",
     "preflight_alert_delivery",
     "ascend_driver_stall",
+    "ascend_unmatched_digest",
 })
 
 TEST_CHECKS = [
@@ -1514,6 +1537,7 @@ CHECKS = [
     ("preflight_alert_delivery", check_preflight_alert_delivery),
     ("ascend_driver_stall", check_ascend_driver_stall),
     ("duplicate_guard", check_duplicate_guard),
+    ("ascend_unmatched_digest", check_ascend_unmatched_digest),
 ]
 
 

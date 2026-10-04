@@ -735,6 +735,22 @@ class EzlynxApiClient:
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
 
+    def search_policy_page(self, page_index: int, page_size: int) -> dict[str, Any]:
+        """Read-only paged GET of the policy book. No name, email, or phone.
+
+        PolicyApi ignores ApplicantName, Email, and PhoneNumber and returns
+        the whole book (totalSize around 38k). Those parameters are not
+        sent. ``pageIndex`` and ``pageSize`` match the fields on the search
+        envelope. This method does not create or update a policy.
+        """
+        index = int(page_index)
+        size = int(page_size)
+        if index < 0 or size < 1 or size > 200:
+            raise EzlynxApiError(None, "policy page bounds are invalid")
+        return self._search_policy_api(
+            {"pageIndex": str(index), "pageSize": str(size)}
+        )
+
     def search_applicants_by_name_and_email(self, name: str, email: str) -> dict[str, Any]:
         """Read-only PolicyApi search by insured name and email.
 

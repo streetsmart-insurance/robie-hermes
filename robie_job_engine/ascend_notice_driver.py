@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -922,6 +923,23 @@ def _resolve_by_name_and_email(
     return _unique_identity(result, _both, via="name_and_email", label="name and email")
 
 
+# Plain reasons for the accounting list. Filing does not use these.
+# A near match is never an applicant resolution.
+POLICY_OUTCOME_NO_NUMBER = "no policy number"
+POLICY_OUTCOME_NOT_IN_EZLYNX = "policy not in EZLynx"
+POLICY_OUTCOME_MULTIPLE = "multiple candidates"
+POLICY_OUTCOME_INCOMPLETE = "incomplete search"
+_POLICY_SEARCH_OUTCOME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ascend_policy_search_outcome",
+    default=POLICY_OUTCOME_NO_NUMBER,
+)
+
+
+def current_policy_search_outcome() -> str:
+    """Why the exact policy search did not choose one client. Empty if it did."""
+    return _POLICY_SEARCH_OUTCOME.get()
+
+
 def _resolve_by_policy_numbers(
     ezlynx_client: Any, numbers: list[str]
 ) -> tuple[ApplicantResolution | None, str, bool]:
@@ -931,33 +949,43 @@ def _resolve_by_policy_numbers(
     true only when every number produced zero rows or stayed incomplete
     after one retry. Several rows, or applicant ids that disagree, stop
     the cascade.
+
+    The context value records the policy step for the accounting list.
+    It does not change which applicant is filed.
     """
     found: list[tuple[str, str]] = []
+    saw_incomplete = False
     for number in numbers:
         try:
             result = _search_retry(
                 lambda number=number: ezlynx_client.search_policy_by_number(number)
             )
         except Exception as exc:  # noqa: BLE001 - fail closed, keep the class
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
             return None, f"policy_search_failed: {type(exc).__name__}", False
         if _page_is_incomplete(result):
+            saw_incomplete = True
             continue
         matched = _rows_matching_policy(_policy_rows(result), number)
         if len(matched) == 0:
             continue
         if len(matched) != 1:
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_MULTIPLE)
             return None, f"applicant_unresolved: {len(matched)} candidate rows", False
         account_id = _first_present(matched[0], _APPLICANT_ID_KEYS)
         if not account_id:
+            _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
             return None, (
                 f"applicant_unresolved: {len(matched)} candidate row lacks accountId"
             ), False
         found.append((account_id, number))
     unique = {account_id for account_id, _number in found}
     if len(unique) > 1:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_MULTIPLE)
         return None, f"applicant_unresolved: {len(unique)} candidate rows", False
     if len(unique) == 1:
         account_id, number = found[0]
+        _POLICY_SEARCH_OUTCOME.set("")
         return (
             ApplicantResolution(
                 applicant_id=account_id,
@@ -968,6 +996,10 @@ def _resolve_by_policy_numbers(
             "",
             False,
         )
+    if saw_incomplete:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_INCOMPLETE)
+    else:
+        _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_NOT_IN_EZLYNX)
     return None, "applicant_unresolved: 0 candidate rows", True
 
 
@@ -1019,6 +1051,7 @@ def resolve_applicant(
     PolicyApi rows have no CSR field. This function does not return one.
     """
     numbers = [str(item or "").strip() for item in policy_numbers if str(item or "").strip()]
+    _POLICY_SEARCH_OUTCOME.set(POLICY_OUTCOME_NO_NUMBER)
     if numbers:
         resolution, reason, fall_through = _resolve_by_policy_numbers(ezlynx_client, numbers)
         if resolution is not None or not fall_through:
@@ -1876,6 +1909,9 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         )
         if resolution is None:
             result.reason = reason
+            outcome = current_policy_search_outcome()
+            if outcome:
+                result.detail["unmatched_reason"] = outcome
             result.detail["needs_human_review"] = True
             return result
     needs_csr_task = notice_type == triage.CANCELLATION or (

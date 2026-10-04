@@ -652,6 +652,38 @@ class EventKeyStore:
                     episode_id TEXT PRIMARY KEY,
                     seen_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS unmatched_notices (
+                    event_key TEXT PRIMARY KEY,
+                    insured_name TEXT NOT NULL DEFAULT '',
+                    program_id TEXT NOT NULL DEFAULT '',
+                    loan_id TEXT NOT NULL DEFAULT '',
+                    policy_numbers TEXT NOT NULL DEFAULT '[]',
+                    notice_type TEXT NOT NULL DEFAULT '',
+                    amount_cents INTEGER,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    resolved_at TEXT,
+                    suggestion_client TEXT NOT NULL DEFAULT '',
+                    suggestion_policy TEXT NOT NULL DEFAULT '',
+                    aged_out_notified_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
+                    policy_key TEXT NOT NULL,
+                    policy_number TEXT NOT NULL,
+                    applicant_name TEXT NOT NULL DEFAULT '',
+                    applicant_id TEXT NOT NULL,
+                    PRIMARY KEY (policy_key, applicant_id)
+                );
+                CREATE TABLE IF NOT EXISTS ezlynx_policy_index_meta (
+                    name TEXT PRIMARY KEY,
+                    built_at TEXT NOT NULL,
+                    calls INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    total_size INTEGER,
+                    complete INTEGER NOT NULL,
+                    pages INTEGER NOT NULL
+                );
                 """
             )
             _ensure_filed_identity_columns(conn)
@@ -851,6 +883,214 @@ class EventKeyStore:
                 break
             streak += 1
         return streak
+
+    def upsert_unmatched(
+        self,
+        notice: ApiNotice,
+        *,
+        reason: str,
+        seen_at: str,
+        suggestion_client: str = "",
+        suggestion_policy: str = "",
+        update_suggestion: bool = False,
+    ) -> None:
+        """Insert or refresh one unmatched notice. ``first_seen`` stays put.
+
+        A later unmatched sight of a resolved key reopens it. Suggestion
+        text is replaced only when ``update_suggestion`` is set, and only
+        in this store. Nothing is written to EZLynx.
+        """
+        policies = [
+            str(number).strip()
+            for number in notice.policy_numbers
+            if str(number or "").strip()
+        ]
+        flag = 1 if update_suggestion else 0
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO unmatched_notices (
+                    event_key, insured_name, program_id, loan_id, policy_numbers,
+                    notice_type, amount_cents, first_seen, last_seen, reason,
+                    resolved_at, suggestion_client, suggestion_policy,
+                    aged_out_notified_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    insured_name=excluded.insured_name,
+                    program_id=excluded.program_id,
+                    loan_id=excluded.loan_id,
+                    policy_numbers=excluded.policy_numbers,
+                    notice_type=excluded.notice_type,
+                    amount_cents=excluded.amount_cents,
+                    last_seen=excluded.last_seen,
+                    reason=excluded.reason,
+                    resolved_at=NULL,
+                    suggestion_client=CASE WHEN ? = 1 THEN excluded.suggestion_client
+                        ELSE unmatched_notices.suggestion_client END,
+                    suggestion_policy=CASE WHEN ? = 1 THEN excluded.suggestion_policy
+                        ELSE unmatched_notices.suggestion_policy END,
+                    aged_out_notified_at=CASE
+                        WHEN unmatched_notices.resolved_at IS NOT NULL
+                             AND unmatched_notices.resolved_at != ''
+                        THEN NULL
+                        ELSE unmatched_notices.aged_out_notified_at
+                    END
+                """,
+                (
+                    notice.event_key,
+                    str(notice.insured_name or "").strip(),
+                    notice.program_id,
+                    _stored_loan_id(notice),
+                    json.dumps(policies),
+                    notice.event_type,
+                    notice.amount_cents,
+                    seen_at,
+                    seen_at,
+                    reason,
+                    suggestion_client,
+                    suggestion_policy,
+                    flag,
+                    flag,
+                ),
+            )
+
+    def resolve_unmatched(self, event_key: str, resolved_at: str) -> None:
+        """Mark one notice resolved. A missing row is left alone."""
+        key = str(event_key or "").strip()
+        moment = str(resolved_at or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET resolved_at=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (moment, key),
+            )
+
+    def list_unmatched(self) -> list[dict[str, Any]]:
+        """Every unmatched row, including resolved ones. Empty if the table is new."""
+        with self._connect() as conn:
+            try:
+                fetched = conn.execute(
+                    "SELECT * FROM unmatched_notices ORDER BY first_seen, event_key"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        rows: list[dict[str, Any]] = []
+        for row in fetched:
+            item = dict(row)
+            try:
+                parsed = json.loads(item.get("policy_numbers") or "[]")
+            except json.JSONDecodeError:
+                parsed = []
+            item["policy_numbers"] = (
+                [str(number) for number in parsed if str(number or "").strip()]
+                if isinstance(parsed, list)
+                else []
+            )
+            if item.get("amount_cents") is not None:
+                item["amount_cents"] = int(item["amount_cents"])
+            rows.append(item)
+        return rows
+
+    def mark_aged_out_notified(self, event_keys: list[str], notified_at: str) -> None:
+        moment = str(notified_at or "").strip()
+        if not moment:
+            return
+        with self._connect() as conn:
+            for key in event_keys:
+                cleaned = str(key or "").strip()
+                if not cleaned:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE unmatched_notices
+                    SET aged_out_notified_at=?
+                    WHERE event_key=?
+                    """,
+                    (moment, cleaned),
+                )
+
+    def set_unmatched_suggestion(
+        self, event_key: str, client_name: str, policy_number: str
+    ) -> None:
+        """Store suggestion text on an open row. Does not write to EZLynx."""
+        key = str(event_key or "").strip()
+        if not key:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET suggestion_client=?, suggestion_policy=?
+                WHERE event_key=? AND (resolved_at IS NULL OR resolved_at='')
+                """,
+                (str(client_name or "").strip(), str(policy_number or "").strip(), key),
+            )
+
+    def save_policy_index(
+        self,
+        rows: list[dict[str, str]],
+        *,
+        built_at: str,
+        calls: int,
+        total_size: int | None,
+        pages: int,
+    ) -> None:
+        """Replace the policy-number index. Callers pass only a complete read."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM ezlynx_policy_index")
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO ezlynx_policy_index (
+                        policy_key, policy_number, applicant_name, applicant_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        str(row.get("policy_key") or ""),
+                        str(row.get("policy_number") or ""),
+                        str(row.get("applicant_name") or ""),
+                        str(row.get("applicant_id") or ""),
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO ezlynx_policy_index_meta (
+                    name, built_at, calls, row_count, total_size, complete, pages
+                ) VALUES ('book', ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    built_at=excluded.built_at,
+                    calls=excluded.calls,
+                    row_count=excluded.row_count,
+                    total_size=excluded.total_size,
+                    complete=1,
+                    pages=excluded.pages
+                """,
+                (built_at, int(calls), len(rows), total_size, int(pages)),
+            )
+
+    def policy_index(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """The last complete index. An incomplete or missing index returns no rows."""
+        with self._connect() as conn:
+            try:
+                meta_row = conn.execute(
+                    "SELECT * FROM ezlynx_policy_index_meta WHERE name='book'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return [], {}
+            if meta_row is None or int(meta_row["complete"] or 0) != 1:
+                return [], dict(meta_row) if meta_row is not None else {}
+            fetched = conn.execute(
+                """
+                SELECT policy_key, policy_number, applicant_name, applicant_id
+                FROM ezlynx_policy_index
+                """
+            ).fetchall()
+        return [dict(row) for row in fetched], dict(meta_row)
 
 
 def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[dict[str, str]]:
@@ -2032,11 +2272,15 @@ def run_once(
     if hasattr(ctx, "planned_category_discussions"):
         ctx.planned_category_discussions.clear()
 
+    from .ascend_unmatched_digest import persist_unmatched_notice, resolve_unmatched_notice
+
     results: list[dict[str, Any]] = []
     lines: list[str] = []
     ask: list[dict[str, str]] = []
+    seen_at = _iso(moment)
     for notice in notices:
         if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
+            resolve_unmatched_notice(store, notice.event_key, seen_at)
             results.append(
                 {
                     "event_key": notice.event_key,
@@ -2052,6 +2296,7 @@ def run_once(
             outcome = _file_through_driver(ctx, notice)
         results.append(outcome)
         if str(outcome.get("reason") or "").startswith("applicant_unresolved"):
+            plain = persist_unmatched_notice(store, notice, outcome, seen_at=seen_at)
             ask.append(
                 {
                     "event_key": notice.event_key,
@@ -2059,12 +2304,14 @@ def run_once(
                     "program_id": notice.program_id,
                     "insured_name": notice.insured_name,
                     "reason": str(outcome.get("reason") or ""),
+                    "unmatched_reason": plain,
                 }
             )
         if outcome.get("status") in {"dry_run", "done"}:
             lines.append(_would_file_line(notice, outcome.get("detail") or {}))
             if live and outcome.get("status") == "done":
                 store.record_filed(notice)
+                resolve_unmatched_notice(store, notice.event_key, seen_at)
         elif outcome.get("reason") == "remittance_target_unconfigured":
             logger.info(
                 "skip %s remittance_target_unconfigured",
