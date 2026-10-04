@@ -693,3 +693,53 @@ def test_file_record_passes_resolved_title_as_hint(tmp_path):
     assert deps.note_writer.calls, "note writer was not called"
     _applicant, _text, kw = deps.note_writer.calls[0]
     assert kw.get("title_hint") == "Certificate request - Big Client Inc"
+
+
+# --- direct EZLynx Task API ------------------------------------------------
+
+
+class DirectProvenZapier(FakeZapier):
+    """CertZapierClient result when the direct Task API read the task back."""
+
+    assignee = "SCanales"
+
+    def create_task(self, **kw):
+        self.created.append(kw)
+        return SimpleNamespace(fired=True, reason="direct_api created",
+                               method="direct_api", verified=True,
+                               task_id="777", note_id="9001")
+
+
+def test_file_record_direct_api_task_is_proof_without_callback(tmp_path):
+    deps = make_deps(str(tmp_path))
+    deps.zapier = DirectProvenZapier()
+    deps.task_prover = None  # the read-back is the proof, not the prover
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status != "ERROR", res.hold_reasons
+    assert res.task_id == "777"
+    assert any("direct Task API" in e for e in res.evidence)
+    assert deps.zapier.created[0]["discussion_id"] == str(res.discussion_id)
+
+
+def test_cert_client_unverified_direct_post_raises_not_zap(monkeypatch):
+    from robie_job_engine import ezlynx_task_api
+
+    monkeypatch.setattr(ezlynx_task_api, "create_task",
+                        lambda **kw: {"status": "unverified", "reason": "timeout"})
+    z = CertZapierClient(trigger_script="/nonexistent/zap-trigger")
+    with pytest.raises(RuntimeError, match="not confirmed"):
+        z.create_task(applicant_id=220250093, title="t", email_subject="s",
+                      note_text="n", discussion_id="d1")
+
+
+def test_cert_client_direct_created_skips_zap(monkeypatch):
+    from robie_job_engine import ezlynx_task_api
+
+    monkeypatch.setattr(ezlynx_task_api, "create_task",
+                        lambda **kw: {"status": "created", "note_id": "9001",
+                                      "task_id": "777"})
+    z = CertZapierClient(trigger_script="/nonexistent/zap-trigger")
+    got = z.create_task(applicant_id=220250093, title="t", email_subject="s",
+                        note_text="n", discussion_id="d1")
+    assert got.verified is True and got.method == "direct_api"
+    assert got.task_id == "777" and got.filing_id == ""

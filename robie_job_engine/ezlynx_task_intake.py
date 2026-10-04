@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Intake orchestrator: Gmail report -> one durable Job Engine job per task.
 
-Runs on a schedule (every ~30 min, offset from the Looker delivery):
+Runs on a schedule (every 5 minutes, offset from the Looker delivery):
 
 1. Fetch the latest "Robie AI - Task Check-In" delivery (fail-closed
    envelope; skips already-processed message IDs).
@@ -123,6 +123,52 @@ def _already_processed(store: JobStore, message_id: str) -> bool:
     return row is not None
 
 
+HEARTBEAT_DDL = """
+CREATE TABLE IF NOT EXISTS ezlynx_task_intake_heartbeats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message_id TEXT,
+    digest TEXT,
+    newest_created_et TEXT,
+    row_count INTEGER,
+    error TEXT
+);
+"""
+
+
+def _ensure_heartbeat_table(store: JobStore) -> None:
+    with store.connect() as conn:
+        conn.execute(HEARTBEAT_DDL)
+
+
+def newest_created_et(tasks: list[Any]) -> str:
+    """Latest Created Date after conversion to America/New_York."""
+    stamps = [str(getattr(task, "created_at_et", "") or "") for task in tasks]
+    stamps = [stamp for stamp in stamps if stamp]
+    return max(stamps) if stamps else ""
+
+
+def _heartbeat(
+    store: JobStore,
+    *,
+    status: str,
+    message_id: str = "",
+    digest: str = "",
+    newest_et: str = "",
+    row_count: int = 0,
+    error: str = "",
+) -> None:
+    _ensure_heartbeat_table(store)
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO ezlynx_task_intake_heartbeats
+               (created_at, status, message_id, digest, newest_created_et, row_count, error)
+               VALUES (?,?,?,?,?,?,?)""",
+            (utcnow_iso(), status, message_id, digest, newest_et, row_count, error[:500]),
+        )
+
+
 def _record_run(
     store: JobStore,
     *,
@@ -176,6 +222,356 @@ def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
     return JobEngine(store, {}, {ACTION_TYPE: verifier})
 
 
+def _dry_run_enabled(flag: bool) -> bool:
+    if flag:
+        return True
+    return os.environ.get("ROBIE_TASK_INTAKE_DRY_RUN", "").strip() == "1"
+
+
+def _max_task_age_hours() -> int | None:
+    raw = os.environ.get("ROBIE_CALL_MAX_TASK_AGE_HOURS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _intake_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _created_moment(task: Any):
+    from .report_clock import report_created_et
+
+    raw = (
+        str(getattr(task, "created_at", "") or "")
+        or str(getattr(task, "created_at_et", "") or "")
+        or str(getattr(task, "created_date", "") or "")
+    )
+    return report_created_et(raw)
+
+
+def _labeled_call(task: Any) -> bool:
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(getattr(task, "activity_labels", "") or "", "")
+    return decision.action in ("workflow", "freeform")
+
+
+def _age_block(task: Any, now: datetime, max_hours: int | None) -> str | None:
+    from .report_clock import within_task_age
+
+    created = _created_moment(task)
+    if created is None:
+        return "unparseable"
+    if not within_task_age(created, now, max_hours=max_hours):
+        return "too_old"
+    return None
+
+
+def select_intake_work(
+    tasks: list[Any],
+    statuses: dict[str, str],
+    *,
+    now: datetime,
+    max_tasks: int,
+    max_age_hours: int | None,
+    first_seen: set[str] | None = None,
+    job_task_ids: set[str] | None = None,
+) -> tuple[list[Any], list[tuple[Any, str]], list[str], str]:
+    """Newest eligible work, one-time hold notes, and the cap alert.
+
+    Baseline rows are never dialed. A labeled call is age-checked, held,
+    or routed only the first time it is seen. If the seen store already
+    knew the task, or any job in any state exists for that task id, this
+    pass does nothing with it. ``deferred`` is the exception: a hold that
+    could not be sent because the driver lease was out is tried again,
+    and only when no job exists.
+
+    ``first_seen is None`` means the caller is selecting a fresh list and
+    every row is eligible. Labeled calls that are too old, or whose
+    Created Date cannot be read, are held instead of dialed. A hold that
+    already has a note, or that was already attempted, is not posted again.
+    """
+    known_jobs = job_task_ids or set()
+    work: list[Any] = []
+    hold: list[tuple[Any, str]] = []
+    for task in tasks:
+        task_id = str(task.task_id)
+        status = statuses.get(task_id, "")
+        if status == "baseline":
+            continue
+        if _labeled_call(task):
+            first = (
+                first_seen is None
+                or task_id in first_seen
+                or (status == "deferred" and task_id not in known_jobs)
+            )
+            if task_id in known_jobs or not first:
+                continue
+            block = _age_block(task, now, max_age_hours)
+            if block:
+                if status not in {"hitl", "hitl_attempted"}:
+                    hold.append((task, block))
+                continue
+        if status == "capped":
+            continue
+        work.append(task)
+
+    def sort_key(item: Any) -> float:
+        created = _created_moment(item)
+        return created.timestamp() if created is not None else float("-inf")
+
+    work.sort(key=sort_key, reverse=True)
+    hold.sort(key=lambda pair: sort_key(pair[0]), reverse=True)
+    chosen = work[:max_tasks]
+    overflow = work[max_tasks:]
+    chosen_hold = hold[:max_tasks]
+    overflow_hold = hold[max_tasks:]
+    alert = ""
+    if overflow or overflow_hold:
+        alert = (
+            f"Batch cap: processing {len(chosen)} of {len(work)} eligible tasks "
+            f"(cap {max_tasks}); {len(overflow)} not dialed."
+        )
+    return chosen, chosen_hold, [str(task.task_id) for task in overflow], alert
+
+
+_HOLD_TOO_OLD = (
+    "Roby here — I did not place a call. This task is older than the "
+    "calling window, so a person needs to decide what to do with it."
+)
+_HOLD_UNPARSEABLE = (
+    "Roby here — I did not place a call. The Created Date could not be "
+    "read, so a person needs to decide what to do with it."
+)
+
+
+def _stored_cap_error(store: JobStore, message_id: str) -> str:
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT error FROM ezlynx_task_intake_runs WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+    if row is None:
+        return ""
+    text = str(row["error"] or "")
+    return text if text.lower().startswith("batch cap") else ""
+
+
+def _jobs_for_report(store: JobStore, tasks: list[Any]) -> dict[str, dict[str, Any]]:
+    """Any job row for these task ids, keyed by task id."""
+    from .ezlynx_task_jobs import _find_by_idempotency_key
+
+    found: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = str(getattr(task, "task_id", "") or "")
+        if not task_id:
+            continue
+        job = _find_by_idempotency_key(store, task_idempotency_key(task_id))
+        if job is not None:
+            found[task_id] = job
+    return found
+
+
+def _production_lease_refused() -> bool:
+    from .ezlynx_driver_gate import production_driver_refused
+
+    return production_driver_refused()
+
+
+def _discussion_belongs_to_applicant(client: Any, applicant_id: str, discussion_id: str) -> bool:
+    """True when this discussion is exactly one of the applicant's.
+
+    A client with no lookup cannot prove it, so the note is refused.
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` does not skip this check.
+    """
+    lookup = getattr(client, "get_discussion_ids", None)
+    if lookup is None:
+        logger.error(
+            "discussion %s was not posted; client cannot list applicant %s's discussions",
+            discussion_id, applicant_id,
+        )
+        return False
+    try:
+        owned = [str(item).strip() for item in lookup(applicant_id)]
+    except Exception as exc:  # noqa: BLE001 — unreadable is not proof
+        logger.error(
+            "discussion ownership read failed for applicant %s: %s", applicant_id, exc,
+        )
+        return False
+    return owned.count(discussion_id) == 1
+
+
+def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
+    body = _HOLD_UNPARSEABLE if reason == "unparseable" else _HOLD_TOO_OLD
+    discussion_id = str(getattr(task, "discussion_id", "") or "")
+    applicant_id = str(getattr(task, "applicant_id", "") or "")
+    if not discussion_id:
+        return False
+    if not _discussion_belongs_to_applicant(client, applicant_id, discussion_id):
+        logger.error(
+            "hold note not sent for %s; discussion %s is not applicant %s's",
+            getattr(task, "task_id", ""), discussion_id, applicant_id,
+        )
+        return False
+    response = client.append_note(
+        discussion_id,
+        body,
+        applicant_id=str(getattr(task, "applicant_id", "") or ""),
+    )
+    if not isinstance(response, dict):
+        return False
+    note_id = str(response.get("noteId") or response.get("note_id") or "")
+    return bool(note_id)
+
+
+def _park_stale_job(store: JobStore, job: dict[str, Any], reason: str) -> None:
+    """Take a too-old PENDING job off the dial list. The next tick must not call."""
+    if JobStatus(job["status"]) != JobStatus.PENDING:
+        return
+    try:
+        store.transition(
+            job["id"],
+            JobStatus.AWAITING_HUMAN_INPUT,
+            expected={JobStatus.PENDING},
+            error=f"calling window: {reason}"[:500],
+            resume_status=JobStatus.PENDING,
+            release_lease=True,
+        )
+    except Exception as e:  # noqa: BLE001 — leaving it pending is logged; the filter will not dial it
+        logger.error("could not park job %s off the dial list: %s", job.get("id"), e)
+
+
+def _finish_hold(seen: Any, statuses: dict[str, str], task_id: str, posted: bool) -> None:
+    if posted:
+        seen.mark(task_id, "hitl")
+        statuses[task_id] = "hitl"
+        return
+    seen.mark(task_id, "hitl_attempted")
+    statuses[task_id] = "hitl_attempted"
+    logger.error(
+        "hold note for %s had no note id; recorded the attempt and will not repeat",
+        task_id,
+    )
+
+
+def _send_hold(
+    client: Any,
+    seen: Any,
+    statuses: dict[str, str],
+    task: Any,
+    reason: str,
+    *,
+    logged: list[bool],
+) -> str:
+    """Post one hold note. Returns posted, attempted, or deferred.
+
+    A lease refusal before the note is sent stays deferred and retryable.
+    """
+    from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, EzlynxDriverGateRefused
+
+    task_id = str(task.task_id)
+    try:
+        posted = _post_hold_note(client, task, reason)
+    except EzlynxDriverGateRefused as e:
+        if not logged[0]:
+            logger.error(LEASE_NOT_WITH_PRODUCTION)
+            logged[0] = True
+        logger.error("hold note not sent for %s: %s", task_id, e)
+        seen.mark(task_id, "deferred")
+        statuses[task_id] = "deferred"
+        return "deferred"
+    except Exception as e:  # noqa: BLE001
+        logger.error("hold note failed for %s: %s", task_id, e)
+        _finish_hold(seen, statuses, task_id, False)
+        return "attempted"
+    _finish_hold(seen, statuses, task_id, posted)
+    return "posted" if posted else "attempted"
+
+
+def _retry_deferred_holds(store: JobStore, tasks: list[Any]) -> None:
+    """A hold the lease blocked is tried again on the next tick of the same delivery."""
+    from .ezlynx_seen_tasks import SeenTaskStore
+
+    seen = SeenTaskStore(store.path)
+    statuses = seen.statuses()
+    known_jobs = set(_jobs_for_report(store, tasks))
+    now = _intake_now()
+    holds: list[tuple[Any, str]] = []
+    for task in tasks:
+        task_id = str(task.task_id)
+        if statuses.get(task_id) != "deferred" or task_id in known_jobs:
+            continue
+        if not _labeled_call(task):
+            continue
+        block = _age_block(task, now, _max_task_age_hours())
+        if block:
+            holds.append((task, block))
+    if not holds:
+        return
+    try:
+        client = _build_discussion_client()
+    except Exception as e:  # noqa: BLE001 — stay deferred and try the next tick
+        logger.error("deferred hold note not sent; discussion client unavailable: %s", e)
+        return
+    logged = [False]
+    for task, reason in holds:
+        _send_hold(client, seen, statuses, task, reason, logged=logged)
+
+
+def _drop_pending_past_the_calling_window(
+    store: JobStore,
+    jobs: list[dict[str, Any]],
+    tasks: list[Any],
+    seen: Any,
+    discussion_client: Any,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Re-check age immediately before a dial.
+
+    A job left PENDING through a long lease outage can be past the calling
+    window by the time PRODUCTION holds the lease. That task gets the hold
+    note and is not dialed. A lease refusal before the note is sent leaves
+    the job PENDING and deferred.
+    """
+    by_id = {str(task.task_id): task for task in tasks}
+    statuses = seen.statuses()
+    dialable: list[dict[str, Any]] = []
+    logged = [False]
+    max_hours = _max_task_age_hours()
+    for job in jobs:
+        if JobStatus(job["status"]) != JobStatus.PENDING:
+            continue
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        task = by_id.get(task_id)
+        if task is None or not _labeled_call(task):
+            dialable.append(job)
+            continue
+        block = _age_block(task, now, max_hours)
+        if not block:
+            dialable.append(job)
+            continue
+        status = statuses.get(task_id, "")
+        if status in {"hitl", "hitl_attempted"}:
+            _park_stale_job(store, job, block)
+            continue
+        if discussion_client is None:
+            logger.error(
+                "hold note not sent for %s; discussion client unavailable", task_id,
+            )
+            continue
+        outcome = _send_hold(
+            discussion_client, seen, statuses, task, block, logged=logged,
+        )
+        if outcome == "deferred":
+            continue
+        _park_stale_job(store, job, block)
+    return dialable
 STALE_RUNNING_MINUTES = 45
 MAX_REPORT_AGE_MINUTES = 90
 _UNSET: Any = object()  # "read the restriction from the environment"
@@ -430,16 +826,44 @@ def _confirm_returned(task: AssignedTask) -> bool:
     return True
 
 
+def _include_unlabeled_tasks() -> bool:
+    """Production intake dials only the two call labels.
+
+    The task-flow safety tests patch this so handoff, resume, and the
+    live-return checks still run. The systemd unit does not set anything
+    that turns it on, so an unlabeled task gets no lookup, job, or note.
+    """
+    return False
+
+
 def _report_age_minutes(report: Any) -> float | None:
-    try:
-        received = datetime.fromtimestamp(int(report.received_at) / 1000, tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError, OSError):
+    """Age of the report in minutes. Epoch milliseconds or an ISO timestamp.
+
+    Unknown text is unknown age, which the caller treats as stale. The
+    clock is ``_intake_now`` so a test can pin Monday without the wall
+    clock making a fresh ISO delivery look old.
+    """
+    text = str(getattr(report, "received_at", "") or "").strip()
+    if not text:
         return None
-    return (datetime.now(timezone.utc) - received).total_seconds() / 60
+    digits = text[1:] if text.startswith("-") else text
+    if digits.isdigit():
+        try:
+            received = datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        received = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return (_intake_now() - received).total_seconds() / 60
 
 
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     """Run one intake pass. Returns 0 healthy, 2 on failure (health check alerts)."""
+    dry_run = _dry_run_enabled(dry_run)
     try:
         allowed = allowed_task_ids()
     except TaskRestrictionError as e:
@@ -448,6 +872,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
 
     store = JobStore(db_path or default_db_path())
     _ensure_intake_table(store)
+    _ensure_heartbeat_table(store)
 
     if not dry_run:
         recovered = recover_stale_running(store, allowed=allowed)
@@ -467,121 +892,383 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         report = fetch_latest_task_report(service)
     except (TaskInboxError, Exception) as e:  # noqa: BLE001 — fail-closed, recorded
         logger.error(f"Inbox fetch failed: {e}")
+        _heartbeat(store, status="failed", error=f"inbox: {e}")
         return 2
 
     if report is None:
         logger.info("No delivery yet — quiet.")
+        _heartbeat(store, status="no_email")
         return 0
 
     # Unrelated tasks stop HERE: before any lookup, job, cap count or note.
-    tasks = [t for t in report.tasks if allowed is None or t.task_id in allowed]
+    tasks = [t for t in report.tasks if allowed is None or str(t.task_id) in allowed]
     if len(tasks) != len(report.tasks):
-        logger.info(f"Task restriction dropped {len(report.tasks) - len(tasks)} unrelated task(s)")
+        logger.info(
+            "Task restriction dropped %s unrelated task(s)",
+            len(report.tasks) - len(tasks),
+        )
+    # The production unit only dials Robie Call and Robie lead follow-up.
+    # Anything else stays untouched: no discussion lookup, no job, no note.
+    if not _include_unlabeled_tasks():
+        labeled = [task for task in tasks if _labeled_call(task)]
+        skipped = len(tasks) - len(labeled)
+        if skipped:
+            logger.info("Leaving %s unlabeled task(s) untouched", skipped)
+        tasks = labeled
 
+    newest_et = str(getattr(report, "newest_created_et", "") or "") or newest_created_et(tasks)
     age = _report_age_minutes(report)
     fresh = age is not None and age <= MAX_REPORT_AGE_MINUTES
-
-    if _already_processed(store, report.message_id):
-        # Already ran. NEW work still needs a fresh report; a stale one starts nothing.
-        if not fresh:
-            logger.error(f"Latest report {report.message_id} is stale "
-                         f"({'unknown age' if age is None else f'{int(age)} min'}); "
-                         "no new work is started.")
-            return 2
-        resumed = _resumable_jobs(store, tasks)
-        if not resumed:
-            logger.info(f"Delivery {report.message_id} already processed — quiet.")
-            return 0
-        if dry_run:
-            logger.info(f"[DRY-RUN] {len(resumed)} resumed job(s) to work.")
-            return 0
-        logger.info(f"Delivery {report.message_id} already processed; working {len(resumed)} resumed job(s).")
-        try:
-            _work_new(store, resumed, {t.task_id for t in tasks}, allowed)
-        except _ClientUnavailable as e:
-            logger.error(f"Discussion client unavailable: {e}")
-            return 2
-        return 0
-
     if not fresh:
-        # A stale (or undated) report describes a past state of the queue: tasks may
-        # already have been handed on. Never start new work from it.
-        msg = (f"Report {report.message_id} is "
-               f"{'of unknown age' if age is None else f'{int(age)} min old'} "
-               f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it.")
+        # A stale (or undated) report describes a past state of the queue.
+        # Never baseline it and never start new work from it. Owed recovery
+        # already ran above and is not subject to this limit.
+        msg = (
+            f"Report {report.message_id} is "
+            f"{'of unknown age' if age is None else f'{int(age)} min old'} "
+            f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it."
+        )
         logger.error(msg)
-        if not dry_run:
+        if dry_run:
+            logger.info(
+                "[DRY-RUN] %s Robie tasks; a stale report would not be baselined, "
+                "dialed, or written. No jobs, no EZLynx writes, no worker. %s",
+                len(tasks), msg,
+            )
+        if not _already_processed(store, report.message_id) and not dry_run:
             _record_run(
                 store, message_id=report.message_id, digest=report.digest,
                 filename=report.filename, task_count=len(tasks), jobs_created=0,
                 status="stale", error=msg,
             )
+        _heartbeat(
+            store, status="failed", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=msg,
+        )
         return 2
+
+    if _already_processed(store, report.message_id):
+        # A job left PENDING (lease refused after the delivery was recorded,
+        # or the call was queued) is still eligible. A finished job is not
+        # touched. A hold note the lease deferred is retried on this same
+        # delivery once PRODUCTION holds the lease.
+        pending = [
+            job for job in _jobs_for_report(store, tasks).values()
+            if JobStatus(job["status"]) == JobStatus.PENDING
+        ]
+        lease_refused = _production_lease_refused()
+        if not pending or lease_refused:
+            if pending and lease_refused:
+                from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
+                logger.error(LEASE_NOT_WITH_PRODUCTION)
+            elif not lease_refused:
+                _retry_deferred_holds(store, tasks)
+            logger.info(f"Delivery {report.message_id} already processed — quiet.")
+            _heartbeat(
+                store, status="ok", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count,
+                error=_stored_cap_error(store, report.message_id),
+            )
+            return 0
+        logger.info(
+            "Delivery %s already processed; continuing %s pending job(s)",
+            report.message_id, len(pending),
+        )
 
     logger.info(f"Delivery {report.message_id}: {len(tasks)} Robie AI tasks")
 
-    # 2. Blast-radius cap.
-    if len(tasks) > MAX_TASKS_PER_RUN:
-        msg = (
-            f"Batch cap exceeded: {len(tasks)} tasks > {MAX_TASKS_PER_RUN}. "
-            "Refusing to process; alerting."
-        )
-        logger.error(msg)
-        _record_run(
-            store, message_id=report.message_id, digest=report.digest,
-            filename=report.filename, task_count=len(tasks), jobs_created=0,
-            status="over_cap", error=msg,
-        )
-        return 2
+    if dry_run:
+        from .ezlynx_write_scope import all_clients_scope_honored, describe_write_scope
 
-    # 3. One durable job per task ID.
+        scope_line = describe_write_scope()
+        logger.info(
+            "[DRY-RUN] %s Robie tasks; no jobs, no EZLynx writes, no worker. %s",
+            len(tasks), scope_line,
+        )
+        scope_error = ""
+        if os.environ.get("ROBIE_ENV", "").strip().upper() in {"PRODUCTION", "PROD", "LIVE"}:
+            if not all_clients_scope_honored():
+                scope_error = "write scope did not resolve to all clients"
+                logger.error("[DRY-RUN] %s", scope_error)
+        _heartbeat(
+            store, status="failed" if scope_error else "ok",
+            message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=scope_error,
+        )
+        return 2 if scope_error else 0
+
+    # Seen-task store. An empty table baselines labeled calls and dials
+    # none of them. Unlabeled tasks are not baselined: they are not calls,
+    # and a label added later is still a first sighting.
+    from .bland_prod_wiring import live_calls_enabled
+    from .ezlynx_seen_tasks import SeenTaskStore
+    from .ezlynx_task_jobs import remember_live_mode
+
+    seen = SeenTaskStore(store.path)
+    if seen.is_empty():
+        labeled_ids = [task.task_id for task in tasks if _labeled_call(task)]
+        non_call = [task for task in tasks if not _labeled_call(task)]
+        if labeled_ids:
+            seen.baseline(labeled_ids, report_digest=report.digest)
+        if not non_call:
+            msg = f"First-run baseline: recorded {len(labeled_ids)} tasks and dialed none."
+            logger.warning(msg)
+            _record_run(
+                store, message_id=report.message_id, digest=report.digest,
+                filename=report.filename, task_count=len(tasks), jobs_created=0,
+                status="ok", error=msg,
+            )
+            _heartbeat(
+                store, status="ok", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=msg,
+            )
+            return 0
+        tasks = non_call
+
+    new_ids, dropped = seen.observe(
+        [task.task_id for task in tasks], report_digest=report.digest,
+    )
+    if dropped:
+        logger.info(
+            "%s previously seen tasks are absent from this report; not dialing them",
+            len(dropped),
+        )
+    now = _intake_now()
+    live = live_calls_enabled()
+    enabled_at = remember_live_mode(store, live=live, now=utcnow_iso())
+    from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
+
+    existing_jobs = _jobs_for_report(store, tasks)
+    chosen, hold, overflow_ids, cap_alert = select_intake_work(
+        tasks, seen.statuses(), now=now, max_tasks=MAX_TASKS_PER_RUN,
+        max_age_hours=_max_task_age_hours(),
+        first_seen=new_ids,
+        job_task_ids=set(existing_jobs),
+    )
+    lease_blocked = _production_lease_refused()
+    if lease_blocked:
+        # Once per run. Jobs stay pending and hold notes stay retryable.
+        logger.error(LEASE_NOT_WITH_PRODUCTION)
+        for task, _reason in hold:
+            seen.mark(task.task_id, "deferred")
+        for task_id in overflow_ids:
+            seen.mark(task_id, "deferred")
+    else:
+        for task_id in overflow_ids:
+            seen.mark(task_id, "capped")
+        if cap_alert:
+            logger.error(cap_alert)
+
     jobs_created = 0
     jobs: list[dict[str, Any]] = []
     failures: list[str] = []
-    for task in tasks:
+    discussion_client: Any = None
+    if not lease_blocked and (hold or chosen):
+        try:
+            discussion_client = _build_discussion_client()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Discussion client unavailable: {e}")
+            _record_run(
+                store, message_id=report.message_id, digest=report.digest,
+                filename=report.filename, task_count=len(tasks), jobs_created=0,
+                status="failed", error=f"discussion client: {e}",
+            )
+            _heartbeat(
+                store, status="failed", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+            )
+            return 2
+
+    if not lease_blocked:
+        from .ezlynx_driver_gate import EzlynxDriverGateRefused
+
+        lease_note_logged = False
+        for task, reason in hold:
+            posted = False
+            lease_refused = False
+            try:
+                posted = _post_hold_note(discussion_client, task, reason)
+            except EzlynxDriverGateRefused as e:
+                # Raised before the note is sent. Leave it retryable.
+                lease_refused = True
+                if not lease_note_logged:
+                    logger.error(LEASE_NOT_WITH_PRODUCTION)
+                    lease_note_logged = True
+                logger.error("hold note not sent for %s: %s", task.task_id, e)
+            except Exception as e:  # noqa: BLE001
+                logger.error("hold note failed for %s: %s", task.task_id, e)
+            if lease_refused:
+                seen.mark(task.task_id, "deferred")
+                continue
+            if posted:
+                seen.mark(task.task_id, "hitl")
+            else:
+                seen.mark(task.task_id, "hitl_attempted")
+                logger.error(
+                    "hold note for %s had no note id; recorded the attempt and will not repeat",
+                    task.task_id,
+                )
+
+    queued_at = utcnow_iso()
+    for task in chosen:
+        # A labeled call that already has a job is not in `chosen`. A new
+        # labeled call may reopen a terminal job. An unlabeled handoff
+        # (safety tests only) reopens when the live return is proven.
+        reopen = (not _labeled_call(task)) or (task.task_id in new_ids)
         try:
             job, created = ensure_task_job(
                 store, task,
                 report_message_id=report.message_id, report_digest=report.digest,
-                report_received_at=report.received_at, confirm_returned=_confirm_returned,
+                reopen_terminal=reopen,
+                live=live,
+                queued_at=queued_at,
+                live_enabled_at=enabled_at,
+                report_received_at=report.received_at,
+                confirm_returned=_confirm_returned,
             )
             jobs.append(job)
-            if created:
+            if created and task.task_id in new_ids:
                 jobs_created += 1
         except Exception as e:  # noqa: BLE001 — one bad task must not kill the batch
             logger.error(f"ensure_task_job failed for {task.task_id}: {e}")
             failures.append(f"{task.task_id}: {type(e).__name__}")
 
-    if dry_run:
-        logger.info(f"[DRY-RUN] {len(jobs)} jobs ensured ({jobs_created} new); no work performed.")
+    run_error = LEASE_NOT_WITH_PRODUCTION if lease_blocked else cap_alert
+    # A lease refusal is not a finished delivery. Leaving the message
+    # unrecorded lets the next tick dial the same pending job, or post
+    # the hold note, once PRODUCTION holds the lease.
+    if lease_blocked:
+        _heartbeat(
+            store, status="ok", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=run_error,
+        )
         return 0
 
-    # 4-6. Work PENDING jobs for tasks in THIS fresh report only, then verify.
-    try:
-        worker = _work_new(store, jobs, {t.task_id for t in tasks}, allowed)
-    except _ClientUnavailable as e:
-        logger.error(f"Discussion client unavailable: {e}")
+    in_report = {t.task_id for t in tasks}
+    pending_ids = {job["id"] for job in jobs}
+    for task_id, job in _jobs_for_report(store, tasks).items():
+        if task_id not in in_report or job["id"] in pending_ids:
+            continue
+        if JobStatus(job["status"]) != JobStatus.PENDING:
+            continue
+        jobs.append(job)
+        pending_ids.add(job["id"])
+
+    if jobs and discussion_client is None:
+        try:
+            discussion_client = _build_discussion_client()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Discussion client unavailable: {e}")
+            _heartbeat(
+                store, status="failed", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+            )
+            return 2
+
+    # Age is checked again here, not only when the job was first created.
+    # A lease outage can leave a PENDING job until it is too old to dial.
+    if jobs:
+        jobs = _drop_pending_past_the_calling_window(
+            store, jobs, tasks, seen, discussion_client, now,
+        )
+
+    failure_error = ("no durable job for: " + "; ".join(failures))[:500] if failures else ""
+    if not jobs:
+        status = "partial" if failures else "ok"
         _record_run(
             store, message_id=report.message_id, digest=report.digest,
             filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-            status="failed", error=f"discussion client: {e}",
+            status=status, error=failure_error or run_error,
         )
-        return 2
+        _heartbeat(
+            store, status="failed" if failures else "ok",
+            message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count,
+            error=failure_error or run_error,
+        )
+        return 2 if failures else 0
+
+    # 4. Build the worker. The discussion client is already open.
+    # Reassignment stays off unless EZLYNX_TASK_REASSIGN_ENABLED=1. The
+    # unit does not set that, and a gated-off handoff posts no note.
+    reassigner: Any = None
+    if reassign_enabled():
+        reassigner = PlaywrightTaskReassigner()
+        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
+    else:
+        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
+
+    from .bland_prod_wiring import build_call_dependencies
+
+    phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
+    from .call_opt_in import CallOptInStore
+    from .call_opt_out import CallOptOutStore
+    from .call_pickup import CallDedupeStore
+
+    store_dir = os.path.dirname(store.path)
+    worker = TaskAssignmentWorker(
+        discussion_client=discussion_client,
+        task_reassigner=reassigner,
+        reassign_enabled=reassign_enabled(),
+        phone_lookup=phone_lookup,
+        bland_client=bland_client,
+        call_dry_run=call_dry_run,
+        transfer_lookup=transfer_lookup,
+        opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
+        opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
+        call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+    )
+    verifier = TaskIntakeVerifier(
+        discussion_client=discussion_client, task_reassigner=reassigner, store=store,
+    )
+    engine = _build_engine(store, verifier)
+
+    # 5. Work PENDING jobs for tasks in THIS report only.
+    # Includes a job left pending by an earlier lease refusal.
+    # Re-read the row first. The list was built earlier, and a job can
+    # leave PENDING before this loop reaches it.
+    for job in jobs:
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        if task_id not in in_report:
+            continue
+        try:
+            current = store.get_job(job["id"])
+            if JobStatus(current["status"]) != JobStatus.PENDING:
+                continue
+            worker.process_job(store, current)
+        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
+            logger.error(f"process_job raised for {task_id}: {e}")
+
+    # 6. Independently verify VERIFYING jobs (fresh EZLynx read-back).
+    for job in jobs:
+        fresh = store.get_job(job["id"])
+        if JobStatus(fresh["status"]) != JobStatus.VERIFYING:
+            continue
+        try:
+            action = store.get_checkpoint(fresh["id"], "action") or {}
+            engine._verify(fresh, action)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"verify raised for {fresh['id']}: {e}")
 
     # 7. Record the run. A task that could not get a job is NOT a healthy run.
     status = "partial" if failures else "ok"
+    recorded_error = failure_error or cap_alert
     _record_run(
         store, message_id=report.message_id, digest=report.digest,
         filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-        status=status,
-        error=("no durable job for: " + "; ".join(failures))[:500] if failures else "",
+        status=status, error=recorded_error,
+    )
+    _heartbeat(
+        store, status="failed" if failures else "ok",
+        message_id=report.message_id, digest=report.digest,
+        newest_et=newest_et, row_count=report.row_count, error=recorded_error,
     )
     actions = {}
     for r in worker.results:
         actions[r.action] = actions.get(r.action, 0) + 1
     logger.info(f"Intake pass done: {actions}")
     return 2 if failures else 0
-
 
 def _unconfirmed_note_intents(store: JobStore, job: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Unconfirmed, receipt-less note intents of THIS round only."""
@@ -709,7 +1396,11 @@ def resume_task(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="EZLynx task intake (Robie AI)")
     parser.add_argument("--db", default=None, help="Job Engine DB path")
-    parser.add_argument("--dry-run", action="store_true", help="Ingest only; no EZLynx writes")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Log the report only. No EZLynx writes, no job rows, no worker. "
+             "ROBIE_TASK_INTAKE_DRY_RUN=1 does the same.",
+    )
     parser.add_argument("--resume", metavar="TASK_ID", default=None,
                         help="Resume the waiting job for one task ID")
     parser.add_argument("--assign-to", metavar="NAME", default=None,

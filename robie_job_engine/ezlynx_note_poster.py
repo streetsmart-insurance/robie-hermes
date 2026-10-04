@@ -834,4 +834,3 @@ class EZLynxAgreementPoster:
             "policy_number": policy_number,
             "live_applied": False,
         }
-

@@ -167,8 +167,8 @@ def test_accepted_post_before_timeout_or_crash_restart_no_repost(context, failur
     store, job = context
     client = FakeDiscussionClient()
     original = client.append_note
-    def accepted_then_failed(*args):
-        original(*args)
+    def accepted_then_failed(*args, **kwargs):
+        original(*args, **kwargs)
         raise failure("accepted before local receipt")
     client.append_note = accepted_then_failed
     with pytest.raises((UnverifiedNoteError, SystemExit)):
@@ -195,10 +195,10 @@ def test_concurrent_attempt_is_suppressed(context):
     client = FakeDiscussionClient()
     entered, release = Event(), Event()
     original = client.append_note
-    def waiting(*args):
+    def waiting(*args, **kwargs):
         entered.set()
         assert release.wait(5)
-        return original(*args)
+        return original(*args, **kwargs)
     client.append_note = waiting
     with ThreadPoolExecutor(max_workers=2) as pool:
         future = pool.submit(post, client, store, job)
@@ -277,7 +277,8 @@ class Discussions:
         self.id_lookups.append(applicant_id)
         return list(self.ids)
 
-    def append_note(self, discussion_id, body):
+    def append_note(self, discussion_id, body, applicant_id=None, **kwargs):
+        del applicant_id, kwargs
         self.posts.append((discussion_id, body))
         self.latest = f"note-{len(self.posts)}"
         self.notes.append(self.latest)
@@ -401,7 +402,7 @@ def test_applicant_outside_write_allowlist_blocks_every_write(store):
 def test_unprovable_discussion_ownership_blocks_every_write(store):
     class NoLookup:
         posts = []
-        def append_note(self, *a): self.posts.append(a); return {"note_id": "n"}
+        def append_note(self, *a, **k): self.posts.append(a); return {"note_id": "n"}
         def get_discussion(self, *a): return {}
     client, owners = NoLookup(), Owners()
     result = _work(store, _worker(client, owners), make_task())
@@ -430,11 +431,11 @@ def test_reassigner_refuses_non_allowlisted_applicant_before_browser(monkeypatch
 def test_resume_after_question_posts_new_step_note_and_reassigns_once(store):
     disc, owners = Discussions(), Owners()
     first = _work(store, _worker(disc, None), make_task())
-    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and len(disc.posts) == 1
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and disc.posts == []
     store.resume(first["id"])
     second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
     assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
-    assert len(disc.posts) == 2 and owners.calls == ["Carlo Ferrara"]
+    assert len(disc.posts) == 1 and owners.calls == ["Carlo Ferrara"]
     assert _verify(store, first["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
 
 
@@ -587,8 +588,8 @@ def test_resume_with_answer_uses_the_chosen_owner(store):
 def test_uncertain_note_pauses_for_a_human_instead_of_failing_and_never_reposts(store):
     disc, owners = Discussions(), Owners()
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     first = _work(store, _worker(disc, owners), make_task())
@@ -602,8 +603,8 @@ def test_uncertain_note_pauses_for_a_human_instead_of_failing_and_never_reposts(
 def test_human_can_adopt_the_confirmed_note_id_and_work_continues(store):
     disc, owners = Discussions(), Owners()
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     first = _work(store, _worker(disc, owners), make_task())
@@ -640,6 +641,8 @@ def test_stale_running_job_is_recovered_and_a_fresh_one_is_not(store):
 
 def _wire_intake(monkeypatch, report, disc, owners, gate):
     # Main wires Bland into the intake; these tests are about task handoff, so keep calls out.
+    # Production intake leaves unlabeled tasks untouched. These tests opt in.
+    monkeypatch.setattr(intake, "_include_unlabeled_tasks", lambda: True)
     monkeypatch.setattr("robie_job_engine.bland_prod_wiring.build_call_dependencies",
                         lambda: (None, None, None, True))
     monkeypatch.setattr("robie_job_engine.report_email_source.build_default_gmail_service", lambda: object())
@@ -823,8 +826,8 @@ def test_a_zombie_worker_cannot_write_after_a_replacement_takes_over(store):
 
 def _uncertain_note_job(store, disc, owners):
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     first = _work(store, _worker(disc, owners), make_task())
@@ -884,8 +887,8 @@ def test_a_pending_job_is_recovered_after_the_reassignment_removed_it_from_the_r
     _wire_intake(monkeypatch, None, disc, owners, gate)
     monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     assert intake.run_intake(db_path=db) == 0
@@ -1024,7 +1027,8 @@ def test_a_late_worker_cannot_write_a_note_record_after_losing_its_lease(store):
     disc, state = Discussions(), {}
     original_append = disc.append_note
 
-    def append_then_lose_lease(discussion_id, body):
+    def append_then_lose_lease(discussion_id, body, applicant_id=None, **kwargs):
+        del applicant_id, kwargs
         original_append(discussion_id, body)
         _lapse(store, state["job_id"])
         intake.recover_stale_running(store)
@@ -1164,8 +1168,8 @@ def test_owed_recovery_still_completes_when_the_latest_report_is_stale(tmp_path,
     _wire_intake(monkeypatch, None, disc, owners, {"on": True})
     monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     assert intake.run_intake(db_path=db) == 0
@@ -1229,8 +1233,8 @@ def test_a_note_from_an_earlier_round_cannot_be_adopted_for_a_later_one(store):
                                report_received_at=_later_ms(), confirm_returned=lambda t: True)
     assert int(again["payload"]["round"]) == 1
     original = disc.append_note
-    def accepted_then_timeout(*args):
-        original(*args)
+    def accepted_then_timeout(*args, **kwargs):
+        original(*args, **kwargs)
         raise TimeoutError("accepted before receipt")
     disc.append_note = accepted_then_timeout
     second = worker.process_job(store, again)

@@ -1,4 +1,10 @@
-"""Fire EZLynx follow-up tasks through the agency's Zapier catch-hook Zap.
+"""Create EZLynx follow-up tasks: direct Task API first, Zapier as fallback.
+
+The direct path is :mod:`robie_job_engine.ezlynx_task_api`. Zapier runs only
+when that path wrote nothing (off, no confirmed user id, no discussion,
+login stopped, or the POST was rejected). A direct POST that may have
+landed but was not read back is reported as not created, and Zapier is
+not fired on top of it.
 
 The hook URL lives in the Secure Vault as ``custom.zapier-webhook``; this
 module never sees it.  Firing goes through the zapier skill's
@@ -9,11 +15,16 @@ Use ``dry_run=True`` to validate a payload without firing.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+from . import ezlynx_task_api
+
+logger = logging.getLogger(__name__)
 
 # Legacy host-install location. Still searched, but no longer the only place.
 ZAP_TRIGGER_SCRIPT = os.path.expanduser("~/workspace/skills/zapier/bin/zap-trigger")
@@ -143,15 +154,59 @@ def validate_task_payload(payload: dict[str, Any]) -> None:
 
 
 def fire_task(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
-    """POST the payload to the Zapier catch hook (or dry-run validate it).
+    """Create the task via the direct Task API, falling back to Zapier.
 
-    Returns the script's parsed result dict: {"ok": bool, ...}.  Raises
-    ValueError on a bad payload and RuntimeError when the script itself
-    cannot run.
+    Returns {"ok": bool, "method": "direct_api"|"zapier", ...}. ``ok`` is
+    True only for a read-back direct task or an accepted Zap. Raises
+    ValueError on a bad payload and RuntimeError when the Zapier script
+    is needed but cannot run.
     """
     if isinstance(payload, dict) and payload.get("assignee"):
         payload["assignee"] = normalize_assignee(payload["assignee"])
     validate_task_payload(payload)
+    direct = _attempt_direct(payload, dry_run=dry_run)
+    if direct.get("status") == ezlynx_task_api.CREATED:
+        return {"ok": True, "method": "direct_api", "direct_api": direct}
+    if not ezlynx_task_api.zapier_fallback_allowed(direct):
+        if dry_run:
+            result = _fire_via_zapier(payload, dry_run=True)
+            result["direct_api"] = direct
+            return result
+        return {
+            "ok": False,
+            "method": "direct_api",
+            "status": "unverified",
+            "error": (
+                "EZLynx task was not confirmed and Zapier was not fired, "
+                "to avoid a duplicate: " + str(direct.get("reason") or "")
+            ),
+            "direct_api": direct,
+        }
+    result = _fire_via_zapier(payload, dry_run=dry_run)
+    result["direct_api"] = direct
+    return result
+
+
+def _attempt_direct(payload: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    """Direct Task API attempt. An unexpected error counts as nothing written."""
+    try:
+        return ezlynx_task_api.create_task(
+            applicant_id=payload.get("applicant_id"),
+            title=str(payload.get("task_title") or ""),
+            description=str(payload.get("note_text") or payload.get("description") or ""),
+            assignee=str(payload.get("assignee") or ""),
+            due_date=payload.get("due_date"),
+            discussion_id=str(payload.get("discussion_id") or ""),
+            discussion_title=str(payload.get("discussion_title") or ""),
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 - raised before any task POST
+        logger.warning("Direct task API raised (%s); using Zapier.", type(exc).__name__)
+        return {"status": "error", "reason": type(exc).__name__}
+
+
+def _fire_via_zapier(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+    """POST the payload to the Zapier catch hook (or dry-run validate it)."""
     script = resolve_zap_trigger()
     command = ["python3", script, "--payload", json.dumps(payload)]
     if dry_run:
@@ -170,4 +225,7 @@ def fire_task(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, An
         ) from exc
     if completed.returncode not in (0, 1, 2):
         raise RuntimeError(f"zap-trigger exited {completed.returncode}: {result}")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"zap-trigger returned non-object output: {str(result)[:200]}")
+    result.setdefault("method", "zapier")
     return result

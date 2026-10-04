@@ -1,0 +1,9 @@
+[Service]
+# Live client dials on hermes-poc-01. Installed only by
+# scripts/install-robie-task-intake.sh --live
+# ROBIE_CALL_SMS_CONFIGURED is left unset.
+Environment=ROBIE_PHONE_LIVE_CALLS=1
+Environment=ROBIE_PHONE_REAL_CLIENTS=1
+Environment=ROBIE_BLAND_ALLOWED_ENVS=PRODUCTION
+Environment=ROBIE_BLAND_ALLOWED_HOSTS=hermes-poc-01
+Environment=ROBIE_BLAND_MAX_DURATION_MINUTES=10

@@ -62,6 +62,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
         "Account Name": "John Test",
         "Task Created By": "carlo1",
         "Assigned Producer": "Jane Producer",
+        "Activity Labels": "Robie Call",
     }
     task.update(overrides)
     return task
@@ -189,6 +190,7 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_recall_is_not_call_task(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Recall the policy",
             "Task Description": "Recall the policy from the carrier",
         })
@@ -196,11 +198,14 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_morning_is_not_call_task(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Follow up",
             "Task Description": "Call during the morning meeting is fine",
         })
+        self.assertFalse(is_call_task(task))
         # "morning" contains "ring" as substring — must not match
         task2 = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Morning review",
             "Task Description": "Review in the morning",
         })
@@ -208,6 +213,7 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_telephone_substring_no_match(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Update",
             "Task Description": "Update the telephone log",
         })
@@ -215,13 +221,19 @@ class TestWordBoundaryKeywords(unittest.TestCase):
 
     def test_real_call_still_detected(self):
         self.assertTrue(is_call_task(make_task()))
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "x", "Task Description": "Please CALL the client"})))
-        self.assertTrue(is_call_task(make_task(**{
+        self.assertFalse(is_call_task(make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Dial them", "Task Description": ""})))
+        self.assertTrue(is_call_task(make_task(**{
+            "Activity Labels": "Robie lead follow-up",
+            "Task Subject": "x", "Task Description": "Please CALL the client"})))
 
     def test_recall_task_never_dials(self):
         task = make_task(**{
+            "Activity Labels": "",
             "Task Subject": "Recall the policy",
             "Task Description": "Recall the policy from the carrier",
         })
@@ -522,13 +534,18 @@ class TestOutcomeNoteHonesty(unittest.TestCase):
                                            "answered_by": "voicemail"}}],
             "voicemail_hit": True, "redialed": True,
             "recording_url": None, "error": None,
+        }, call_status={
+            "ok": True, "status": "completed", "answered_by": "voicemail",
+            "duration_s": 20,
         })
         ports = make_ports(bland=bland)
         handle_robie_call_task(make_task(), live_config(), ports)
         body = ports.discussion_client.appended[0]["body"]
-        self.assertIn("The call was successful.", body)
-        self.assertIn("voicemail", body.lower())
-        self.assertIn("called back", body.lower())
+        self.assertIn("No answer, left a voicemail.", body)
+        self.assertIn("Eva identified herself as an AI assistant", body)
+        self.assertNotIn("The call was successful.", body)
+        self.assertNotIn("..", body)
+        self.assertNotIn("Please call", body)
 
     def test_failed_note_names_failure(self):
         bland = FakeBlandPort(result={
@@ -559,6 +576,8 @@ class TestOutcomeNoteHonesty(unittest.TestCase):
         body = ports.discussion_client.appended[0]["body"]
         self.assertIn("couldn't confirm whether it reached the person or voicemail",
                       body)
+        self.assertNotIn("Eva identified", body)
+        self.assertNotIn("I couldn't confirm whether the call went through.", body)
 
     def test_note_has_no_jargon(self):
         ports = make_ports()
@@ -567,6 +586,138 @@ class TestOutcomeNoteHonesty(unittest.TestCase):
         for jargon in ("voicemail_action", "double-dial", "Bland call id",
                        "answered_by", "final_status"):
             self.assertNotIn(jargon, body)
+
+    def _answered(self) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "call_ids": ["c1"],
+            "attempts": [{
+                "attempt": 1,
+                "success": True,
+                "final_status": {
+                    "status": "completed",
+                    "answered_by": "human",
+                    "duration": 40,
+                },
+            }],
+        }
+
+    def _note(self, instruction: str, call: Optional[Dict[str, Any]] = None) -> str:
+        return rch._format_outcome_note(
+            "Avery 04",
+            instruction,
+            call or self._answered(),
+            "skipped",
+            producer_name="Daniela Aguilar",
+            called_party="Avery 04",
+        )
+
+    def test_outcome_topic_strips_the_call_instruction(self):
+        buster = self._note("Call Buster Brown to confirm renewal documents received")
+        self.assertTrue(buster.startswith(
+            "Called Avery 04 for Daniela Aguilar to confirm renewal documents received."
+        ))
+        self.assertNotIn("Buster", buster)
+        self.assertNotIn("..", buster)
+        self.assertIn("Eva identified herself as an AI assistant", buster)
+
+        vehicle = self._note("Please call the client to confirm the new vehicle")
+        self.assertTrue(vehicle.startswith(
+            "Called Avery 04 for Daniela Aguilar to confirm the new vehicle."
+        ))
+        self.assertNotIn("Please call", vehicle)
+        self.assertNotIn("the client", vehicle.split("\n", 1)[0])
+
+        siren = self._note(
+            "Please call 732-555-0100 and say that you are Sirenhead "
+            "and ask how their day is"
+        )
+        first = siren.split("\n", 1)[0]
+        self.assertEqual(
+            first,
+            "Called Avery 04 for Daniela Aguilar about the request in this task.",
+        )
+        self.assertNotIn("Sirenhead", first)
+        self.assertNotIn("say that", first)
+        self.assertNotIn("ask how", first)
+        self.assertFalse(first.rstrip(".").endswith(" and"))
+        self.assertNotIn("732", siren)
+        self.assertNotIn("[phone", siren)
+
+        spoken = self._note(
+            "Please call the client to confirm the new vehicle and say that "
+            "you are Sirenhead and ask to speak to Chloe and"
+        )
+        spoken_first = spoken.split("\n", 1)[0]
+        self.assertEqual(
+            spoken_first,
+            "Called Avery 04 for Daniela Aguilar to confirm the new vehicle.",
+        )
+        self.assertNotIn("Sirenhead", spoken_first)
+        self.assertNotIn("Chloe", spoken_first)
+        self.assertFalse(spoken_first.rstrip(".").endswith(" and"))
+
+        plain = self._note("renewal documents")
+        self.assertTrue(plain.startswith(
+            "Called Avery 04 for Daniela Aguilar about renewal documents."
+        ))
+
+        empty = self._note("")
+        self.assertTrue(empty.startswith(
+            "Called Avery 04 for Daniela Aguilar about this task."
+        ))
+        blank = self._note("   ")
+        self.assertTrue(blank.startswith(
+            "Called Avery 04 for Daniela Aguilar about this task."
+        ))
+
+        long = self._note(
+            "Call the client to confirm the renewal documents were received "
+            "before noon yesterday extra words here please"
+        )
+        long_first = long.split("\n", 1)[0]
+        long_topic = long_first.split(" to ", 1)[1].rstrip(".")
+        self.assertEqual(len(long_topic.split()), 12)
+        self.assertNotIn("please", long_first)
+        self.assertTrue(long_first.endswith("."))
+        self.assertNotIn("..", long_first)
+
+    def test_definite_no_answer_is_plain_and_has_no_disclosure(self):
+        body = self._note("Please call the client to confirm the new vehicle", {
+            "success": True,
+            "call_ids": ["c1"],
+            "attempts": [{
+                "attempt": 1,
+                "success": True,
+                "final_status": {"status": "no-answer", "answered_by": "", "duration": 0},
+            }],
+        })
+        self.assertIn("No answer, no message.", body)
+        self.assertNotIn("I couldn't confirm whether the call went through.", body)
+        self.assertNotIn("Eva identified", body)
+        self.assertNotIn("Please call", body)
+        self.assertEqual(body.strip().count("\n") + 1, 2)
+
+    def test_voicemail_without_a_message_has_no_disclosure(self):
+        body = self._note("Please call the client about the renewal documents", {
+            "success": True,
+            "voicemail_hit": True,
+            "redialed": False,
+            "call_ids": ["c1"],
+            "attempts": [{
+                "attempt": 1,
+                "success": True,
+                "final_status": {
+                    "status": "completed",
+                    "answered_by": "voicemail",
+                    "voicemail_action": "hangup",
+                    "duration": 8,
+                },
+            }],
+        })
+        self.assertIn("No answer, no message.", body)
+        self.assertNotIn("left a voicemail", body)
+        self.assertNotIn("Eva identified", body)
 
 
 if __name__ == "__main__":

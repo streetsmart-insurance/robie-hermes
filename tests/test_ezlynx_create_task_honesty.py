@@ -122,23 +122,12 @@ class TestCreateTaskHonesty(unittest.TestCase):
 
             store = AscendSyncStore(Path(tmp) / "sync.db")
             manager = _manager(store, poster)
-            with patch("robie_job_engine.ascend_sync.send_google_chat_alert") as alert:
-                with self.assertLogs("robie.ascend_sync", level="ERROR") as logs:
-                    first = manager.sync_once()
-                    second = manager.sync_once()
-            self.assertEqual(first["cancellations_found"], 1)
-            self.assertEqual(first["cancellations_synced"], 0)
-            self.assertEqual(second["cancellations_synced"], 0)
+            # #747 disabled scheduled sync; it must refuse and mark nothing
+            # done. The pending-on-failure contract now lives on the
+            # ReliableDelivery path (tests/test_ascend_destinations.py).
+            with self.assertRaisesRegex(RuntimeError, "ASCEND_SYNC_DISABLED"):
+                manager.sync_once()
             self.assertFalse(store.is_event_processed("cancel-honesty-1"))
-            self.assertTrue(any("NOT created" in line for line in logs.output))
-            self.assertTrue(first["errors"])
-            self.assertGreaterEqual(alert.call_count, 1)
-            alert_text = alert.call_args.args[0]
-            self.assertIn("not created", alert_text.lower())
-            self.assertIn("cancel-honesty-1", alert_text)
-            with store._connect() as conn:
-                count = conn.execute("SELECT COUNT(*) AS n FROM ascend_synced_events").fetchone()["n"]
-            self.assertEqual(count, 0)
 
             # The hermes accountability package is still the ``src`` on this path.
             import src
@@ -159,12 +148,12 @@ class TestCreateTaskHonesty(unittest.TestCase):
 
             store = AscendSyncStore(Path(tmp) / "sync.db")
             manager = _manager(store, poster)
-            with patch("robie_job_engine.ascend_sync.send_google_chat_alert") as alert:
-                stats = manager.sync_once()
-            self.assertEqual(stats["cancellations_synced"], 0)
+            # #747 disabled scheduled sync; it must refuse and mark nothing
+            # done. The pending-on-failure contract now lives on the
+            # ReliableDelivery path (tests/test_ascend_destinations.py).
+            with self.assertRaisesRegex(RuntimeError, "ASCEND_SYNC_DISABLED"):
+                manager.sync_once()
             self.assertFalse(store.is_event_processed("cancel-honesty-1"))
-            self.assertTrue(stats["errors"])
-            self.assertIn("HTTP 502", alert.call_args.args[0])
 
     def test_http_error_dict_is_not_rewritten_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,7 +165,7 @@ class TestCreateTaskHonesty(unittest.TestCase):
             self.assertIn("HTTP 500", result["reason"])
             self.assertNotEqual(result["status"], "success")
 
-    def test_success_passthrough_still_marks_done(self) -> None:
+    def test_success_passthrough_is_returned_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "renewal"
             _write_client(root, _SUCCESS_CLIENT)
@@ -197,19 +186,12 @@ class TestCreateTaskHonesty(unittest.TestCase):
 
             store = AscendSyncStore(Path(tmp) / "sync.db")
             manager = _manager(store, poster)
-            with patch("robie_job_engine.ascend_sync.send_google_chat_alert") as alert:
-                stats = manager.sync_once()
-            self.assertEqual(stats["cancellations_found"], 1)
-            self.assertEqual(stats["cancellations_synced"], 1)
-            self.assertEqual(stats["errors"], [])
-            self.assertTrue(store.is_event_processed("cancel-honesty-1"))
-            alert.assert_not_called()
-            with store._connect() as conn:
-                row = conn.execute(
-                    "SELECT status FROM ascend_synced_events WHERE event_id = ?",
-                    ("cancel-honesty-1",),
-                ).fetchone()
-            self.assertEqual(row["status"], "SUCCESS")
+            # #747 disabled scheduled sync; it must refuse and mark nothing
+            # done. The pending-on-failure contract now lives on the
+            # ReliableDelivery path (tests/test_ascend_destinations.py).
+            with self.assertRaisesRegex(RuntimeError, "ASCEND_SYNC_DISABLED"):
+                manager.sync_once()
+            self.assertFalse(store.is_event_processed("cancel-honesty-1"))
 
             import src
 
@@ -245,67 +227,6 @@ class TestCreateTaskHonesty(unittest.TestCase):
             self.assertEqual(failed["status"], "error")
             self.assertIn("[redacted]", failed["reason"])
             self.assertNotIn("SECRETVALUE", failed["reason"])
-
-    def test_task_create_retry_posts_the_discussion_note_once(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            missing = Path(tmp) / "no-such-renewal-tree"
-            missing.mkdir()
-            poster = EZLynxAgreementPoster(renewal_root=str(missing))
-            store = AscendSyncStore(Path(tmp) / "sync.db")
-            manager = _manager(store, poster)
-            task_calls = {"n": 0}
-            original_create = poster.create_task
-
-            def counting_create(*args, **kwargs):
-                task_calls["n"] += 1
-                return original_create(*args, **kwargs)
-
-            poster.create_task = counting_create
-            with patch("robie_job_engine.ascend_sync.send_google_chat_alert"):
-                first = manager.sync_once()
-                self.assertEqual(poster.post_custom_note.call_count, 1)
-                self.assertEqual(first["cancellations_synced"], 0)
-                self.assertFalse(store.is_event_processed("cancel-honesty-1"))
-                recorded = store.get_retry_note("cancel-honesty-1", "cancellation")
-                self.assertIsNotNone(recorded)
-                self.assertEqual(recorded["note_id"], "note-1")
-                second = manager.sync_once()
-            self.assertEqual(poster.post_custom_note.call_count, 1)
-            self.assertEqual(task_calls["n"], 2)
-            self.assertEqual(second["cancellations_synced"], 0)
-            self.assertFalse(store.is_event_processed("cancel-honesty-1"))
-
-    def test_retry_note_keys_skip_an_identical_repost(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = AscendSyncStore(Path(tmp) / "sync.db")
-            poster = MagicMock()
-            poster.post_custom_note.return_value = {"status": "success"}
-            manager = AscendEZLynxSyncManager(
-                api_client=MagicMock(),
-                store=store,
-                matcher=MagicMock(),
-                poster=poster,
-                quickbooks_client=MagicMock(),
-            )
-            for key in ("cancellation", "agreement_signed", "reinstatement_paid"):
-                first = manager._post_discussion_note_once(
-                    event_id="event-1",
-                    note_key=key,
-                    applicant_id="app-1",
-                    title="Notice",
-                    note_text=f"same body for {key}",
-                )
-                second = manager._post_discussion_note_once(
-                    event_id="event-1",
-                    note_key=key,
-                    applicant_id="app-1",
-                    title="Notice",
-                    note_text=f"same body for {key}",
-                )
-                self.assertNotIn("duplicate_suppressed", first)
-                self.assertTrue(second["duplicate_suppressed"])
-                self.assertFalse(store.is_event_processed("event-1"))
-            self.assertEqual(poster.post_custom_note.call_count, 3)
 
 
 if __name__ == "__main__":

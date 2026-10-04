@@ -271,7 +271,9 @@ class TaskReassigner(Protocol):
 class DiscussionClient(Protocol):
     """Subset of DiscussionApiClient used by the worker."""
 
-    def append_note(self, discussion_id: str, body: str) -> dict[str, Any]: ...
+    def append_note(
+        self, discussion_id: str, body: str, applicant_id: str = "",
+    ) -> dict[str, Any]: ...
     def get_discussion(self, discussion_id: str) -> dict[str, Any]: ...
 
 
@@ -533,12 +535,12 @@ class TaskAssignmentWorker:
         task = _task_from_payload(payload)
         from .ezlynx_task_cdp import validate_identity
         validate_identity(task.task_id, task.applicant_id)
-        # No write of any kind (note, reassignment, call) before the applicant
-        # is cleared and the discussion is proven to belong to it.
-        self._assert_write_target(task)
         timestamp = utcnow_iso()
 
         if is_test_task(task):
+            # No write of any kind before the applicant is cleared and the
+            # discussion is proven to belong to that applicant.
+            self._assert_write_target(task)
             note = self._note_record(
                 store, job, task.discussion_id,
                 "Roby here — this looks like a test task, so I'm leaving it "
@@ -558,9 +560,44 @@ class TaskAssignmentWorker:
         # Route callback tasks to the Robie Call handler (PR #746) when its
         # ports are wired. The handler runs inside this same durable job —
         # one job per EZLynx task — checkpointing under "robie-call:<id>".
-        if category == "callback" and self._call_handler_available():
+        if category == "callback":
+            from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, production_driver_refused
+            from .ezlynx_task_jobs import job_is_dialable
+
+            # A labeled call is never handed back with a gate-off or
+            # reassignment note. If the handler is not wired, the job waits
+            # and nothing is written to the client.
+            if not self._call_handler_available():
+                self._record(
+                    task, "awaiting_human",
+                    "Call handler is not wired; no note posted.",
+                    timestamp,
+                )
+                raise NeedsHuman(
+                    f"Task {task.task_id}: call handler is not wired; no note posted"
+                )
+            # Lease first. A refusal leaves the job PENDING and posts nothing.
+            # The write-target check below also reads the lease, and that
+            # refusal must not be recorded as a human hold.
+            if production_driver_refused():
+                if not getattr(self, "_lease_refused_logged", False):
+                    logger.error(LEASE_NOT_WITH_PRODUCTION)
+                    self._lease_refused_logged = True
+                raise CallHeld(LEASE_NOT_WITH_PRODUCTION)
+            if not job_is_dialable(payload):
+                self._record(
+                    task, "awaiting_human",
+                    "Call job is not dialable; a non-live queue is never dialed.",
+                    timestamp,
+                )
+                raise NeedsHuman(
+                    f"Task {task.task_id}: call job is not dialable"
+                )
+            # WRITE_SCOPE=all still has to prove this discussion is the client's.
+            self._assert_write_target(task)
             return self._do_call_task(store, job, task, timestamp)
 
+        self._assert_write_target(task)
         answer = self._human_answer(store, job, task)
         candidates = reassign_candidates(
             task, human_choice=str(answer.get("assign_to") or "").strip() or None
@@ -584,19 +621,22 @@ class TaskAssignmentWorker:
             )
 
         if not (self.reassign_enabled and self.reassigner is not None):
-            target, target_field = candidates[0]
-            self._post_note_verified(
-                store, job, task.discussion_id,
-                f"Roby here — I read this request ({category}) but I can't "
-                f"complete it myself. It needs to go back to {target} "
-                f"({FIELD_LABELS[target_field]}); automatic reassignment is off, so "
-                "please reassign it in EZLynx.",
-                purpose="gate-off",
+            # The gate is off by default, and the intake unit never turns it
+            # on. Do not file a gate-off note or a reassignment note. The job
+            # waits; nothing is written to the client's discussion.
+            target, _target_field = candidates[0]
+            logger.info(
+                "Reassignment gate is off for task %s; no note posted",
+                task.task_id,
             )
-            self._record(task, "awaiting_human", f"Reassignment gate off; flagged for reassign to {target}.", timestamp)
+            self._record(
+                task, "awaiting_human",
+                f"Reassignment gate off; left for a person, no note posted (target {target}).",
+                timestamp,
+            )
             raise NeedsHuman(
                 f"Task {task.task_id}: reassignment gate is off — a human must "
-                f"reassign to {target} in EZLynx."
+                f"reassign to {target} in EZLynx. No note was posted."
             )
 
         reassigned = self._reassign_with_reconciliation(store, job, task, candidates, answer)
@@ -838,7 +878,17 @@ class TaskAssignmentWorker:
         checkpoint for the independent verifier.
         """
         from . import robie_call_handler as rch
+        from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, production_driver_refused
         from .robie_call_job_engine_adapters import build_robie_call_ports
+
+        # Same fail-closed rule as the kill switch, checked again in case
+        # the lease moved after the run started. Nothing has been sent.
+        # CallHeld leaves the job PENDING for a later tick.
+        if production_driver_refused():
+            if not getattr(self, "_lease_refused_logged", False):
+                logger.error(LEASE_NOT_WITH_PRODUCTION)
+                self._lease_refused_logged = True
+            raise CallHeld(LEASE_NOT_WITH_PRODUCTION)
 
         payload = job.get("payload") or {}
         task_dict: dict[str, Any] = {
@@ -854,6 +904,12 @@ class TaskAssignmentWorker:
             "Activity Labels": task.activity_labels,
             "Discussion ID": task.discussion_id,
             "Workflow": payload.get("workflow") or "",
+            # Raw Created Date is Central. The handler converts it to Eastern
+            # before the window, same-day key, and age check.
+            "Created Date": task.created_at or payload.get("created_at") or task.created_date,
+            "dialable": payload.get("dialable") is True,
+            "queued_at": payload.get("queued_at") or "",
+            "live_enabled_at": payload.get("live_enabled_at") or "",
         }
         reassign_port = (
             _WorkerReassignPortAdapter(self.reassigner, task)
@@ -924,15 +980,13 @@ class TaskAssignmentWorker:
         return action
 
     def _categorize_task(self, task: AssignedTask) -> str:
-        """Sort the request from its activity type and note text."""
+        """Sort the request. Only an exact call label is a callback."""
         from .call_pickup import classify_call_request
 
-        labeled = classify_call_request(task.activity_labels, task.description)
+        labeled = classify_call_request(task.activity_labels, "")
         if labeled.action in ("workflow", "freeform"):
             return "callback"
         text = f"{task.title} {task.description}".lower()
-        if any(kw in text for kw in ["call", "phone", "callback", "reach out"]):
-            return "callback"
         if any(kw in text for kw in ["document", "upload", "attach", "pdf"]):
             return "document"
         if any(kw in text for kw in ["quote", "premium", "price"]):
@@ -1002,7 +1056,11 @@ class TaskAssignmentWorker:
             if store.get_checkpoint(job["id"], kind) != intent:
                 raise UnverifiedNoteError("Note intent persistence failed; not sent")
             try:
-                response = self.client.append_note(discussion_id, body)
+                response = self.client.append_note(
+                    discussion_id,
+                    body,
+                    applicant_id=str(payload.get("applicant_id") or ""),
+                )
             except Exception as exc:
                 raise UnverifiedNoteError("Note acceptance uncertain; not reposting") from exc
             intent["note_id"] = _extract_note_id(response)
@@ -1197,6 +1255,8 @@ def _task_from_payload(payload: dict[str, Any]) -> AssignedTask:
         assigned_producer=str(payload.get("assigned_producer") or ""),
         csr=str(payload.get("csr") or ""),
         activity_labels=str(payload.get("activity_labels") or ""),
+        created_at=str(payload.get("created_at") or ""),
+        created_at_et=str(payload.get("created_at_et") or ""),
     )
 
 

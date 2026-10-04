@@ -9,7 +9,12 @@ Fail-closed contract (standing agency rules):
   standing authorization for the certificate sweep: when a certificate
   request matches an applicant but no existing discussion safely fits, the
   sweep auto-creates a NAMED discussion (never "Untitled") with the filing
-  note as its first note. Ad-hoc creation anywhere else is still forbidden.
+  note as its first note. The one other exception is Carlo's 2026-10-04
+  authorization for the direct Task API
+  (:func:`robie_job_engine.ezlynx_task_api.create_robie_discussion_with_task`):
+  a discussion titled exactly ``Tasks by Robie``, on allowlisted applicants,
+  with the task note as its first note and a read-back of both. Ad-hoc
+  creation anywhere else is still forbidden.
 - Every creation is fail-closed: the write-scope allowlist and the
   no-phone-number note guard run before the POST, and a fresh GET read-back
   must prove the returned discussion exists, carries the requested title,
@@ -518,14 +523,25 @@ class DiscussionApiClient:
     # -- append ----------------------------------------------------------
 
     def append_note(
-        self, discussion_id: str, body: str, *, note_type: str = "Note"
+        self,
+        discussion_id: str,
+        body: str,
+        *,
+        note_type: str = "Note",
+        applicant_id: str | None = None,
     ) -> dict[str, Any]:
         """Append a note to an EXISTING discussion (v8 discussions/:id/notes).
 
         Never creates a discussion. The body is refused when it contains a
         phone-number-like value. Several discussions the user did not name
         are refused here too, so agent code cannot pick one after listing them.
+
+        When ``applicant_id`` is passed, the write-scope allowlist is
+        enforced before any HTTP request, the same check used when filing
+        an outcome note. Hold notes and reassignment notes pass it.
         """
+        if applicant_id is not None:
+            require_allowed_ezlynx_write_applicant(applicant_id)
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")

@@ -1,0 +1,64 @@
+[Unit]
+Description=ROBIE EZLynx Task Check-In intake
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_DASHBOARD_SHEET_ID=1Qj0-i4QJuNkfWtjdfAdpQpI1JmC44KmThr_rrzGG6EQ
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+Environment=ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1
+Environment=ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME=05:30
+Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=America/New_York
+Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes/robie-job-engine/data/ezlynx-session.lock
+Environment=ROBIE_EZLYNX_LOGIN_HELPER=/opt/streetsmart-hermes/releases/current/ezlynx_login_bootstrap.py
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=PRODUCTION
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+# Notes on real clients. ROBIE_EZLYNX_WRITE_SCOPE=all is ignored unless
+# Playground guardrails are active. Without ROBIE_PLAYGROUND=1 a dry-run
+# falls back to test applicant 220250093 and real clients print
+# write_scope_refused. These two lines do not enable live dials. Playground
+# hard blocks stay in force: notes only, no deletes, no status changes.
+# A dry-run still writes nothing to EZLynx.
+# In systemd, EnvironmentFile= overrides Environment= regardless of order,
+# so placing these lines after EnvironmentFile= does not protect them.
+# None of the
+# EnvironmentFile paths loaded above (robie-recording.env,
+# robie-ezlynx.env, robie-accountability.env) set ROBIE_EZLYNX_WRITE_SCOPE
+# or ROBIE_PLAYGROUND. The installer reads `systemctl show -p Environment`
+# and refuses to continue unless that effective environment contains
+# ROBIE_EZLYNX_WRITE_SCOPE=all. It also reads every file from
+# `systemctl show -p EnvironmentFiles` and refuses if any of them sets
+# ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND, because EnvironmentFile=
+# overrides Environment=. The check runs before the live drop-in is installed.
+Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
+Environment=ROBIE_PLAYGROUND=1
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0750 /opt/streetsmart-hermes/robie-job-engine/data
+# This unit does not set EZLYNX_TASK_REASSIGN_ENABLED (it stays off) and
+# does not set ROBIE_TASK_FIELD_CONTRACT_PATH. The empty field contract
+# keeps task Saves blocked. Unlabeled tasks are not touched. A gated-off
+# reassignment posts no note.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ezlynx_task_intake
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+# One run dials at most 25 calls (MAX_TASKS_PER_RUN stays 25). Each call
+# polls Bland for about 140 seconds, may wait 10 seconds before attempt 2,
+# and the handler's own outcome polling adds up to 60 seconds. 25 times
+# (140 + 10 + 60) seconds is about 87.5 minutes. TimeoutStartSec is
+# 120 minutes so that budget fits. The per-run cap is not lowered.
+# The Bland poll stays inside the 180-second redial window.
+TimeoutStartSec=120min
+
+[Install]
+WantedBy=multi-user.target

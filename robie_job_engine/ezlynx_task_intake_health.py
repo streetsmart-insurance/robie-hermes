@@ -94,7 +94,7 @@ def check_intake(now: datetime | None = None) -> list[str]:
             age_str = "unknown age" if age is None else f"{int(age.total_seconds() // 60)} min ago"
             problems.append(
                 f"no successful intake run in the last {INTAKE_FRESH_MINUTES} min "
-                f"(last ok run {age_str}) — the 30-minute report may be missing or stuck"
+                f"(last ok run {age_str}) — the 5-minute intake may be missing or stuck"
             )
 
     # 2. Stuck RUNNING jobs (crashed worker never released the lease).

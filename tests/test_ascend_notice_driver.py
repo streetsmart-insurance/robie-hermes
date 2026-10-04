@@ -1238,6 +1238,26 @@ def test_live_mode_leaves_failed_email_unread(no_zap_fire):
     assert ctx.source.marked == ["m1"]  # the failed one stays unread
 
 
+def test_live_mode_task_not_created_leaves_email_unread(monkeypatch):
+    def failed_fire(payload, *, dry_run=False):
+        return {"ok": False, "method": "direct_api", "error": "not confirmed"}
+
+    monkeypatch.setattr(driver.zapier_tasks, "fire_task", failed_fire)
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["done"] == 0
+    result = summary["results"][0]
+    assert result["status"] != "done"
+    assert result["reason"].startswith("task_not_created")
+    assert ctx.source.marked == []
+
+
+
+
 def test_label_apply_error_is_never_reached_for_a_cancellation(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
@@ -2110,7 +2130,7 @@ def test_workflow_sets_delegation_sa_and_prod_ascend_secret():
     assert "ROBIE_PLAYGROUND=1" in text
 
 
-def test_write_scope_all_is_only_on_the_ascend_notice_unit():
+def test_write_scope_all_is_only_on_approved_note_units():
     root = Path(__file__).resolve().parents[1]
     unit = (root / "deploy/systemd/robie-ascend-notice-driver.service").read_text(encoding="utf-8")
     drop_in = (
@@ -2143,11 +2163,15 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
                 continue
             if scope_line in path.read_text(encoding="utf-8"):
                 hits.append(path.relative_to(root).as_posix())
+    # Task intake files call-outcome notes on real clients under the same
+    # Playground guardrails. It is not a live-dial switch and it does not
+    # widen deletes or status changes. No other unit may set this.
     assert sorted(hits) == [
         "deploy/systemd/robie-ascend-api-notice.service",
         "deploy/systemd/robie-ascend-api-notice.service.d/10-write-scope.conf",
         "deploy/systemd/robie-ascend-notice-driver.service",
         "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf",
+        "deploy/systemd/robie-task-intake.service",
     ]
     example = (root / "deploy/systemd/robie-playground.env.example").read_text(encoding="utf-8")
     assert "\nROBIE_EZLYNX_WRITE_SCOPE=\n" in example

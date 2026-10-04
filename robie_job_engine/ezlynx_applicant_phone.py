@@ -52,6 +52,34 @@ def dialable_phone_field(record: Mapping[str, Any] | None) -> Optional[str]:
     return None
 
 
+def ambiguous_phone(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Fail closed when phone fields hold more than one E.164 number.
+
+    Candidate labels carry no digits. One number, or the same number in
+    more than one field, is not ambiguous.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    found: list[tuple[str, str]] = []
+    for key in PHONE_FIELDS:
+        phone = to_e164_us(record.get(key))
+        if phone:
+            found.append((key, phone))
+    distinct = {phone for _key, phone in found}
+    if len(distinct) < 2:
+        return None
+    labels = {
+        "CellPhone": "Cell",
+        "BusinessPhone": "Business",
+        "HomePhone": "Home",
+    }
+    return {
+        "phone": None,
+        "ambiguous": True,
+        "candidates": [{"label": labels.get(key, "a number")} for key, _phone in found],
+    }
+
+
 def extract_dialable_phone(record: Mapping[str, Any] | None) -> Optional[str]:
     """The applicant's phone, or None. Never returns a non-phone field."""
     if not isinstance(record, Mapping):
@@ -88,6 +116,10 @@ class EzlynxApplicantPhoneLookup:
         except Exception as exc:  # noqa: BLE001 — fail closed, no dial
             logger.warning("applicant phone lookup failed: %s", type(exc).__name__)
             return None
+        ambiguous = ambiguous_phone(record)
+        if ambiguous is not None:
+            logger.warning("applicant phone lookup refused: more than one E.164 number")
+            return ambiguous
         return extract_dialable_phone(record)
 
     def is_mobile(self, applicant_id: str) -> bool:

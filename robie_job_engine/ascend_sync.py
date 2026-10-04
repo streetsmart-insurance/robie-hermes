@@ -428,8 +428,8 @@ class AscendApiClient:
 
     def fetch_cancelation_returns(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch cancellation returns containing return premiums and cancellation docs."""
-        data = self.get("/v1/cancelation_returns", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/cancelation_returns", page_size)
 
     def fetch_billable(self, billable_id: str) -> Dict[str, Any]:
         """Fetch billable details (carrier, policy number, coverage, program ID)."""
@@ -445,23 +445,23 @@ class AscendApiClient:
 
     def fetch_invoices(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch invoices."""
-        data = self.get("/v1/invoices", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/invoices", page_size)
 
     def fetch_programs(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch programs."""
-        data = self.get("/v1/programs", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/programs", page_size)
 
     def fetch_loans(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch loans."""
-        data = self.get("/v1/loans", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/loans", page_size)
 
     def fetch_payouts(self, page_size: int = 50) -> List[Dict[str, Any]]:
         """Fetch payouts (supplier remittances and agency commissions)."""
-        data = self.get("/v1/payouts", {"page_size": page_size})
-        return data.get("data", [])
+        from .ascend_delivery_state import paginate
+        return paginate(self.get, "/v1/payouts", page_size)
 
     def fetch_program_billables(self, program_id: str) -> List[Dict[str, Any]]:
         """List billables for a program via GET /v1/billables?program_id=…
@@ -652,7 +652,100 @@ class AscendEZLynxSyncManager:
         return result
 
     def sync_once(self) -> Dict[str, Any]:
-        """Perform one full synchronization run of all Ascend event feeds."""
+        raise RuntimeError("ASCEND_SYNC_DISABLED: stage-only candidate; use preview_once explicitly; no scheduled delivery")
+
+    def preview_once(self) -> Dict[str, Any]:
+        """Read and stage only. Live destinations deliberately not wired.
+
+        Replays use injected ports in ascend_delivery_state. Never resume legacy
+        writes from an existence-only checkpoint. No legacy ledger edits.
+        """
+        from .ascend_delivery_state import candidate_events, ReliableDelivery
+        events = candidate_events(self.api)
+        ledger = {}
+        delivery = ReliableDelivery(ledger)
+        reasons = {}
+        for event in events:
+            # Only reads through the existing matcher; no note/task methods.
+            if event['kind'] in ('cancellation', 'agreement_signed'):
+                app, _ = self.matcher.match_account(
+                    policy_number=event.get('policy_number'),
+                    insured_name=event.get('insured_name'))
+                event['applicant_id'] = app
+            reason = delivery.process(event)
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return {'mode': 'read_only_candidate', 'source_seen': len(events),
+                'delivered': 0, 'writes': 0, 'reasons': reasons,
+                'legacy_ledger_modified': False,
+                'live_destination_adapters': 'disabled_pending_Test_readback'}
+
+    def deliver_test_once(
+        self,
+        *,
+        ledger_path: str,
+        destination: Any = None,
+        ezlynx_client: Any = None,
+        realm_id: Optional[str] = None,
+        allow_applicants: tuple = ("26356199",),
+        include_payouts: bool = False,
+    ) -> Dict[str, Any]:
+        """Explicit Test-only delivery through live ports, with readback.
+
+        Not scheduled and not reachable from sync_once/daemon. Refuses
+        outside ROBIE_ENV=TEST. Only events mapped to an applicant in
+        ``allow_applicants`` (Buster Brown by default) get ``destination``;
+        everything else is staged only. ``destination=None`` is a dry run.
+        COMPLETE means ReliableDelivery's ``delivered_readback`` and nothing
+        else: every component was read back from the destination with the
+        source key and binding.
+        """
+        from .ascend_delivery_state import DurableLedger, ReliableDelivery, candidate_events
+        from .ascend_destination_mapping import map_event
+        from .runtime_env import TEST_ENV_NAME, current_robie_env
+
+        if current_robie_env() != TEST_ENV_NAME:
+            raise RuntimeError("ASCEND_DELIVERY_TEST_ONLY: refusing outside ROBIE_ENV=TEST")
+        allowed = {str(a) for a in allow_applicants}
+        ledger = DurableLedger(ledger_path)
+        live = ReliableDelivery(ledger, destination)
+        staged = ReliableDelivery(ledger, None)
+        reasons: Dict[str, int] = {}
+        complete: List[Dict[str, Any]] = []
+        mapping: Dict[str, int] = {}
+        try:
+            for event in candidate_events(self.api):
+                mapped = map_event(event, ezlynx_client=ezlynx_client, realm_id=realm_id)
+                why = mapped.pop("mapping_reason", "")
+                if why:
+                    mapping[why] = mapping.get(why, 0) + 1
+                    if mapped["kind"] in ("cancellation", "agreement_signed", "accounting_issue"):
+                        mapped["applicant_id"] = None
+                kind = mapped["kind"]
+                in_scope = (
+                    (kind == "commission_payout" and include_payouts and not why)
+                    or (kind != "commission_payout" and str(mapped.get("applicant_id") or "") in allowed)
+                )
+                runner = live if (destination is not None and in_scope) else staged
+                reason = runner.process(mapped)
+                reasons[reason] = reasons.get(reason, 0) + 1
+                state = ledger[mapped["key"]]
+                if reason == "delivered_readback" and state.delivered:
+                    complete.append({"key": mapped["key"], "kind": kind,
+                                     "destination_ids": dict(state.destination_ids)})
+        finally:
+            ledger.close()
+        return {
+            "mode": "test_delivery" if destination is not None else "test_dry_run",
+            "allow_applicants": sorted(allowed),
+            "reasons": reasons,
+            "mapping_reasons": mapping,
+            "complete": complete,
+            "complete_requires": "delivered_readback (destination ids read back with source key and binding)",
+        }
+
+    def _legacy_sync_once_DISABLED(self) -> Dict[str, Any]:
+        raise RuntimeError("legacy orchestration disabled: no destination readback")
+        """Retained for review only; unreachable legacy implementation."""
         self._task_failures = []
         started_at = _now_iso()
         stats = {
@@ -1442,22 +1535,7 @@ class AscendEZLynxSyncManager:
 
 
 def run_daemon(interval_seconds: int = 3600, db_path: Optional[str] = None) -> None:
-    """Run synchronization daemon on a recurring interval (default 1 hour)."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    logger.info("Starting Ascend to EZLynx Sync Daemon (Interval: %ds)", interval_seconds)
-
-    store = AscendSyncStore(db_path or DEFAULT_DB_PATH)
-    manager = AscendEZLynxSyncManager(store=store)
-
-    while True:
-        try:
-            logger.info("Executing scheduled Ascend-EZLynx sync cycle...")
-            manager.sync_once()
-        except Exception as exc:
-            logger.error("Daemon cycle error: %s", exc, exc_info=True)
-
-        logger.info("Sleeping for %d seconds...", interval_seconds)
-        time.sleep(interval_seconds)
+    raise RuntimeError("ASCEND_SYNC_DISABLED: daemon cannot run a stage-only candidate")
 
 
 def main() -> None:
@@ -1468,14 +1546,8 @@ def main() -> None:
     parser.add_argument("--db-path", type=str, default=str(DEFAULT_DB_PATH), help="Path to sqlite sync database")
     args = parser.parse_args()
 
-    if args.daemon:
-        run_daemon(interval_seconds=args.interval, db_path=args.db_path)
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        store = AscendSyncStore(args.db_path)
-        manager = AscendEZLynxSyncManager(store=store)
-        res = manager.sync_once()
-        print(json.dumps(res, indent=2))
+    # Stop before opening a store, matcher, secret client or destination adapter.
+    parser.exit(2, "ASCEND_SYNC_DISABLED: stage-only candidate is not an operational sync\n")
 
 
 if __name__ == "__main__":

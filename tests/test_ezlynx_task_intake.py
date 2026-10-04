@@ -90,6 +90,7 @@ class FakeDiscussionClient:
         already_posted: bool = False,
     ):
         self.posts: list[tuple[str, str]] = []
+        self.applicants: list[str] = []
         self.fail_times = fail_times
         self.confirm = confirm
         self.api_note_id = api_note_id
@@ -105,8 +106,11 @@ class FakeDiscussionClient:
     def get_discussion_ids(self, applicant_id: str) -> list[str]:
         return list(self.discussion_ids)
 
-    def append_note(self, discussion_id: str, body: str) -> dict[str, Any]:
+    def append_note(
+        self, discussion_id: str, body: str, applicant_id: str | None = None,
+    ) -> dict[str, Any]:
         self.posts.append((discussion_id, body))
+        self.applicants.append(str(applicant_id or ""))
         if self.fail_times > 0:
             self.fail_times -= 1
             raise ConnectionError("transient network blip")
@@ -284,7 +288,7 @@ def _pending_job(store, task: AssignedTask) -> dict[str, Any]:
 
 
 def test_worker_single_honest_note_gate_off(store):
-    """Gate off: one note, no 'working on it' claim, waits for a human."""
+    """Gate off: the job waits, and no note is posted to the client."""
     client = FakeDiscussionClient()
     worker = TaskAssignmentWorker(discussion_client=client, reassign_enabled=False)
     job = _pending_job(store, make_task())
@@ -292,11 +296,8 @@ def test_worker_single_honest_note_gate_off(store):
     result = worker.process_job(store, job)
 
     assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
-    assert len(client.posts) == 1
-    body = client.posts[0][1]
-    assert "working on it" not in body.lower()
-    assert "Carlo Ferrara" in body  # names the handoff target
-    assert "reassign" in body.lower()
+    assert client.posts == []
+    assert "no note was posted" in (result.get("last_error") or "").lower()
 
 
 def test_worker_reassigns_gate_on(store):
@@ -348,6 +349,7 @@ def test_worker_test_task_left_alone(store):
     assert reassigner.calls == []
     assert len(client.posts) == 1
     assert "leaving it alone" in client.posts[0][1].lower()
+    assert client.applicants == ["220250093"]
 
 
 def test_note_timeout_not_retried(store):
