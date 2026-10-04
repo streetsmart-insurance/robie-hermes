@@ -1864,11 +1864,13 @@ def test_agency_remittance_is_ignored(no_zap_fire):
     )
 
 
-def test_disputed_charge_fails_closed_without_markley_user_id(no_zap_fire, monkeypatch):
-    monkeypatch.delenv("ROBIE_ACCOUNTING_ASSIGNEE", raising=False)
-    assert driver.ezlynx_user_id_for_login("Markley1") is None
+def test_disputed_charge_fails_closed_when_assignee_login_has_no_id(no_zap_fire, monkeypatch):
+    monkeypatch.delenv("ROBIE_EZLYNX_LOGIN_NOBODY1", raising=False)
+    monkeypatch.setenv("ROBIE_ACCOUNTING_ASSIGNEE", "Nobody1")
+    assert driver.ezlynx_user_id_for_login("Markley1") == 263046
+    assert driver.ezlynx_user_id_for_login("Nobody1") is None
     assert "eca8cba27574021b7b0e924b9cf389d720cce745" in driver.ACCOUNTING_EZLYNX_USER["source"]
-    assert "ezlynx_user_id" not in driver.ACCOUNTING_EZLYNX_USER
+    assert "849801097" in driver.ACCOUNTING_EZLYNX_USER["source"]
     ctx, discussion_client = make_ctx(
         notices=[_disputed_notice()],
         policy_rows={"HO-998877": [policy_row()]},
@@ -1879,8 +1881,31 @@ def test_disputed_charge_fails_closed_without_markley_user_id(no_zap_fire, monke
     assert result["status"] == "skipped"
     assert result["reason"] == "accounting assignee id unknown"
     assert result["detail"]["needs_human_review"] is True
-    assert result["detail"]["accounting_login"] == "Markley1"
+    assert result["detail"]["accounting_login"] == "Nobody1"
     assert summary["would_file"] == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+
+
+def test_disputed_charge_dry_run_assigns_markley_263046(no_zap_fire, monkeypatch):
+    monkeypatch.delenv("ROBIE_ACCOUNTING_ASSIGNEE", raising=False)
+    ctx, discussion_client = make_ctx(
+        notices=[_disputed_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=[{"discussionId": "d-pay", "title": "Ascend - Payments"}],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    note = result["detail"]["task_payload"]
+    assert note["type"] == "TaskCreationNote"
+    assert note["task"]["assignedUserId"] == 263046
+    assert "applicantId" not in note
+    assert summary["would_file"][0]["task"] == {
+        "type": "disputed_charge",
+        "assignee": "Markley1",
+    }
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert discussion_client._urlopen.posts_to("with-note") == []
     assert no_zap_fire == []
@@ -1908,6 +1933,151 @@ def test_disputed_charge_tasks_when_the_user_id_is_known(no_zap_fire, monkeypatc
     assert "applicantId" not in note
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+
+
+def _late_payment(message_id, policy, amount):
+    return make_notice(
+        subject=f"Past due payment for Shoreline Builders LLC {policy}",
+        body=f"Policy ID {policy} Effective 02/01/2026\nAmount due: {amount}\n",
+        message_id=message_id,
+    )
+
+
+def test_dry_run_labels_a_discussion_planned_earlier_this_run(no_zap_fire):
+    notices = [
+        _late_payment("pay-1", "GL-112233", "$3,528.22"),
+        _late_payment("pay-2", "GL-445566", "$90.00"),
+    ]
+    ctx, discussion_client = make_ctx(
+        notices=notices,
+        policy_rows={
+            "GL-112233": [{"policyNumber": "GL-112233", "accountId": ALLOWED_APPLICANT}],
+            "GL-445566": [{"policyNumber": "GL-445566", "accountId": ALLOWED_APPLICANT}],
+        },
+        discussion_rows=[{"discussionId": "d-other", "title": "Untitled"}],
+        ascend_client=FakeAscendClient(program={"status": "past_due"}),
+    )
+    summary = driver.run_driver(ctx)
+    assert [item["status"] for item in summary["results"]] == ["dry_run", "dry_run"]
+    first, second = summary["would_file"]
+    assert first["discussion_plan"] == "create"
+    assert first["discussion_title"] == "Ascend - Payments"
+    assert "discussion_id" not in first
+    assert second["discussion_plan"] == "create (planned earlier this run)"
+    assert second["discussion_title"] == "Ascend - Payments"
+    assert second["discussion_plan"] != "use_existing"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert discussion_client._urlopen.posts_to("with-note") == []
+    assert no_zap_fire == []
+
+
+class _TimeoutThenFound:
+    """with-note times out. Later applicant reads can return the titled row."""
+
+    def __init__(self, *, reveal_on_list):
+        self.reveal_on_list = reveal_on_list
+        self.calls = []
+        self.list_calls = 0
+        self.with_note_attempts = 0
+
+    def __call__(self, url, *, data=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "data": data, "headers": dict(headers or {})})
+        if "connect/token" in url:
+            return FakeResponse({"access_token": "tok123", "expires_in": 3600})
+        if "by-applicant" in url:
+            self.list_calls += 1
+            if self.list_calls >= self.reveal_on_list:
+                return FakeResponse(
+                    [
+                        {
+                            "discussionId": "d-found",
+                            "title": "Ascend - Payments",
+                            "applicantId": ALLOWED_APPLICANT,
+                        }
+                    ]
+                )
+            return FakeResponse([])
+        if "with-note" in url and data:
+            self.with_note_attempts += 1
+            raise TimeoutError("with-note timed out")
+        if "/notes" in url and data:
+            return FakeResponse({"noteId": "n-found"})
+        if "v8/discussions/" in url and not data:
+            return FakeResponse(
+                {
+                    "discussionId": "d-found",
+                    "title": "Ascend - Payments",
+                    "notes": [{"noteId": "n-found", "body": "filed"}],
+                }
+            )
+        raise AssertionError(f"unexpected Discussion API URL: {url}")
+
+    def posts_to(self, needle):
+        return [c for c in self.calls if needle in c["url"] and c["data"]]
+
+
+def _live_payments_ctx(notices, urlopen):
+    config = discussions.DiscussionApiConfig(
+        discussion_base_url=API_BASE,
+        token_endpoint=TOKEN_URL,
+        client_id="street_smart_api",
+        client_secret="secret",
+        username="SSRobie",
+        integration_group_id="159",
+    )
+    client = discussions.DiscussionApiClient(config, urlopen=urlopen)
+    policy_rows = {}
+    for notice in notices:
+        number = notice.body.split("Policy ID ", 1)[1].split(" ", 1)[0]
+        policy_rows[number] = [{"policyNumber": number, "accountId": ALLOWED_APPLICANT}]
+    ctx = driver.DriverContext(
+        ascend_client=FakeAscendClient(program={"status": "past_due"}),
+        ezlynx_client=FakeEzlynxClient(rows_by_number=policy_rows),
+        discussion_client=client,
+        source=FakeSource(notices),
+        dry_run=False,
+        due_days=2,
+        today=date(2026, 9, 15),
+    )
+    return ctx
+
+
+def test_create_timeout_rereads_and_uses_the_discussion(no_zap_fire):
+    urlopen = _TimeoutThenFound(reveal_on_list=2)
+    ctx = _live_payments_ctx([_late_payment("pay-1", "GL-112233", "$3,528.22")], urlopen)
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "done"
+    assert result["detail"]["discussion_id"] == "d-found"
+    assert result["detail"]["discussion_plan"] == "use_existing"
+    assert result["detail"]["discussion_recovered_after_create_error"] is True
+    assert urlopen.with_note_attempts == 1
+    assert len(urlopen.posts_to("/notes")) == 1
+    assert "/v8/discussions/d-found/notes" in urlopen.posts_to("/notes")[0]["url"]
+    assert no_zap_fire == []
+
+
+def test_next_notice_rereads_before_creating_a_second_discussion(no_zap_fire):
+    # The timed-out create is not visible on the immediate re-read. The next
+    # notice in the category must re-read before it posts with-note again.
+    urlopen = _TimeoutThenFound(reveal_on_list=3)
+    ctx = _live_payments_ctx(
+        [
+            _late_payment("pay-1", "GL-112233", "$3,528.22"),
+            _late_payment("pay-2", "GL-445566", "$90.00"),
+        ],
+        urlopen,
+    )
+    summary = driver.run_driver(ctx)
+    first, second = summary["results"]
+    assert first["status"] == "skipped"
+    assert first["reason"].startswith("discussion_error:")
+    assert second["status"] == "done"
+    assert second["detail"]["discussion_id"] == "d-found"
+    assert second["detail"]["discussion_plan"] == "use_existing"
+    assert urlopen.with_note_attempts == 1
+    assert len(urlopen.posts_to("/notes")) == 1
     assert no_zap_fire == []
 
 

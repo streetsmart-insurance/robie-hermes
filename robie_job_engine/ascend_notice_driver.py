@@ -790,6 +790,12 @@ CATEGORY_TITLES: dict[str, str] = {
 }
 _CATEGORY_TITLE_KEYS = {title.casefold(): title for title in CATEGORY_TITLES.values()}
 
+DISCUSSION_PLAN_USE_EXISTING = "use_existing"
+DISCUSSION_PLAN_CREATE = "create"
+# A later notice in this run, when the discussion was planned and not read
+# back from EZLynx. Dry-run must not call that a use of an existing row.
+DISCUSSION_PLAN_CREATE_PLANNED = "create (planned earlier this run)"
+
 NOTICE_CATEGORY: dict[str, str] = {
     triage.LATE_PAYMENT: CATEGORY_PAYMENTS,
     triage.PAYMENT_CONFIRMATION: CATEGORY_PAYMENTS,
@@ -814,21 +820,30 @@ ACCOUNTING_ASSIGNEE_UNKNOWN = "accounting assignee id unknown"
 NO_MATCHING_CATEGORY = "no matching category"
 INTENT_CSR_TASK_ENV = "ROBIE_ASCEND_INTENT_TO_CANCEL_CSR_TASK"
 
-# Markley1 as copied from streetsmart-insurance/streetsmart-phone-watchdog
-# src/ezlynx/ezlynx_users.py at main eca8cba27574021b7b0e924b9cf389d720cce745.
-# That file's 22 confirmed ids are the ezlynx_user_id fields read back from
-# the EZLynx API on 2026-10-03. Markley1 is in the directory and has no
-# ezlynx_user_id. Do not invent one. ezlynx_user_id_for returns None for
-# this entry, and the disputed-charge task stays in human review.
+# Markley1 is copied from streetsmart-insurance/streetsmart-phone-watchdog
+# src/ezlynx/ezlynx_users.py at main eca8cba27574021b7b0e924b9cf389d720cce745
+# (Accounting Team / accounting@streetsmart.insurance; that directory entry
+# had no ezlynx_user_id). The id is from live Prod evidence:
+# Discussion API task notes use assignedUserId 263046 — discussion 849801097
+# (Jake created an "Accounting Agency Bill Verification" task assigned to
+# 263046) and discussion 849685947 (created by and assigned to 263046).
+# The 2026-10-02 EZLynx open-task list shows 38 tasks with
+# taskAssignment {userId: 263046, name: "Accounting Team"}. Markley1 is
+# Accounting Team in both repos. A ROBIE_ACCOUNTING_ASSIGNEE login with no
+# known id still fails closed (accounting assignee id unknown).
 ACCOUNTING_EZLYNX_USER: dict[str, Any] = {
     "user_name": "Markley1",
     "first_name": "Accounting",
     "last_name": "Team",
     "email": "accounting@streetsmart.insurance",
     "role": "Accounting / Financial Operations",
+    "ezlynx_user_id": 263046,
     "source": (
         "streetsmart-insurance/streetsmart-phone-watchdog "
-        "src/ezlynx/ezlynx_users.py eca8cba27574021b7b0e924b9cf389d720cce745"
+        "src/ezlynx/ezlynx_users.py eca8cba27574021b7b0e924b9cf389d720cce745; "
+        "ezlynx_user_id 263046 from Prod Discussion API discussions "
+        "849801097 and 849685947 and the 2026-10-02 EZLynx open-task list "
+        "(38 tasks, taskAssignment userId 263046, name Accounting Team)"
     ),
 }
 
@@ -863,8 +878,9 @@ def intent_to_cancel_csr_task_enabled() -> bool:
 def ezlynx_user_id_for_login(username: str) -> int | None:
     """Confirmed numeric id, same rule as phone-watchdog ``ezlynx_user_id_for``.
 
-    Match is the accounting login only. A missing or non-positive
-    ``ezlynx_user_id`` returns None. Markley1's copied entry has no id.
+    Match is the accounting login only. A different login, or a missing
+    or non-positive ``ezlynx_user_id``, returns None. Markley1's id is
+    263046 from the Prod task evidence cited on ``ACCOUNTING_EZLYNX_USER``.
     """
     key = str(username or "").strip().casefold()
     stored = str(ACCOUNTING_EZLYNX_USER.get("user_name") or "").strip().casefold()
@@ -1119,6 +1135,33 @@ def choose_category_discussion(
     if not hits:
         return None, 0
     return max(hits, key=_discussion_recency), len(hits)
+
+
+def _list_category_discussion(
+    client: Any,
+    applicant_id: str,
+    title: str,
+) -> tuple[dict[str, Any] | None, int]:
+    """Read this applicant's discussions and pick the exact category title.
+
+    Several rows with that title log a warning and keep the newest. A
+    transport or API error propagates so the caller can fail closed
+    instead of creating another discussion.
+    """
+    listed = client.get_discussions(applicant_id)
+    chosen, match_count = choose_category_discussion(
+        discussions_for_applicant(listed, applicant_id),
+        title,
+    )
+    if chosen is not None and match_count > 1:
+        logger.warning(
+            "applicant %s has %d discussions titled %r; using the newest %s",
+            applicant_id,
+            match_count,
+            discussions.discussion_title_of(chosen) or title,
+            discussions.discussion_id_of(chosen),
+        )
+    return chosen, match_count
 
 
 def _read_existing_note(
@@ -1469,39 +1512,45 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 
     # One category discussion per applicant. Reuse it when the title matches
     # (trim, case-insensitive). Otherwise this run creates that title once.
+    # A token from an earlier plan is not an EZLynx discussion: dry-run says
+    # so, and live mode re-reads by title before it creates a second one.
     plan_key = (resolution.applicant_id, canonical)
     remembered = ctx.planned_category_discussions.get(plan_key)
     chosen_id = ""
     display_title = canonical
-    if remembered is not None:
-        discussion_plan = "use_existing"
-        if not str(remembered).startswith("planned:"):
-            chosen_id = str(remembered)
+    if remembered is not None and str(remembered).startswith("planned:"):
+        discussion_plan = DISCUSSION_PLAN_CREATE_PLANNED
+        if not ctx.dry_run:
+            try:
+                chosen, _match_count = _list_category_discussion(
+                    ctx.discussion_client, resolution.applicant_id, canonical
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed, do not write
+                result.reason = f"discussion_error: {type(exc).__name__}: {exc}"
+                return result
+            if chosen is not None:
+                discussion_plan = DISCUSSION_PLAN_USE_EXISTING
+                chosen_id = discussions.discussion_id_of(chosen)
+                display_title = discussions.discussion_title_of(chosen) or canonical
+                ctx.planned_category_discussions[plan_key] = chosen_id
+    elif remembered is not None:
+        discussion_plan = DISCUSSION_PLAN_USE_EXISTING
+        chosen_id = str(remembered)
     else:
         try:
-            listed = ctx.discussion_client.get_discussions(resolution.applicant_id)
+            chosen, _match_count = _list_category_discussion(
+                ctx.discussion_client, resolution.applicant_id, canonical
+            )
         except Exception as exc:  # noqa: BLE001 - fail closed, do not write
             result.reason = f"discussion_error: {type(exc).__name__}: {exc}"
             return result
-        chosen, match_count = choose_category_discussion(
-            discussions_for_applicant(listed, resolution.applicant_id),
-            canonical,
-        )
         if chosen is not None:
-            discussion_plan = "use_existing"
+            discussion_plan = DISCUSSION_PLAN_USE_EXISTING
             chosen_id = discussions.discussion_id_of(chosen)
             display_title = discussions.discussion_title_of(chosen) or canonical
-            if match_count > 1:
-                logger.warning(
-                    "applicant %s has %d discussions titled %r; using the newest %s",
-                    resolution.applicant_id,
-                    match_count,
-                    display_title,
-                    chosen_id,
-                )
             ctx.planned_category_discussions[plan_key] = chosen_id
         else:
-            discussion_plan = "create"
+            discussion_plan = DISCUSSION_PLAN_CREATE
             ctx.planned_category_discussions[plan_key] = _planned_discussion_token(
                 resolution.applicant_id, canonical
             )
@@ -1607,16 +1656,77 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             except EzlynxDriverGateRefused as exc:
                 result.reason = f"driver_gate_refused: {exc}"
                 return result
-            filed = discussions.create_discussion_with_note(
-                ctx.discussion_client,
-                resolution.applicant_id,
-                canonical,
-                note_text,
-                dry_run=False,
-            )
-            created_id = str(filed.get("discussion_id") or "").strip()
-            if created_id:
-                ctx.planned_category_discussions[plan_key] = created_id
+            try:
+                filed = discussions.create_discussion_with_note(
+                    ctx.discussion_client,
+                    resolution.applicant_id,
+                    canonical,
+                    note_text,
+                    dry_run=False,
+                )
+            except (discussions.DiscussionApiError, TimeoutError, OSError) as exc:
+                # The POST may have landed before the client saw the error.
+                # Re-read by exact title and use that discussion. Do not
+                # POST with-note again.
+                try:
+                    recovered, _match_count = _list_category_discussion(
+                        ctx.discussion_client, resolution.applicant_id, canonical
+                    )
+                except Exception as read_exc:  # noqa: BLE001 - fail closed
+                    result.reason = (
+                        f"discussion_error: {exc}; reread failed: "
+                        f"{type(read_exc).__name__}: {read_exc}"
+                    )
+                    return result
+                if recovered is None:
+                    result.reason = f"discussion_error: {exc}"
+                    return result
+                chosen_id = discussions.discussion_id_of(recovered)
+                display_title = discussions.discussion_title_of(recovered) or canonical
+                ctx.planned_category_discussions[plan_key] = chosen_id
+                result.detail["discussion_plan"] = DISCUSSION_PLAN_USE_EXISTING
+                result.detail["discussion_title"] = display_title
+                result.detail["discussion_id"] = chosen_id
+                result.detail["discussion_recovered_after_create_error"] = True
+                logger.warning(
+                    "with-note create for applicant %s title %r failed (%s); "
+                    "using existing discussion %s",
+                    resolution.applicant_id,
+                    canonical,
+                    exc,
+                    chosen_id,
+                )
+                authorize_notice_write(
+                    "discussion_note",
+                    discussion_id=chosen_id,
+                    discussion_title=display_title,
+                )
+                recovered_note = _read_existing_note(
+                    ctx.discussion_client,
+                    resolution.applicant_id,
+                    note_text,
+                    discussion_id=chosen_id,
+                )
+                if recovered_note.get("duplicate"):
+                    filed = {
+                        "status": "filed",
+                        "discussion_id": chosen_id,
+                        "discussion_title": display_title,
+                        "note_id": recovered_note.get("note_id") or None,
+                        "reason": "recovered category discussion already has this note",
+                    }
+                else:
+                    filed = discussions.file_note_to_existing_discussion(
+                        ctx.discussion_client,
+                        resolution.applicant_id,
+                        note_text,
+                        discussion_id=chosen_id,
+                        dry_run=False,
+                    )
+            else:
+                created_id = str(filed.get("discussion_id") or "").strip()
+                if created_id:
+                    ctx.planned_category_discussions[plan_key] = created_id
     except NonNoteWriteRefused as exc:
         result.reason = str(exc)
         return result
