@@ -305,6 +305,34 @@ class DestinationReadClientTests(unittest.TestCase):
         self.assertIn("Email=insured%40example.test", seen["url"])
         self.assertIsNone(seen["data"])
 
+    def test_name_email_and_phone_searches_are_read_only_gets(self):
+        seen = {}
+
+        def fake_urlopen(url, *, data, headers, timeout):
+            if "connect/token" in url:
+                return FakeResponse(
+                    json.dumps({"access_token": "tok-p", "expires_in": 3600}).encode()
+                )
+            seen["url"] = url
+            seen["data"] = data
+            return FakeResponse(json.dumps({"results": [], "totalSize": 0}).encode())
+
+        client = EzlynxApiClient(_classic_config(), urlopen=fake_urlopen)
+        client.search_applicants_by_name("Fixture Hauling LLC")
+        self.assertIn("/PolicyApi/policy/v1/search", seen["url"])
+        self.assertIn("ApplicantName=Fixture", seen["url"])
+        self.assertNotIn("Email=", seen["url"])
+        self.assertIsNone(seen["data"])
+
+        client.search_applicants_by_email("insured@example.test")
+        self.assertIn("Email=insured%40example.test", seen["url"])
+        self.assertNotIn("ApplicantName=", seen["url"])
+        self.assertIsNone(seen["data"])
+
+        client.search_applicants_by_phone("555-010-0199")
+        self.assertIn("PhoneNumber=555-010-0199", seen["url"])
+        self.assertIsNone(seen["data"])
+
     def test_list_documents_uses_classic_eztoken_not_documentapi_host(self):
         seen = {}
 

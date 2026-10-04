@@ -396,6 +396,8 @@ def test_email_skips_api_filed_events_and_keeps_the_gaps(tmp_path, monkeypatch):
             internal_date=email_at,
             store=store,
         ) == ""
+    # 60h after the flip is inside the 96h past-due window. The body has no
+    # invoice number; the subject and program URL are enough.
     late_email = "2026-09-30T12:01:00Z"
     assert source.email_covered_by_api(
         program_id=_pid(1),
@@ -403,6 +405,23 @@ def test_email_skips_api_filed_events_and_keeps_the_gaps(tmp_path, monkeypatch):
         subject=f"Past due payment for {INSURED}",
         body=body,
         internal_date=late_email,
+        store=store,
+    ) == past.event_key
+    too_late = "2026-10-02T04:02:00Z"
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date=too_late,
+        store=store,
+    ) == ""
+    assert source.email_covered_by_api(
+        program_id=_pid(2),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body.replace(_pid(1), _pid(2)),
+        internal_date=email_at,
         store=store,
     ) == ""
 
@@ -1085,10 +1104,12 @@ def test_past_due_without_updated_at_survives_once(tmp_path, monkeypatch):
         now=now,
     )
     dated_late = [item for item in kept if item.invoice_id == _iid(12)]
-    assert dated_late and dated_late[0].occurred_at == "2026-10-02"
-    stale = dict(invoice, due_date="2024-12-28", id=_iid(13), invoice_number="INV-3005")
+    assert dated_late and dated_late[0].occurred_at == "2026-10-04T16:00:00Z"
+    assert dated_late[0].occurred_at != "2026-10-02"
+    old_program = _program(1, "payment_overdue", "2024-12-28T00:00:00Z")
+    stale = dict(invoice, due_date="2026-10-03", id=_iid(13), invoice_number="INV-3005")
     dropped = source.notices_from_snapshot(
-        programs=[program],
+        programs=[old_program],
         loans=[],
         invoices=[stale],
         payouts=[],
@@ -1097,6 +1118,7 @@ def test_past_due_without_updated_at_survives_once(tmp_path, monkeypatch):
         now=now,
     )
     assert all(item.invoice_id != _iid(13) for item in dropped)
+    assert not any(item.event_type == triage.LATE_PAYMENT for item in dropped)
 
     pages = {
         source.FEED_PROGRAMS: {"data": [program], "meta": {"next": None}},
@@ -1127,3 +1149,231 @@ def test_past_due_without_updated_at_survives_once(tmp_path, monkeypatch):
     assert any(row["reason"] == "api_already_filed" for row in second["results"])
     assert len(ctx.discussion_client._urlopen.posts_to("/notes")) == 1
     assert fired == []
+
+
+def test_fifteen_minute_past_due_files_once_on_the_flip_not_the_due_date(tmp_path, monkeypatch):
+    fired: list[dict] = []
+    monkeypatch.setattr(
+        driver.zapier_tasks,
+        "fire_task",
+        lambda payload, *, dry_run=False: fired.append(payload) or {"ok": True},
+    )
+    now = datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc)
+    since = now - timedelta(minutes=15)
+    flip = "2026-10-04T15:50:00Z"
+    program = _program(1, "payment_overdue", flip)
+    invoice = {
+        "id": _iid(11),
+        "program_id": _pid(1),
+        "status": "overdue",
+        "due_date": "2026-10-03",
+        "invoice_number": "INV-3003",
+        "policy_number": POLICY,
+        "total_amount_cents": 41210,
+    }
+    store = source.EventKeyStore(tmp_path / "events.db")
+    seen = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[invoice],
+        payouts=[],
+        store=store,
+        since=since,
+        now=now,
+    )
+    late = [item for item in seen if item.event_type == triage.LATE_PAYMENT]
+    assert len(late) == 1
+    assert late[0].occurred_at == flip
+    assert late[0].invoice_id == _iid(11)
+    assert source.make_event_key(_pid(1), triage.LATE_PAYMENT, flip) in late[0].alias_keys
+
+    pages = {
+        source.FEED_PROGRAMS: {"data": [program], "meta": {"next": None}},
+        source.FEED_LOANS: {"data": [], "meta": {"next": None}},
+        source.FEED_INVOICES: {"data": [invoice], "meta": {"next": None}},
+        source.FEED_PAYOUTS: {"data": [], "meta": {"next": None}},
+    }
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    rows = [{"discussionId": "d-pay", "title": "Ascend - Payments"}]
+    ctx = driver_ctx(rows)
+    first = source.run_once(
+        client=FeedClient(pages),
+        store=store,
+        driver_ctx=ctx,
+        now=now,
+        since=since,
+    )
+    done = [row for row in first["results"] if row["status"] == "done"]
+    assert [row["event_type"] for row in done] == [triage.LATE_PAYMENT]
+    assert first["would_file_count"] == 1
+    second = source.run_once(
+        client=FeedClient(pages),
+        store=store,
+        driver_ctx=driver_ctx(rows),
+        now=now + timedelta(minutes=15),
+        since=since,
+    )
+    assert second["would_file_count"] == 0
+    assert any(row["reason"] == "api_already_filed" for row in second["results"])
+    assert len(ctx.discussion_client._urlopen.posts_to("/notes")) == 1
+    assert fired == []
+
+
+def test_collapse_keeps_the_in_window_flip_when_the_invoice_time_is_outside():
+    since = datetime(2026, 10, 4, 15, 45, tzinfo=timezone.utc)
+    flip = "2026-10-04T15:50:00Z"
+    program_notice = source._program_notices(
+        _program(1, "payment_overdue", flip),
+        [],
+        store=None,
+        persist=False,
+    )[0]
+    invoice_notice = source._invoice_notice(
+        {
+            "id": _iid(11),
+            "program_id": _pid(1),
+            "status": "overdue",
+            "due_date": "2026-10-03",
+            "invoice_number": "INV-3003",
+        },
+        _program(1, "payment_overdue", flip),
+    )
+    assert invoice_notice is not None
+    invoice_notice.occurred_at = "2026-10-03"
+    merged = source._collapse([program_notice, invoice_notice], since=since)
+    assert len(merged) == 1
+    assert merged[0].invoice_id == _iid(11)
+    assert merged[0].occurred_at == flip
+
+
+def test_past_due_email_dedupes_on_program_and_insured_without_invoice_number(tmp_path):
+    store = source.EventKeyStore(tmp_path / "events.db")
+    flip = "2026-10-04T15:50:00Z"
+    program = _program(1, "payment_overdue", flip, loan_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    notice = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[
+            {
+                "id": _iid(11),
+                "program_id": _pid(1),
+                "status": "overdue",
+                "due_date": "2026-10-03",
+                "invoice_number": "INV-3003",
+            }
+        ],
+        payouts=[],
+        store=store,
+    )[0]
+    assert notice.occurred_at == flip
+    store.record_filed(notice)
+    body = (
+        f"This policy has a past-due payment of $412.10 which was due on 10/03/2026.\n"
+        f"Customer {INSURED}\n"
+        f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
+    )
+    assert "Invoice No." not in body
+    inside = "2026-10-08T15:50:00Z"
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date=inside,
+        store=store,
+    ) == notice.event_key
+    outside = "2026-10-08T16:00:00Z"
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date=outside,
+        store=store,
+    ) == ""
+    assert source.email_covered_by_api(
+        program_id=_pid(2),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=body,
+        internal_date=inside,
+        store=store,
+    ) == ""
+    assert source.email_covered_by_api(
+        program_id=_pid(1),
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Payment failed for {INSURED}",
+        body="We couldn't process your payment of $412.10.\n" + body,
+        internal_date=inside,
+        store=store,
+    ) == ""
+    loan_body = (
+        f"Customer Other Hauling LLC\n"
+        f"https://dashboard.useascend.com/loans/cccccccc-cccc-4ccc-8ccc-cccccccccccc\n"
+    )
+    assert source.email_covered_by_api(
+        program_id="",
+        notice_type=triage.LATE_PAYMENT,
+        subject="Past due payment for Other Hauling LLC",
+        body=loan_body,
+        internal_date=inside,
+        store=store,
+    ) == notice.event_key
+    assert source.email_covered_by_api(
+        program_id="",
+        notice_type=triage.LATE_PAYMENT,
+        subject=f"Past due payment for {INSURED}",
+        body=f"Customer {INSURED}\n",
+        internal_date=inside,
+        store=store,
+    ) == notice.event_key
+
+
+def test_unmatched_applicant_is_one_ask_list_and_is_not_filed(tmp_path, monkeypatch):
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+
+    class NoMatch:
+        def search_policy_by_number(self, policy_number):
+            return {"data": [], "totalSize": 0}
+
+        def search_applicants_by_name(self, name):
+            return {"data": [], "totalSize": 0}
+
+        def search_applicants_by_email(self, email):
+            return {"data": [], "totalSize": 0}
+
+        def search_applicants_by_phone(self, phone):
+            return {"data": [], "totalSize": 0}
+
+    now = datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc)
+    program = _program(1, "payment_overdue", "2026-10-04T15:50:00Z")
+    invoice = {
+        "id": _iid(11),
+        "program_id": _pid(1),
+        "status": "overdue",
+        "due_date": "2026-10-03",
+        "invoice_number": "INV-3003",
+        "policy_number": POLICY,
+    }
+    pages = {
+        source.FEED_PROGRAMS: {"data": [program], "meta": {"next": None}},
+        source.FEED_LOANS: {"data": [], "meta": {"next": None}},
+        source.FEED_INVOICES: {"data": [invoice], "meta": {"next": None}},
+        source.FEED_PAYOUTS: {"data": [], "meta": {"next": None}},
+    }
+    ctx = driver_ctx()
+    ctx.ezlynx_client = NoMatch()
+    summary = source.run_once(
+        client=FeedClient(pages),
+        store=source.EventKeyStore(tmp_path / "events.db"),
+        driver_ctx=ctx,
+        now=now,
+        since=now - timedelta(minutes=15),
+    )
+    assert summary["would_file_count"] == 0
+    assert summary["errors"] == []
+    assert len(summary["ask"]) == 1
+    assert summary["ask"][0]["event_type"] == triage.LATE_PAYMENT
+    assert summary["ask"][0]["insured_name"] == INSURED
+    assert summary["ask"][0]["reason"].startswith("applicant_unresolved")
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []

@@ -1599,6 +1599,12 @@ def test_name_and_email_matches_only_when_unique():
         def search_policy_by_number(self, policy_number):
             raise AssertionError("policy search is not the fallback")
 
+        def search_applicants_by_name(self, name):
+            payload = {"data": self.rows}
+            if self.total is not None:
+                payload["totalSize"] = self.total
+            return payload
+
         def search_applicants_by_name_and_email(self, name, email):
             payload = {"data": self.rows}
             if self.total is not None:
@@ -1620,7 +1626,7 @@ def test_name_and_email_matches_only_when_unique():
     assert reason == ""
     assert resolution is not None
     assert resolution.applicant_id == ALLOWED_APPLICANT
-    assert resolution.via == "name_and_email"
+    assert resolution.via == "insured_name"
 
     two = IdentityClient(
         [
@@ -1646,7 +1652,25 @@ def test_name_and_email_matches_only_when_unique():
         [{"ApplicantName": "Fixture Hauling LLC", "accountId": ALLOWED_APPLICANT}]
     )
     resolution, reason = driver.resolve_applicant(
-        name_only, [], "Fixture Hauling LLC", "insured@example.test"
+        name_only, [], "Fixture Hauling, LLC", None
+    )
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert resolution.via == "insured_name"
+
+    unfiltered = IdentityClient(
+        [
+            {"ApplicantName": "Someone Else LLC", "accountId": "111"},
+            {
+                "ApplicantName": "Fixture Hauling LLC",
+                "Email": "insured@example.test",
+                "accountId": ALLOWED_APPLICANT,
+            },
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        unfiltered, [], "Fixture Hauling LLC", "insured@example.test"
     )
     assert resolution is None
     assert "ambiguous" in reason
@@ -1670,8 +1694,9 @@ def test_name_and_email_matches_only_when_unique():
     resolution, reason = driver.resolve_applicant(
         one, [], "Fixture Hauling LLC", None
     )
-    assert resolution is None
-    assert "0 candidate" in reason
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.via == "insured_name"
 
 
 def test_policy_numbers_that_disagree_do_not_guess():
@@ -1684,6 +1709,239 @@ def test_policy_numbers_that_disagree_do_not_guess():
     resolution, reason = driver.resolve_applicant(client, ["AAA111", "BBB222"], "Fixture")
     assert resolution is None
     assert "2 candidate" in reason
+
+
+def test_incomplete_policy_search_retries_once_then_uses_the_name():
+    class Client:
+        def __init__(self):
+            self.policy_calls = 0
+
+        def search_policy_by_number(self, policy_number):
+            self.policy_calls += 1
+            return {
+                "data": [{"policyNumber": policy_number, "accountId": "111"}],
+                "totalSize": 5,
+            }
+
+        def search_applicants_by_name(self, name):
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+    client = Client()
+    resolution, reason = driver.resolve_applicant(
+        client, ["HO-998877"], "Fixture Hauling LLC"
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert client.policy_calls == 2
+
+
+def test_ambiguous_policy_does_not_fall_through_to_name():
+    class Guard:
+        def search_policy_by_number(self, policy_number):
+            return {
+                "data": [
+                    {"policyNumber": policy_number, "accountId": "111"},
+                    {"policyNumber": policy_number, "accountId": "222"},
+                ],
+                "totalSize": 2,
+            }
+
+        def search_applicants_by_name(self, name):
+            raise AssertionError("ambiguous policy must not search by name")
+
+    resolution, reason = driver.resolve_applicant(
+        Guard(), ["HO-998877"], "Fixture Hauling LLC", "insured@example.test", "555-010-0199"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_zero_policy_hits_fall_through_to_normalized_name_email_and_phone():
+    class Cascade:
+        def __init__(self):
+            self.calls = []
+
+        def search_policy_by_number(self, policy_number):
+            self.calls.append(("policy", policy_number))
+            return {"data": [], "totalSize": 0}
+
+        def search_applicants_by_name(self, name):
+            self.calls.append(("name", name))
+            return {
+                "data": [
+                    {"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}
+                ],
+                "totalSize": 1,
+            }
+
+        def search_applicants_by_email(self, email):
+            raise AssertionError("unique name must stop the cascade")
+
+        def search_applicants_by_phone(self, phone):
+            raise AssertionError("unique name must stop the cascade")
+
+    client = Cascade()
+    resolution, reason = driver.resolve_applicant(
+        client,
+        ["HO-998877"],
+        "Fixture Hauling, LLC",
+        "insured@example.test",
+        "555-010-0199",
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert client.calls[0][0] == "policy"
+    assert client.calls[1][0] == "name"
+
+    ampersand = Cascade()
+    ampersand.search_applicants_by_name = lambda name: {
+        "data": [{"ApplicantName": "Smith and Sons", "accountId": ALLOWED_APPLICANT}],
+        "totalSize": 1,
+    }
+    resolution, reason = driver.resolve_applicant(
+        ampersand, [], "Smith & Sons, LLC", None
+    )
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+    dba = Cascade()
+    dba.search_applicants_by_name = lambda name: {
+        "data": [{"ApplicantName": "Fixture Transport", "accountId": ALLOWED_APPLICANT}],
+        "totalSize": 1,
+    }
+    resolution, reason = driver.resolve_applicant(
+        dba, [], "Fixture Hauling LLC DBA Fixture Transport", None
+    )
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+
+def test_email_then_phone_match_only_one_applicant():
+    class Identity:
+        def __init__(self, rows, total=None):
+            self.rows = rows
+            self.total = len(rows) if total is None else total
+
+        def _page(self):
+            return {"data": self.rows, "totalSize": self.total}
+
+        def search_applicants_by_email(self, email):
+            return self._page()
+
+        def search_applicants_by_phone(self, phone):
+            return self._page()
+
+    one = Identity(
+        [{"Email": "insured@example.test", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(
+        one, [], None, "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "email"
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+    two = Identity(
+        [
+            {"Email": "insured@example.test", "accountId": "111"},
+            {"Email": "insured@example.test", "accountId": "222"},
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(
+        two, [], None, "insured@example.test"
+    )
+    assert resolution is None
+    assert "2 candidate" in reason
+
+    phone = Identity(
+        [{"PhoneNumber": "5550100199", "accountId": ALLOWED_APPLICANT}]
+    )
+    resolution, reason = driver.resolve_applicant(phone, [], None, None, "(555) 010-0199")
+    assert reason == ""
+    assert resolution.via == "phone"
+
+    many = Identity(
+        [
+            {"PhoneNumber": "5550100199", "accountId": "111"},
+            {"PhoneNumber": "5550100199", "accountId": "222"},
+        ]
+    )
+    resolution, reason = driver.resolve_applicant(many, [], None, None, "555-010-0199")
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_incomplete_search_is_retried_once_then_the_cascade_continues():
+    class Retry:
+        def __init__(self):
+            self.name_calls = 0
+            self.email_calls = 0
+
+        def search_applicants_by_name(self, name):
+            self.name_calls += 1
+            if self.name_calls == 1:
+                return {
+                    "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                    "totalSize": 40,
+                }
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+        def search_applicants_by_email(self, email):
+            raise AssertionError("a completed retry is a name match")
+
+    client = Retry()
+    resolution, reason = driver.resolve_applicant(
+        client, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "insured_name"
+    assert client.name_calls == 2
+
+    class StillIncomplete:
+        def __init__(self):
+            self.name_calls = 0
+
+        def search_applicants_by_name(self, name):
+            self.name_calls += 1
+            return {
+                "data": [{"ApplicantName": "Fixture Hauling", "accountId": "111"}],
+                "totalSize": 40,
+            }
+
+        def search_applicants_by_email(self, email):
+            return {
+                "data": [{"Email": email, "accountId": ALLOWED_APPLICANT}],
+                "totalSize": 1,
+            }
+
+    again = StillIncomplete()
+    resolution, reason = driver.resolve_applicant(
+        again, [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert reason == ""
+    assert resolution.via == "email"
+    assert again.name_calls == 2
+
+    class Never:
+        def search_applicants_by_name(self, name):
+            return {"data": [{"ApplicantName": name, "accountId": "111"}], "totalSize": 9}
+
+        def search_applicants_by_email(self, email):
+            return {"data": [], "totalSize": 4}
+
+    resolution, reason = driver.resolve_applicant(
+        Never(), [], "Fixture Hauling LLC", "insured@example.test"
+    )
+    assert resolution is None
+    assert "incomplete" in reason
 
 
 def test_matched_row_without_account_id_fails_closed():

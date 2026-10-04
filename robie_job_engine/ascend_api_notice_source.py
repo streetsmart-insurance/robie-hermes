@@ -151,7 +151,23 @@ _INVOICE_UUID_RE = re.compile(
 )
 
 WINDOW = timedelta(hours=36)
+# Past-due mail arrives long after the due date. The window is anchored
+# to the program's overdue-flip time, and it has to cover the first email
+# (observed 36h to 86h after the due date, which is inside 96h of the flip).
+PAST_DUE_WINDOW = timedelta(hours=96)
 SKEW = timedelta(hours=2)
+_LOAN_URL_RE = re.compile(
+    r"dashboard\.useascend\.com/loans/"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    re.IGNORECASE,
+)
+_FILED_SELECT = (
+    "event_key, program_id, event_type, anchor, occurred_at, invoice_id, "
+    "insured_name, loan_id"
+)
+_FILED_SELECT_BASE = (
+    "event_key, program_id, event_type, anchor, occurred_at, invoice_id"
+)
 
 
 def live_enabled() -> bool:
@@ -365,6 +381,24 @@ def policy_numbers_of(*records: dict[str, Any] | None) -> list[str]:
     return found
 
 
+def insured_phone_of(*records: dict[str, Any] | None) -> str:
+    """Insured phone from a program, loan, or invoice. Empty when absent."""
+    keys = ("phone", "business_phone", "mobile", "mobile_phone", "phone_number")
+    record_keys = ("payer_phone", "insured_phone", "phone", "mobile", "phone_number")
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        insured = record.get("insured") if isinstance(record.get("insured"), dict) else {}
+        candidates = [insured.get(key) for key in keys]
+        candidates.extend(record.get(key) for key in record_keys)
+        for value in candidates:
+            text = str(value or "").strip()
+            digits = re.sub(r"\D", "", text)
+            if len(digits) >= 10:
+                return text
+    return ""
+
+
 def insured_email_of(*records: dict[str, Any] | None) -> str:
     """Insured email from a program or invoice. Empty when it is not an address."""
     candidates: list[Any] = []
@@ -510,6 +544,7 @@ def _render_common(
     policy_numbers: list[str],
     extra_lines: list[str],
     insured_email: str = "",
+    insured_phone: str = "",
 ) -> str:
     lines = list(extra_lines)
     for number in policy_numbers:
@@ -518,9 +553,46 @@ def _render_common(
         lines.append(f"Customer {insured}")
     if insured_email:
         lines.append(f"Email {insured_email}")
+    if insured_phone:
+        lines.append(f"Phone {insured_phone}")
     if program_id and program_id != AGENCY_PROGRAM:
         lines.append(_dashboard(program_id))
     return "\n".join(line for line in lines if line)
+
+
+def _ensure_filed_identity_columns(conn: sqlite3.Connection) -> None:
+    """Add identity columns on a store created before program/loan dedupe."""
+    have = {str(row[1]) for row in conn.execute("PRAGMA table_info(filed_events)")}
+    if "insured_name" not in have:
+        conn.execute(
+            "ALTER TABLE filed_events ADD COLUMN insured_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "loan_id" not in have:
+        conn.execute(
+            "ALTER TABLE filed_events ADD COLUMN loan_id TEXT NOT NULL DEFAULT ''"
+        )
+
+
+def _fetch_filed_rows(
+    conn: sqlite3.Connection, where: str, params: tuple[str, ...]
+) -> list[dict[str, str]]:
+    """Read filed rows. A store from before the identity columns still reads."""
+    try:
+        fetched = conn.execute(
+            f"SELECT {_FILED_SELECT} FROM filed_events WHERE {where}",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        fetched = conn.execute(
+            f"SELECT {_FILED_SELECT_BASE} FROM filed_events WHERE {where}",
+            params,
+        ).fetchall()
+    return [dict(row) for row in fetched]
+
+
+def _stored_loan_id(notice: ApiNotice) -> str:
+    program = notice.program if isinstance(notice.program, dict) else {}
+    return str(program.get("loan_id") or "").strip()
 
 
 class EventKeyStore:
@@ -549,7 +621,9 @@ class EventKeyStore:
                     occurred_at TEXT NOT NULL,
                     invoice_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL
+                    recorded_at TEXT NOT NULL,
+                    insured_name TEXT NOT NULL DEFAULT '',
+                    loan_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_filed_program_type
                     ON filed_events(program_id, event_type);
@@ -580,6 +654,7 @@ class EventKeyStore:
                 );
                 """
             )
+            _ensure_filed_identity_columns(conn)
 
     def is_filed(self, event_key: str) -> bool:
         with self._connect() as conn:
@@ -600,13 +675,15 @@ class EventKeyStore:
                     """
                     INSERT INTO filed_events (
                         event_key, program_id, event_type, anchor, occurred_at,
-                        invoice_id, status, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'filed', ?)
+                        invoice_id, status, recorded_at, insured_name, loan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'filed', ?, ?, ?)
                     ON CONFLICT(event_key) DO UPDATE SET
                         status='filed',
                         occurred_at=excluded.occurred_at,
                         invoice_id=excluded.invoice_id,
-                        recorded_at=excluded.recorded_at
+                        recorded_at=excluded.recorded_at,
+                        insured_name=excluded.insured_name,
+                        loan_id=excluded.loan_id
                     """,
                     (
                         key,
@@ -616,20 +693,27 @@ class EventKeyStore:
                         notice.occurred_at,
                         notice.invoice_id,
                         moment,
+                        str(notice.insured_name or "").strip(),
+                        _stored_loan_id(notice),
                     ),
                 )
 
     def filed_for(self, program_id: str, event_type: str) -> list[dict[str, str]]:
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT event_key, program_id, event_type, anchor, occurred_at, invoice_id
-                FROM filed_events
-                WHERE program_id=? AND event_type=? AND status='filed'
-                """,
+            return _fetch_filed_rows(
+                conn,
+                "program_id=? AND event_type=? AND status='filed'",
                 (str(program_id or "").strip().lower(), str(event_type or "").strip().lower()),
-            ).fetchall()
-        return [dict(row) for row in rows]
+            )
+
+    def filed_of_type(self, event_type: str) -> list[dict[str, str]]:
+        """Every filed row of one type. Used when an email has no program id."""
+        with self._connect() as conn:
+            return _fetch_filed_rows(
+                conn,
+                "event_type=? AND status='filed'",
+                (str(event_type or "").strip().lower(),),
+            )
 
     def episode_status(self, episode_id: str) -> str:
         with self._connect() as conn:
@@ -787,15 +871,11 @@ def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[d
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
-        fetched = conn.execute(
-            """
-            SELECT event_key, program_id, event_type, anchor, occurred_at, invoice_id
-            FROM filed_events
-            WHERE program_id=? AND event_type=? AND status='filed'
-            """,
+        return _fetch_filed_rows(
+            conn,
+            "program_id=? AND event_type=? AND status='filed'",
             (program_id, event_type),
-        ).fetchall()
-        return [dict(row) for row in fetched]
+        )
     except sqlite3.Error as exc:
         logger.warning("api notice store read failed: %s", type(exc).__name__)
         return []
@@ -825,17 +905,128 @@ def email_covered_by_api(
     if kind == triage.LATE_PAYMENT and triage._payment_failed(subject, body):
         return ""
     program = str(program_id or "").strip().lower()
-    if not program:
+    if not program and kind != triage.LATE_PAYMENT:
         return ""
     path = live_db_path()
     try:
-        if store is not None:
-            rows = store.filed_for(program, kind)
-        else:
-            rows = _readonly_filed_rows(path, program, kind)
+        rows = _filed_rows_for_email(
+            path,
+            program,
+            kind,
+            subject=subject,
+            body=body,
+            store=store,
+        )
     except Exception as exc:  # noqa: BLE001 - a bad store must not block email
         logger.warning("api notice dedupe lookup failed: %s", type(exc).__name__)
         return ""
+    if not rows:
+        return ""
+    if kind == triage.LATE_PAYMENT:
+        # No invoice number is required. Real past-due mail does not carry
+        # "Invoice No."; the subject is "Past due payment for <insured>".
+        return _past_due_email_key(
+            rows,
+            subject=subject,
+            body=body,
+            internal_date=internal_date,
+            program=program,
+        )
+    return _timed_email_key(rows, body=body, internal_date=internal_date, program=program, window=WINDOW)
+
+
+def _filed_rows_for_email(
+    path: Path,
+    program: str,
+    kind: str,
+    *,
+    subject: str,
+    body: str,
+    store: EventKeyStore | None,
+) -> list[dict[str, str]]:
+    """Filed rows the email might be a duplicate of.
+
+    A program id limits the lookup to that program. Past-due mail with no
+    program id falls back to a loan id in the body or the insured name.
+    A named program that has no filed row does not borrow another program.
+    """
+    if program:
+        if store is not None:
+            return store.filed_for(program, kind)
+        return _readonly_filed_rows(path, program, kind)
+    if kind != triage.LATE_PAYMENT:
+        return []
+    if store is not None:
+        pool = store.filed_of_type(kind)
+    else:
+        pool = _readonly_filed_of_type(path, kind)
+    return _past_due_identity_rows(pool, subject=subject, body=body)
+
+
+def _readonly_filed_of_type(path: Path, event_type: str) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    quoted = urlparse.quote(path.resolve().as_posix())
+    uri = f"file:{quoted}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("api notice store is not readable: %s", type(exc).__name__)
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return _fetch_filed_rows(
+            conn,
+            "event_type=? AND status='filed'",
+            (event_type,),
+        )
+    except sqlite3.Error as exc:
+        logger.warning("api notice store read failed: %s", type(exc).__name__)
+        return []
+    finally:
+        conn.close()
+
+
+def _loan_ids_in_text(body: str) -> set[str]:
+    return {match.group(1).lower() for match in _LOAN_URL_RE.finditer(str(body or ""))}
+
+
+def _past_due_identity_rows(
+    rows: list[dict[str, str]], *, subject: str, body: str
+) -> list[dict[str, str]]:
+    """Rows whose loan id or insured name is on the email."""
+    from .ascend_notice_driver import insured_names_match
+
+    loans = _loan_ids_in_text(body)
+    email_name = triage.extract_insured_name(subject, body) or ""
+    found: list[dict[str, str]] = []
+    for row in rows:
+        loan_id = str(row.get("loan_id") or "").strip().lower()
+        if loan_id and loan_id in loans:
+            found.append(row)
+            continue
+        row_name = str(row.get("insured_name") or "").strip()
+        if email_name and row_name and insured_names_match(email_name, row_name):
+            found.append(row)
+    return found
+
+
+def _past_due_email_key(
+    rows: list[dict[str, str]],
+    *,
+    subject: str,
+    body: str,
+    internal_date: str,
+    program: str,
+) -> str:
+    """Skip when a filed past-due for this program or insured is near the flip.
+
+    The window is at least 96h and is anchored to ``occurred_at``, which is
+    the overdue-flip time. Invoice text is an extra hit, not a requirement.
+    When the insured name is missing on either side, the program (or loan)
+    match still skips: a missed dedupe files one note, not two.
+    """
     if not rows:
         return ""
     needles = _email_anchors(body, program)
@@ -846,6 +1037,34 @@ def email_covered_by_api(
             return str(row["event_key"])
         if anchor and anchor.lower() in needles:
             return str(row["event_key"])
+    # ``subject`` is "Past due payment for <insured>". Rows are already
+    # limited to that program, or to the insured or loan when the email
+    # had no program id. A missing name does not reopen the email.
+    return _closest_in_window(rows, internal_date, PAST_DUE_WINDOW)
+
+
+def _timed_email_key(
+    rows: list[dict[str, str]],
+    *,
+    body: str,
+    internal_date: str,
+    program: str,
+    window: timedelta,
+) -> str:
+    needles = _email_anchors(body, program)
+    for row in rows:
+        invoice_id = str(row.get("invoice_id") or "")
+        anchor = str(row.get("anchor") or "")
+        if invoice_id and invoice_id.lower() in needles:
+            return str(row["event_key"])
+        if anchor and anchor.lower() in needles:
+            return str(row["event_key"])
+    return _closest_in_window(rows, internal_date, window)
+
+
+def _closest_in_window(
+    rows: list[dict[str, str]], internal_date: str, window: timedelta
+) -> str:
     email_at = parse_time(internal_date)
     if email_at is None:
         if len(rows) == 1:
@@ -857,7 +1076,7 @@ def email_covered_by_api(
         if occurred is None:
             continue
         delta = email_at - occurred
-        if -SKEW <= delta <= WINDOW:
+        if -SKEW <= delta <= window:
             score = abs(delta.total_seconds())
             key = str(row["event_key"])
             if closest is None or score < closest[0]:
@@ -1068,10 +1287,10 @@ def notices_from_snapshot(
         notice = _payout_notice(payout)
         if notice is not None:
             notices.append(notice)
-    collapsed = _collapse(notices)
-    if since is None:
-        return collapsed
-    return [notice for notice in collapsed if _event_in_window(notice, since)]
+    # Keep a merged notice when any pre-merge part is inside the lookback,
+    # and give the keeper that in-window time. Filtering after the merge
+    # used to drop the program's overdue flip along with the invoice.
+    return _collapse(notices, since=since)
 
 
 def _program_notices(
@@ -1100,7 +1319,7 @@ def _program_notices(
                 event_type=triage.LATE_PAYMENT,
                 program=program,
                 anchor=anchor,
-                occurred_at=updated,
+                occurred_at=anchor,
                 subject=f"Past due payment for {insured_name_of(program)}",
                 lines=[
                     "This policy has a past-due payment of "
@@ -1206,6 +1425,7 @@ def _status_notice(
         policy_numbers=policies,
         extra_lines=lines,
         insured_email=insured_email_of(program),
+        insured_phone=insured_phone_of(program),
     )
     notice = _notice(
         event_type=event_type,
@@ -1335,6 +1555,7 @@ def _loan_status_notice(
         policy_numbers=policies,
         extra_lines=lines,
         insured_email=insured_email_of(program, loan),
+        insured_phone=insured_phone_of(program, loan),
     )
     notice = _notice(
         event_type=event_type,
@@ -1358,25 +1579,51 @@ def _invoice_alias_keys(
     return (make_event_key(program_id, event_type, invoice_id),)
 
 
+def _overdue_flip_time(
+    program: dict[str, Any], store: EventKeyStore | None
+) -> str:
+    """When the program entered ``payment_overdue``. Empty if it has not.
+
+    The episode anchor freezes the first flip on this run's store. A later
+    poll that is still overdue reuses that time. The invoice due date is
+    not a flip.
+    """
+    if _status(program) != "payment_overdue":
+        return ""
+    updated = str(program.get("updated_at") or "").strip()
+    if parse_time(updated) is None:
+        return ""
+    program_id = _record_id(program)
+    if not program_id or store is None:
+        return normalize_anchor(updated)
+    return store.episode_anchor(
+        f"{program_id}|{triage.LATE_PAYMENT}",
+        "payment_overdue",
+        updated,
+        persist=False,
+    )
+
+
 def _past_due_occurred_at(
     invoice: dict[str, Any],
+    program: dict[str, Any],
     *,
     store: EventKeyStore | None,
     program_id: str,
     invoice_id: str,
     now: datetime | None,
 ) -> str:
-    """A timestamp the lookback can keep.
+    """The program's overdue-flip time, else the first time this store saw it.
 
-    Invoice past-due rows often have no ``updated_at``. A due date or a
-    past-due date from the API is the event time. When the API has neither,
-    the first poll records the current time and every later poll reuses it,
-    so the invoice is new once.
+    Never the invoice due date. On the 15-minute timer the due date is about
+    a day before the program flips, so a due-date event time falls outside
+    the lookback and the notice never files.
     """
-    for key in ("updated_at", "past_due_at", "past_due_date", "due_date"):
-        raw = invoice.get(key)
-        if parse_time(raw):
-            return str(raw).strip()
+    # ``invoice`` due date, past-due date, and updated_at are display fields.
+    # ``program_id`` selects the episode; the flip itself comes from ``program``.
+    flip = _overdue_flip_time(program, store)
+    if flip and parse_time(flip):
+        return flip
     moment = _iso(now or _now())
     episode = f"invoice:{invoice_id}|late_payment_first_seen"
     if store is None:
@@ -1400,6 +1647,7 @@ def _invoice_notice(
         holder["id"] = program_id
     insured = insured_name_of(holder, str(invoice.get("payer_name") or invoice.get("payee") or ""))
     email = insured_email_of(holder, invoice)
+    phone = insured_phone_of(holder, invoice)
     policies = policy_numbers_of(holder, invoice)
     amount = cents_to_money(invoice.get("total_amount_cents"))
     updated = str(invoice.get("updated_at") or invoice.get("paid_at") or "")
@@ -1418,6 +1666,7 @@ def _invoice_notice(
                 insured=insured,
                 policy_numbers=policies,
                 insured_email=email,
+                insured_phone=phone,
                 extra_lines=[
                     f"Your customer, {insured}, disputed the following payment.",
                     f"Payment amount {amount}" if amount else "Payment amount is on the settlement invoice.",
@@ -1445,6 +1694,7 @@ def _invoice_notice(
                 insured=insured,
                 policy_numbers=policies,
                 insured_email=email,
+                insured_phone=phone,
                 extra_lines=["A reinstatement was approved. The carrier still has to accept it."],
             ),
             program=holder,
@@ -1463,6 +1713,7 @@ def _invoice_notice(
             sentence += "."
         occurred = _past_due_occurred_at(
             invoice,
+            holder,
             store=store,
             program_id=program_id,
             invoice_id=invoice_id,
@@ -1482,6 +1733,7 @@ def _invoice_notice(
                 insured=insured,
                 policy_numbers=policies,
                 insured_email=email,
+                insured_phone=phone,
                 extra_lines=[sentence, f"Invoice No. {invoice.get('invoice_number') or invoice_id}"],
             ),
             program=holder,
@@ -1506,6 +1758,7 @@ def _invoice_notice(
                 insured=insured,
                 policy_numbers=policies,
                 insured_email=email,
+                insured_phone=phone,
                 extra_lines=[
                     f"Payment of {amount} was received." if amount else "A payment was received.",
                     f"Invoice No. {invoice.get('invoice_number') or invoice_id}",
@@ -1570,20 +1823,37 @@ def _payout_notice(payout: dict[str, Any]) -> ApiNotice | None:
     )
 
 
-def _collapse(notices: list[ApiNotice]) -> list[ApiNotice]:
-    """One note per program per family when a richer invoice event is present."""
+def _absorb(keeper: ApiNotice, other: ApiNotice, since: datetime | None) -> None:
+    """Fold ``other`` into ``keeper``. An in-window part keeps the merged event."""
+    keeper.alias_keys = tuple(
+        dict.fromkeys((*keeper.alias_keys, other.event_key, *other.alias_keys))
+    )
+    if since is None or _event_in_window(keeper, since):
+        return
+    if _event_in_window(other, since):
+        keeper.occurred_at = other.occurred_at
+
+
+def _collapse(notices: list[ApiNotice], *, since: datetime | None = None) -> list[ApiNotice]:
+    """One note per program per family when a richer invoice event is present.
+
+    When ``since`` is set, a merged notice stays if any of its parts is
+    inside the lookback. The keeper takes that in-window time so a due-date
+    invoice cannot erase the program's overdue flip.
+    """
     by_key: dict[str, ApiNotice] = {}
     for notice in notices:
         current = by_key.get(notice.event_key)
         if current is None:
             by_key[notice.event_key] = notice
             continue
-        aliases = tuple(dict.fromkeys((*current.alias_keys, *notice.alias_keys)))
         preferred = current if current.invoice_id else notice
         other = notice if preferred is current else current
-        preferred.alias_keys = tuple(
-            dict.fromkeys((*aliases, other.event_key, *other.alias_keys))
-        )
+        if preferred.alias_keys != current.alias_keys and preferred is not current:
+            preferred.alias_keys = tuple(
+                dict.fromkeys((*preferred.alias_keys, *current.alias_keys))
+            )
+        _absorb(preferred, other, since)
         by_key[notice.event_key] = preferred
     grouped: dict[tuple[str, str], list[ApiNotice]] = {}
     for notice in by_key.values():
@@ -1596,26 +1866,20 @@ def _collapse(notices: list[ApiNotice]) -> list[ApiNotice]:
             grouped.setdefault((notice.program_id.lower(), notice.event_type), []).append(notice)
     drop: set[int] = set()
     for bucket in grouped.values():
-        if len(bucket) < 2:
+        unique = list({id(item): item for item in bucket}.values())
+        if len(unique) < 2:
             continue
-        with_invoice = [item for item in bucket if item.invoice_id]
-        if not with_invoice:
-            keeper = bucket[0]
-            for extra in bucket[1:]:
-                keeper.alias_keys = tuple(
-                    dict.fromkeys((*keeper.alias_keys, extra.event_key, *extra.alias_keys))
-                )
-                drop.add(id(extra))
-            continue
-        keeper = with_invoice[0]
-        for extra in bucket:
+        with_invoice = [item for item in unique if item.invoice_id]
+        keeper = with_invoice[0] if with_invoice else unique[0]
+        for extra in unique:
             if extra is keeper:
                 continue
-            keeper.alias_keys = tuple(
-                dict.fromkeys((*keeper.alias_keys, extra.event_key, *extra.alias_keys))
-            )
+            _absorb(keeper, extra, since)
             drop.add(id(extra))
-    return [notice for notice in by_key.values() if id(notice) not in drop]
+    kept = [notice for notice in by_key.values() if id(notice) not in drop]
+    if since is None:
+        return kept
+    return [notice for notice in kept if _event_in_window(notice, since)]
 
 
 def events_from_webhook(event_name: str, payload: dict[str, Any] | None) -> list[ApiNotice]:
@@ -1770,6 +2034,7 @@ def run_once(
 
     results: list[dict[str, Any]] = []
     lines: list[str] = []
+    ask: list[dict[str, str]] = []
     for notice in notices:
         if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
             results.append(
@@ -1786,6 +2051,16 @@ def run_once(
         else:
             outcome = _file_through_driver(ctx, notice)
         results.append(outcome)
+        if str(outcome.get("reason") or "").startswith("applicant_unresolved"):
+            ask.append(
+                {
+                    "event_key": notice.event_key,
+                    "event_type": notice.event_type,
+                    "program_id": notice.program_id,
+                    "insured_name": notice.insured_name,
+                    "reason": str(outcome.get("reason") or ""),
+                }
+            )
         if outcome.get("status") in {"dry_run", "done"}:
             lines.append(_would_file_line(notice, outcome.get("detail") or {}))
             if live and outcome.get("status") == "done":
@@ -1822,10 +2097,20 @@ def run_once(
         "stall_alerted": alerted,
         "would_file_lines": lines,
         "would_file_count": len(lines),
+        "ask": ask,
         "results": results,
     }
     for line in lines:
         logger.warning("%s", line)
+    if ask:
+        logger.warning(
+            "ask: %s client notice(s) matched no single EZLynx applicant: %s",
+            len(ask),
+            "; ".join(
+                f"{item['event_key']} {item['insured_name']} ({item['reason']})"
+                for item in ask
+            ),
+        )
     return summary
 
 
