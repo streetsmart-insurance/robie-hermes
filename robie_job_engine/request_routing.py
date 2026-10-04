@@ -40,6 +40,9 @@ WORKER_FOR_ACTION = {
     "audit_verification": "audit-verification",
     "mortgagee_verification": "mortgagee-verification",
     "policy_change_verification": "policy-change-verification",
+    # Read-only confirmation pilot. Does not replace policy_change_verification
+    # and does not replace the weekly 4359 overdue checker.
+    "policy_change_confirmation": "policy-change-confirmation",
     "daily_verification_digest": "verification-digest",
 }
 
@@ -69,6 +72,7 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "audit_verification",
         "mortgagee_verification",
         "policy_change_verification",
+        "policy_change_confirmation",
         "daily_verification_digest",
     }
 )

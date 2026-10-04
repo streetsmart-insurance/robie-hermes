@@ -1,0 +1,197 @@
+{
+ "retrieve_live": true,
+ "task_id": "",
+ "assignment_event_id": "1133255175",
+ "source_version": "discussion 844935034 lastModified 2026-09-30T13:28:58.927+00:00 mostRecentNoteId 1133255175",
+ "case": {
+  "agency": "Streetsmart Insurance",
+  "applicant_id": "182400439",
+  "policy_id": "71575837",
+  "policy_number": "860521214",
+  "carrier": "Progressive",
+  "product": "Commercial Auto",
+  "term": "2026-07-25 to 2027-07-25",
+  "change_request_id": "820042962",
+  "task_id": "",
+  "discussion_id": "844935034",
+  "assignment_event_id": "1133255175",
+  "assignment_timestamp": "2026-09-30T13:28:58.927+00:00",
+  "original_assigner_id": "311006",
+  "request_date": "2026-09-16",
+  "requested_effective_date": "2026-06-22",
+  "due_date": "",
+  "submission_evidence": ""
+ },
+ "task": {
+  "id": "",
+  "current_owner_id": "Eimy Ramos",
+  "created_by": "",
+  "assigned_producer_id": "Sandy Santana"
+ },
+ "assignment_events": [
+  {
+   "id": "1133255175",
+   "timestamp": "2026-09-30T13:28:58.927+00:00",
+   "previous_owner_id": "311006",
+   "previous_owner_name": "Sandy Santana",
+   "current_owner_id": "Eimy Ramos"
+  }
+ ],
+ "discussions": [
+  {
+   "id": "844935034",
+   "title": "Policy Change Request - Auto | 860521214 Progressive",
+   "note_count": 13,
+   "notes_read": 1,
+   "body": "pls call progressive and see if they willing to backdate removing vehicle to the effective date of the policy term 2026 if not close out task TY"
+  }
+ ],
+ "reread": {
+  "current_owner_id": "Eimy Ramos",
+  "assignment_event_id": "1133255175",
+  "source_version": "discussion 844935034 lastModified 2026-09-30T13:28:58.927+00:00 mostRecentNoteId 1133255175"
+ },
+ "request": {
+  "source_id": "820042962",
+  "summary": "Client Center request (Yessina Morales, 9/16/2026): delete vehicle 3, 2002 Ford Econoline, effective 6/22/2026.",
+  "fields": {
+   "policy_number": {
+    "raw": "860521214",
+    "reference": "change request header"
+   },
+   "term": {
+    "raw": "2026-07-25 to 2027-07-25",
+    "reference": "change request header 7/25/2026-7/25/2027"
+   },
+   "named_insured": {
+    "raw": "3JR Contracting LLC",
+    "reference": "change request named insured"
+   },
+   "carrier": {
+    "raw": "Progressive",
+    "reference": "change request header: Progressive Insurance"
+   },
+   "product": {
+    "raw": "Commercial Auto",
+    "reference": "change request header: Auto (Commercial)"
+   },
+   "change_action": {
+    "raw": "Delete vehicle: 2002 Ford Econoline",
+    "reference": "Business Auto Information: Commercial Vehicle 3 Delete"
+   },
+   "effective_date": {
+    "raw": "06/22/2026",
+    "reference": "Policy Change Effective Date"
+   },
+   "vin": {
+    "raw": "1FMRE11L12HB45846",
+    "reference": "Commercial Vehicle 3 Vin"
+   }
+  }
+ },
+ "carrier_document": {
+  "source_id": "823968766",
+  "kind": "policy_change_declarations",
+  "issued": true,
+  "pages_missing": false,
+  "ocr_quality": "clear",
+  "summary": "Progressive Southeastern Ins Co amended Declarations Page (Form 6489 NC 05/25), dated Sep 28 2026: 'Your coverage has changed'; policy changes effective Sep 16 2026, processed Sep 25 2026 11:56 a.m.; premium change -$1,069.00; 'The 2002 FORD ECONOLINE has been removed.'",
+  "fields": {
+   "policy_number": {
+    "raw": "860521214",
+    "reference": "dec page p1"
+   },
+   "term": {
+    "raw": "2026-07-25 to 2027-07-25",
+    "reference": "dec page p1 Policy Period Jul 25, 2026 - Jul 25, 2027"
+   },
+   "named_insured": {
+    "raw": "3JR Contracting LLC",
+    "reference": "dec page p1 named insured"
+   },
+   "carrier": {
+    "raw": "Progressive",
+    "reference": "dec page p1 Underwritten by Progressive Southeastern Ins Co"
+   },
+   "product": {
+    "raw": "Commercial Auto",
+    "reference": "dec page p1"
+   },
+   "change_action": {
+    "raw": "Delete vehicle: 2002 Ford Econoline",
+    "reference": "dec page p1 Changes: The 2002 FORD ECONOLINE has been removed."
+   },
+   "effective_date": {
+    "raw": "September 16, 2026",
+    "reference": "dec page p1 Policy changes effective"
+   },
+   "premium_amount": {
+    "raw": "-1069.00",
+    "reference": "dec page p1 Premium change"
+   },
+   "premium_basis": {
+    "raw": "transaction",
+    "reference": "dec page p1 Premium change"
+   }
+  },
+  "unrequested": []
+ },
+ "ezlynx_record": {
+  "source_id": "policyDetail 485129656",
+  "summary": "EZLynx policy card: Auto (Commercial) 860521214, Progressive, transaction Policy Change dated 2026-09-25, full-term premium $2,330.",
+  "fields": {
+   "policy_number": {
+    "raw": "860521214",
+    "reference": "policy card"
+   },
+   "term": {
+    "raw": "2026-07-25 to 2027-07-25",
+    "reference": "policy card"
+   },
+   "named_insured": {
+    "raw": "3JR Contracting LLC",
+    "reference": "account header"
+   },
+   "carrier": {
+    "raw": "Progressive",
+    "reference": "policy card: Progressive Insurance"
+   },
+   "product": {
+    "raw": "Commercial Auto",
+    "reference": "policy card: Auto (Commercial)"
+   }
+  },
+  "unrequested": []
+ },
+ "linked_applicant": {
+  "name": "3JR Contracting LLC",
+  "source_id": "182400439",
+  "reference": "account header"
+ },
+ "filing": {
+  "verified": true,
+  "document_id": "823968766",
+  "name": "Policy change-Declarations Page (860521214).pdf",
+  "folder": "",
+  "label": "",
+  "policy_number": "860521214",
+  "filed_by": "Eimy Ramos",
+  "filed_at": "2026-09-29T15:27:59.73Z"
+ },
+ "readback": {
+  "ok": true,
+  "document_id": "823968766"
+ },
+ "directory_entry": {
+  "document_download_route": "Progressive: 'List of Carriers we can download documents' (Drive sheet 'Document Download', id 1LwfTBKqFqX2BigFv_b33D-sin4UClPql_NUhf7JbUHo, last modified 2022-06-20)"
+ },
+ "carrier_proof": {
+  "worker_identity": "SSRobie",
+  "environment": "TEST",
+  "host": "hermes-test-01",
+  "directory_route_verified": false,
+  "genuine_issued_endorsement": true,
+  "endorsement_document_id": "823968766",
+  "source": "ezlynx_filed_carrier_document"
+ }
+}

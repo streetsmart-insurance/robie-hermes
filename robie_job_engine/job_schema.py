@@ -216,6 +216,25 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "accounted for; no request is ever closed by the worker",
         "PolicyChangeVerifier",
     ),
+    "policy_change_confirmation": ExecutableSkillContract(
+        expected_destination_result=(
+            "a cited comparison and a proposed note exist, external writes are zero, "
+            "and the EZLynx task stays open for the producer to confirm and close"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="PolicyChangeConfirmationVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "the comparison cites the request, the issued endorsement, and the EZLynx record",
+            "external writes stay at zero",
+            "the producer is the confirmation owner and the original assigner receives the result",
+        ),
+        failure_conditions=(
+            "the case or original assigner is not exact",
+            "issued endorsement evidence is missing or unreadable",
+            "a write, confirmation, or closure is attempted",
+        ),
+    ),
     "daily_verification_digest": ExecutableSkillContract(
         expected_destination_result=(
             "the daily verification digest artifact exists and the digest email "
@@ -372,6 +391,13 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": False,
         "required": ("report_id",),
         "identity": ("policy_number", "change_request_created_date"),
+    },
+    "policy_change_confirmation": {
+        # Separate from policy_change_verification. Read-only pilot.
+        # Production stays blocked by the new-job-type gate.
+        "schema_verified": True,
+        "required": ("task_id", "assignment_event_id"),
+        "identity": ("task_id", "assignment_event_id", "policy_id"),
     },
     "daily_verification_digest": {
         "schema_verified": True,
