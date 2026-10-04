@@ -8,7 +8,7 @@ notice emails and runs the chain once per email.
 
 Pipeline per email::
 
-    Gmail (default staff mailboxes, unread, from no-reply@ or accounting@)
+    Gmail (default staff mailboxes, unread, from the Ascend notice senders)
       -> triage_notice()                       (read-only classification)
       -> resolve applicant_id                  (EZLynx PolicyApi, normalized policy number)
       -> resolve CSR login                    (cancellation only; Ascend producer)
@@ -22,6 +22,10 @@ Safety (non-negotiable):
 - DRY_RUN defaults ON. Live mode only with ``--live`` or
   ``ASCEND_DRIVER_LIVE=1``. Dry-run logs exactly what it would do
   (subject, applicant, CSR, note text, task payload) and writes nothing.
+- Each run appends a counts-only record to
+  ``/var/lib/robie-ascend-notice-driver/runs.jsonl`` (directory 0755,
+  file 0644). The hourly health check reads that file and does not read
+  the journal. The record has no subject, body, or applicant id.
   Dry-run requests ``gmail.readonly`` only: no mark-read, no notes, no
   labels, no Zapier post, and no ``driver_gate_for_write`` call.
 - Fail closed per email: triage ``needs_human_review``, unresolved
@@ -100,6 +104,7 @@ from . import ascend_notice_triage as triage
 from . import ezlynx_discussions as discussions
 from . import zapier_tasks
 from .ascend_api import AscendApiClient, configured_client as configured_ascend_client
+from .ascend_driver_stall import annotate_summary, append_run_record
 from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
 from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
 from .ezlynx_write_scope import EzlynxWriteScopeError
@@ -109,23 +114,46 @@ ROBIE_WAS_HERE = "Robie was here"
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAILBOX = "hello@streetsmart.insurance"
-DEFAULT_QUERY = (
-    "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+# Exact From addresses on the redacted notice fixtures (56 files). A query
+# that does not already limit From to these addresses, or to useascend.com,
+# has this clause appended so GitHub and other non-Ascend mail is never pulled.
+ASCEND_NOTICE_SENDERS: tuple[str, ...] = (
+    "no-reply@useascend.com",
+    "accounting@useascend.com",
+    "support@useascend.com",
 )
 DEFAULT_DUE_DAYS = 2
 
 # Scanned when neither --mailbox nor ASCEND_DRIVER_MAILBOX / ASCEND_DRIVER_MAILBOXES
 # is set. Also the hard allowlist: any other mailbox is refused unless
 # ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1.
+# Prod's live driver reads these 25 mailboxes (Carlo, 2026-10-04).
 DEFAULT_MAILBOXES: tuple[str, ...] = (
+    "carlo@streetsmart.insurance",
+    "jake@streetsmart.insurance",
+    "robie@streetsmart.insurance",
     "hello@streetsmart.insurance",
-    "mike@streetsmart.insurance",
-    "angie@streetsmart.insurance",
-    "eimy@streetsmart.insurance",
+    "accounting@streetsmart.insurance",
     "sandy@streetsmart.insurance",
     "zeus@streetsmart.insurance",
+    "certificates@streetsmart.insurance",
+    "daniela@streetsmart.insurance",
+    "angie@streetsmart.insurance",
+    "ana@streetsmart.insurance",
+    "jazmin@streetsmart.insurance",
+    "jackie@streetsmart.insurance",
     "taylor@streetsmart.insurance",
-    "jake@streetsmart.insurance",
+    "steffany@streetsmart.insurance",
+    "amber@streetsmart.insurance",
+    "ashley@streetsmart.insurance",
+    "jimmy@streetsmart.insurance",
+    "matthew@streetsmart.insurance",
+    "karla@streetsmart.insurance",
+    "mitchell@streetsmart.insurance",
+    "eimy@streetsmart.insurance",
+    "alejandro@streetsmart.insurance",
+    "mike@streetsmart.insurance",
+    "andrea@streetsmart.insurance",
 )
 ALLOWED_MAILBOXES = frozenset(mailbox.casefold() for mailbox in DEFAULT_MAILBOXES)
 
@@ -185,10 +213,9 @@ def parse_mailbox_list(raw: str) -> list[str]:
 
 
 def enforce_mailbox_allowlist(mailboxes: list[str]) -> list[str]:
-    """Refuse mailboxes outside the default staff set unless explicitly allowed.
+    """Refuse mailboxes outside the staff allowlist unless explicitly allowed.
 
-    The override is ``ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1``. Shared or
-    unknown mailboxes are not scanned by default.
+    The override is ``ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1``.
     """
     cleaned: list[str] = []
     refused: list[str] = []
@@ -219,7 +246,8 @@ def resolve_mailboxes(
     """Choose scan targets.
 
     Precedence: ``--mailboxes``, then ``ASCEND_DRIVER_MAILBOXES``, then
-    ``--mailbox``, then ``ASCEND_DRIVER_MAILBOX``, then the default eight.
+    ``--mailbox``, then ``ASCEND_DRIVER_MAILBOX``, then the default staff
+    mailboxes.
     ``None`` means the flag was omitted. An explicit empty string falls
     through the same way.
     """
@@ -240,11 +268,100 @@ def resolve_mailboxes(
     return enforce_mailbox_allowlist(chosen)
 
 
+def ascend_sender_filter() -> str:
+    """Gmail ``from:`` clause limited to the fixture-proven Ascend notice senders."""
+    return "from:(" + " OR ".join(ASCEND_NOTICE_SENDERS) + ")"
+
+
+DEFAULT_QUERY = "is:unread newer_than:2d " + ascend_sender_filter()
+
+_FROM_CLAUSE_RE = re.compile(r"from:\(([^)]*)\)|from:(\S+)", re.IGNORECASE)
+_ASCEND_DOMAIN = "useascend.com"
+
+
+def _token_is_ascend_sender(token: str) -> bool:
+    text = token.strip().strip("\"'").casefold()
+    if not text:
+        return False
+    if text in {sender.casefold() for sender in ASCEND_NOTICE_SENDERS}:
+        return True
+    if text in {_ASCEND_DOMAIN, f"@{_ASCEND_DOMAIN}"}:
+        return True
+    return text.endswith(f"@{_ASCEND_DOMAIN}")
+
+
+def _from_targets(query: str) -> list[str] | None:
+    """Return From targets, or None when the query has no ``from:`` operator."""
+    matches = list(_FROM_CLAUSE_RE.finditer(query))
+    if not matches:
+        return None
+    targets: list[str] = []
+    for match in matches:
+        grouped = match.group(1)
+        if grouped is not None:
+            targets.extend(
+                part.strip()
+                for part in re.split(r"(?i)\s+OR\s+", grouped)
+                if part.strip()
+            )
+        elif match.group(2):
+            targets.append(match.group(2))
+    return targets
+
+
+def _has_or_outside_parens(query: str) -> bool:
+    depth = 0
+    index = 0
+    while index < len(query):
+        char = query[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and query[index : index + 2].casefold() == "or":
+            before_ok = index == 0 or not query[index - 1].isalnum()
+            after_at = index + 2
+            after_ok = after_at >= len(query) or not query[after_at].isalnum()
+            if before_ok and after_ok:
+                return True
+        index += 1
+    return False
+
+
+def ensure_ascend_sender_filter(query: str) -> str:
+    """Keep a query from matching mail outside Ascend's notice senders.
+
+    An empty query becomes the default. A query whose every ``from:`` token
+    is an allowlisted sender or ``@useascend.com`` is left alone, including
+    a domain-wide ``from:useascend.com``. Anything else gets the sender
+    clause AND-ed on. A top-level ``OR`` is parenthesized first so a
+    non-Ascend alternative cannot survive the AND.
+    """
+    text = str(query or "").strip()
+    clause = ascend_sender_filter()
+    if not text:
+        return DEFAULT_QUERY
+    if clause.casefold() in text.casefold():
+        return text
+    targets = _from_targets(text)
+    if targets and all(_token_is_ascend_sender(target) for target in targets):
+        return text
+    if _has_or_outside_parens(text):
+        return f"({text}) {clause}"
+    return f"{text} {clause}"
+
+
 def configured_query(cli_value: str | None = None) -> str:
-    """Gmail query. An explicit CLI value wins; otherwise the env, then the default."""
+    """Gmail query. An explicit CLI value wins; otherwise the env, then the default.
+
+    The Ascend sender clause is applied unless the chosen query already
+    limits From to those addresses or to ``useascend.com``.
+    """
     if cli_value is not None and str(cli_value).strip():
-        return str(cli_value)
-    return str(os.environ.get("ASCEND_DRIVER_QUERY") or DEFAULT_QUERY)
+        raw = str(cli_value).strip()
+    else:
+        raw = str(os.environ.get("ASCEND_DRIVER_QUERY") or "").strip() or DEFAULT_QUERY
+    return ensure_ascend_sender_filter(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -1990,7 +2107,7 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
             for item in results
         ],
     }
-    return summary
+    return annotate_summary(summary)
 
 
 def _notice_allow_modify(*, dry_run: bool) -> bool:
@@ -2096,7 +2213,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--query",
         default=None,
-        help="Gmail search. Defaults to ASCEND_DRIVER_QUERY or the Ascend sender filter.",
+        help="Gmail search. Defaults to ASCEND_DRIVER_QUERY or the built-in "
+        "Ascend sender filter. A query that does not already limit From to "
+        "Ascend notice addresses has that filter added.",
     )
     parser.add_argument(
         "--due-days",
@@ -2124,9 +2243,14 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_driver(ctx)
     except Exception as exc:  # noqa: BLE001 - top-level fail closed
         logger.error("driver failed closed: %s: %s", type(exc).__name__, exc)
-        print(json.dumps({"dry_run": dry_run, "fatal": f"{type(exc).__name__}: {exc}"}))
+        summary = {"dry_run": dry_run, "fatal": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(summary))
+        if append_run_record(summary) is None:
+            logger.warning("could not write ascend driver run log")
         return 1
     print(json.dumps(summary, indent=2, default=str))
+    if append_run_record(summary) is None:
+        logger.warning("could not write ascend driver run log")
     return 0
 
 

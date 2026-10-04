@@ -24,6 +24,9 @@ Runs via cron (hourly). Checks the things that have actually bitten us:
       - 4359 Tuesday email proof (evidence-latest.json from most recent Tue)
       - Chat intake liveness (reuses production_preflight.check_chat_intake)
       - Preflight alert delivery (journal JSON alert_delivery_failed)
+  11. Ascend notice driver stall: last 4 live runs saw actionable notices
+      and filed nothing. Reads the counts file the driver writes. Does
+      not read the journal (the health-check user cannot).
 
 Output:
   - JSON status file (always written, even when healthy)
@@ -1152,6 +1155,31 @@ def check_preflight_alert_delivery(journal: str | None = None) -> tuple[bool, st
     return True, "preflight alert delivery ok", extra
 
 
+def check_ascend_driver_stall() -> tuple[bool, str, dict]:
+    """Alert when actionable Ascend notices were seen and nothing was filed.
+
+    Reads ``/var/lib/robie-ascend-notice-driver/runs.jsonl`` (or
+    ``ASCEND_DRIVER_STATE_DIR`` / ``ASCEND_DRIVER_RUN_LOG``). A missing log
+    or fewer than four completed live runs is quiet. Dry runs do not count.
+    Ignored and unrecognized notices do not count as actionable. The
+    health-check user on Production cannot read the system journal, so
+    this probe does not call journalctl.
+    """
+    extra: dict = {}
+    try:
+        _prepend_release_import()
+        from robie_job_engine.ascend_driver_stall import evaluate_stall_file
+
+        verdict = evaluate_stall_file()
+    except Exception as exc:
+        extra["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        return True, f"ascend driver stall not visible: {type(exc).__name__}", extra
+    extra.update(verdict)
+    if verdict.get("status") == "ALERT":
+        return False, str(verdict.get("detail") or "ascend driver stalled"), extra
+    return True, str(verdict.get("detail") or "ascend driver not stalled"), extra
+
+
 def check_duplicate_guard() -> tuple[bool, str, dict]:
     """Does the outbound duplicate guard still behave correctly?
 
@@ -1440,6 +1468,7 @@ PROD_ONLY_CHECK_NAMES = frozenset({
     "tuesday_4359_proof",
     "chat_intake",
     "preflight_alert_delivery",
+    "ascend_driver_stall",
 })
 
 TEST_CHECKS = [
@@ -1483,6 +1512,7 @@ CHECKS = [
     ("tuesday_4359_proof", check_4359_tuesday_proof),
     ("chat_intake", check_chat_intake),
     ("preflight_alert_delivery", check_preflight_alert_delivery),
+    ("ascend_driver_stall", check_ascend_driver_stall),
     ("duplicate_guard", check_duplicate_guard),
 ]
 

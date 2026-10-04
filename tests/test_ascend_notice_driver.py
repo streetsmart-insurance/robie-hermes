@@ -1294,7 +1294,7 @@ def test_driver_has_no_delete_surface():
 # ---------------------------------------------------------------------------
 
 
-def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
+def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys, tmp_path):
     """On a fatal fail-closed, stdout must parse as JSON (log lines go to
     stderr) because the driver workflow feeds stdout to json.tool."""
     monkeypatch.delenv("ROBIE_ENV", raising=False)
@@ -1302,6 +1302,7 @@ def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
     monkeypatch.delenv("ASCEND_DRIVER_MAILBOX", raising=False)
     monkeypatch.delenv("ASCEND_DRIVER_MAILBOXES", raising=False)
     monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
+    monkeypatch.setenv("ASCEND_DRIVER_STATE_DIR", str(tmp_path))
     rc = driver.main([])
     assert rc == 1
     out, _err = capsys.readouterr()
@@ -1695,21 +1696,19 @@ def test_default_query_and_mailboxes(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     assert driver.DEFAULT_QUERY == (
-        "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+        "is:unread newer_than:2d from:(no-reply@useascend.com OR "
+        "accounting@useascend.com OR support@useascend.com)"
     )
     assert driver.configured_query() == driver.DEFAULT_QUERY
-    assert driver.resolve_mailboxes() == [
-        "hello@streetsmart.insurance",
-        "mike@streetsmart.insurance",
-        "angie@streetsmart.insurance",
-        "eimy@streetsmart.insurance",
-        "sandy@streetsmart.insurance",
-        "zeus@streetsmart.insurance",
-        "taylor@streetsmart.insurance",
-        "jake@streetsmart.insurance",
-    ]
+    assert driver.resolve_mailboxes() == list(driver.DEFAULT_MAILBOXES)
+    assert len(driver.DEFAULT_MAILBOXES) == 25
+    assert "carlo@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
+    assert "certificates@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
+    assert "andrea@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
     monkeypatch.setenv("ASCEND_DRIVER_QUERY", "is:unread newer_than:1d")
-    assert driver.configured_query() == "is:unread newer_than:1d"
+    assert driver.configured_query() == (
+        "is:unread newer_than:1d " + driver.ascend_sender_filter()
+    )
     assert driver.configured_query("is:unread from:accounting@useascend.com") == (
         "is:unread from:accounting@useascend.com"
     )
@@ -1718,10 +1717,13 @@ def test_default_query_and_mailboxes(monkeypatch):
 def test_mailbox_outside_allowlist_is_refused(monkeypatch):
     monkeypatch.delenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", raising=False)
     with pytest.raises(driver.MailboxAllowlistError):
-        driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance")
-    monkeypatch.setenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", "1")
+        driver.resolve_mailboxes(mailbox="outsider@streetsmart.insurance")
     assert driver.resolve_mailboxes(mailbox="robie@streetsmart.insurance") == [
         "robie@streetsmart.insurance"
+    ]
+    monkeypatch.setenv("ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES", "1")
+    assert driver.resolve_mailboxes(mailbox="outsider@streetsmart.insurance") == [
+        "outsider@streetsmart.insurance"
     ]
 
 
@@ -1737,6 +1739,8 @@ def test_workflow_sets_delegation_sa_and_prod_ascend_secret():
     assert "workflow_dispatch" in trigger
     assert "# schedule:" in text
     assert "ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com" in text
+    assert "/opt/streetsmart-hermes/venv/bin/python" in text
+    assert ".hermes/hermes-agent/venv/bin/python" not in text
     assert "secrets/ascend-prod-api-key/versions/latest" in text
     assert "secrets/ascend-api-key/versions/latest" not in text
     assert "ROBIE_EZLYNX_WRITE_SCOPE=all" in text
@@ -1754,7 +1758,20 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
     assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in drop_in
     assert "Environment=ROBIE_PLAYGROUND=1" in drop_in
     assert "\n[Install]\n" not in unit
-    assert not (root / "deploy/systemd/robie-ascend-notice-driver.timer").exists()
+    assert "ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_notice_driver --due-days 2" in unit
+    assert ".hermes/hermes-agent/venv/bin/python" not in unit
+    assert "Environment=ASCEND_DRIVER_LIVE" not in unit
+    assert "--live" not in unit
+    timer = (root / "deploy/systemd/robie-ascend-notice-driver.timer").read_text(encoding="utf-8")
+    assert "Persistent=true" in timer
+    assert "OnUnitActiveSec=15min" in timer
+    example = (
+        root / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf.example"
+    ).read_text(encoding="utf-8")
+    assert "Environment=ASCEND_DRIVER_LIVE=1" in example
+    assert not (
+        root / "deploy/systemd/robie-ascend-notice-driver.service.d/30-live.conf"
+    ).exists()
     scope_line = "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all"
     hits = []
     for folder in (root / "deploy/systemd", root / "systemd"):
