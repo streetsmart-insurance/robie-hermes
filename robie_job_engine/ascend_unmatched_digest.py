@@ -164,16 +164,15 @@ _INTRO = (
     "To have one filed automatically, update the policy number in Ascend or EZLynx so they match."
 )
 _UNMATCHED_ASK = (
-    "Robie couldn't match this Ascend notice to an EZLynx client by policy number. "
     "Update the policy number in Ascend or EZLynx so they match, and Robie will file it."
 )
 _TYPO_CHECK = "Check whether the policy number is a typo in Ascend or EZLynx."
 _FIX_LINE_CHECKED = (
-    "Fix the policy number in EZLynx or Ascend and it drops off this list "
+    "Fix the policy number in Ascend or EZLynx and it drops off this list "
     "once Robie matches it and files the note."
 )
 _FIX_LINE_AS_SHOWN = (
-    "Fix the policy number in EZLynx and it drops off this list "
+    "Fix the policy number in Ascend or EZLynx and it drops off this list "
     "once Robie matches it and files the note. "
     "The policy number is as Ascend sent it."
 )

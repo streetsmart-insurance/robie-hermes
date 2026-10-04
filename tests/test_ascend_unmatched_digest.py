@@ -423,10 +423,11 @@ def test_sample_digest_is_plain_english():
     assert "More than one EZLynx client matched." in body
     assert "Bare Insured, intent to cancel." in body
     assert "Ascend did not include a policy number." in body
+    assert "Robie couldn't match this Ascend notice" not in body
     assert body.count(digest._UNMATCHED_ASK) == 4
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
-        "Fix the policy number in EZLynx and it drops off this list once Robie matches it and files the note. "
+        "Fix the policy number in Ascend or EZLynx and it drops off this list once Robie matches it and files the note. "
         "The policy number is as Ascend sent it."
     )
     assert "or Ascend" not in body
@@ -1610,7 +1611,8 @@ def test_recheck_reads_the_policy_number_from_ascend(tmp_path, monkeypatch):
     assert "Policy ID HO-NEW" in row["body"]
     assert "HO-OLD" not in row["body"]
     assert "HO-NEW" in result["body"]
-    assert "or Ascend" in result["body"]
+    assert "Fix the policy number in Ascend or EZLynx" in result["body"]
+    assert "The policy number is as Ascend sent it." not in result["body"]
     assert os.environ.get(source.LIVE_ENV) != "1"
 
     class Spent:
@@ -2775,7 +2777,8 @@ def test_dry_run_does_not_store_the_reread_policy_number(tmp_path, monkeypatch):
     assert json.loads(row["program_json"])["policy_number"] == "HO-OLD"
     assert row["ready_at"] in (None, "")
     assert "HO-NEW" in result["body"]
-    assert "or Ascend" in result["body"]
+    assert "Fix the policy number in Ascend or EZLynx" in result["body"]
+    assert "The policy number is as Ascend sent it." not in result["body"]
 
 
 def test_production_digest_uses_the_poll_read_client(tmp_path, monkeypatch, capsys):
@@ -2847,8 +2850,8 @@ def test_production_digest_uses_the_poll_read_client(tmp_path, monkeypatch, caps
     assert code == 0
     assert calls["configured"] == 0
     assert calls["gets"] == ["/v1/programs/prog-1"]
+    assert "Fix the policy number in Ascend or EZLynx" in printed
     assert "The policy number is as Ascend sent it." in printed
-    assert "or Ascend" not in printed
     row = store.list_unmatched()[0]
     assert row["policy_numbers"] == ["HO-998877"]
 
