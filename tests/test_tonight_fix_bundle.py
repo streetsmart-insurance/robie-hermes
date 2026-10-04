@@ -658,6 +658,7 @@ class ProveFollowUpTests(unittest.TestCase):
             def __init__(self):
                 self._session_tasks = {}
                 self._background_tasks = {task}
+                self._session_tasks = {"chat:spaces/1:thread": task}
                 self.calls = []
 
             def interrupt_session_activity(self, key, chat_id):
@@ -1746,7 +1747,7 @@ class ProveSessionReleaseTests(unittest.TestCase):
             adapter = Adapter()
             event = Event()
             await terminate_gateway_agent(
-                adapter, event, None, reason="gateway_max_turn_seconds", store=None
+                adapter, event, "history-owner", reason="gateway_max_turn_seconds", store=None
             )
             self.assertEqual(adapter.gateway_runner._session_history[real], [])
             self.assertEqual(adapter.gateway_runner.session_store.session_id, "fresh-session")
@@ -1824,6 +1825,32 @@ class ProveSessionReleaseTests(unittest.TestCase):
         self.assertNotIn("conversation_job_for_event", idle)
 
     def test_stop_kills_the_recording_process_group(self):
+        # Keep subreaper state isolated from the rest of the test runner.
+        if os.environ.get("ROBIE_TEST_RECORDING_SUBREAPER") != "1":
+            child_code = """
+import ctypes, os, sys, unittest
+# unittest discovery adds tests/ only to the parent interpreter's sys.path.
+# Bootstrap that same import root explicitly in this isolated interpreter.
+sys.path.insert(0, os.path.join(os.getcwd(), "tests"))
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+os.environ["ROBIE_TEST_RECORDING_SUBREAPER"] = "1"
+unittest.main(module="test_tonight_fix_bundle", argv=[
+    "recording-reaper-proof",
+    "ProveSessionReleaseTests.test_stop_kills_the_recording_process_group",
+])
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", child_code], cwd=str(ROOT),
+                # Keep the hosted CI root-only path even when a local runner
+                # supplies PYTHONPATH=.:tests, so this import regression stays covered.
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
         proc = subprocess.Popen(
             ["bash", "-c", "sleep 60 & sleep 60 & wait"],
             start_new_session=True,
@@ -1857,6 +1884,21 @@ class ProveSessionReleaseTests(unittest.TestCase):
             self.assertIsNotNone(proc.poll())
             self.assertNotEqual(proc.returncode, 0)
             for child in children:
+                # Killed grandchildren are adopted by this isolated subreaper.
+                # Reap them ourselves instead of depending on container PID 1.
+                deadline = time.monotonic() + 3
+                try:
+                    waited, status = os.waitpid(child, os.WNOHANG)
+                except ChildProcessError:
+                    # The shell can reap a child before it is killed itself.
+                    # Absence remains mandatory; a live or zombie PID fails.
+                    self.assertFalse(Path(f"/proc/{child}").exists(), child)
+                    continue
+                while waited == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    waited, status = os.waitpid(child, os.WNOHANG)
+                self.assertEqual(waited, child, "recording child did not exit")
+                self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
                 self.assertFalse(Path(f"/proc/{child}").exists(), child)
             self.assertEqual(saved["failure"], "stopped")
         finally:
@@ -2447,11 +2489,11 @@ class Round6ConversationTests(unittest.TestCase):
             first = file_note_to_existing_discussion(
                 client, "220250093", body, title_hint=title, ledger_path=ledger
             )
-            # No note text and no returned id. A stable +1 is filed.
-            self.assertEqual(first["status"], "filed")
-            self.assertTrue(first["read_back"])
-            self.assertEqual(first["note_id"], "new-note")
-            self.assertEqual(first.get("verified_by"), "discussion")
+            # No note text and no returned id: count alone is not our receipt.
+            self.assertEqual(first["status"], "held")
+            self.assertFalse(first["read_back"])
+            self.assertIsNone(first["note_id"])
+            self.assertIsNone(first.get("verified_by"))
             self.assertEqual(first["discussion_title"], title)
             self.assertEqual(client.appended, 1)
             self.assertNotIn("note_id", str(first.get("reason") or ""))
@@ -2460,7 +2502,9 @@ class Round6ConversationTests(unittest.TestCase):
             )
         self.assertEqual(second["status"], "already_posted")
         self.assertFalse(second.get("read_back"))
-        self.assertIn("Want me to add it again?", second["reason"])
+        self.assertIn("couldn't confirm", second["reason"].casefold())
+        self.assertNotIn("already added", second["reason"].casefold())
+        self.assertNotIn("Want me to add it again?", second["reason"])
         self.assertEqual(client.appended, 1)
 
     def test_holder_note_and_field_reply_say_what_was_and_was_not_done(self):

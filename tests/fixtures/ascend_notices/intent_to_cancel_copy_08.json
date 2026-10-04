@@ -1,0 +1,13 @@
+{
+  "family": "intent_to_cancel_copy",
+  "from": "no-reply@useascend.com",
+  "subject": "[URGENT] Fixture Insured A LLC - StreetSmart Insurance Agency: Policy(s) at risk for cancellation",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain",
+    "    text/html (22505b)",
+    "  application/pdf (685719b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": ""
+}

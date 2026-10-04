@@ -1,0 +1,67 @@
+name: Disabled bounded Test deployment dispatcher
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+env:
+  CLOUD_DEPLOY_ENABLED: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_ENABLED }}
+  CLOUD_DEPLOY_COMMIT: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_COMMIT }}
+  CLOUD_DEPLOY_TREE: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_TREE }}
+  CLOUD_DEPLOY_PR: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_PR }}
+  CLOUD_DEPLOY_PR_ID: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_PR_ID }}
+
+jobs:
+  dispatch:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'streetsmart-insurance/robie-hermes' &&
+      vars.ROBIE_TEST_CLOUD_DEPLOY_ENABLED == 'TEST_DEPLOY_V1' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/robie-test deploy ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: write
+    steps:
+      - name: Verify immutable controller before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('CLOUD_DEPLOY_COMMIT', '')
+              tree = os.environ.get('CLOUD_DEPLOY_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_COMMIT }}
+          persist-credentials: false
+      - name: Authorize original human request and dispatch only Test deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/test_cloud_deploy.py dispatch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-cloud-dispatch-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/cloud-deploy-request.json
+            ${{ runner.temp }}/cloud-deploy-controller.json
+          retention-days: 30
+          if-no-files-found: error

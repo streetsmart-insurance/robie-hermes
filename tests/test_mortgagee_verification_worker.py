@@ -14,6 +14,7 @@ import types
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
+from tests.durable_temp import ROOT as DURABLE_TEST_ROOT
 
 import pytest
 
@@ -142,7 +143,7 @@ def job():
 @pytest.fixture()
 def durable_db():
     """A durable (non-/tmp) sqlite path: DurableWorkLedger rejects /tmp."""
-    base = Path.home() / ".cache" / "robie-mortgagee-tests"
+    base = DURABLE_TEST_ROOT / "mortgagee-tests"
     base.mkdir(parents=True, exist_ok=True)
     tmpdir = Path(tempfile.mkdtemp(dir=str(base)))
     db = tmpdir / "jobs.db"

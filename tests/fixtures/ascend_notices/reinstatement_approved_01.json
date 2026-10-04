@@ -1,0 +1,13 @@
+{
+  "family": "reinstatement_approved",
+  "from": "no-reply@useascend.com",
+  "subject": "Your reinstatement request has been approved for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/mixed",
+    "  multipart/alternative",
+    "    text/plain (775b)",
+    "    text/html (17941b)",
+    "  application/pdf (146674b) [att:<redacted>.pdf]"
+  ],
+  "text_plain": "Hi Zeus,\r\n\r\nReinstatement has been requested for Fixture Insured A LLC.\r\n\r\nPlease note that the carrier does not have to accept this request for reinstatement from Ascend. If the carrier denies the reinstatement, the policy will remain canceled and you and the insured will be notified.\r\n\r\nPlease find the reinstatement notice(s) attached below.\r\n\r\nPlease do not hesitate to reach out with any questions.\r\n\r\nBest,\r\n\r\nTeam Ascend\r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by Ascend Ascend"
+}

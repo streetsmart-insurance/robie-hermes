@@ -111,6 +111,14 @@ def requested_message_applicant(payload: dict) -> str | None:
             found.add(applicant)
     for applicant in re.findall(r'\b(?:applicant(?:\s+id)?|ezlynx\s+account(?:\s+id)?)(?:\s*[:#]\s*|\s+)([1-9]\d*)\b', text, flags=re.I):
         found.add(applicant)
+    # One id the user typed, alone or after a name ("Buster Brown 26356199").
+    # Digits that appear only inside a URL stay on the host check above.
+    # Digits inside a policy number or other hyphenated token (TEST-HO-20260911-E01)
+    # are not an applicant. A second different id still fails closed.
+    # This does not widen the allowlist.
+    prose = re.sub(r'https?://\S+', ' ', text)
+    for applicant in re.findall(r'(?<![\dA-Za-z-])([1-9]\d{5,9})(?![\dA-Za-z-])', prose):
+        found.add(applicant)
     if len(found) != 1:
         return None
     selected = next(iter(found))
@@ -339,6 +347,12 @@ def applicant_is_write_allowed(value: object) -> bool:
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
+    from .safety_seal import assert_write_checks_intact, driver_gate_for_write
+
+    # The driver lease and the startup snapshot are checked before the
+    # allowlist global. Agent code that widens that global fails here.
+    assert_write_checks_intact()
+    driver_gate_for_write()
     applicant_id = normalize_applicant_id(value)
     if not applicant_is_write_allowed(applicant_id):
         display = applicant_id or "<missing>"

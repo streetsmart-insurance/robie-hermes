@@ -46,6 +46,10 @@ LABEL_NOT_FOUND = "LABEL_NOT_FOUND"
 LABEL_NOT_UNIQUE = "LABEL_NOT_UNIQUE"
 LABEL_REFUSED = "LABEL_REFUSED"
 LABEL_APPLY_FAILED = "LABEL_APPLY_FAILED"
+# The list call itself failed or the client cannot list. Distinct from a
+# successful list that has no unique "Ascend NOC" row. Callers may file the
+# note and record label_not_applied. Never invent an id in this case.
+LABEL_LIST_UNAVAILABLE = "LABEL_LIST_UNAVAILABLE"
 
 
 class OrgLabelError(RuntimeError):
@@ -121,19 +125,24 @@ def select_unique_org_label(
 
 
 def plan_exact_label(client: Any, required_name: str = ASCEND_NOC_LABEL) -> dict[str, str]:
-    """Read-only unique lookup. Does not apply and does not create."""
+    """Read-only unique lookup. Does not apply and does not create.
+
+    A failed or missing list raises ``LABEL_LIST_UNAVAILABLE``. That is not
+    a resolved label: the id is unknown and must not be invented.
+    """
     if not hasattr(client, "list_organization_labels"):
         raise OrgLabelError(
-            LABEL_APPLY_FAILED,
+            LABEL_LIST_UNAVAILABLE,
             "EZLynx client cannot list organization labels",
         )
     try:
         rows = normalize_org_label_rows(client.list_organization_labels())
     except OrgLabelError:
         raise
-    except Exception as exc:  # noqa: BLE001 - fail closed
+    except Exception as exc:  # noqa: BLE001 - list unavailable; do not invent an id
         raise OrgLabelError(
-            LABEL_APPLY_FAILED, f"organization label list failed: {type(exc).__name__}"
+            LABEL_LIST_UNAVAILABLE,
+            f"organization label list failed: {type(exc).__name__}",
         ) from exc
     record = select_unique_org_label(rows, required_name)
     return {

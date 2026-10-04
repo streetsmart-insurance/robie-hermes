@@ -68,18 +68,28 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         )
         self.assertNotIn("JobContextManager(ROBIE_JOB_DB)", adapter)
 
-    def test_dm_new_intent_detaches_parked_hitl_before_routing(self):
+    def test_owned_new_intent_detaches_parked_hitl_before_routing(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
             encoding="utf-8"
         )
-        classify_at = adapter.index("classify_human_reply(text, interaction)")
+        dispatch_at = adapter.index("async def _dispatch_message(")
+        owner_at = adapter.index("if not await asyncio.to_thread(pending_input_owned", dispatch_at)
+        conversation_at = adapter.index("if pending_reply_is_conversation(text):", owner_at)
+        classify_at = adapter.index("classify_human_reply(text, interaction)", conversation_at)
         detach_at = adapter.index("queue.deactivate_conversation", classify_at)
         admin_at = adapter.index("admin_response = await asyncio.to_thread", detach_at)
         resume_at = adapter.index("queue.resume_human_input", admin_at)
+        self.assertLess(owner_at, conversation_at)
+        self.assertLess(conversation_at, classify_at)
         self.assertLess(classify_at, detach_at)
         self.assertLess(detach_at, admin_at)
         self.assertLess(admin_at, resume_at)
-        self.assertIn('source_space_type in {"DIRECT_MESSAGE", "DM"}', adapter)
+        bind_at = adapter.index("await self._bind_inbound_job_thread(", admin_at)
+        self.assertLess(owner_at, bind_at)
+        self.assertLess(bind_at, resume_at)
+        refusal = adapter[owner_at:conversation_at]
+        self.assertIn('pending human input owner mismatch', refusal)
+        self.assertIn('return', refusal)
 
     def test_hitl_direct_resume_reopens_and_runs_generic_chat_job(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(

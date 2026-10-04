@@ -23,6 +23,26 @@ DEFAULT_RECORDING_ROOT = "/opt/streetsmart-hermes/robie-job-engine/data/recordin
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 
 
+def touch_browser_capture_stop_files(db_path: str, job_id: str) -> None:
+    """Tell browser_capture and ffmpeg to stop. The stop file is the signal."""
+    if not db_path or not job_id:
+        return
+    try:
+        rows = RecordingStore(db_path).list_for_job(job_id)
+    except Exception:
+        return
+    for row in rows:
+        stop = str(row.get("stop_file") or "").strip()
+        if not stop:
+            continue
+        try:
+            path = Path(stop)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+        except OSError:
+            continue
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
