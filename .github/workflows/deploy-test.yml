@@ -3,15 +3,50 @@ name: Deploy immutable release to Test
 on:
   workflow_dispatch:
     inputs:
+      cloud_comment_id:
+        description: Optional original human PR comment ID for the disabled cloud route
+        required: false
+        type: string
+      operation:
+        description: Deploy Test, or certify retained bytes after independent Test QA
+        required: true
+        default: deploy
+        type: choice
+        options: [deploy, install-stopped, certify]
+      test_run_id:
+        description: For certify, the successful Test deployment run
+        required: false
+        type: string
+      test_artifact_id:
+        description: For certify, its installed-test-release artifact ID
+        required: false
+        type: string
+      release_sha256:
+        description: For certify, the exact installed TGZ digest
+        required: false
+        type: string
+      qa_evidence:
+        description: For certify, independent Test QA JSON for this exact main commit
+        required: false
+        type: string
       confirmation:
-        description: Type DEPLOY_TO_HERMES_TEST_01
+        description: Type DEPLOY_TO_HERMES_TEST_01, INSTALL_TEST_KEPT_STOPPED or CERTIFY_TEST_PACKAGE
         required: true
         type: string
 
 permissions:
   actions: read
   contents: read
+  issues: read
+  pull-requests: read
   id-token: write
+
+env:
+  CLOUD_DEPLOY_ENABLED: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_ENABLED }}
+  CLOUD_DEPLOY_COMMIT: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_COMMIT }}
+  CLOUD_DEPLOY_TREE: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_TREE }}
+  CLOUD_DEPLOY_PR: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_PR }}
+  CLOUD_DEPLOY_PR_ID: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_PR_ID }}
 
 concurrency:
   group: robie-hermes-test-deploy
@@ -19,7 +54,11 @@ concurrency:
 
 jobs:
   deploy-test:
-    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (!inputs.cloud_comment_id || (vars.ROBIE_TEST_CLOUD_DEPLOY_ENABLED == 'TEST_DEPLOY_V1' && inputs.operation == 'deploy')) &&
+      ((inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01') ||
+       (inputs.operation == 'install-stopped' && inputs.confirmation == 'INSTALL_TEST_KEPT_STOPPED'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -28,13 +67,53 @@ jobs:
       TEST_VM: hermes-test-01
       STAGING_DIR: /var/tmp/robie-test-deploy/${{ github.sha }}
       SSH_KEY: /tmp/hermes-test-deploy
+      CLOUD_COMMENT_ID: ${{ inputs.cloud_comment_id }}
     steps:
+      - name: Verify immutable controller before checkout
+        if: inputs.cloud_comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re, urllib.request
+          try:
+              sha = os.environ.get('CLOUD_DEPLOY_COMMIT', '')
+              tree = os.environ.get('CLOUD_DEPLOY_TREE', '')
+              assert re.fullmatch('[0-9a-f]{40}', sha) and re.fullmatch('[0-9a-f]{40}', tree)
+              assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+              assert os.environ['GITHUB_REF_PROTECTED'] == 'true'
+              request = urllib.request.Request('https://api.github.com/repos/streetsmart-insurance/robie-hermes/git/commits/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  revision = json.load(response)
+              assert revision['sha'] == sha and revision['tree']['sha'] == tree
+          except Exception:
+              raise SystemExit('APPROVED_CONTROLLER_CHECKOUT_REFUSED') from None
+          PY
+      - name: Check out pinned cloud receiving validator
+        if: inputs.cloud_comment_id != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ vars.ROBIE_TEST_CLOUD_DEPLOY_COMMIT }}
+          path: .cloud-controller
+          persist-credentials: false
+      - name: Preserve pinned controller outside runtime checkout
+        if: inputs.cloud_comment_id != ''
+        run: mv .cloud-controller "${RUNNER_TEMP}/cloud-controller"
+      - name: Independently authorize original cloud comment
+        if: inputs.cloud_comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B "${RUNNER_TEMP}/cloud-controller/scripts/test_cloud_deploy.py" receive
+
       - name: Check out protected main
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Re-run verification gate
         run: |
-          python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "pypdf>=5,<7"
+          python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "pypdf>=5,<7" "PyYAML>=6.0,<7"
           PYTHONPATH=. python -m robie_job_engine.regression_battery --ci
           PYTHONPATH=. python -m pytest -q \
             tests/test_ringcentral_workbooks.py \
@@ -58,6 +137,8 @@ jobs:
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
+          PYTHONPATH=.:tests python -m pytest -q tests/test_chat_review_concurrency.py tests/test_durable_turn_generations.py tests/test_chat_reply_recovery.py tests/test_reply_and_go_guards.py tests/test_discussion_note_readback.py
+          PYTHONPATH=. python -m pytest -q tests/test_release_promotion.py tests/test_production_deploy_workflow.py tests/test_chat_release_scope.py tests/test_test_deploy_workflow.py tests/test_test_stopped_install.py
 
       - name: Build immutable artifact
         id: release
@@ -83,6 +164,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Revalidate cloud request and exact built bytes before cloud authentication
+        if: inputs.cloud_comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILT_DIGEST: ${{ steps.release.outputs.sha256 }}
+        run: |
+          python3 -I -B "${RUNNER_TEMP}/cloud-controller/scripts/test_cloud_deploy.py" receive
+          python3 - <<'PYDIGEST'
+          import json, os, pathlib
+          request = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'cloud-deploy-request.json').read_text())
+          assert request['sha256'] == os.environ['BUILT_DIGEST']
+          PYDIGEST
+
       - name: Authenticate with short-lived Test identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
@@ -102,16 +196,46 @@ jobs:
             --project="${PROJECT_ID}" --zone="${ZONE}" \
             --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
 
+      - name: Require OS Login for cloud deployment
+        if: inputs.cloud_comment_id != ''
+        run: |
+          set -euo pipefail
+          value=$(gcloud compute instances describe hermes-test-01 --project=streetsmart-hermes-poc --zone=us-east1-b --format='value(metadata.items.filter("key=enable-oslogin").map().extract(value).flatten())')
+          test "${value^^}" = TRUE
+      - name: Register bounded cloud deployment key
+        if: inputs.cloud_comment_id != ''
+        env:
+          OSLOGIN_SSH_KEY_TTL: 1h
+        run: |
+          bash "${RUNNER_TEMP}/cloud-controller/scripts/ensure-gcloud-ssh-key.sh"
+          echo "SSH_KEY=${HOME}/.ssh/google_compute_engine" >> "${GITHUB_ENV}"
+      - name: Execute authorized Test deployment under retained host lock
+        if: inputs.cloud_comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.transfer_bundle.outputs.artifact-id }}
+          ARTIFACT_SHA256: ${{ steps.transfer_bundle.outputs.artifact-digest }}
+          INSTALLER_SHA256: ${{ steps.release.outputs.installer_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I -B "${RUNNER_TEMP}/cloud-controller/scripts/test_cloud_deploy.py" receive
+          python3 -I -B "${RUNNER_TEMP}/cloud-controller/scripts/test_cloud_deploy_claim.py" > "${RUNNER_TEMP}/cloud-execute.py"
+          gcloud compute ssh hermes-test-01 --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap --ssh-key-file="${SSH_KEY}" --ssh-key-expire-after=1h --quiet --ssh-flag=-T --ssh-flag=-oBatchMode=yes --ssh-flag=-oConnectTimeout=20 --command='sudo -n /usr/bin/python3 -I -B -' < "${RUNNER_TEMP}/cloud-execute.py" > "${RUNNER_TEMP}/cloud-execution-result.json"
+
       - name: Create bounded Test staging directory
+        if: inputs.cloud_comment_id == ''
         shell: bash
         run: |
           set -euo pipefail
-          ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          if [[ -z "${CLOUD_COMMENT_ID}" ]]; then
+            ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          fi
           connected=false
           for attempt in 1 2 3; do
             if gcloud compute ssh "${TEST_VM}" \
               --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-              --ssh-key-file="${SSH_KEY}" \
+              --ssh-key-file="${SSH_KEY}" --ssh-key-expire-after=1h \
               --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"; then
               connected=true
               break
@@ -124,6 +248,7 @@ jobs:
           fi
 
       - name: Transfer exact artifact and installer
+        if: inputs.cloud_comment_id == ''
         timeout-minutes: 4
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -135,13 +260,73 @@ jobs:
           python scripts/transfer-test-artifact.py
 
       - name: Install and independently verify Test
+        if: inputs.cloud_comment_id == ''
+        env:
+          INSTALL_OPERATION: ${{ inputs.operation }}
         run: |
+          set -euo pipefail
+          extra=()
+          case "${INSTALL_OPERATION}" in
+            deploy) ;;
+            install-stopped) extra=(--keep-stopped) ;;
+            *) exit 2 ;;
+          esac
           archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive }}')"
           checksum="${archive}.sha256"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --ssh-key-file="${SSH_KEY}" \
-            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}'"
+            --ssh-key-file="${SSH_KEY}" --ssh-key-expire-after=1h \
+            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}' --skip-policy-setup ${extra[*]}"
+
+      - name: Retain stopped bytes without live certification
+        if: inputs.operation == 'install-stopped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stopped-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/test-transfer/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Retain installed Test package for independent QA
+        if: inputs.operation == 'deploy'
+        env:
+          ARCHIVE: ${{ steps.release.outputs.archive }}
+          RELEASE_DIGEST: ${{ steps.release.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/verified-test-package"
+          mkdir -p "${bundle}"
+          cp "${ARCHIVE}" "${ARCHIVE}.sha256" "${bundle}/"
+          short="${GITHUB_SHA:0:12}"
+          for name in test-deploy-evidence.json; do
+            gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --ssh-key-file="${SSH_KEY}" --ssh-key-expire-after=1h \
+              "${TEST_VM}:/opt/streetsmart-hermes-test/deployments/${short}/${name}" "${bundle}/${name}"
+          done
+          PYTHONPATH=. python -m robie_job_engine.release_promotion verify-installed \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}"
+
+      - name: Retain exact installed bytes; this does not authorize promotion
+        if: inputs.operation == 'deploy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/verified-test-package/*
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Preserve cloud request and claim evidence
+        if: always() && inputs.cloud_comment_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-cloud-receipt-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/cloud-deploy-request.json
+            ${{ runner.temp }}/cloud-deploy-controller.json
+            ${{ runner.temp }}/cloud-execution-result.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Publish immutable Test evidence
         if: always()
@@ -153,5 +338,53 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Artifact SHA-256: \`${{ steps.release.outputs.sha256 }}\`"
             echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Operation: ${{ inputs.operation }} (install-stopped is NOT live or certified)"
             echo "- Production deployment: \`false\`"
           } >>"${GITHUB_STEP_SUMMARY}"
+
+  certify-test:
+    if: github.ref == 'refs/heads/main' && !inputs.cloud_comment_id && inputs.operation == 'certify' && inputs.confirmation == 'CERTIFY_TEST_PACKAGE'
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate retained Test bytes and independent reviewer evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_RUN_ID: ${{ inputs.test_run_id }}
+          TEST_ARTIFACT_ID: ${{ inputs.test_artifact_id }}
+          RELEASE_DIGEST: ${{ inputs.release_sha256 }}
+          QA_EVIDENCE: ${{ inputs.qa_evidence }}
+          REVIEWER: ${{ github.actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/verified-test-package"
+          PYTHONPATH=. python -m robie_job_engine.release_promotion download-installed \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}" \
+            --run-id "${TEST_RUN_ID}" --artifact-id "${TEST_ARTIFACT_ID}"
+          python - <<'PYQA'
+          import json, os, pathlib
+          from robie_job_engine.release_promotion import bind_qa_to_install
+          qa = json.loads(os.environ["QA_EVIDENCE"])
+          # Bind independent evidence to the actual verified download above.
+          # QA reviewer must be the authenticated workflow actor.
+          qa = bind_qa_to_install(qa, os.environ["TEST_RUN_ID"],
+                                  os.environ["TEST_ARTIFACT_ID"], os.environ["REVIEWER"])
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "verified-test-package/test-qa-evidence.json"
+          target.write_text(json.dumps(qa, sort_keys=True) + "\n", encoding="utf-8")
+          PYQA
+          PYTHONPATH=. python -m robie_job_engine.release_promotion verify \
+            --directory "${bundle}" --commit "${GITHUB_SHA}" --sha256 "${RELEASE_DIGEST}"
+      - name: Retain exact Test-verified package without redeploying or rebuilding
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/verified-test-package/*
+          retention-days: 30
+          if-no-files-found: error

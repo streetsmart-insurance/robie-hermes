@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import subprocess
+import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -51,8 +53,26 @@ CHECK_CHAT_INTAKE = "chat-intake"
 CHECK_CHAT_RUNTIME = "chat-runtime"
 CHAT_JOB_ACTION = "hermes.google_chat_task"
 DEFAULT_CHAT_INTAKE_FRESH_SECONDS = 6 * 60 * 60
+# hermes-gateway writes this line to the gateway log, not the systemd journal.
+DEFAULT_GATEWAY_LOG = "/opt/streetsmart-hermes/.hermes/logs/gateway.log"
+# Historical EnvironmentFile. The preflight unit does not load it: the file
+# is not on the host, and the Chat key is set on the unit itself.
+DEFAULT_PREFLIGHT_ENV_FILE = "/etc/streetsmart-hermes/robie-recording.env"
+PREFLIGHT_UNIT = "robie-production-preflight.service"
+EXIT_OK = 0
+EXIT_CHECK_FAILED = 2
+EXIT_ALERT_DELIVERY_FAILED = 3
 LISTENER_CONNECTED_MARKER = "[GoogleChat] Connected"
+LISTENER_DISCONNECTED_MARKER = "[GoogleChat] Disconnected"
 LISTENER_HANDOFF_MARKER = "durable executable handoff"
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+_ISO_TS = re.compile(
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:Z|[+-]\d{2}:?\d{2})?)"
+)
+_SYSLOG_TS = re.compile(
+    r"\b([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\b"
+)
+_TIME_ONLY_TS = re.compile(r"^\s*(\d{2}:\d{2}:\d{2})(?:[.,]\d+)?\b")
 LISTENER_FATAL_MARKERS = (
     "pubsub_reconnect_exhausted",
     "Pub/Sub reconnect failed",
@@ -504,12 +524,218 @@ def _read_gateway_journal(
             "400",
             "--no-pager",
             "-o",
-            "cat",
+            "short-iso",
             "--since",
             "24 hours ago",
         ]
     )
     return (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def _gateway_log_path(explicit: str | Path | None = None) -> Path:
+    if explicit:
+        return Path(explicit)
+    raw = os.environ.get("ROBIE_GATEWAY_LOG", "").strip()
+    return Path(raw or DEFAULT_GATEWAY_LOG)
+
+
+def _parse_iso_timestamp(raw: str) -> datetime | None:
+    text = raw.strip().replace(",", ".", 1)
+    if " " in text and "T" not in text:
+        text = text.replace(" ", "T", 1)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    offset = re.search(r"([+-]\d{2})(\d{2})$", text)
+    if offset and text[-3] != ":":
+        text = text[: offset.start()] + offset.group(1) + ":" + offset.group(2)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_log_timestamp(line: str, *, now: datetime | None = None) -> datetime | None:
+    """Pull a timestamp off a gateway or journal line. None when the line has none."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    clock = clock.astimezone(timezone.utc)
+    iso = _ISO_TS.search(line)
+    if iso:
+        parsed = _parse_iso_timestamp(iso.group(1))
+        if parsed is not None:
+            return parsed
+    syslog = _SYSLOG_TS.search(line)
+    if syslog:
+        month_name, day, hms = syslog.groups()
+        try:
+            month = datetime.strptime(month_name, "%b").month
+            hour, minute, second = (int(part) for part in hms.split(":"))
+            parsed = datetime(
+                clock.year, month, int(day), hour, minute, second, tzinfo=timezone.utc
+            )
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed > clock + timedelta(days=2):
+                parsed = parsed.replace(year=clock.year - 1)
+            return parsed
+    time_only = _TIME_ONLY_TS.match(line[:40])
+    if time_only:
+        hour, minute, second = (int(part) for part in time_only.group(1).split(":"))
+        try:
+            parsed = clock.replace(
+                hour=hour, minute=minute, second=second, microsecond=0
+            )
+        except ValueError:
+            return None
+        if parsed > clock + timedelta(hours=12):
+            parsed -= timedelta(days=1)
+        return parsed
+    return None
+
+
+def _marker_kind(line: str) -> tuple[str, str] | None:
+    if LISTENER_DISCONNECTED_MARKER in line:
+        return ("disconnected", LISTENER_DISCONNECTED_MARKER)
+    if LISTENER_CONNECTED_MARKER in line:
+        return ("connected", LISTENER_CONNECTED_MARKER)
+    folded = line.casefold()
+    for marker in (*LISTENER_FATAL_MARKERS, *LISTENER_STALL_MARKERS):
+        if marker.casefold() in folded:
+            return ("error", marker)
+    return None
+
+
+def _listener_events(
+    text: str,
+    *,
+    source: int = 0,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Marker events in file order. A later line inherits the previous timestamp."""
+    events: list[dict[str, Any]] = []
+    last_ts: datetime | None = None
+    for seq, line in enumerate(str(text or "").splitlines()):
+        stamped = _parse_log_timestamp(line, now=now)
+        if stamped is not None:
+            last_ts = stamped
+        parsed = _marker_kind(line)
+        if parsed is None:
+            continue
+        kind, detail = parsed
+        event_ts = stamped
+        if event_ts is None and last_ts is not None:
+            event_ts = last_ts + timedelta(microseconds=seq + 1)
+        events.append(
+            {
+                "kind": kind,
+                "detail": detail,
+                "at": event_ts,
+                "seq": seq,
+                "source": source,
+            }
+        )
+    return events
+
+
+def _events_from_log_path(
+    path: Path,
+    *,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Stream marker lines only. Missing file is empty, not an error."""
+    events: list[dict[str, Any]] = []
+    last_ts: datetime | None = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for seq, line in enumerate(handle):
+                stamped = _parse_log_timestamp(line, now=now)
+                if stamped is not None:
+                    last_ts = stamped
+                parsed = _marker_kind(line)
+                if parsed is None:
+                    continue
+                kind, detail = parsed
+                event_ts = stamped
+                if event_ts is None and last_ts is not None:
+                    event_ts = last_ts + timedelta(microseconds=seq + 1)
+                events.append(
+                    {
+                        "kind": kind,
+                        "detail": detail,
+                        "at": event_ts,
+                        "seq": seq,
+                        "source": 1,
+                    }
+                )
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    return events, None
+
+
+def _latest_listener_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Most recent marker. Timestamped lines beat lines that have no time at all."""
+    if not events:
+        return None
+    stamped = [item for item in events if item.get("at") is not None]
+    pool = stamped or events
+    return max(
+        pool,
+        key=lambda item: (
+            item.get("at") or _EPOCH,
+            int(item.get("source") or 0),
+            int(item.get("seq") or 0),
+        ),
+    )
+
+
+def classify_listener_journal(text: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Observe gateway logs only. The latest Connected/Disconnected/error wins.
+
+    A Connected anywhere in the blob is not enough: a later Disconnected or
+    error means the listener is down. Does not send a Chat job.
+    """
+    events = _listener_events(text, now=now)
+    latest = _latest_listener_event(events)
+    blob = str(text or "")
+    folded = blob.casefold()
+    latest_kind = str(latest["kind"]) if latest else ""
+    error = next((item for item in reversed(events) if item["kind"] == "error"), None)
+    fatal = next((item for item in LISTENER_FATAL_MARKERS if item.casefold() in folded), None)
+    stall = next((item for item in LISTENER_STALL_MARKERS if item.casefold() in folded), None)
+    if error is not None and latest_kind == "error":
+        detail = str(error["detail"])
+        if detail in LISTENER_FATAL_MARKERS:
+            fatal = detail
+        elif detail in LISTENER_STALL_MARKERS:
+            stall = detail
+    has_connect = any(item["kind"] == "connected" for item in events)
+    return {
+        "connected": latest_kind == "connected",
+        "has_connect": has_connect,
+        "latest": latest_kind or None,
+        "handoff": LISTENER_HANDOFF_MARKER in blob,
+        "fatal": fatal if latest_kind == "error" or not has_connect else None,
+        "stall": stall if latest_kind == "error" or not has_connect else None,
+        "wedged": latest_kind == "error" or (not has_connect and error is not None),
+    }
+
+
+def _gateway_unit_active(
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> bool:
+    try:
+        data = probe_hermes_gateway(runner=runner)
+    except Exception:
+        return False
+    return bool(data.get("active"))
 
 
 def check_chat_intake(
@@ -518,37 +744,101 @@ def check_chat_intake(
     now: datetime | None = None,
     journal: str | None = None,
     journal_reader: Callable[[], str] | None = None,
+    gateway_log: str | None = None,
+    gateway_log_path: str | Path | None = None,
     fresh_seconds: int | None = None,
+    gateway_active: bool | None = None,
+    gateway_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
-    """Yes if Chat intake is live. Silent/wedged listener + active gateway is no.
+    """Yes when the Chat listener is connected and hermes-gateway is active.
 
-    Recent DurableChatEventQueue / Chat-job activity is yes. Recency alone is
-    not the wedge signal (#26 can leave a still-fresh prior job). A stall or
-    fatal marker in hermes-gateway logs is no. Idle Connected without a stall
-    is yes so a quiet morning does not page. No inbound and no Connected is
-    no: a silent listener while hermes-gateway is active.
-    Does not @robie. Does not send a test Chat job.
+    Connected is read from the gateway log file (default
+    ``/opt/streetsmart-hermes/.hermes/logs/gateway.log``, override
+    ``ROBIE_GATEWAY_LOG`` or ``gateway_log_path``) and from the systemd
+    journal. The most recent Connected, Disconnected, or error marker wins.
+    A quiet inbox is INFO while that listener is up — Chat traffic is often
+    zero for a night or a weekend. FAIL when the gateway is inactive, the
+    latest marker is a disconnect or an error newer than the last connect,
+    or neither source has a connect marker.
+
+    Injected log text defaults the gateway to active so unit tests do not
+    call systemctl. Pass ``gateway_active`` or ``gateway_runner`` to cover
+    a down unit. Does not @robie. Does not send a test Chat job.
     """
     clock = now or datetime.now(timezone.utc)
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
+    clock = clock.astimezone(timezone.utc)
     window = fresh_seconds if fresh_seconds is not None else _fresh_seconds()
     inbound_at = last_chat_inbound_at(db_path)
     age = (clock - inbound_at).total_seconds() if inbound_at is not None else None
     recent = age is not None and age >= 0 and age <= window
+    log_path = _gateway_log_path(gateway_log_path)
+    log_error: str | None = None
+    live = (
+        journal is None
+        and gateway_log is None
+        and gateway_log_path is None
+    )
+    if gateway_active is None:
+        if gateway_runner is not None or live:
+            gateway_active = _gateway_unit_active(runner=gateway_runner)
+        else:
+            gateway_active = True
     if journal is None:
         reader = journal_reader or _read_gateway_journal
         try:
             journal = reader()
         except Exception:
             journal = ""
-    state = classify_listener_journal(journal or "")
-    if state["wedged"]:
-        reason = state["fatal"] or state["stall"] or "Pub/Sub stall"
+    events = _listener_events(journal or "", source=0, now=clock)
+    if gateway_log is None and (gateway_log_path is not None or live):
+        file_events, log_error = _events_from_log_path(log_path, now=clock)
+        events.extend(file_events)
+    elif gateway_log is not None:
+        events.extend(_listener_events(gateway_log, source=1, now=clock))
+    if not gateway_active:
         return _result(
             CHECK_CHAT_INTAKE,
             False,
-            f"{GATEWAY_UNIT} active; Chat listener wedged ({reason})",
+            f"{GATEWAY_UNIT} inactive",
+        )
+    latest = _latest_listener_event(events)
+    has_connect = any(item["kind"] == "connected" for item in events)
+    latest_kind = str(latest["kind"]) if latest else ""
+    if latest_kind == "error" or (
+        not has_connect and any(item["kind"] == "error" for item in events)
+    ):
+        detail = str(latest["detail"]) if latest and latest_kind == "error" else ""
+        if not detail:
+            error = next(item for item in reversed(events) if item["kind"] == "error")
+            detail = str(error["detail"])
+        return _result(
+            CHECK_CHAT_INTAKE,
+            False,
+            f"{GATEWAY_UNIT} active; Chat listener wedged ({detail})",
+        )
+    if has_connect and latest_kind == "disconnected":
+        return _result(
+            CHECK_CHAT_INTAKE,
+            False,
+            f"{GATEWAY_UNIT} active; Chat listener disconnected "
+            "(latest marker newer than last connect)",
+        )
+    if not has_connect:
+        unread = f"; gateway log unreadable ({log_error})" if log_error else ""
+        if latest_kind == "disconnected":
+            return _result(
+                CHECK_CHAT_INTAKE,
+                False,
+                f"{GATEWAY_UNIT} active; Chat listener disconnected "
+                f"(no {LISTENER_CONNECTED_MARKER} in journal or {log_path})",
+            )
+        return _result(
+            CHECK_CHAT_INTAKE,
+            False,
+            f"{GATEWAY_UNIT} active; Chat listener silent "
+            f"(no {LISTENER_CONNECTED_MARKER} in journal or {log_path}{unread})",
         )
     if recent:
         stamp = inbound_at.isoformat() if inbound_at else "recent"
@@ -557,26 +847,14 @@ def check_chat_intake(
             True,
             f"last Chat inbound {stamp} ({int(age)}s ago)",
         )
-    if state["connected"]:
-        return _result(
-            CHECK_CHAT_INTAKE,
-            True,
-            f"{GATEWAY_UNIT} active; Chat Pub/Sub listener connected (idle)",
-        )
-    if inbound_at is not None:
-        return _result(
-            CHECK_CHAT_INTAKE,
-            False,
-            f"{GATEWAY_UNIT} active; Chat listener silent "
-            f"(last inbound {inbound_at.isoformat()})",
-        )
-    path = Path(db_path or _jobs_db())
-    return _result(
+    when = inbound_at.isoformat() if inbound_at is not None else "never"
+    quiet = _result(
         CHECK_CHAT_INTAKE,
-        False,
-        f"{GATEWAY_UNIT} active; Chat listener silent "
-        f"(no Chat inbound in {path})",
+        True,
+        f"INFO: listener connected; no inbound since {when}",
     )
+    quiet["severity"] = "INFO"
+    return quiet
 
 
 def check_chat_runtime(
@@ -658,33 +936,51 @@ def _post_failure(
     send = poster if poster is not None else post_as_chat_app
     finder = dm_finder if dm_finder is not None else find_direct_message_space
     targets: list[str] = []
+    attempted: list[str] = []
+    errors: list[str] = []
     dm_errors: list[str] = []
     space = _chat_space()
     space_posted = False
     if space.startswith("spaces/"):
-        send(space, text)
-        targets.append(space)
-        space_posted = True
+        attempted.append(space)
+        try:
+            send(space, text)
+        except Exception as exc:
+            errors.append(f"{space}: {type(exc).__name__}: {exc}")
+        else:
+            targets.append(space)
+            space_posted = True
     for email in fail_notify_emails():
+        label = f"dm:{email}"
+        attempted.append(label)
         try:
             dm_space = finder(email)
         except Exception as exc:
             dm_errors.append(f"{email}: {type(exc).__name__}")
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
             continue
         if not str(dm_space or "").startswith("spaces/"):
             dm_errors.append(f"{email}: no existing DM space")
+            errors.append(f"{label}: no existing DM space")
             continue
         if dm_space in targets:
             continue
         try:
             send(dm_space, text)
-            targets.append(dm_space)
         except Exception as exc:
             dm_errors.append(f"{email}: {type(exc).__name__}")
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            continue
+        targets.append(dm_space)
+    # Space success keeps DM lookup noise in dm_errors. chat_post_error is the
+    # reason the alert itself did not land.
+    post_error = None if space_posted else ("; ".join(errors) or "Chat alert was not posted")
     return {
         "space_posted": space_posted,
         "targets": targets,
+        "attempted": attempted,
         "dm_errors": dm_errors,
+        "chat_post_error": post_error,
     }
 
 
@@ -772,19 +1068,29 @@ def run_production_preflight(
         try:
             notify = _post_failure(message, poster=poster, dm_finder=dm_finder)
             posted = bool(notify.get("space_posted"))
+            post_error = notify.get("chat_post_error")
         except Exception as exc:
             post_error = f"{type(exc).__name__}: {exc}"
+            if not notify.get("attempted"):
+                space = _chat_space()
+                notify = {
+                    "attempted": [space] if space.startswith("spaces/") else [],
+                    "targets": [],
+                    "dm_errors": [],
+                }
+        delivered = bool(notify.get("targets"))
         payload = {
             "ok": False,
             "failed_check": result["name"],
             "checks": completed,
             "chat_posted": posted,
+            "chat_post_error": post_error,
+            "alert_targets": list(notify.get("attempted") or []),
+            "alert_delivery_failed": not delivered,
             "fail_notify_targets": list(notify.get("targets") or []),
             "fail_notify_dm_errors": list(notify.get("dm_errors") or []),
             "message": message,
         }
-        if post_error:
-            payload["chat_post_error"] = post_error
         _attach_tab_flush(
             payload,
             db_path=db_path,
@@ -797,6 +1103,9 @@ def run_production_preflight(
         "failed_check": None,
         "checks": completed,
         "chat_posted": False,
+        "chat_post_error": None,
+        "alert_targets": [],
+        "alert_delivery_failed": False,
         "fail_notify_targets": [],
         "fail_notify_dm_errors": [],
         "message": None,
@@ -810,6 +1119,103 @@ def run_production_preflight(
     return report
 
 
+def resolve_preflight_env_files(
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> list[tuple[str, bool]]:
+    """EnvironmentFile paths this process was pointed at, and whether each exists.
+
+    ``ROBIE_PREFLIGHT_ENV_FILE`` wins. Otherwise ask systemd which files the
+    preflight unit loads. The unit does not load the missing
+    ``robie-recording.env``. An empty systemd answer stays empty so the
+    startup line does not invent that path.
+    """
+    explicit = os.environ.get("ROBIE_PREFLIGHT_ENV_FILE", "").strip()
+    paths: list[str] = []
+    if explicit:
+        paths.append(explicit)
+    else:
+        run = runner or _run
+        try:
+            proc = run(
+                [
+                    "systemctl",
+                    "show",
+                    PREFLIGHT_UNIT,
+                    "-p",
+                    "EnvironmentFiles",
+                    "--value",
+                ]
+            )
+            for match in re.findall(r"(/[^ \n]+)", proc.stdout or ""):
+                if match not in paths:
+                    paths.append(match)
+        except Exception:
+            paths = []
+    return [(path, Path(path).is_file()) for path in paths]
+
+
+def format_preflight_startup(
+    env_files: list[tuple[str, bool]] | None = None,
+) -> str:
+    """One line: which Chat key and env file this process resolved. No secrets."""
+    key = os.environ.get("ROBIE_CHAT_SA_KEY_FILE", "").strip()
+    if key.startswith("{"):
+        shown_key = "(inline JSON refused)"
+    else:
+        shown_key = key or "(unset)"
+    files = env_files if env_files is not None else resolve_preflight_env_files()
+    shown_files = ", ".join(
+        f"{path} ({'present' if exists else 'missing'})" for path, exists in files
+    ) or "(none)"
+    return (
+        f"preflight startup: ROBIE_CHAT_SA_KEY_FILE={shown_key}; "
+        f"env file {shown_files}"
+    )
+
+
+def preflight_result_payload(report: dict[str, Any]) -> dict[str, Any]:
+    """JSON result. Always includes the post error and the targets we tried."""
+    return {
+        "ok": bool(report.get("ok")),
+        "failed_check": report.get("failed_check"),
+        "chat_posted": bool(report.get("chat_posted")),
+        "chat_post_error": report.get("chat_post_error"),
+        "alert_targets": list(report.get("alert_targets") or []),
+        "alert_delivery_failed": bool(report.get("alert_delivery_failed")),
+        "checks": [
+            {"name": item["name"], "ok": item["ok"], "evidence": item["evidence"]}
+            for item in report.get("checks") or []
+        ],
+    }
+
+
+def preflight_exit_code(report: dict[str, Any]) -> int:
+    if report.get("ok"):
+        return EXIT_OK
+    if report.get("alert_delivery_failed"):
+        return EXIT_ALERT_DELIVERY_FAILED
+    return EXIT_CHECK_FAILED
+
+
+def parse_preflight_alert_state(text: str) -> dict[str, Any] | None:
+    """Last preflight JSON object in a journal blob, if one was printed."""
+    found: dict[str, Any] | None = None
+    for line in str(text or "").splitlines():
+        brace = line.find("{")
+        if brace < 0:
+            continue
+        try:
+            obj = json.loads(line[brace:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and (
+            "alert_delivery_failed" in obj or "chat_posted" in obj
+        ):
+            found = obj
+    return found
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -820,20 +1226,22 @@ def main() -> int:
     )
     parser.add_argument("--db", default="")
     args = parser.parse_args()
+    print(format_preflight_startup(), file=sys.stderr)
     report = run_production_preflight(db_path=args.db or None)
-    print(json.dumps(
-        {
-            "ok": report["ok"],
-            "failed_check": report.get("failed_check"),
-            "chat_posted": report.get("chat_posted"),
-            "checks": [
-                {"name": item["name"], "ok": item["ok"], "evidence": item["evidence"]}
-                for item in report.get("checks") or []
-            ],
-        },
-        sort_keys=True,
-    ))
-    return 0 if report["ok"] else 2
+    payload = preflight_result_payload(report)
+    print(json.dumps(payload, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "alert_delivery_failed": payload["alert_delivery_failed"],
+                "alert_targets": payload["alert_targets"],
+                "chat_post_error": payload["chat_post_error"],
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    return preflight_exit_code(report)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "enabled": "DISABLED",
+  "host": "hermes-test-01",
+  "commit": "42e872f4c86fc4b4e37f859fc390f0b7c832f373",
+  "sha256": "876dc38f2e53ab49771888fc710fe222b6384f7dce7b38be146190d4ad25a064",
+  "operations": [
+    "prepare-hold",
+    "hold",
+    "install",
+    "verify"
+  ],
+  "actor_ids": [
+    320188404
+  ],
+  "issue": null,
+  "helper_sha256": null,
+  "not_before": null,
+  "expires": null,
+  "approved_outage_reference": null,
+  "external_fence_reference": null,
+  "drain_evidence_reference": null,
+  "operator_handoff_reference": null,
+  "external_producers_fenced": false,
+  "manual_runners_fenced": false,
+  "workers_drained": false,
+  "exclusive_operator_handoff": false,
+  "gateway_already_inactive": false,
+  "cron_outage_included": false,
+  "no_resume": true,
+  "expected_prior_target": null,
+  "prepare_hold_authorized": false,
+  "auxiliary_units": [
+    "robie-verification-audit-4246.timer",
+    "robie-verification-audit-4246.service",
+    "robie-verification-manual-renewal-4247.timer",
+    "robie-verification-manual-renewal-4247.service",
+    "robie-verification-mortgagee-4372.timer",
+    "robie-verification-mortgagee-4372.service"
+  ],
+  "worker_lock": null,
+  "safe_stop": {},
+  "drain_timeout_seconds": 600,
+  "pr_id": null
+}

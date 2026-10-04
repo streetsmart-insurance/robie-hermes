@@ -556,7 +556,8 @@ class BlandVoiceDispatcher:
     Construction/wiring only - the worker never instantiates this itself.
     The API key is supplied by the engine wiring (read from the secret
     store at runtime); it is never logged, never written to files, and
-    never placed in a URL.
+    never placed in a URL. HTTP goes through bland_transport, which owns
+    the vendor host and the Test live-call gates.
 
     Dispatch discipline: POST the call, then immediately read back
     GET /v1/calls/{call_id}. ``call_placed`` follows classify_voice_result:
@@ -567,39 +568,25 @@ class BlandVoiceDispatcher:
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://api.bland.ai",
         timeout_s: float = 30.0,
     ) -> None:
         if not api_key:
             raise ValueError("BlandVoiceDispatcher requires an api_key")
         self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
 
-    # -- stdlib HTTP -----------------------------------------------------
+    # -- HTTP via the single Bland transport (no host string here) -------
     def _request_json(
         self, method: str, path: str, body: Optional[dict[str, Any]] = None
     ) -> dict[str, Any]:
-        import json as _json
-        import urllib.request as _request
+        from .bland_transport import get_call, post_call
 
-        data = None
-        headers = {
-            "Authorization": self._api_key,
-            "Content-Type": "application/json",
-        }
-        if body is not None:
-            data = _json.dumps(body).encode("utf-8")
-        req = _request.Request(
-            self._base_url + path, data=data, headers=headers, method=method
-        )
-        with _request.urlopen(req, timeout=self._timeout_s) as resp:
-            raw = resp.read().decode("utf-8") if resp is not None else "{}"
-        try:
-            parsed = _json.loads(raw)
-        except ValueError:
-            parsed = {}
-        return parsed if isinstance(parsed, dict) else {}
+        if method == "POST":
+            return post_call(body or {}, api_key=self._api_key, execute=True)
+        if method == "GET":
+            call_id = str(path).rstrip("/").rsplit("/", 1)[-1]
+            return get_call(call_id, api_key=self._api_key, execute=True)
+        raise ValueError("unsupported Bland method")
 
     # -- port implementation ----------------------------------------------
     def dispatch_voice_call(self, request: BlandCallRequest) -> dict[str, Any]:

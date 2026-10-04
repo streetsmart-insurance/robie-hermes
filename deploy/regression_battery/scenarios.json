@@ -194,6 +194,14 @@
       "scenario": "message-intake:queue-during-active-work",
       "closed": false,
       "note": "Chat intake failed while an email owned the execution run. Queue receipts must not acquire the execution slot, and pending emails must remain unread. Deployment and business verification tracked separately."
+    },
+    {
+      "id": "chat-725-727-reconciliation",
+      "class": "chat-generation-and-ingress-ownership",
+      "new_failure_mode": true,
+      "scenario": "chat:exact-owner-env-stop-write-boundary",
+      "closed": false,
+      "note": "Offline tests/test_chat_reconciliation.py selectively adapts 725 stop, progress and write-boundary failures onto 727 generation safeguards. CI fixtures are not runtime proof. Unmarked Test-thread reply routing still requires ingress ownership design; no deployment or incident closure."
     }
   ]
 }

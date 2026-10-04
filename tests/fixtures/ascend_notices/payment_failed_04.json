@@ -1,0 +1,11 @@
+{
+  "family": "payment_failed",
+  "from": "no-reply@useascend.com",
+  "subject": "Payment failed for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (1266b)",
+    "  text/html (29848b)"
+  ],
+  "text_plain": "Hi Mike,\r\n\r\nFixture Insured A LLC attempted to pay their invoice, but the payment failed because of card being declined.\r\n\r\nWe have already notified your customer about the failure and provided them with a payment link. However, you may also wish to remind them directly. The payment link is provided below for your reference.\r\n\r\nCustomer\r\nFixture Insured A LLC\r\n\r\nReference\r\nIFIXTURE10\r\n\r\nSubtotal $273.95\r\nTransaction fee $95.56\r\nTotal (Mastercard •••• 0000)\r\nFailed because of card being declined\r\n\r\n$290.87\r\n\r\nTheir policy(s):\r\n\r\nPolicy General Liability (XS Brokers)\r\nPolicy ID CBL58682451P-85\r\nEffective date 04/01/2026\r\n \r\n\r\nView details ( https://dashboard.useascend.com/programs/a2786f7c-d081-4b19-a374-72b6fd7ec635 )\r\n\r\nGet payment link ( https://checkout.useascend.com/streetsmart_insurance_agency/invoices/8af371f2-a0c3-433f-a69e-d4923c1f62c3?s_token=FIXTURE )\r\n\r\nSubmitting payment through Ascend does not guarantee coverage for the policy. This is determined by the carrier who may still need to bind the policy to confirm coverage.\r\n\r\nThe email has been delivered from a send-only address. Please do not reply to this message. If you have any queries, please contact Customer Support.\r\n\r\nPowered by Ascend Ascend"
+}

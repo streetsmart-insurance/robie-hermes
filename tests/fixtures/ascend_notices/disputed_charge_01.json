@@ -1,0 +1,11 @@
+{
+  "family": "disputed_charge",
+  "from": "no-reply@useascend.com",
+  "subject": "[Action Needed] Disputed charge for Fixture Insured A LLC",
+  "mime_structure": [
+    "multipart/alternative",
+    "  text/plain (1680b)",
+    "  text/html (23006b)"
+  ],
+  "text_plain": "Hi Fixture Person,\r\n\r\nWe received notification that your customer, Fixture Insured A LLC, disputed the following payment on Sep 27, 2026:\r\n\r\nPayment amount$165.27Invoice typeInstallment paymentDescriptionSeptember installmentPayment methodMASTERCARD•••• 0000Payment dateSep 19, 2026\r\n\r\nWhile StreetSmart Insurance Agency is not liable for the disputed amount, lost disputes and loan cancelations will affect your commission.\r\n\r\nThe disputed payment has been reported to Honor Capital as a failed payment, and Honor will return the funds. The customer's account will become overdue. If the customer does not catch up on payments, the policy and loan will be canceled.\r\n\r\nWe recommend that you take the following actions immediately:* Collect and submit evidence to counter the dispute by Oct 26, 2026.\r\n* Contact the customer to understand why they disputed the payment.* If the customer wants to cancel the policy and loan, submit a policy cancelation request with the carrier and initiate cancelation in Ascend.\r\n* If the customer does not want to cancel the policy and loan, they will need to resubmit payment via Ascend.\r\n* If the customer is waiting for a refund, let them know that refunds from a canceled policy can take 30-90 days, since the funds have to come back from the carrier first. We'll process their refund once funds arrive.\r\n\r\nView and submit evidence ( https://dashboard.useascend.com/disputes/4dde7259-499d-415a-a6da-e2da1bfcd558 )View all disputes for your organization here ( https://dashboard.useascend.com/accounting/disputes ). Learn more about disputes here ( https://support.useascend.com/articles/2716159562-disputes ).\r\n\r\nPowered by AscendAscend"
+}

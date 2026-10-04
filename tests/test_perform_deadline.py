@@ -7,7 +7,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from durable_temp import durable_temporary_directory
 
@@ -24,6 +24,7 @@ from robie_job_engine.perform_deadline import (
     DEFAULT_PERFORM_TIMEOUT_SECONDS,
     resolve_perform_idle_seconds,
     resolve_perform_max_seconds,
+    wait_for_perform_result,
 )
 from robie_job_engine.request_routing import WORKER_FOR_ACTION
 from robie_job_engine.store import JobStore, report_current_job_perform_progress
@@ -67,7 +68,18 @@ class PerformDeadlineTests(unittest.TestCase):
         self.store = JobStore(self.db)
 
     def tearDown(self):
-        self.tmp.cleanup()
+        # The ceiling test's worker keeps writing the sqlite wal after the
+        # engine returns. Cleanup can see the directory fill back up.
+        last: BaseException | None = None
+        for _ in range(25):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(0.05)
+        if last is not None:
+            raise last
 
     def test_overdue_and_submission_audit_keep_120s_idle_and_3600s_ceiling(self):
         for action_type in (
@@ -129,18 +141,37 @@ class PerformDeadlineTests(unittest.TestCase):
         self.assertEqual(started["n"], 1)
 
     def test_progress_heartbeat_extends_deadline_and_completes(self):
+        # Simulate worker scheduling rather than betting on an 80 ms margin
+        # between real sleep and a loaded CI runner's 200 ms idle deadline.
+        # The production wait loop and real durable progress/evidence stay in
+        # use. Virtual time exceeds the initial deadline, so completion still
+        # requires each persisted heartbeat to refresh it.
+        clock = {"now": 0.0}
+        store = self.store
+
         class Progressing:
             def perform(self, job, *, idempotency_key):
-                store = JobStore(self_store_path)
-                for page in range(1, 4):
-                    time.sleep(0.12)
-                    store.report_perform_progress(
-                        job["id"],
-                        {"pages_reviewed": page, "rows_inspected": page * 10},
-                    )
                 return WorkerResult(True, "browser.read", {"record_id": "done"})
 
-        self_store_path = self.db
+        class ScheduledFuture:
+            def __init__(self, perform, job, kwargs):
+                self.perform, self.job, self.kwargs = perform, job, kwargs
+                self.page = 0
+
+            def result(self, timeout):
+                if self.page < 3:
+                    self.page += 1
+                    clock["now"] += 0.12
+                    store.report_perform_progress(
+                        self.job["id"],
+                        {"pages_reviewed": self.page,
+                         "rows_inspected": self.page * 10},
+                    )
+                    raise TimeoutError()  # The worker is still in progress.
+                return self.perform(self.job, **self.kwargs)
+
+        pool = Mock()
+        pool.submit.side_effect = lambda perform, job, **kw: ScheduledFuture(perform, job, kw)
         job = self.store.create_job(
             "browser.read",
             {"worker": "progress", "perform_timeout_seconds": 0.2},
@@ -152,8 +183,18 @@ class PerformDeadlineTests(unittest.TestCase):
             {"browser.read": _OkVerifier()},
             perform_timeout_seconds=0.2,
         )
-        finished = engine.run(job["id"])
+
+        def wait_with_virtual_clock(future, store, job, **kwargs):
+            return wait_for_perform_result(
+                future, store, job, monotonic=lambda: clock["now"], **kwargs
+            )
+
+        with patch("robie_job_engine.engine.concurrent.futures.ThreadPoolExecutor", return_value=pool), \
+             patch("robie_job_engine.engine.wait_for_perform_result", side_effect=wait_with_virtual_clock):
+            finished = engine.run(job["id"])
         self.assertEqual(finished["status"], JobStatus.COMPLETE)
+        self.assertGreater(clock["now"], 0.2)
+        pool.submit.assert_called_once()
         progress = self.store.get_checkpoint(job["id"], "perform_progress")
         self.assertEqual(progress["pages_reviewed"], 3)
         self.assertEqual(progress["rows_inspected"], 30)

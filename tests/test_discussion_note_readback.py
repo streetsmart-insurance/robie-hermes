@@ -95,12 +95,11 @@ def _file(client, text="NatGen cancellation notice was added. ROBIE was here", *
     return disc.file_note_to_existing_discussion(client, APPLICANT, text, **kwargs)
 
 
-def test_textless_count_increase_is_filed_and_a_repeat_does_not_repost(tmp_path):
-    """Live shape: empty 2xx, metadata-only read, 405 on the notes list.
+def test_textless_count_increase_does_not_identify_our_note(tmp_path):
+    """A concurrent writer can produce the same stable metadata.
 
-    Exactly one new note, a new latest id, the same title, and a second
-    read that still shows them, is filed. The ledger keeps that id. A
-    same-day repeat asks first and does not post again.
+    An empty 2xx plus a higher count is not a receipt. The unconfirmed
+    row blocks a same-day repeat.
     """
 
     client = LiveShapeClient()
@@ -110,24 +109,20 @@ def test_textless_count_increase_is_filed_and_a_repeat_does_not_repost(tmp_path)
 
     ledger = tmp_path / "ledger.json"
     result = _file(client, ledger_path=ledger)
-    assert result["status"] == "filed"
-    assert result["note_id"] == "701"
-    assert result["read_back"] is True
-    assert result["verified_by"] == "discussion"
-    assert result["reason"] == "The note was added to the discussion."
-    assert "told apart" not in result["reason"]
+    assert result["status"] == "held"
+    assert result["note_id"] is None
+    assert result["read_back"] is False
+    assert result["confirmation"] == SENT_UNCONFIRMED
     assert client.posts == 1
-    assert client.reads == 3
     assert client.note_lists == 1  # the explicit 405 check above, not the filer
-    for word in FIELD_WORDS:
-        assert word not in result["reason"]
     saved = json.loads(ledger.read_text(encoding="utf-8"))
-    assert saved["notes"][0]["confirmation"] == "confirmed"
-    assert saved["notes"][0]["note_id"] == "701"
+    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
 
     again = _file(client, ledger_path=ledger)
     assert again["status"] == "already_posted"
-    assert "Want me to add it again?" in again["reason"]
+    assert "couldn't confirm" in again["reason"].casefold()
+    assert "already added" not in again["reason"].casefold()
+    assert "Want me to add it again?" not in again["reason"]
     assert client.posts == 1
 
     allowed = _file(client, ledger_path=ledger, allow_repost=True)
@@ -191,6 +186,7 @@ def test_a_different_latest_note_is_not_marked_done(tmp_path):
 
 
 def test_unconfirmed_send_blocks_until_the_day_window_passes(tmp_path):
+    """An unconfirmed send does not expire when the day window passes."""
     client = LiveShapeClient(after_count=7, after_latest="700")
     ledger = tmp_path / "ledger.json"
     first = _file(client, ledger_path=ledger)
@@ -203,8 +199,25 @@ def test_unconfirmed_send_blocks_until_the_day_window_passes(tmp_path):
     ).isoformat()
     ledger.write_text(json.dumps(saved), encoding="utf-8")
     second = _file(client, ledger_path=ledger)
-    assert client.posts == 2
-    assert second["status"] == "held"
+    assert client.posts == 1
+    assert second["status"] == "already_posted"
+
+
+def test_unconfirmed_send_still_blocks_after_the_day_window(tmp_path):
+    client = LiveShapeClient(after_count=7, after_latest="700")
+    ledger = tmp_path / "ledger.json"
+    first = _file(client, ledger_path=ledger)
+    assert first["status"] == "held"
+    assert first["confirmation"] == SENT_UNCONFIRMED
+    assert client.posts == 1
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    saved["notes"][0]["posted_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=25)
+    ).isoformat()
+    ledger.write_text(json.dumps(saved), encoding="utf-8")
+    second = _file(client, ledger_path=ledger)
+    assert client.posts == 1
+    assert second["status"] == "already_posted"
 
 
 def test_ledger_write_failure_does_not_post(tmp_path):
@@ -219,16 +232,39 @@ def test_ledger_write_failure_does_not_post(tmp_path):
     assert client.posts == 0
 
 
-def test_a_post_that_raises_does_not_keep_the_unconfirmed_row(tmp_path):
+@pytest.mark.parametrize("status", [500, None])
+def test_api_error_after_possible_acceptance_keeps_marker_and_blocks_retry(tmp_path, status):
     class Boom(LiveShapeClient):
         def append_note(self, discussion_id, text, note_type="Note"):
-            raise disc.DiscussionApiError(500, "rejected")
+            self.posts += 1
+            self.posted = True
+            raise disc.DiscussionApiError(status, "response failed after possible acceptance")
 
     ledger = tmp_path / "ledger.json"
+    client = Boom()
     with pytest.raises(disc.DiscussionApiError):
-        _file(Boom(), ledger_path=ledger)
+        _file(client, ledger_path=ledger)
     saved = json.loads(ledger.read_text(encoding="utf-8"))
-    assert saved["notes"] == []
+    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
+    assert _file(client, ledger_path=ledger)["status"] == "already_posted"
+    assert client.posts == 1
+
+
+def test_accepted_post_followed_by_timeout_keeps_marker_and_blocks_retry(tmp_path):
+    class Boom(LiveShapeClient):
+        def append_note(self, discussion_id, text, note_type="Note"):
+            self.posts += 1
+            self.posted = True
+            raise TimeoutError("response lost after server acceptance")
+
+    ledger = tmp_path / "ledger.json"
+    client = Boom()
+    with pytest.raises(TimeoutError):
+        _file(client, ledger_path=ledger)
+    saved = json.loads(ledger.read_text(encoding="utf-8"))
+    assert saved["notes"][0]["confirmation"] == SENT_UNCONFIRMED
+    assert _file(client, ledger_path=ledger)["status"] == "already_posted"
+    assert client.posts == 1
 
 
 def test_rerun_uses_the_ledger_and_does_not_post_again(tmp_path):

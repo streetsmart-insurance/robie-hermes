@@ -1,0 +1,13 @@
+[Unit]
+Description=ROBIE Test EZLynx keepalive every 15 minutes
+ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=robie-ezlynx-keepalive-test.service
+
+[Install]
+WantedBy=timers.target

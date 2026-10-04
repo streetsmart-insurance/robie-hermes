@@ -8,6 +8,8 @@ engine email send must call should_skip_send() first. Kept dependency-free
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -188,6 +190,69 @@ def find_recent_sent(
     return matches
 
 
+def _content_hash(text: str) -> str:
+    """Hash normalized content for duplicate detection."""
+    normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _plain_body_from_payload(payload: dict) -> str:
+    body_txt = ""
+
+    def _extract(part: dict) -> None:
+        nonlocal body_txt
+        if body_txt:
+            return
+        mime = str(part.get("mimeType") or "")
+        data = str((part.get("body") or {}).get("data") or "")
+        if mime == "text/plain" and data:
+            try:
+                body_txt = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            except Exception:
+                return
+        for sub in part.get("parts") or []:
+            _extract(sub)
+
+    _extract(payload or {})
+    return body_txt
+
+
+def _incoming_is_new_thread_content(service, incoming_body: str, thread_id: str) -> bool:
+    """True when this inbound body is new compared with earlier thread mail.
+
+    A later email in the same thread with a different body is a correction
+    and must be processed. The message being handled is not compared with
+    itself. An unchanged body, or a thread that only contains this message,
+    stays a duplicate when Sent already has the reply.
+    """
+    body = (incoming_body or "").strip()
+    thread = (thread_id or "").strip()
+    if not body or not thread or service is None:
+        return False
+    try:
+        fetched = (
+            service.users()
+            .threads()
+            .get(userId="me", id=thread, format="full")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001 - content check must not break the send path
+        logger.warning("Content check failed: %s", exc)
+        return False
+    hashes: list[str] = []
+    for msg in fetched.get("messages") or []:
+        if "SENT" in (msg.get("labelIds") or []):
+            continue
+        text = _plain_body_from_payload(msg.get("payload") or {})
+        if text:
+            hashes.append(_content_hash(text))
+    current = _content_hash(body)
+    prior = list(hashes)
+    if prior and prior[-1] == current:
+        prior = prior[:-1]
+    return bool(prior) and current not in prior
+
+
 def should_skip_send(
     service,
     to_address: str,
@@ -195,8 +260,15 @@ def should_skip_send(
     window_hours: int = 24,
     *,
     expected_mailbox: str = "",
+    incoming_body: str = "",
+    thread_id: str = "",
 ) -> tuple[bool, str]:
-    """Return (skip, reason). True when the same send already exists in Sent."""
+    """Return (skip, reason). True when the same send already exists in Sent.
+
+    ``expected_mailbox`` stays optional so existing callers keep working.
+    ``incoming_body`` and ``thread_id`` are optional. When both are set, a
+    new body in that thread is a correction and is not skipped.
+    """
     expected = (expected_mailbox or "").strip().casefold()
     actual = delegated_mailbox(service) if expected else ""
     if expected and actual and actual != expected:
@@ -210,6 +282,9 @@ def should_skip_send(
     )
     if matches:
         first = matches[0]
+        if _incoming_is_new_thread_content(service, incoming_body, thread_id):
+            logger.info("New content in thread (correction/follow-up), not skipping")
+            return False, "new content in thread - processing as correction"
         return True, (
             f"already sent to {to_address} "
             f"(sent id {first['id']} at {first['date']}); skipping duplicate"
