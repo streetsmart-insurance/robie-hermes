@@ -29,6 +29,14 @@ Safety (non-negotiable):
   error, phone numbers in the note text, or a write-scope refusal -> that
   email is skipped, logged, and the driver continues with the rest.
   Informational mail is ``ignored``, not a human-review skip.
+- Write-scope eligibility is checked before org-label planning. Dry-run
+  reports matches blocked only by that allowlist as
+  ``would_file_if_write_scope_allowed``, with applicant ids. The allowlist
+  itself is unchanged.
+- When the org-label list is unavailable, the note is still filed (dry-run
+  counts it as would-file) and the result says ``label_not_applied``. No
+  label id is invented. A list that succeeds but has no unique
+  ``Ascend NOC`` still skips the notice.
 - Never deletes anything. Never invents an applicant_id or a CSR username.
 - Live note writes go through ``file_note_to_existing_discussion``, which
   enforces the EZLynx write-scope allowlist and the driver lease. Dry-run
@@ -120,6 +128,10 @@ _SHARED_CSR_NAMES = frozenset({"hello", "accounting", "robie", "robie ai"})
 
 # Trailing term suffix on a policy number: -00, -01, -1.
 _TERM_SUFFIX_RE = re.compile(r"-\d{1,2}$")
+
+# Trailing EZLynx line-of-business code, separated by whitespace: "DSLA123 APD".
+# 2-4 uppercase letters only. Applied to the EZLynx row, not the Ascend number.
+_LOB_SUFFIX_RE = re.compile(r"\s+[A-Z]{2,4}\s*$")
 
 # Policy-row fields that may carry the bound applicant id.
 _APPLICANT_ID_KEYS = (
@@ -513,6 +525,21 @@ def normalize_policy_number(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).upper()
 
 
+def strip_ezlynx_lob_suffix(value: str) -> str:
+    """Drop one trailing LOB code (`` APD``) from an EZLynx policy number.
+
+    The suffix is 2-4 uppercase letters after whitespace. Lowercase, a
+    single letter, and five-or-more letters stay, so a real policy token
+    is not trimmed. The Ascend notice number is not passed through here.
+    """
+    return _LOB_SUFFIX_RE.sub("", str(value or ""))
+
+
+def normalize_ezlynx_policy_number(value: str) -> str:
+    """Normalize an EZLynx policy number after dropping a trailing LOB suffix."""
+    return normalize_policy_number(strip_ezlynx_lob_suffix(value))
+
+
 def strip_policy_term_suffix(value: str) -> str:
     """Drop a trailing term suffix (``-00``, ``-01``, ``-1``) after normalization."""
     return _TERM_SUFFIX_RE.sub("", normalize_policy_number(value))
@@ -521,8 +548,11 @@ def strip_policy_term_suffix(value: str) -> str:
 def _rows_matching_policy(rows: list[dict[str, Any]], policy_number: str) -> list[dict[str, Any]]:
     """Exact normalized match, else a term-suffix match on both sides.
 
-    An exact hit wins and stops the suffix pass, so ``ABC123-00`` does not
-    also collect a different ``ABC123`` row when the exact row is present.
+    EZLynx rows may carry a trailing line-of-business code (`` APD``). That
+    suffix is stripped on the row only, then compared to the bare Ascend
+    number. An exact hit wins and stops the suffix pass, so ``ABC123-00``
+    does not also collect a different ``ABC123`` row when the exact row is
+    present.
     """
     target = normalize_policy_number(policy_number)
     if not target:
@@ -530,7 +560,7 @@ def _rows_matching_policy(rows: list[dict[str, Any]], policy_number: str) -> lis
     exact = [
         row
         for row in rows
-        if normalize_policy_number(_row_policy_number(row)) == target
+        if normalize_ezlynx_policy_number(_row_policy_number(row)) == target
     ]
     if exact:
         return exact
@@ -540,8 +570,11 @@ def _rows_matching_policy(rows: list[dict[str, Any]], policy_number: str) -> lis
     return [
         row
         for row in rows
-        if normalize_policy_number(_row_policy_number(row))
-        and strip_policy_term_suffix(_row_policy_number(row)) == target_base
+        if normalize_ezlynx_policy_number(_row_policy_number(row))
+        and strip_policy_term_suffix(
+            normalize_ezlynx_policy_number(_row_policy_number(row))
+        )
+        == target_base
     ]
 
 
@@ -552,11 +585,13 @@ def resolve_applicant(
 ) -> tuple[ApplicantResolution | None, str]:
     """Resolve ``applicant_id`` from PolicyApi rows. Fail closed.
 
-    Compare policy numbers normalized (uppercase, spaces removed). When
-    that misses, strip a trailing term suffix (``-00`` / ``-01`` / ``-1``)
-    on both the notice and the row. Accept only when exactly one row
-    matches and it carries ``accountId`` (or ``ApplicantId``). Otherwise
-    ``applicant_unresolved`` and the candidate count.
+    Compare policy numbers normalized (uppercase, spaces removed). An
+    EZLynx row may also drop one trailing LOB code (`` APD``, 2-4 uppercase
+    letters). When that misses, strip a trailing term suffix (``-00`` /
+    ``-01`` / ``-1``) on both the notice and the row. Accept only when
+    exactly one row matches and it carries ``accountId`` (or
+    ``ApplicantId``). Otherwise ``applicant_unresolved`` and the candidate
+    count.
 
     PolicyApi rows have no CSR field. This function does not return one.
     Insured-name lookup is not attempted.
@@ -746,19 +781,12 @@ def _prepare_dry_run_note(
     is not used: that helper always calls ``driver_gate_for_write``.
     """
     from .chat_write_boundary import assert_chat_applicant
-    from .ezlynx_write_scope import (
-        EZLYNX_WRITE_SCOPE_REFUSED,
-        applicant_is_write_allowed,
-        normalize_applicant_id,
-    )
+    from .ezlynx_write_scope import normalize_applicant_id
 
     applicant = normalize_applicant_id(applicant_id)
-    if not applicant_is_write_allowed(applicant):
-        display = applicant or "<missing>"
-        raise EzlynxWriteScopeError(
-            f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} is not on the "
-            "EZLynx business-write allowlist"
-        )
+    refusal = _write_scope_refusal_reason(applicant)
+    if refusal:
+        raise EzlynxWriteScopeError(refusal.removeprefix("write_scope_refused: "))
     assert_chat_applicant(applicant)
     text = discussions.reject_phone_numbers(note_body).strip()
     if not text:
@@ -795,6 +823,28 @@ def _prepare_dry_run_note(
         "discussion_title": discussions.discussion_title_of(record),
         "note_id": None,
     }
+
+
+def _write_scope_refusal_reason(applicant_id: str) -> str:
+    """Empty when the applicant may be written. Does not take the driver lease.
+
+    Same refusal text as ``require_allowed_ezlynx_write_applicant``, without
+    ``driver_gate_for_write``. Dry-run and the pre-label check both use this.
+    """
+    from .ezlynx_write_scope import (
+        EZLYNX_WRITE_SCOPE_REFUSED,
+        applicant_is_write_allowed,
+        normalize_applicant_id,
+    )
+
+    applicant = normalize_applicant_id(applicant_id)
+    if applicant_is_write_allowed(applicant):
+        return ""
+    display = applicant or "<missing>"
+    return (
+        f"write_scope_refused: {EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} "
+        "is not on the EZLynx business-write allowlist"
+    )
 
 
 def _dry_run_label_result(applicant_id: str, plan: dict[str, str]) -> dict[str, Any]:
@@ -873,29 +923,48 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
 
+    note_text = signed_notice_note(str(triaged.get("note_text") or "").strip())
+    if not note_text:
+        result.reason = "empty_note_text"
+        return result
+    try:
+        discussions.reject_phone_numbers(note_text)
+    except discussions.DiscussionApiError as exc:
+        result.reason = f"discussion_error: {exc}"
+        return result
+
+    # Write scope before any label lookup. A narrow allowlist must not hide
+    # a real match behind a label-list failure, and must not call the list.
+    scope_refusal = _write_scope_refusal_reason(resolution.applicant_id)
+    if scope_refusal:
+        result.reason = scope_refusal
+        return result
+
     # Cancellation notices also get the exact org label "Ascend NOC" on
     # the filed note (Activities; UI path) so existing email/text
     # automation can fire. Late-pay, intent-to-cancel, and return-premium
     # stay note-only: no label, and intent-to-cancel is never a
-    # cancellation task. Resolve the unique label before filing so a
-    # missing or ambiguous label does not leave an orphan note. Apply
-    # uses CDP session cookies — OAuth Portal OrganizationLabels is HTTP 403.
+    # cancellation task. A successful list with a missing or ambiguous
+    # label still skips, so we do not file an orphan note. A list that
+    # cannot be read does not skip: the note is filed and the result says
+    # label_not_applied. No label id is invented. Apply uses CDP session
+    # cookies — OAuth Portal OrganizationLabels is HTTP 403.
     label_plan: dict[str, str] | None = None
+    label_list_unavailable = ""
     if notice_type == triage.CANCELLATION:
         try:
             label_plan = org_labels.plan_exact_label(
                 ctx.ezlynx_client, org_labels.ASCEND_NOC_LABEL
             )
         except org_labels.OrgLabelError as exc:
-            result.reason = f"label_not_applied: {exc.code}: {exc}"
-            return result
-        result.detail["label_name"] = label_plan["name"]
-        result.detail["label_id"] = label_plan["id"]
-
-    note_text = signed_notice_note(str(triaged.get("note_text") or "").strip())
-    if not note_text:
-        result.reason = "empty_note_text"
-        return result
+            if exc.code == org_labels.LABEL_LIST_UNAVAILABLE:
+                label_list_unavailable = f"label_not_applied: {exc.code}: {exc}"
+            else:
+                result.reason = f"label_not_applied: {exc.code}: {exc}"
+                return result
+        else:
+            result.detail["label_name"] = label_plan["name"]
+            result.detail["label_id"] = label_plan["id"]
 
     # Append to an EXISTING titled discussion. Untitled is refused inside
     # select_discussion_for_note. The write-scope guard refuses
@@ -966,6 +1035,12 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             result.reason = f"label_not_applied: {labeled.get('status')}"
             return result
         result.detail["label"] = labeled
+    elif label_list_unavailable:
+        # Note proceeds. The label id is unknown; do not invent one.
+        result.detail["label"] = {
+            "status": "label_not_applied",
+            "reason": label_list_unavailable,
+        }
 
     # Zapier task: only cancellation notices have a builder. Anything else
     # gets its note and a logged skip — never an invented payload.
@@ -1003,7 +1078,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["task_skipped"] = f"no task builder for notice type {notice_type!r}"
 
     result.status = "dry_run" if ctx.dry_run else "done"
-    result.reason = "ok"
+    result.reason = label_list_unavailable or "ok"
     if not ctx.dry_run:
         try:
             ctx.source.mark_processed(notice.message_id)
@@ -1079,6 +1154,15 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
         for notice, item in paired
         if ctx.dry_run and item.status == "dry_run"
     ]
+    # Real matches the narrow allowlist blocked. Still skipped; not filed.
+    would_file_if_write_scope_allowed = [
+        _would_file_entry(notice, item)
+        for notice, item in paired
+        if ctx.dry_run
+        and item.status == "skipped"
+        and _reason_prefix(item.reason) == "write_scope_refused"
+        and str((item.detail or {}).get("applicant_id") or "")
+    ]
     ignored = sum(1 for item in results if item.status == "ignored")
     summary = {
         "dry_run": ctx.dry_run,
@@ -1090,10 +1174,13 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
         "by_notice_type": by_notice_type,
         "would_file_count": len(would_file),
         "would_file": would_file,
+        "would_file_if_write_scope_allowed_count": len(would_file_if_write_scope_allowed),
+        "would_file_if_write_scope_allowed": would_file_if_write_scope_allowed,
         "skipped_by_reason": skipped_by_reason,
         "breakdown": {
             "by_notice_type": dict(by_notice_type),
             "would_file": len(would_file),
+            "would_file_if_write_scope_allowed": len(would_file_if_write_scope_allowed),
             "ignored": ignored,
             "skipped_by_reason": dict(skipped_by_reason),
         },

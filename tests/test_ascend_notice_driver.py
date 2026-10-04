@@ -84,6 +84,7 @@ class FakeEzlynxClient:
         fail_with=None,
         org_labels=None,
         apply_label_error=None,
+        label_list_error=None,
     ):
         self.rows_by_number = rows_by_number or {}
         self.fail_with = fail_with
@@ -94,6 +95,8 @@ class FakeEzlynxClient:
             else [{"id": "noc-1", "name": "Ascend NOC"}]
         )
         self.apply_label_error = apply_label_error
+        self.label_list_error = label_list_error
+        self.label_list_calls = 0
         self.applied_labels = []
 
     def search_policy_by_number(self, policy_number):
@@ -104,6 +107,9 @@ class FakeEzlynxClient:
         return {"status": "success", "data": rows}
 
     def list_organization_labels(self):
+        self.label_list_calls += 1
+        if self.label_list_error is not None:
+            raise self.label_list_error
         return list(self.org_labels)
 
     def apply_applicant_organization_label(self, applicant_id, label_id):
@@ -202,6 +208,7 @@ def make_ctx(
     fail_policy_search_with=None,
     org_labels=None,
     apply_label_error=None,
+    label_list_error=None,
 ):
     discussion_rows = (
         discussion_rows
@@ -216,6 +223,7 @@ def make_ctx(
             fail_with=fail_policy_search_with,
             org_labels=org_labels,
             apply_label_error=apply_label_error,
+            label_list_error=label_list_error,
         ),
         discussion_client=discussion_client,
         source=FakeSource(notices),
@@ -301,6 +309,9 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert entry["policy_number"] == "HO-998877"
     assert entry["applicant_id"] == ALLOWED_APPLICANT
     assert entry["csr_login"] == "KarlaSS"
+    assert summary["would_file_if_write_scope_allowed_count"] == 0
+    assert summary["would_file_if_write_scope_allowed"] == []
+    assert summary["breakdown"]["would_file_if_write_scope_allowed"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +506,70 @@ def test_write_scope_refusal_fails_closed(no_zap_fire):
     assert "write_scope_refused" in result["reason"]
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+    # Scope is decided before the label list, so a list failure cannot hide
+    # the match and the list is not called.
+    assert ctx.ezlynx_client.label_list_calls == 0
+    assert summary["would_file"] == []
+    assert summary["would_file_if_write_scope_allowed_count"] == 1
+    assert summary["breakdown"]["would_file_if_write_scope_allowed"] == 1
+    blocked = summary["would_file_if_write_scope_allowed"][0]
+    assert blocked["applicant_id"] == "999999999"
+    assert blocked["notice_type"] == triage.CANCELLATION
+    assert blocked["policy_number"] == "HO-998877"
+    assert blocked["csr_login"] == "KarlaSS"
+
+
+def test_label_list_unavailable_still_would_file_without_inventing_an_id(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row(applicant_id="175448994")]},
+        label_list_error=RuntimeError("portal label list HTTP 500"),
+    )
+    with mock.patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({ALLOWED_APPLICANT, "175448994"}),
+    ):
+        summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["reason"].startswith("label_not_applied:")
+    assert "LABEL_LIST_UNAVAILABLE" in result["reason"]
+    assert "organization label list failed" in result["reason"]
+    label = result["detail"]["label"]
+    assert label["status"] == "label_not_applied"
+    assert "label_id" not in label
+    assert "label_id" not in result["detail"]
+    assert "110248" not in json.dumps(result)
+    assert summary["would_file_count"] == 1
+    assert summary["skipped"] == 0
+    entry = summary["would_file"][0]
+    assert entry["applicant_id"] == "175448994"
+    assert entry["notice_type"] == triage.CANCELLATION
+    assert entry["csr_login"] == "KarlaSS"
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
+    assert ctx.ezlynx_client.label_list_calls == 1
+    assert ctx.source.marked == []
+    assert no_zap_fire == []
+
+
+def test_label_list_unavailable_live_files_note_and_does_not_apply(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+        label_list_error=RuntimeError("portal label list HTTP 500"),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "done"
+    assert "label_not_applied" in result["reason"]
+    assert "LABEL_LIST_UNAVAILABLE" in result["reason"]
+    assert "label_id" not in result["detail"]["label"]
+    assert len(discussion_client._urlopen.posts_to("/notes")) == 1
+    assert ctx.ezlynx_client.applied_labels == []
+    assert len(no_zap_fire) == 1
+    assert ctx.source.marked == ["m1"]
 
 
 def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
@@ -940,6 +1015,80 @@ def test_policy_suffix_matches_single_account_row():
     assert resolution.applicant_id == ALLOWED_APPLICANT
     assert resolution.csr_username == ""
     assert resolution.policy_number == "ABC123-00"
+
+
+def test_ezlynx_lob_suffix_matches_bare_ascend_number():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "DSLA123456": [
+                {"policyNumber": "DSLA123456 APD", "accountId": ALLOWED_APPLICANT}
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["DSLA123456"], None)
+    assert reason == ""
+    assert resolution is not None
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+    assert driver.normalize_ezlynx_policy_number("DSLA123456 APD") == "DSLA123456"
+    assert driver.normalize_ezlynx_policy_number("DSLA123456 ABCD") == "DSLA123456"
+    assert driver.normalize_ezlynx_policy_number("DSLA123456 AP") == "DSLA123456"
+
+
+def test_ezlynx_lob_suffix_does_not_strip_other_shapes():
+    assert driver.strip_ezlynx_lob_suffix("ABC123 A") == "ABC123 A"
+    assert driver.strip_ezlynx_lob_suffix("ABC123 ABCDE") == "ABC123 ABCDE"
+    assert driver.strip_ezlynx_lob_suffix("ABC123 apd") == "ABC123 apd"
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123": [
+                {"policyNumber": "ABC123 ABCDE", "accountId": ALLOWED_APPLICANT},
+                {"policyNumber": "ABC123 A", "accountId": "222"},
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123"], None)
+    assert resolution is None
+    assert reason.startswith("applicant_unresolved:")
+    assert "0 candidate" in reason
+
+
+def test_ezlynx_lob_suffix_two_rows_fail_closed():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123": [
+                {"policyNumber": "ABC123 APD", "accountId": "111"},
+                {"policyNumber": "ABC123 BOP", "accountId": "222"},
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123"], None)
+    assert resolution is None
+    assert "2 candidate" in reason
+
+
+def test_ezlynx_lob_suffix_and_term_suffix_match_one_row():
+    client = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123-00": [
+                {"policyNumber": "ABC123 APD", "accountId": ALLOWED_APPLICANT}
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(client, ["ABC123-00"], None)
+    assert reason == ""
+    assert resolution.applicant_id == ALLOWED_APPLICANT
+
+    exact = FakeEzlynxClient(
+        rows_by_number={
+            "ABC123-00": [
+                {"policyNumber": "ABC123-00 APD", "accountId": "111"},
+                {"policyNumber": "ABC123 BOP", "accountId": "222"},
+            ]
+        }
+    )
+    resolution, reason = driver.resolve_applicant(exact, ["ABC123-00"], None)
+    assert reason == ""
+    assert resolution.applicant_id == "111"
 
 
 def test_spaced_policy_number_normalizes():
