@@ -610,6 +610,12 @@ def ensure_pending_view(page: Any) -> None:
         raise IntakeHold("Expected exactly one Geico Gateway tab")
     if pending_view_selected(page):
         return
+    # The filter chips render via JavaScript after DOM ready. Wait for the
+    # Pending Cancellations chip before concluding it is absent.
+    try:
+        page.get_by_role("button", name=_PENDING_TOGGLE_TEXT).wait_for(timeout=20000)
+    except Exception:
+        pass
     chip = _pending_chip_view(page)
     if chip in {"ambiguous", "error", "absent"}:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
