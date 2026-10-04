@@ -39,6 +39,19 @@ def to_e164_us(raw: Any) -> Optional[str]:
     return "+1" + digits
 
 
+def dialable_phone_field(record: Mapping[str, Any] | None) -> Optional[str]:
+    """The phone field that produced the dialable number, or None."""
+    if not isinstance(record, Mapping):
+        return None
+    for key in PHONE_FIELDS:
+        value = record.get(key)
+        if value in (None, ""):
+            continue
+        if to_e164_us(value):
+            return key
+    return None
+
+
 def extract_dialable_phone(record: Mapping[str, Any] | None) -> Optional[str]:
     """The applicant's phone, or None. Never returns a non-phone field."""
     if not isinstance(record, Mapping):
@@ -76,3 +89,13 @@ class EzlynxApplicantPhoneLookup:
             logger.warning("applicant phone lookup failed: %s", type(exc).__name__)
             return None
         return extract_dialable_phone(record)
+
+    def is_mobile(self, applicant_id: str) -> bool:
+        """True only when the dialable number came from CellPhone."""
+        if not str(applicant_id or "").strip():
+            return False
+        try:
+            record = self._fetch(str(applicant_id))
+        except Exception:  # noqa: BLE001 — fail closed, no text offer
+            return False
+        return dialable_phone_field(record) == "CellPhone"
