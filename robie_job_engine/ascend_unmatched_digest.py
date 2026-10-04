@@ -1,7 +1,7 @@
 """Daily plain-English list of Ascend notices that matched no single EZLynx client.
 
 The 15-minute poll upserts each unmatched notice into the API store. This
-module turns the open rows into one weekday email for the accounting team.
+module turns the open rows into one weekday email to hello@streetsmart.insurance.
 Dry-run is the default: the email is printed to the journal unless
 ``ASCEND_UNMATCHED_DIGEST_LIVE=1``. An empty list sends nothing.
 
@@ -89,8 +89,9 @@ LIVE_ENV = "ASCEND_UNMATCHED_DIGEST_LIVE"
 STATE_ENV = "ASCEND_UNMATCHED_DIGEST_STATE"
 DB_ENV = "ASCEND_UNMATCHED_DIGEST_DB"
 MARKER_ENV = "ASCEND_UNMATCHED_DIGEST_MARKER"
+TO_ENV = "ASCEND_UNMATCHED_DIGEST_TO"
 TIMER_UNIT = "robie-ascend-unmatched-digest.timer"
-ACCOUNTING_TO = "accounting@streetsmart.insurance"
+DIGEST_TO = "hello@streetsmart.insurance"
 EASTERN = ZoneInfo("America/New_York")
 WINDOW = timedelta(days=14)
 INDEX_STALE = timedelta(hours=20)
@@ -158,6 +159,15 @@ _NOTICE_WORDS = {
 }
 
 _POLICY_IGNORABLE = re.compile(r"[\s\-\u2010\u2011\u2012\u2013\u2014]+")
+_INTRO = (
+    "Robie couldn't match these Ascend notices to an EZLynx client by policy number. "
+    "To have one filed automatically, update the policy number in Ascend or EZLynx so they match."
+)
+_UNMATCHED_ASK = (
+    "Robie couldn't match this Ascend notice to an EZLynx client by policy number. "
+    "Update the policy number in Ascend or EZLynx so they match, and Robie will file it."
+)
+_TYPO_CHECK = "Check whether the policy number is a typo in Ascend or EZLynx."
 _FIX_LINE_CHECKED = (
     "Fix the policy number in EZLynx or Ascend and it drops off this list "
     "once Robie matches it and files the note."
@@ -182,6 +192,12 @@ MAYBE_NOTE_LIMIT_LINE = (
 # A poll older than this is not evidence that notes are on.
 POLL_FRESHNESS = timedelta(hours=2)
 _POLICY_ID_LINE = re.compile(r"(?i)^policy id\s+\S+")
+
+
+def digest_recipient() -> str:
+    """Who receives the weekday email. hello@ unless the env names someone else."""
+    override = str(os.environ.get(TO_ENV) or "").strip()
+    return override or DIGEST_TO
 
 
 def live_enabled() -> bool:
@@ -778,11 +794,11 @@ def item_line(item: dict[str, Any]) -> str:
         str(item.get("reason") or ""),
         "Robie could not match this notice to one client.",
     )
-    sentence = ", ".join(parts) + ". " + reason
+    sentence = ", ".join(parts) + ". " + reason + " " + _UNMATCHED_ASK
     client = str(item.get("suggestion_client") or "").strip()
     policy = str(item.get("suggestion_policy") or "").strip()
     if client and policy:
-        sentence += f" Did you mean {client} (policy {policy})?"
+        sentence += f" Did you mean {client} (policy {policy})? " + _TYPO_CHECK
     return sentence
 
 
@@ -807,13 +823,16 @@ def render_digest(
         return None
     count = len(current) if current else len(aged)
     subject = digest_subject(count, when or _now())
-    lines = [item_line(item) for item in current]
+    lines = [_INTRO]
+    lines.extend(item_line(item) for item in current)
     if aged:
         bits = []
         for item in aged:
             name = str(item.get("insured_name") or "").strip() or "An insured"
             bits.append(f"{name}, {notice_words(str(item.get('notice_type') or ''))}")
-        lines.append("Still unmatched after 14 days: " + "; ".join(bits) + ".")
+        lines.append(
+            "Still unmatched after 14 days: " + "; ".join(bits) + ". " + _UNMATCHED_ASK
+        )
     lines.append(_FIX_LINE_CHECKED if policy_rechecked else _FIX_LINE_AS_SHOWN)
     return subject, "\n".join(lines)
 
@@ -1345,7 +1364,7 @@ def run_digest(
         return result
     sender = mailer or default_mailer
     try:
-        sender(to=[ACCOUNTING_TO], subject=subject, text_body=body)
+        sender(to=[digest_recipient()], subject=subject, text_body=body)
     except Exception as exc:  # noqa: BLE001 - refused and failed sends both alert
         result["error"] = type(exc).__name__
         result["sent"] = False
@@ -1548,7 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
     parser = argparse.ArgumentParser(
         description=(
-            "Email accounting the open unmatched Ascend notices. "
+            "Email hello@ the open unmatched Ascend notices. "
             "Dry-run unless ASCEND_UNMATCHED_DIGEST_LIVE=1."
         )
     )

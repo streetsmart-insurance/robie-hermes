@@ -16,7 +16,7 @@
 #     --release-dir /opt/streetsmart-hermes/current \
 #     --enable-timer
 #
-# After Carlo's explicit go to email accounting@:
+# After Carlo's explicit go to email hello@:
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --release-dir /opt/streetsmart-hermes/current \
 #     --live

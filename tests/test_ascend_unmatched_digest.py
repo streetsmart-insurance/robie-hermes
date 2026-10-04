@@ -414,13 +414,16 @@ def test_aged_items_are_mentioned_once_and_only_after_a_live_send(tmp_path, caps
 def test_sample_digest_is_plain_english():
     subject, body = digest.sample_digest()
     assert subject == "Ascend notices Robie couldn't match (3) for October 5, 2026"
+    assert body.startswith(digest._INTRO)
     assert "Fixture Hauling LLC, past-due payment, $412.10, policy HO-998877." in body
     assert "That policy number is not in EZLynx." in body
     assert "Did you mean Fixture Hauling (policy HO-998878)?" in body
+    assert digest._TYPO_CHECK in body
     assert "Northwind Trucking Inc, cancellation, $1,200.00, policy CA-100200." in body
     assert "More than one EZLynx client matched." in body
     assert "Bare Insured, intent to cancel." in body
     assert "Ascend did not include a policy number." in body
+    assert body.count(digest._UNMATCHED_ASK) == 4
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
         "Fix the policy number in EZLynx and it drops off this list once Robie matches it and files the note. "
@@ -430,6 +433,52 @@ def test_sample_digest_is_plain_english():
     for forbidden in ("event_key", "program_id", "late_payment", "applicant_id", "unmatched_reason"):
         assert forbidden not in subject
         assert forbidden not in body
+
+
+def test_the_digest_goes_only_to_hello_unless_the_env_names_another_address(tmp_path, monkeypatch):
+    assert digest.DIGEST_TO == "hello@streetsmart.insurance"
+    assert digest.digest_recipient() == "hello@streetsmart.insurance"
+    monkeypatch.setenv(digest.TO_ENV, "ops@example.test")
+    assert digest.digest_recipient() == "ops@example.test"
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    notice = source._invoice_notice(
+        {
+            "id": HELPERS._iid(11),
+            "program_id": HELPERS._pid(1),
+            "status": "overdue",
+            "invoice_number": "INV-3003",
+            "policy_number": HELPERS.POLICY,
+            "total_amount_cents": 41210,
+        },
+        HELPERS._program(1, "payment_overdue", "2026-10-05T13:50:00Z"),
+    )
+    assert notice is not None
+    store.upsert_unmatched(
+        notice,
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-05T13:50:00Z",
+        suggestion_client="Fixture Hauling",
+        suggestion_policy="HO-998878",
+        update_suggestion=True,
+    )
+    sent: list[list[str]] = []
+
+    def _mailer(*, to, subject, text_body):
+        sent.append(list(to))
+        assert digest._TYPO_CHECK in text_body
+        assert "will file this on the next Ascend run" not in text_body
+        return {"kind": "gmail", "message_id": "m1"}
+
+    digest.run_digest(stores=[store], now=NOW, live=True, mailer=_mailer, refresh=False)
+    assert sent == [["ops@example.test"]]
+    unit = (
+        Path(__file__).resolve().parents[1]
+        / "deploy"
+        / "systemd"
+        / "robie-ascend-unmatched-digest.service"
+    ).read_text(encoding="utf-8")
+    assert "ASCEND_UNMATCHED_DIGEST_TO=hello@streetsmart.insurance" in unit
+    assert "accounting@streetsmart.insurance" not in unit
 
 
 def test_store_permissions_stay_on_the_ascend_api_folder(tmp_path):
@@ -656,14 +705,16 @@ def test_live_digest_sends_once_through_the_mailer(tmp_path):
 
     def _mailer(*, to, subject, text_body):
         sent.append(to[0])
-        assert to == [digest.ACCOUNTING_TO]
+        assert to == [digest.DIGEST_TO]
+        assert to == ["hello@streetsmart.insurance"]
         assert subject == "Ascend notices Robie couldn't match (1) for October 5, 2026"
         assert "More than one EZLynx client matched." in text_body
+        assert digest._UNMATCHED_ASK in text_body
         return {"kind": "gmail", "message_id": "m1"}
 
     result = digest.run_digest(stores=[store], now=NOW, live=True, mailer=_mailer, refresh=False)
     assert result["sent"] is True
-    assert sent == [digest.ACCOUNTING_TO]
+    assert sent == ["hello@streetsmart.insurance"]
 
 
 def _page(rows, total=None):
