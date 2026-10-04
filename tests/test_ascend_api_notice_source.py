@@ -731,10 +731,17 @@ def test_timer_polls_every_fifteen_minutes_and_stays_dry_run():
     assert "Environment=ASCEND_API_SOURCE_LIVE" not in service
     assert "secrets/ascend-prod-api-key/versions/latest" in service
     assert "-m robie_job_engine.ascend_api_notice_source" in service
+    assert "ExecStart=/opt/streetsmart-hermes/venv/bin/python " in service
+    assert ".hermes/hermes-agent/venv" not in service
+    assert "User=streetsmart-hermes" in service
     assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in service
     assert "Environment=ROBIE_PLAYGROUND=1" in service
     assert "Environment=ROBIE_EZLYNX_WRITE_SCOPE=all" in drop_in
+    assert "Environment=ROBIE_PLAYGROUND=1" in drop_in
     text = (ROOT / "robie_job_engine/ascend_api_notice_source.py").read_text(encoding="utf-8")
+    assert "cd /" in text
+    assert "/opt/streetsmart-hermes/venv/bin/python" in text
+    assert ".hermes/hermes-agent/venv" not in text
     assert "HTTPServer" not in text
     assert "smtplib" not in text
     assert "def events_from_webhook" in text

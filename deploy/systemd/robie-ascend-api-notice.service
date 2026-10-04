@@ -18,10 +18,17 @@ Environment=ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-pro
 # Live filing is a drop-in that sets ASCEND_API_SOURCE_LIVE=1.
 # Write scope matches the #762 notice unit. The driver still refuses every
 # write that is not a category note or an allowed task.
+# ROBIE_EZLYNX_WRITE_SCOPE=all is ignored unless Playground guardrails are
+# active (ezlynx_write_scope.all_clients_scope_honored). Without
+# ROBIE_PLAYGROUND=1 a dry-run falls back to test applicant 220250093 and
+# real clients print write_scope_refused instead of would-file. The flag
+# does not enable live filing; that is still ASCEND_API_SOURCE_LIVE=1.
 Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
 Environment=ROBIE_PLAYGROUND=1
 Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db
-ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ascend_api_notice_source
+# streetsmart-hermes cannot exec the carlo-owned mode-0700 .hermes tree
+# (systemd 203/EXEC). Use the shared venv, same User= as the email driver.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_api_notice_source
 ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
 NoNewPrivileges=true
 PrivateTmp=true

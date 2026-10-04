@@ -13,14 +13,23 @@ Prod dry-run (after this release is the live tree; do not set the live flag)::
 
     sudo systemctl start robie-ascend-api-notice.service
 
-or, against the current tree::
+or, against the current tree. Start in ``/`` so a stray
+``/tmp/robie_job_engine`` cannot shadow imports. ``ROBIE_PLAYGROUND=1``
+stays: ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is ignored unless Playground
+guardrails are active, and without it the dry-run falls back to test
+applicant ``220250093``. The flag does not turn on live filing. Live
+filing is still ``ASCEND_API_SOURCE_LIVE=1``. The interpreter is the
+shared venv. The ``.hermes`` tree is mode 0700 and owned by carlo, so
+``User=streetsmart-hermes`` fails with 203/EXEC on that path::
 
+    cd /
     sudo env PYTHONPATH=/opt/streetsmart-hermes/current \\
       ROBIE_ENV=PRODUCTION \\
       ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest \\
       ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-prod-api-key/versions/latest \\
-      ROBIE_EZLYNX_WRITE_SCOPE=all ROBIE_PLAYGROUND=1 \\
-      /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \\
+      ROBIE_EZLYNX_WRITE_SCOPE=all \\
+      ROBIE_PLAYGROUND=1 \\
+      /opt/streetsmart-hermes/venv/bin/python \\
       -m robie_job_engine.ascend_api_notice_source
 """
 
