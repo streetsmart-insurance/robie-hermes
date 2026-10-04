@@ -83,7 +83,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
@@ -837,29 +837,130 @@ def _note_id_from(row: Any) -> str:
     return ""
 
 
+_DISCUSSION_APPLICANT_KEYS = (
+    "applicantId",
+    "ApplicantId",
+    "ApplicantID",
+    "applicant_id",
+)
+
+
+def _row_applicant_id(row: dict[str, Any]) -> str:
+    for key in _DISCUSSION_APPLICANT_KEYS:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def discussions_for_applicant(
+    rows: list[dict[str, Any]] | None, applicant_id: str
+) -> list[dict[str, Any]]:
+    """Drop rows stamped with a different applicant id.
+
+    The list request is already ``v8/discussions/by-applicant?applicantId=``,
+    the same query the certificate, evidence, and policy-change readers use.
+    None of those readers send a page index. Rows with no applicant id stay,
+    because that payload shape is already the applicant's list. A row stamped
+    with another applicant is not eligible.
+    """
+    wanted = str(applicant_id or "").strip()
+    records = [row for row in (rows or []) if isinstance(row, dict)]
+    if not wanted:
+        return records
+    return [
+        row
+        for row in records
+        if not _row_applicant_id(row) or _row_applicant_id(row) == wanted
+    ]
+
+
+def _policy_title_token(policy_number: str) -> str:
+    """Uppercase policy number with one trailing LOB suffix (`` APD``) removed."""
+    return normalize_policy_number(strip_ezlynx_lob_suffix(policy_number))
+
+
+def _title_has_policy(title: str, policy_number: str) -> bool:
+    token = _policy_title_token(policy_number)
+    if not token:
+        return False
+    return token in normalize_policy_number(title)
+
+
+def _title_is_finance(title: str) -> bool:
+    folded = str(title or "").casefold()
+    return "ascend" in folded or "premium finance" in folded
+
+
+def _discussion_recency(row: dict[str, Any]) -> tuple[int, float, str]:
+    """Newest updated discussion sorts last. Undated rows sort first."""
+    raw = discussions._discussion_stamp(row)
+    parsed: datetime | None = None
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
+                try:
+                    parsed = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    continue
+    discussion_id = discussions.discussion_id_of(row)
+    if parsed is not None:
+        return (2, parsed.timestamp(), discussion_id)
+    if raw:
+        return (1, 0.0, raw + discussion_id)
+    return (0, 0.0, discussion_id)
+
+
+def select_notice_discussion(
+    rows: list[dict[str, Any]] | None, policy_number: str
+) -> dict[str, Any] | None:
+    """Pick one existing titled discussion. Never an untitled card.
+
+    Prefer a title that contains the normalized policy number (a trailing
+    `` APD``-style suffix already removed). Several policy matches: the most
+    recently updated one. Otherwise the newest titled discussion whose title
+    mentions Ascend or premium finance. Nothing else qualifies.
+    """
+    titled = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and discussions.discussion_id_of(row)
+        and not discussions.is_untitled_discussion(row)
+    ]
+    policy_hits = [
+        row
+        for row in titled
+        if _title_has_policy(discussions.discussion_title_of(row), policy_number)
+    ]
+    pool = policy_hits or [
+        row
+        for row in titled
+        if _title_is_finance(discussions.discussion_title_of(row))
+    ]
+    if not pool:
+        return None
+    return max(pool, key=_discussion_recency)
+
+
 def _read_existing_note(
     client: Any,
     applicant_id: str,
     note_body: str,
     *,
-    title_hint: str | None,
+    discussion_id: str,
 ) -> dict[str, Any]:
-    """Read the discussion and compare note text. No write, no driver gate.
+    """Read the chosen discussion and compare note text. No write, no driver gate.
 
     Write-scope is not checked here. Dry-run uses this for applicants the
     allowlist blocks so a reviewer can see an existing duplicate.
     """
+    del applicant_id
     outcome = {"read": False, "duplicate": False, "note_id": "", "reason": ""}
-    try:
-        rows = client.get_discussions(applicant_id)
-        record = discussions.select_discussion_for_note(rows, title_hint=title_hint)
-    except discussions.DiscussionSelectionError as exc:
-        outcome["reason"] = f"{exc.code}: {exc}"
-        return outcome
-    except Exception as exc:  # noqa: BLE001 - read failed; caller decides
-        outcome["reason"] = f"{type(exc).__name__}: {exc}"
-        return outcome
-    discussion_id = discussions.discussion_id_of(record)
+    record = {"discussionId": discussion_id}
     if not discussion_id:
         outcome["reason"] = "selected discussion has no id"
         return outcome
@@ -902,7 +1003,7 @@ def _prepare_dry_run_note(
     applicant_id: str,
     note_body: str,
     *,
-    title_hint: str | None,
+    discussion_id: str,
 ) -> dict[str, Any]:
     """Validate the note the live path would file. No driver gate, no POST.
 
@@ -921,19 +1022,24 @@ def _prepare_dry_run_note(
     text = discussions.reject_phone_numbers(note_body).strip()
     if not text:
         raise discussions.DiscussionApiError(None, "note body is required")
-    rows = client.get_discussions(applicant)
-    try:
-        record = discussions.select_discussion_for_note(rows, title_hint=title_hint)
-    except discussions.DiscussionSelectionError as exc:
+    rows = discussions_for_applicant(client.get_discussions(applicant), applicant)
+    pinned = str(discussion_id or "").strip()
+    titled = [
+        row
+        for row in rows
+        if discussions.discussion_id_of(row) == pinned
+        and not discussions.is_untitled_discussion(row)
+    ]
+    if len(titled) != 1:
         return {
             "status": "pending",
-            "reason_code": exc.code,
-            "reason": str(exc),
+            "reason_code": "no matching discussion",
+            "reason": "no matching discussion",
             "applicant_id": applicant,
             "discussion_id": None,
             "note_id": None,
-            "matches": list(getattr(exc, "matches", []) or []),
         }
+    record = titled[0]
     discussion_id = discussions.discussion_id_of(record)
     if not discussion_id:
         return {
@@ -1071,14 +1177,33 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         return result
     ctx.seen_notice_events.append(event)
 
+    # One GET of this applicant's discussions. The query is the same
+    # by-applicant?applicantId= call the other readers use. Selection is
+    # local: policy number in the title, else Ascend or premium finance.
+    try:
+        listed = ctx.discussion_client.get_discussions(resolution.applicant_id)
+    except Exception as exc:  # noqa: BLE001 - fail closed, do not write
+        result.reason = f"discussion_error: {type(exc).__name__}: {exc}"
+        return result
+    chosen = select_notice_discussion(
+        discussions_for_applicant(listed, resolution.applicant_id),
+        resolution.policy_number,
+    )
+    if chosen is None:
+        result.reason = "no matching discussion"
+        result.detail["needs_human_review"] = True
+        return result
+    chosen_id = discussions.discussion_id_of(chosen)
+    result.detail["discussion_id"] = chosen_id
+    result.detail["discussion_title"] = discussions.discussion_title_of(chosen)
+
     # Existing-note check is a read, including when write scope will refuse.
     # A matching note is not filed again. A failed read does not invent a match.
-    title_hint = discussion_title_hint(notice_type)
     note_match = _read_existing_note(
         ctx.discussion_client,
         resolution.applicant_id,
         note_text,
-        title_hint=title_hint,
+        discussion_id=chosen_id,
     )
     result.detail["existing_note_read"] = bool(note_match.get("read"))
     result.detail["existing_note_duplicate"] = bool(note_match.get("duplicate"))
@@ -1103,20 +1228,18 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     # That label sends client email and text, and Robie does not send those.
     # Intent-to-cancel is also a note, never a cancellation task.
 
-    # Append to an EXISTING titled discussion. Untitled is refused inside
-    # select_discussion_for_note. The write-scope guard refuses
-    # non-allowlisted applicants; phone numbers in the body raise. Both are
-    # caught below and become a skip, never a silent write.
+    # Append to the discussion already chosen. Never untitled, never created.
+    # The write-scope guard refuses non-allowlisted applicants; phone
+    # numbers in the body raise. Both become a skip, never a silent write.
     # The shared EZLynx seat is gated before a live note and again before
     # a live Zapier post. Dry-run does not call driver_gate_for_write.
-    # title_hint was chosen above for the existing-note read.
     try:
         if ctx.dry_run:
             filed = _prepare_dry_run_note(
                 ctx.discussion_client,
                 resolution.applicant_id,
                 note_text,
-                title_hint=title_hint,
+                discussion_id=chosen_id,
             )
         else:
             from .ezlynx_driver_gate import EzlynxDriverGateRefused
@@ -1131,7 +1254,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 ctx.discussion_client,
                 resolution.applicant_id,
                 note_text,
-                title_hint=title_hint,
+                discussion_id=chosen_id,
                 dry_run=False,
             )
     except EzlynxWriteScopeError as exc:
@@ -1141,6 +1264,10 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = f"discussion_error: {exc}"
         return result
     if filed.get("status") not in {"filed", "dry_run"}:
+        if str(filed.get("reason") or "") == "no matching discussion":
+            result.reason = "no matching discussion"
+            result.detail["needs_human_review"] = True
+            return result
         result.reason = (
             f"note_not_filed: {filed.get('reason_code')}: {filed.get('reason')}"
         )
@@ -1251,6 +1378,8 @@ def _would_file_entry(notice: EmailNotice, result: NoticeResult) -> dict[str, An
         entry["csr_login"] = str(detail.get("csr_username") or "")
     if detail.get("program_uuid"):
         entry["program_uuid"] = str(detail["program_uuid"])
+    if detail.get("discussion_title"):
+        entry["discussion_title"] = str(detail["discussion_title"])
     if "existing_note_duplicate" in detail:
         entry["existing_note_duplicate"] = bool(detail.get("existing_note_duplicate"))
     if "existing_note_read" in detail:
@@ -1341,19 +1470,13 @@ def _notice_allow_modify(*, dry_run: bool) -> bool:
 def discussion_config_from_api_config(api_config: Any) -> DiscussionApiConfig:
     """Build the Discussion API config from the shared EZLynx API secret payload.
 
-    The DiscussionApi root lives under the same host as the document API
-    (https://app.ezlynx.com/DiscussionApi/). No new secrets are introduced.
+    The host-only root comes from the certificate sweep helper. Appending
+    ``DiscussionApi`` onto ``document_base_url`` produces
+    ``.../DocumentApi/DiscussionApi/`` and every read 404s.
     """
-    base = str(api_config.document_base_url or "").rstrip("/") + "/DiscussionApi/"
-    return DiscussionApiConfig(
-        discussion_base_url=base,
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
-    )
+    from .cert_sweep import _discussion_client_for
+
+    return _discussion_client_for(api_config)._config
 
 
 def build_processing_context(

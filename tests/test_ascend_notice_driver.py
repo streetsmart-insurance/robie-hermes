@@ -225,7 +225,7 @@ def make_ctx(
     discussion_rows = (
         discussion_rows
         if discussion_rows is not None
-        else [{"discussionId": "d1", "title": "PCR"}]
+        else [{"discussionId": "d1", "title": "HO-998877"}]
     )
     discussion_client = make_discussion_client(
         discussion_rows, discussion_detail=discussion_detail
@@ -334,6 +334,8 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert entry["applicant_id"] == ALLOWED_APPLICANT
     assert entry["csr_login"] == "KarlaSS"
     assert entry["program_uuid"] == "prog-1"
+    assert entry["discussion_title"] == "HO-998877"
+    assert "insured" not in entry
     assert summary["would_file_if_write_scope_allowed_count"] == 0
     assert summary["would_file_if_write_scope_allowed"] == []
     assert summary["breakdown"]["would_file_if_write_scope_allowed"] == 0
@@ -704,6 +706,7 @@ def test_dry_run_reports_existing_note_duplicate_for_blocked_applicant(no_zap_fi
     assert blocked["applicant_id"] == "175448994"
     assert blocked["existing_note_duplicate"] is True
     assert blocked["existing_note_id"] == "n-existing"
+    assert blocked["discussion_title"] == "HO-998877"
     assert summary["would_file"] == []
     assert ctx.ezlynx_client.label_list_calls == 0
     assert ctx.ezlynx_client.applied_labels == []
@@ -769,11 +772,25 @@ def test_cancellation_live_files_note_without_calling_the_label_api(no_zap_fire)
     assert ctx.source.marked == ["m1"]
 
 
-def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
+def test_cancellation_prefers_the_newest_policy_titled_discussion(no_zap_fire):
     rows = [
-        {"discussionId": "d0", "title": "Untitled"},
-        {"discussionId": "d1", "title": "New Business"},
-        {"discussionId": "d2", "title": "Service-Cancellation"},
+        {"discussionId": "d0", "title": "Untitled", "updatedAt": "2026-12-01T00:00:00Z"},
+        {"discussionId": "d1", "title": "New Business", "updatedAt": "2026-08-01T00:00:00Z"},
+        {
+            "discussionId": "d-old",
+            "title": "HO-998877 APD",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        },
+        {
+            "discussionId": "d2",
+            "title": "Policy HO-998877",
+            "updatedAt": "2026-09-01T00:00:00Z",
+        },
+        {
+            "discussionId": "d-ascend",
+            "title": "Ascend",
+            "updatedAt": "2026-11-01T00:00:00Z",
+        },
     ]
     ctx, discussion_client = make_ctx(
         notices=[make_notice()],
@@ -785,7 +802,7 @@ def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
     result = summary["results"][0]
     assert result["status"] == "done"
     assert result["detail"]["discussion_id"] == "d2"
-    assert result["detail"]["discussion_title"] == "Service-Cancellation"
+    assert result["detail"]["discussion_title"] == "Policy HO-998877"
     assert driver.ROBIE_WAS_HERE in result["detail"]["note_text"]
     posts = discussion_client._urlopen.posts_to("/notes")
     assert len(posts) == 1
@@ -810,8 +827,8 @@ def test_untitled_only_discussions_are_not_filed(no_zap_fire):
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "skipped"
-    assert "note_not_filed" in result["reason"]
-    assert "UNTITLED_FORBIDDEN" in result["reason"]
+    assert result["reason"] == "no matching discussion"
+    assert result["detail"]["needs_human_review"] is True
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
 
@@ -873,10 +890,77 @@ def test_ambiguous_discussions_are_pending_not_filed(no_zap_fire):
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "skipped"
-    assert "note_not_filed" in result["reason"]
-    assert "AMBIGUOUS_DISCUSSIONS" in result["reason"]
+    assert result["reason"] == "no matching discussion"
+    assert result["detail"]["needs_human_review"] is True
+    assert summary["would_file"] == []
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+
+
+def test_finance_title_is_used_when_no_policy_title_matches(no_zap_fire):
+    rows = [
+        {
+            "discussionId": "d-old",
+            "title": "Premium finance",
+            "updatedAt": "2026-02-01T00:00:00Z",
+        },
+        {
+            "discussionId": "d-new",
+            "title": "Ascend NOC",
+            "updatedAt": "2026-08-01T00:00:00Z",
+        },
+        {"discussionId": "d-other", "title": "Certificates", "applicantId": "999"},
+    ]
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=rows,
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "dry_run"
+    assert result["detail"]["discussion_id"] == "d-new"
+    assert result["detail"]["discussion_title"] == "Ascend NOC"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend NOC"
+
+
+def test_other_applicants_rows_do_not_win_the_policy_title(no_zap_fire):
+    rows = [
+        {
+            "discussionId": "d-other",
+            "title": "HO-998877",
+            "applicantId": "999999999",
+            "updatedAt": "2026-12-01T00:00:00Z",
+        },
+        {
+            "discussionId": "d-ours",
+            "title": "Ascend",
+            "applicantId": ALLOWED_APPLICANT,
+            "updatedAt": "2026-01-01T00:00:00Z",
+        },
+    ]
+    ctx, _ = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=rows,
+    )
+    summary = driver.run_driver(ctx)
+    assert summary["results"][0]["detail"]["discussion_id"] == "d-ours"
+    assert summary["would_file"][0]["discussion_title"] == "Ascend"
+
+
+def test_discussion_base_url_is_host_only():
+    class _DocumentApiConfig:
+        document_base_url = "https://app.ezlynx.com/DocumentApi/"
+        token_endpoint = "https://app.ezlynx.com/auth/connect/token"
+        client_id = "id"
+        client_secret = "secret"
+        username = "SSRobie"
+        integration_group_id = "159"
+
+    config = driver.discussion_config_from_api_config(_DocumentApiConfig())
+    assert config.discussion_base_url == "https://app.ezlynx.com/DiscussionApi/"
+    assert "DocumentApi" not in config.discussion_base_url
 
 
 # ---------------------------------------------------------------------------
@@ -895,11 +979,13 @@ def test_late_payment_files_note_but_skips_task(no_zap_fire):
     ctx, discussion_client = make_ctx(
         notices=[notice],
         policy_rows={"GL-112233": [row]},
+        discussion_rows=[{"discussionId": "d-gl", "title": "GL-112233"}],
         ascend_client=FakeAscendClient(program={"status": "past_due"}),
     )
     summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "dry_run"
+    assert result["detail"]["discussion_title"] == "GL-112233"
     assert result["detail"]["notice_type"] == triage.LATE_PAYMENT
     assert result["detail"]["applicant_id"] == ALLOWED_APPLICANT
     assert "csr_username" not in result["detail"]
@@ -910,6 +996,7 @@ def test_late_payment_files_note_but_skips_task(no_zap_fire):
     assert ctx.ezlynx_client.applied_labels == []
     entry = summary["would_file"][0]
     assert entry["notice_type"] == triage.LATE_PAYMENT
+    assert entry["discussion_title"] == "GL-112233"
     assert "csr_login" not in entry
 
 
