@@ -1696,7 +1696,8 @@ def test_default_query_and_mailboxes(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     assert driver.DEFAULT_QUERY == (
-        "is:unread newer_than:2d from:(no-reply@useascend.com OR accounting@useascend.com)"
+        "is:unread newer_than:2d from:(no-reply@useascend.com OR "
+        "accounting@useascend.com OR support@useascend.com)"
     )
     assert driver.configured_query() == driver.DEFAULT_QUERY
     assert driver.resolve_mailboxes() == list(driver.DEFAULT_MAILBOXES)
@@ -1705,7 +1706,9 @@ def test_default_query_and_mailboxes(monkeypatch):
     assert "certificates@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
     assert "andrea@streetsmart.insurance" in driver.DEFAULT_MAILBOXES
     monkeypatch.setenv("ASCEND_DRIVER_QUERY", "is:unread newer_than:1d")
-    assert driver.configured_query() == "is:unread newer_than:1d"
+    assert driver.configured_query() == (
+        "is:unread newer_than:1d " + driver.ascend_sender_filter()
+    )
     assert driver.configured_query("is:unread from:accounting@useascend.com") == (
         "is:unread from:accounting@useascend.com"
     )

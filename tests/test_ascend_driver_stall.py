@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from robie_job_engine import ascend_notice_driver as driver
+from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine.ascend_driver_stall import (
     append_run_record,
     count_actionable,
@@ -116,6 +117,92 @@ class MailboxAllowlistTests(unittest.TestCase):
             driver.resolve_mailboxes(mailbox="outsider@example.com"),
             ["outsider@example.com"],
         )
+
+
+class SenderFilterTests(unittest.TestCase):
+    def test_fixture_senders_are_exactly_the_allowlist(self):
+        fixture_dir = ROOT / "tests" / "fixtures" / "ascend_notices"
+        paths = sorted(fixture_dir.glob("*.json"))
+        self.assertEqual(len(paths), 56)
+        senders = set()
+        for path in paths:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            senders.add(str(data["from"]).casefold())
+        self.assertEqual(
+            senders, {sender.casefold() for sender in driver.ASCEND_NOTICE_SENDERS}
+        )
+        self.assertEqual(
+            driver.ascend_sender_filter(),
+            "from:(no-reply@useascend.com OR accounting@useascend.com OR "
+            "support@useascend.com)",
+        )
+        self.assertEqual(
+            driver.DEFAULT_QUERY,
+            "is:unread newer_than:2d " + driver.ascend_sender_filter(),
+        )
+
+    def test_unfiltered_and_non_ascend_queries_gain_the_clause(self):
+        clause = driver.ascend_sender_filter()
+        with patch.dict(os.environ, {"ASCEND_DRIVER_QUERY": "is:unread newer_than:2d"}):
+            narrowed = driver.configured_query()
+        self.assertEqual(narrowed, f"is:unread newer_than:2d {clause}")
+        github = driver.configured_query("is:unread from:notifications@github.com")
+        self.assertEqual(
+            github, f"is:unread from:notifications@github.com {clause}"
+        )
+        mixed = driver.configured_query(
+            "from:notifications@github.com OR from:support@useascend.com"
+        )
+        self.assertEqual(
+            mixed,
+            f"(from:notifications@github.com OR from:support@useascend.com) {clause}",
+        )
+        self.assertEqual(driver.ensure_ascend_sender_filter("  "), driver.DEFAULT_QUERY)
+        self.assertEqual(driver.configured_query(driver.DEFAULT_QUERY), driver.DEFAULT_QUERY)
+
+    def test_ascend_sender_and_domain_queries_stay_narrow(self):
+        narrow = "is:unread from:accounting@useascend.com"
+        self.assertEqual(driver.configured_query(narrow), narrow)
+        domain = "is:unread newer_than:2d from:useascend.com"
+        self.assertEqual(driver.configured_query(domain), domain)
+        quoted = 'from:"support@useascend.com"'
+        self.assertEqual(driver.configured_query(quoted), quoted)
+
+
+class NoticeClassificationLockTests(unittest.TestCase):
+    def test_journal_families_classify_and_refund_stays_ignored(self):
+        expected = {
+            "payment_confirmation_copy": triage.PAYMENT_CONFIRMATION,
+            "refund_initiated": triage.REFUND,
+            "refund_to_customer": triage.REFUND,
+            "underwriting_request": triage.UNDERWRITING,
+            "underwriting_counteroffer": triage.UNDERWRITING,
+            "processing_payment": triage.PROCESSING_PAYMENT,
+            "past_due_payment": triage.LATE_PAYMENT,
+            "payment_failed": triage.LATE_PAYMENT,
+            "intent_to_cancel_copy": triage.INTENT_TO_CANCEL,
+        }
+        fixture_dir = ROOT / "tests" / "fixtures" / "ascend_notices"
+        seen: set[str] = set()
+        for path in sorted(fixture_dir.glob("*.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            family = data["family"]
+            if family not in expected:
+                continue
+            seen.add(family)
+            notice_type = triage.classify_notice(data["subject"], data["text_plain"])
+            self.assertEqual(notice_type, expected[family], path.name)
+            self.assertNotEqual(notice_type, triage.UNKNOWN, path.name)
+        self.assertEqual(seen, set(expected))
+        self.assertIn(triage.REFUND, triage.IGNORE_TYPES)
+        for filing in (
+            triage.PAYMENT_CONFIRMATION,
+            triage.UNDERWRITING,
+            triage.PROCESSING_PAYMENT,
+            triage.LATE_PAYMENT,
+            triage.INTENT_TO_CANCEL,
+        ):
+            self.assertNotIn(filing, triage.IGNORE_TYPES)
 
 
 class StallVerdictTests(unittest.TestCase):
