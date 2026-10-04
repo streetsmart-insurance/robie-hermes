@@ -22,6 +22,10 @@ Safety (non-negotiable):
 - DRY_RUN defaults ON. Live mode only with ``--live`` or
   ``ASCEND_DRIVER_LIVE=1``. Dry-run logs exactly what it would do
   (subject, applicant, CSR, note text, task payload) and writes nothing.
+- Each run appends a counts-only record to
+  ``/var/lib/robie-ascend-notice-driver/runs.jsonl`` (directory 0755,
+  file 0644). The hourly health check reads that file and does not read
+  the journal. The record has no subject, body, or applicant id.
   Dry-run requests ``gmail.readonly`` only: no mark-read, no notes, no
   labels, no Zapier post, and no ``driver_gate_for_write`` call.
 - Fail closed per email: triage ``needs_human_review``, unresolved
@@ -100,6 +104,7 @@ from . import ascend_notice_triage as triage
 from . import ezlynx_discussions as discussions
 from . import zapier_tasks
 from .ascend_api import AscendApiClient, configured_client as configured_ascend_client
+from .ascend_driver_stall import annotate_summary, append_run_record
 from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
 from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
 from .ezlynx_write_scope import EzlynxWriteScopeError
@@ -117,15 +122,33 @@ DEFAULT_DUE_DAYS = 2
 # Scanned when neither --mailbox nor ASCEND_DRIVER_MAILBOX / ASCEND_DRIVER_MAILBOXES
 # is set. Also the hard allowlist: any other mailbox is refused unless
 # ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1.
+# Prod's live driver reads these 25 mailboxes (Carlo, 2026-10-04).
 DEFAULT_MAILBOXES: tuple[str, ...] = (
+    "carlo@streetsmart.insurance",
+    "jake@streetsmart.insurance",
+    "robie@streetsmart.insurance",
     "hello@streetsmart.insurance",
-    "mike@streetsmart.insurance",
-    "angie@streetsmart.insurance",
-    "eimy@streetsmart.insurance",
+    "accounting@streetsmart.insurance",
     "sandy@streetsmart.insurance",
     "zeus@streetsmart.insurance",
+    "certificates@streetsmart.insurance",
+    "daniela@streetsmart.insurance",
+    "angie@streetsmart.insurance",
+    "ana@streetsmart.insurance",
+    "jazmin@streetsmart.insurance",
+    "jackie@streetsmart.insurance",
     "taylor@streetsmart.insurance",
-    "jake@streetsmart.insurance",
+    "steffany@streetsmart.insurance",
+    "amber@streetsmart.insurance",
+    "ashley@streetsmart.insurance",
+    "jimmy@streetsmart.insurance",
+    "matthew@streetsmart.insurance",
+    "karla@streetsmart.insurance",
+    "mitchell@streetsmart.insurance",
+    "eimy@streetsmart.insurance",
+    "alejandro@streetsmart.insurance",
+    "mike@streetsmart.insurance",
+    "andrea@streetsmart.insurance",
 )
 ALLOWED_MAILBOXES = frozenset(mailbox.casefold() for mailbox in DEFAULT_MAILBOXES)
 
@@ -185,10 +208,9 @@ def parse_mailbox_list(raw: str) -> list[str]:
 
 
 def enforce_mailbox_allowlist(mailboxes: list[str]) -> list[str]:
-    """Refuse mailboxes outside the default staff set unless explicitly allowed.
+    """Refuse mailboxes outside the staff allowlist unless explicitly allowed.
 
-    The override is ``ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1``. Shared or
-    unknown mailboxes are not scanned by default.
+    The override is ``ASCEND_DRIVER_ALLOW_EXTRA_MAILBOXES=1``.
     """
     cleaned: list[str] = []
     refused: list[str] = []
@@ -219,7 +241,8 @@ def resolve_mailboxes(
     """Choose scan targets.
 
     Precedence: ``--mailboxes``, then ``ASCEND_DRIVER_MAILBOXES``, then
-    ``--mailbox``, then ``ASCEND_DRIVER_MAILBOX``, then the default eight.
+    ``--mailbox``, then ``ASCEND_DRIVER_MAILBOX``, then the default staff
+    mailboxes.
     ``None`` means the flag was omitted. An explicit empty string falls
     through the same way.
     """
@@ -1990,7 +2013,7 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
             for item in results
         ],
     }
-    return summary
+    return annotate_summary(summary)
 
 
 def _notice_allow_modify(*, dry_run: bool) -> bool:
@@ -2124,9 +2147,14 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_driver(ctx)
     except Exception as exc:  # noqa: BLE001 - top-level fail closed
         logger.error("driver failed closed: %s: %s", type(exc).__name__, exc)
-        print(json.dumps({"dry_run": dry_run, "fatal": f"{type(exc).__name__}: {exc}"}))
+        summary = {"dry_run": dry_run, "fatal": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(summary))
+        if append_run_record(summary) is None:
+            logger.warning("could not write ascend driver run log")
         return 1
     print(json.dumps(summary, indent=2, default=str))
+    if append_run_record(summary) is None:
+        logger.warning("could not write ascend driver run log")
     return 0
 
 
