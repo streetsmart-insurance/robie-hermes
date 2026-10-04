@@ -23,8 +23,9 @@ filing is still ``ASCEND_API_SOURCE_LIVE=1``. ``ROBIE_ASCEND_API_ENABLED``,
 only let the GET client start; they do not file notes. The interpreter
 is the shared venv. The ``.hermes`` tree is mode 0700 and owned by carlo,
 so ``User=streetsmart-hermes`` fails with 203/EXEC on that path. Dry-run
-state goes to ``ascend_api_notice_events.dry-run.db``, not the live store
-the email driver reads::
+state goes to ``data/ascend-api/ascend_api_notice_events.dry-run.db``, not
+the live store the email driver reads. The email driver on Prod runs as
+carlo. A missing live store means the email still files::
 
     cd /
     sudo env PYTHONPATH=/opt/streetsmart-hermes/current \\
@@ -36,7 +37,7 @@ the email driver reads::
       ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 \\
       ROBIE_EZLYNX_WRITE_SCOPE=all \\
       ROBIE_PLAYGROUND=1 \\
-      ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db \\
+      ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.dry-run.db \\
       /opt/streetsmart-hermes/venv/bin/python \\
       -m robie_job_engine.ascend_api_notice_source
 """
@@ -50,6 +51,7 @@ import os
 import re
 import sqlite3
 import sys
+from urllib import parse as urlparse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,14 +68,15 @@ DB_ENV = "ASCEND_API_NOTICE_DB"
 DRY_RUN_DB_ENV = "ASCEND_API_NOTICE_DRY_RUN_DB"
 LOOKBACK_ENV = "ASCEND_API_SOURCE_LOOKBACK_MINUTES"
 
+STORE_DIR_NAME = "ascend-api"
 DEFAULT_DB_PATH = Path(
-    "/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db"
+    "/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.db"
 )
 DEFAULT_DRY_RUN_DB_PATH = Path(
-    "/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db"
+    "/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.dry-run.db"
 )
-# Group and other can read the store. The email driver has to open it even
-# when it is not the process that created the file. Not world-writable.
+# The dedicated folder is readable by carlo and by streetsmart-hermes.
+# The shared data directory is not touched. The file is not world-writable.
 STORE_FILE_MODE = 0o644
 STORE_DIR_MODE = 0o755
 DEFAULT_LOOKBACK_MINUTES = 20
@@ -161,7 +164,11 @@ def remittance_applicant_id() -> str:
 
 
 class ApiNoticeStoreUnavailable(RuntimeError):
-    """The live dedupe store is missing or cannot be read."""
+    """Raised only by callers that still want a hard failure.
+
+    The email driver does not use this. A missing or unreadable live store
+    means the email files, because email is the source until the API is live.
+    """
 
 
 def live_db_path() -> Path:
@@ -192,25 +199,27 @@ def db_path() -> Path:
 
 
 def publish_store_permissions(path: Path) -> None:
-    """Make the store and its directory readable by the email-driver user.
+    """Mode 0644 on the sqlite file, and 0755 only on ``ascend-api``.
 
-    ``UMask=0077`` created a mode-0600 file. A driver running as a different
-    user then could not open it and would file the notice again. Mode 0644
-    on the file and 0755 on the directory stay readable by
-    ``streetsmart-hermes`` and by whatever user the email unit still runs
-    as. The readiness branch that sets that unit's ``User=`` is not pushed;
-    the unit on main is already ``User=streetsmart-hermes``.
+    The parent of that folder is the shared data directory. Other services
+    keep their own mode there. This function does not chown anything.
     """
     try:
         if path.is_file():
             os.chmod(path, STORE_FILE_MODE)
         parent = path.parent
-        if parent.is_dir() and parent != parent.parent:
+        if parent.name == STORE_DIR_NAME and parent.is_dir():
             os.chmod(parent, STORE_DIR_MODE)
     except OSError as exc:
         logger.warning(
             "could not publish notice store permissions: %s", type(exc).__name__
         )
+
+
+def _create_store_directory(path: Path) -> None:
+    """Create missing directories. Do not change the mode of one that exists."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
 
 
 def make_event_key(program_id: str, event_type: str, anchor: str) -> str:
@@ -519,7 +528,7 @@ class EventKeyStore:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _create_store_directory(self.path)
         self._init()
         publish_store_permissions(self.path)
 
@@ -564,6 +573,10 @@ class EventKeyStore:
                     program_id TEXT PRIMARY KEY,
                     policy_numbers TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS first_seen (
+                    episode_id TEXT PRIMARY KEY,
+                    seen_at TEXT NOT NULL
                 );
                 """
             )
@@ -696,6 +709,25 @@ class EventKeyStore:
                 (key, json.dumps(cleaned), _iso(_now())),
             )
 
+    def first_seen_at(self, episode_id: str, proposed: str) -> str:
+        """The first time this invoice was seen. Later polls keep that time."""
+        key = str(episode_id or "").strip()
+        moment = str(proposed or "").strip()
+        if not key or not moment:
+            return moment
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT seen_at FROM first_seen WHERE episode_id=?",
+                (key,),
+            ).fetchone()
+            if row is not None and str(row["seen_at"] or "").strip():
+                return str(row["seen_at"])
+            conn.execute(
+                "INSERT INTO first_seen (episode_id, seen_at) VALUES (?, ?)",
+                (key, moment),
+            )
+        return moment
+
     def cursor(self) -> datetime | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -737,6 +769,40 @@ class EventKeyStore:
         return streak
 
 
+def _readonly_filed_rows(path: Path, program_id: str, event_type: str) -> list[dict[str, str]]:
+    """Read filed rows. Do not create the path, the file, or any table.
+
+    ``mode=ro`` plus ``query_only`` so a lookup cannot write a journal or
+    migrate the schema. A missing, empty, or unreadable file is no rows.
+    """
+    if not path.is_file():
+        return []
+    quoted = urlparse.quote(path.resolve().as_posix())
+    uri = f"file:{quoted}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("api notice store is not readable: %s", type(exc).__name__)
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        fetched = conn.execute(
+            """
+            SELECT event_key, program_id, event_type, anchor, occurred_at, invoice_id
+            FROM filed_events
+            WHERE program_id=? AND event_type=? AND status='filed'
+            """,
+            (program_id, event_type),
+        ).fetchall()
+        return [dict(row) for row in fetched]
+    except sqlite3.Error as exc:
+        logger.warning("api notice store read failed: %s", type(exc).__name__)
+        return []
+    finally:
+        conn.close()
+
+
 def email_covered_by_api(
     *,
     program_id: str,
@@ -746,12 +812,12 @@ def email_covered_by_api(
     internal_date: str = "",
     store: EventKeyStore | None = None,
 ) -> str:
-    """Event key when the API poller already filed this email. Empty otherwise.
+    """Event key when the live API poller already filed this email.
 
-    Failed-payment mail, underwriting, return premium, and refunds stay with
-    the email driver. A missing or unreadable live store raises
-    :class:`ApiNoticeStoreUnavailable` so the email driver skips the notice
-    instead of filing it again.
+    Empty means the email driver files it. A missing, unreadable, or empty
+    live store is empty: email is the only source until the API is live.
+    The dry-run database is never opened. Only rows with status ``filed``
+    count. The read path does not create a folder, a file, or a table.
     """
     kind = str(notice_type or "").strip()
     if kind not in API_OWNED_EMAIL_TYPES:
@@ -762,16 +828,14 @@ def email_covered_by_api(
     if not program:
         return ""
     path = live_db_path()
-    if store is None and not path.exists():
-        raise ApiNoticeStoreUnavailable(str(path))
     try:
-        keeper = store if store is not None else EventKeyStore(path)
-        rows = keeper.filed_for(program, kind)
-    except ApiNoticeStoreUnavailable:
-        raise
-    except Exception as exc:  # noqa: BLE001 - do not file when the store cannot be read
-        logger.warning("api notice dedupe read failed: %s", type(exc).__name__)
-        raise ApiNoticeStoreUnavailable(str(path)) from exc
+        if store is not None:
+            rows = store.filed_for(program, kind)
+        else:
+            rows = _readonly_filed_rows(path, program, kind)
+    except Exception as exc:  # noqa: BLE001 - a bad store must not block email
+        logger.warning("api notice dedupe lookup failed: %s", type(exc).__name__)
+        return ""
     if not rows:
         return ""
     needles = _email_anchors(body, program)
@@ -956,6 +1020,7 @@ def notices_from_snapshot(
     persist_episodes: bool = False,
     prior_loan_status: dict[str, str] | None = None,
     since: datetime | None = None,
+    now: datetime | None = None,
 ) -> list[ApiNotice]:
     """Map the API shapes from the coverage study. Synthetic callers only."""
     programs_by_id = {
@@ -996,7 +1061,7 @@ def notices_from_snapshot(
         )
     for invoice in invoices:
         program = programs_by_id.get(_program_id_of(invoice), {})
-        notice = _invoice_notice(invoice, program)
+        notice = _invoice_notice(invoice, program, store=store, now=now)
         if notice is not None:
             notices.append(notice)
     for payout in payouts:
@@ -1293,8 +1358,38 @@ def _invoice_alias_keys(
     return (make_event_key(program_id, event_type, invoice_id),)
 
 
+def _past_due_occurred_at(
+    invoice: dict[str, Any],
+    *,
+    store: EventKeyStore | None,
+    program_id: str,
+    invoice_id: str,
+    now: datetime | None,
+) -> str:
+    """A timestamp the lookback can keep.
+
+    Invoice past-due rows often have no ``updated_at``. A due date or a
+    past-due date from the API is the event time. When the API has neither,
+    the first poll records the current time and every later poll reuses it,
+    so the invoice is new once.
+    """
+    for key in ("updated_at", "past_due_at", "past_due_date", "due_date"):
+        raw = invoice.get(key)
+        if parse_time(raw):
+            return str(raw).strip()
+    moment = _iso(now or _now())
+    episode = f"invoice:{invoice_id}|late_payment_first_seen"
+    if store is None:
+        return moment
+    return store.first_seen_at(episode, moment)
+
+
 def _invoice_notice(
-    invoice: dict[str, Any], program: dict[str, Any]
+    invoice: dict[str, Any],
+    program: dict[str, Any],
+    *,
+    store: EventKeyStore | None = None,
+    now: datetime | None = None,
 ) -> ApiNotice | None:
     program_id = _program_id_of(invoice) or _record_id(program)
     anchor, invoice_id = invoice_anchor(invoice)
@@ -1366,6 +1461,13 @@ def _invoice_notice(
             sentence += f" of {amount}."
         else:
             sentence += "."
+        occurred = _past_due_occurred_at(
+            invoice,
+            store=store,
+            program_id=program_id,
+            invoice_id=invoice_id,
+            now=now,
+        )
         return _notice(
             event_type=triage.LATE_PAYMENT,
             program_id=program_id,
@@ -1373,7 +1475,7 @@ def _invoice_notice(
             alias_keys=_invoice_alias_keys(
                 program_id, triage.LATE_PAYMENT, anchor, invoice_id
             ),
-            occurred_at=updated or invoice_id,
+            occurred_at=occurred,
             subject=f"Past due payment for {insured}",
             body=_render_common(
                 program_id=program_id,
@@ -1643,6 +1745,7 @@ def run_once(
         persist_episodes=live and not errors,
         prior_loan_status=observed,
         since=window,
+        now=moment,
     )
     if not errors:
         for loan in loans:

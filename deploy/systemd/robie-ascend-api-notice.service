@@ -7,10 +7,9 @@ Wants=network-online.target
 Type=oneshot
 User=streetsmart-hermes
 Group=streetsmart-hermes
-# 0022 so the sqlite store is mode 0644. A 0077 umask made it mode 0600, which the
-# email driver cannot read when it is not this process. The email unit on
-# main is User=streetsmart-hermes. The readiness branch that would confirm
-# a different user is not pushed.
+# 0022 so the sqlite file this unit creates is mode 0644. The store lives
+# in data/ascend-api/, which this process creates. On Prod the email driver
+# runs as carlo and can read that file. Do not chmod the shared data directory.
 UMask=0022
 WorkingDirectory=/opt/streetsmart-hermes/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes/current
@@ -36,10 +35,10 @@ Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
 Environment=ROBIE_PLAYGROUND=1
 # Live filings. The email driver reads this file. Dry-run uses the other
 # path so a dry-run cannot reset the live stall streak or loan episodes.
-Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db
-Environment=ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.dry-run.db
+Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.db
+Environment=ASCEND_API_NOTICE_DRY_RUN_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend-api/ascend_api_notice_events.dry-run.db
 # streetsmart-hermes cannot exec the carlo-owned mode-0700 .hermes tree
-# (systemd 203/EXEC). Use the shared venv, same User= as the email driver.
+# (systemd 203/EXEC). Use the shared venv.
 ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ascend_api_notice_source
 ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
 NoNewPrivileges=true

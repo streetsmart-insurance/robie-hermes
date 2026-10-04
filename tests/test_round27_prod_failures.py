@@ -324,28 +324,6 @@ class JohnSmithTests(unittest.TestCase):
 
 
 class AscendGateTests(unittest.TestCase):
-    def setUp(self) -> None:
-        # unittest discover does not apply the pytest fixture above. Without
-        # a readable store the notice is skipped before the lease gate.
-        import tempfile
-
-        from robie_job_engine import ascend_api_notice_source as source
-
-        self._store_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._store_dir.cleanup)
-        path = Path(self._store_dir.name) / "events.db"
-        source.EventKeyStore(path)
-        self._previous_db = os.environ.get(source.DB_ENV)
-        os.environ[source.DB_ENV] = str(path)
-
-        def _restore() -> None:
-            if self._previous_db is None:
-                os.environ.pop(source.DB_ENV, None)
-            else:
-                os.environ[source.DB_ENV] = self._previous_db
-
-        self.addCleanup(_restore)
-
     def test_notice_driver_does_not_file_when_test_holds_the_lease(self) -> None:
         from test_ascend_notice_driver import make_ctx, make_notice, policy_row
 

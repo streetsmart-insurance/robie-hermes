@@ -1527,16 +1527,19 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = "unknown_notice_type"
         return result
 
-    # API poller dedupe. Mailbox allowlisting in this file is owned by the
-    # in-flight Prod-readiness change; this hook is the API-store check.
-    # A missing or unreadable store skips the notice so it is not filed twice.
-    covered_key, store_unavailable = _api_source_already_filed(
-        notice, notice_type, program_uuid
-    )
-    if store_unavailable:
-        result.reason = "api_store_unavailable"
-        result.detail["duplicate_source"] = "ascend_api"
-        return result
+    # The lease gate runs before the API-store lookup. A held lease refuses
+    # the notice even when the live store already has this key, and a missing
+    # store must not hide the refusal. Dry-run does not call the gate.
+    if not ctx.dry_run:
+        gate_reason = _driver_gate_refusal()
+        if gate_reason:
+            result.reason = gate_reason
+            return result
+
+    # Skip only when the live store has this key filed. A missing, empty,
+    # or unreadable store means email files. The poller's own api: notice
+    # is the writer and does not consult this hook.
+    covered_key = _api_source_already_filed(notice, notice_type, program_uuid)
     if covered_key:
         result.reason = "api_already_filed"
         result.detail["event_key"] = covered_key
@@ -1984,30 +1987,35 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 # ---------------------------------------------------------------------------
 
 
+def _driver_gate_refusal() -> str:
+    """Empty when this host may write. Otherwise the lease refusal reason."""
+    from .ezlynx_driver_gate import EzlynxDriverGateRefused
+    from .safety_seal import driver_gate_for_write
+
+    try:
+        driver_gate_for_write()
+    except EzlynxDriverGateRefused as exc:
+        return f"driver_gate_refused: {exc}"
+    return ""
+
+
 def _api_source_already_filed(
     notice: EmailNotice, notice_type: str, program_uuid: str
-) -> tuple[str, bool]:
-    """Return ``(event_key, store_unavailable)``.
+) -> str:
+    """Live event key when that filing already happened. Empty means file.
 
-    ``store_unavailable`` means the live store could not be read. The caller
-    skips the notice. An empty key with ``store_unavailable`` false means
-    the email driver still files it.
-
+    A missing, empty, or unreadable live store is empty. Email is the only
+    source until the API poller is live, so the driver files the notice.
     A message id of ``api:<event key>`` is the poller's own synthetic
-    notice. That path is the writer; its dedupe is the event-key store,
-    checked before this hook. A missing live file must not turn that
-    dry-run into a skip. Real mailbox ids still fail closed.
+    notice. That path is the writer; its dedupe is the event-key store.
     """
     if str(notice.message_id or "").startswith("api:"):
-        return "", False
+        return ""
     program_id = str(program_uuid or "").strip()
     if not program_id:
-        return "", False
+        return ""
     try:
-        from .ascend_api_notice_source import (
-            ApiNoticeStoreUnavailable,
-            email_covered_by_api,
-        )
+        from .ascend_api_notice_source import email_covered_by_api
 
         found = email_covered_by_api(
             program_id=program_id,
@@ -2016,21 +2024,14 @@ def _api_source_already_filed(
             body=notice.body,
             internal_date=notice.internal_date,
         )
-    except ApiNoticeStoreUnavailable as exc:
+    except Exception as exc:  # noqa: BLE001 - a bad store must not block the email
         logger.warning(
-            "ascend api notice store unavailable (%s); not filing %s",
-            exc,
-            notice.message_id,
-        )
-        return "", True
-    except Exception as exc:  # noqa: BLE001 - do not file when dedupe cannot be checked
-        logger.warning(
-            "ascend api dedupe lookup failed (%s); not filing %s",
+            "ascend api dedupe lookup failed (%s); filing %s",
             type(exc).__name__,
             notice.message_id,
         )
-        return "", True
-    return str(found or ""), False
+        return ""
+    return str(found or "")
 
 
 def _reason_prefix(reason: str) -> str:

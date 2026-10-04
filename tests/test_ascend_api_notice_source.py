@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -747,7 +749,16 @@ def test_timer_polls_every_fifteen_minutes_and_stays_dry_run():
     assert "Environment=ASCEND_API_SOURCE_LIVE=1" not in service
     assert "UMask=0022" in service
     assert "UMask=0077" not in service
-    assert "ascend_api_notice_events.dry-run.db" in service
+    assert "data/ascend-api/ascend_api_notice_events.db" in service
+    assert "data/ascend-api/ascend_api_notice_events.dry-run.db" in service
+    assert "runs as carlo" in service
+    assert "email driver runs as streetsmart-hermes" not in service.casefold()
+    assert "same User= as the email driver" not in service
+    drop_store = (
+        ROOT / "deploy/systemd/robie-ascend-notice-driver.service.d/20-api-notice-store.conf"
+    ).read_text(encoding="utf-8")
+    assert "data/ascend-api/ascend_api_notice_events.db" in drop_store
+    assert "ROBIE_EZLYNX_WRITE_SCOPE=all" not in drop_store
     text = (ROOT / "robie_job_engine/ascend_api_notice_source.py").read_text(encoding="utf-8")
     assert "cd /" in text
     assert "/opt/streetsmart-hermes/venv/bin/python" in text
@@ -911,46 +922,208 @@ def test_dry_run_database_is_separate_and_stall_alert_stays(tmp_path, monkeypatc
     assert mode == 0o644
 
 
-def test_missing_store_skips_the_email_notice_and_underwriting_still_runs(
-    tmp_path, monkeypatch
-):
-    missing = tmp_path / "missing.db"
-    monkeypatch.setenv(source.DB_ENV, str(missing))
+def _past_due_email() -> driver.EmailNotice:
     body = (
         f"This policy has a past-due payment of $412.10 which was due on 09/27/2026.\n"
         f"Policy ID {POLICY}\n"
         f"Customer {INSURED}\n"
+        f"Invoice No. INV-3003\n"
         f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
     )
-    ctx = driver_ctx()
-    late = driver.EmailNotice(
+    return driver.EmailNotice(
         message_id="mail-late",
         subject=f"Past due payment for {INSURED}",
         body=body,
         internal_date="2026-09-28T12:00:00Z",
     )
-    result = driver.process_notice(late, ctx)
-    assert result.status == "skipped"
-    assert result.reason == "api_store_unavailable"
+
+
+def test_missing_store_files_the_email_and_a_live_row_skips_it(tmp_path, monkeypatch):
+    missing = tmp_path / "ascend-api" / "missing.db"
+    monkeypatch.setenv(source.DB_ENV, str(missing))
+    monkeypatch.setenv(source.DRY_RUN_DB_ENV, str(tmp_path / "dry-run.db"))
+    ctx = driver_ctx()
+    result = driver.process_notice(_past_due_email(), ctx)
+    assert result.status == "dry_run"
+    assert result.reason != "api_store_unavailable"
+    assert not missing.exists()
+    assert not missing.parent.exists()
     assert ctx.discussion_client._urlopen.posts_to("/notes") == []
-    synthetic = driver.EmailNotice(
-        message_id=f"api:{_pid(1)}|late_payment|INV-3003",
-        subject=f"Past due payment for {INSURED}",
-        body=body,
-        internal_date="2026-09-28T12:00:00Z",
+
+    dry = source.EventKeyStore(tmp_path / "dry-run.db")
+    notices = source.notices_from_snapshot(
+        programs=[_program(1, "payment_overdue", "2026-09-28T00:01:00Z", due_date="2026-09-27")],
+        loans=[],
+        invoices=[
+            {
+                "id": _iid(11),
+                "program_id": _pid(1),
+                "status": "overdue",
+                "updated_at": "2026-09-28T00:01:00Z",
+                "invoice_number": "INV-3003",
+                "policy_number": POLICY,
+            }
+        ],
+        payouts=[],
     )
-    own = driver.process_notice(synthetic, ctx)
-    assert own.reason != "api_store_unavailable"
-    assert own.status == "dry_run"
-    underwriting = driver.EmailNotice(
-        message_id="mail-uw",
-        subject=f"Underwriting request for {INSURED}",
-        body=(
-            "We need the following documents for underwriting.\n"
-            f"Policy ID {POLICY}\n"
-            f"https://dashboard.useascend.com/programs/{_pid(1)}\n"
-        ),
-        internal_date="2026-09-28T12:00:00Z",
+    invoice_notice = next(item for item in notices if item.invoice_id == _iid(11))
+    dry.record_filed(invoice_notice)
+    still = driver.process_notice(_past_due_email(), driver_ctx())
+    assert still.status == "dry_run"
+    assert still.reason != "api_already_filed"
+
+    live = source.EventKeyStore(tmp_path / "live.db")
+    live.record_filed(invoice_notice)
+    monkeypatch.setenv(source.DB_ENV, str(live.path))
+    skipped = driver.process_notice(_past_due_email(), driver_ctx())
+    assert skipped.status == "skipped"
+    assert skipped.reason == "api_already_filed"
+    garbage = tmp_path / "garbage.db"
+    garbage.write_text("not a database", encoding="utf-8")
+    monkeypatch.setenv(source.DB_ENV, str(garbage))
+    filed = driver.process_notice(_past_due_email(), driver_ctx())
+    assert filed.status == "dry_run"
+    assert garbage.read_text(encoding="utf-8") == "not a database"
+
+
+def test_driver_gate_runs_before_a_filed_store_match(tmp_path, monkeypatch):
+    live = source.EventKeyStore(tmp_path / "live.db")
+    notice = source._invoice_notice(
+        {
+            "id": _iid(11),
+            "program_id": _pid(1),
+            "status": "overdue",
+            "updated_at": "2026-09-28T00:01:00Z",
+            "invoice_number": "INV-3003",
+            "policy_number": POLICY,
+        },
+        _program(1, "payment_overdue", "2026-09-28T00:01:00Z"),
     )
-    kept = driver.process_notice(underwriting, ctx)
-    assert kept.reason != "api_store_unavailable"
+    assert notice is not None
+    live.record_filed(notice)
+    monkeypatch.setenv(source.DB_ENV, str(live.path))
+    ctx = driver_ctx()
+    ctx.dry_run = False
+
+    def _refused() -> None:
+        from robie_job_engine.ezlynx_driver_gate import EzlynxDriverGateRefused
+
+        raise EzlynxDriverGateRefused("EZLYNX_DRIVER_NOT_IN: driver belongs to TEST")
+
+    with mock.patch("robie_job_engine.safety_seal.driver_gate_for_write", _refused):
+        result = driver.process_notice(_past_due_email(), ctx)
+    assert "driver_gate_refused" in result.reason
+    assert result.reason != "api_already_filed"
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_writer_does_not_chmod_the_shared_data_directory(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    os.chmod(data, 0o770)
+    nested = data / "ascend-api" / "events.db"
+    source.EventKeyStore(nested)
+    assert (data.stat().st_mode & 0o777) == 0o770
+    assert (nested.parent.stat().st_mode & 0o777) == 0o755
+    assert (nested.stat().st_mode & 0o777) == 0o644
+    direct = data / "events.db"
+    source.EventKeyStore(direct)
+    assert (data.stat().st_mode & 0o777) == 0o770
+
+
+def test_past_due_without_updated_at_survives_once(tmp_path, monkeypatch):
+    fired: list[dict] = []
+    monkeypatch.setattr(
+        driver.zapier_tasks,
+        "fire_task",
+        lambda payload, *, dry_run=False: fired.append(payload) or {"ok": True},
+    )
+    invoice = {
+        "id": _iid(11),
+        "program_id": _pid(1),
+        "status": "overdue",
+        "invoice_number": "INV-3003",
+        "policy_number": POLICY,
+        "total_amount_cents": 41210,
+    }
+    program = _program(1, "active", "2026-10-03T00:00:00Z")
+    store = source.EventKeyStore(tmp_path / "events.db")
+    now = datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc)
+    since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    seen = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[invoice],
+        payouts=[],
+        store=store,
+        since=since,
+        now=now,
+    )
+    late = [item for item in seen if item.event_type == triage.LATE_PAYMENT]
+    assert len(late) == 1
+    assert late[0].occurred_at == "2026-10-04T16:00:00Z"
+    later = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[invoice],
+        payouts=[],
+        store=store,
+        since=since,
+        now=now + timedelta(hours=2),
+    )
+    assert [item.event_key for item in later if item.event_type == triage.LATE_PAYMENT] == [
+        late[0].event_key
+    ]
+    dated = dict(invoice, due_date="2026-10-02", id=_iid(12), invoice_number="INV-3004")
+    kept = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[dated],
+        payouts=[],
+        store=store,
+        since=since,
+        now=now,
+    )
+    dated_late = [item for item in kept if item.invoice_id == _iid(12)]
+    assert dated_late and dated_late[0].occurred_at == "2026-10-02"
+    stale = dict(invoice, due_date="2024-12-28", id=_iid(13), invoice_number="INV-3005")
+    dropped = source.notices_from_snapshot(
+        programs=[program],
+        loans=[],
+        invoices=[stale],
+        payouts=[],
+        store=store,
+        since=since,
+        now=now,
+    )
+    assert all(item.invoice_id != _iid(13) for item in dropped)
+
+    pages = {
+        source.FEED_PROGRAMS: {"data": [program], "meta": {"next": None}},
+        source.FEED_LOANS: {"data": [], "meta": {"next": None}},
+        source.FEED_INVOICES: {"data": [invoice], "meta": {"next": None}},
+        source.FEED_PAYOUTS: {"data": [], "meta": {"next": None}},
+    }
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    rows = [{"discussionId": "d-pay", "title": "Ascend - Payments"}]
+    ctx = driver_ctx(rows)
+    first = source.run_once(
+        client=FeedClient(pages),
+        store=store,
+        driver_ctx=ctx,
+        now=now,
+        since=since,
+    )
+    done = [row for row in first["results"] if row["status"] == "done"]
+    assert [row["event_type"] for row in done] == [triage.LATE_PAYMENT]
+    second = source.run_once(
+        client=FeedClient(pages),
+        store=store,
+        driver_ctx=driver_ctx(rows),
+        now=now + timedelta(minutes=15),
+        since=since,
+    )
+    assert second["would_file_count"] == 0
+    assert any(row["reason"] == "api_already_filed" for row in second["results"])
+    assert len(ctx.discussion_client._urlopen.posts_to("/notes")) == 1
+    assert fired == []
