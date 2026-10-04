@@ -546,6 +546,9 @@ def test_stale_running_job_is_recovered_and_a_fresh_one_is_not(store):
 
 
 def _wire_intake(monkeypatch, report, disc, owners, gate):
+    # Main wires Bland into the intake; these tests are about task handoff, so keep calls out.
+    monkeypatch.setattr("robie_job_engine.bland_prod_wiring.build_call_dependencies",
+                        lambda: (None, None, None, True))
     monkeypatch.setattr("robie_job_engine.report_email_source.build_default_gmail_service", lambda: object())
     monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: report)
     monkeypatch.setattr(intake, "_build_discussion_client", lambda: disc)
