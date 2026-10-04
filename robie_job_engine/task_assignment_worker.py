@@ -940,18 +940,20 @@ class TaskAssignmentWorker:
         if not note_id:
             raise UnverifiedNoteError("No durable destination note ID; not reposting")
         record = self.client.get_discussion(discussion_id)
-        if not _contains_note_id(record, note_id):
-            raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
-        if intent.get("adopted") and intent.get("state") != "confirmed":
-            try:
+        adopted_pending = bool(intent.get("adopted")) and intent.get("state") != "confirmed"
+        try:
+            if not _contains_note_id(record, note_id):
+                raise UnverifiedNoteError("Exact destination note ID not found; not reposting")
+            if adopted_pending:
                 self._assert_adopted_note(store, job, kind, intent, payload, discussion_id, body, record, note_id)
-            except UnverifiedNoteError as exc:
-                # A refused adoption must not poison the record: clear it (keeping why) so
-                # a person can adopt a different note ID.
+        except UnverifiedNoteError as exc:
+            if adopted_pending:
+                # A refused adoption, including an ID that does not exist at all, must not
+                # poison the record: clear it (keeping why) so a person can adopt another ID.
                 rejected = {key: value for key, value in intent.items() if key not in ("adopted", "adoption")}
                 rejected.update({"note_id": "", "adoption_rejected": {"note_id": note_id, "reason": str(exc)[:200]}})
                 self._write(store, job["id"], kind, rejected)
-                raise
+            raise
         intent["state"] = "confirmed"
         self._write(store, job["id"], kind, intent)
         return note_id
@@ -1019,6 +1021,10 @@ class TaskAssignmentWorker:
         ))
 
 
+# Clock tolerance for the adopted-note creation-time check: a note created up to this many
+# seconds BEFORE its reservation is still accepted. 120 s is an UNMEASURED ESTIMATE of
+# EZLynx-vs-server clock difference; an older note with identical words must be hours or
+# days older to be refused by time alone (the used-elsewhere check covers the rest).
 NOTE_CLOCK_SKEW_SECONDS = 120
 _NOTE_TIME_KEYS = ("createdDate", "CreatedDate", "createdAt", "CreatedAt", "created", "Created",
                    "dateCreated", "DateCreated", "timestamp", "Timestamp")

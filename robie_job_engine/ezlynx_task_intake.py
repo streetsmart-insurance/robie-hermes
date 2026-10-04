@@ -177,6 +177,7 @@ def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
 
 STALE_RUNNING_MINUTES = 45
 MAX_REPORT_AGE_MINUTES = 90
+_UNSET: Any = object()  # "read the restriction from the environment"
 
 
 class _ClientUnavailable(Exception):
@@ -185,7 +186,7 @@ class _ClientUnavailable(Exception):
 
 def recover_stale_running(
     store: JobStore, *, now: datetime | None = None,
-    stale_minutes: int = STALE_RUNNING_MINUTES,
+    stale_minutes: int = STALE_RUNNING_MINUTES, allowed: Any = _UNSET,
 ) -> list[str]:
     """Return task jobs a crash left RUNNING to PENDING so they are worked again.
 
@@ -198,9 +199,14 @@ def recover_stale_running(
     """
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=stale_minutes)
+    if allowed is _UNSET:
+        try:
+            allowed = allowed_task_ids()
+        except TaskRestrictionError:
+            return []  # a Test run without its restriction changes nothing
     recovered: list[str] = []
     for candidate in store.list_jobs_by_status({JobStatus.RUNNING}):
-        if candidate.get("action_type") != ACTION_TYPE:
+        if candidate.get("action_type") != ACTION_TYPE or not _is_allowed(candidate, allowed):
             continue
         with store.transaction() as conn:
             row = conn.execute(
@@ -289,7 +295,6 @@ def _has_effect_intent(store: JobStore, job: dict[str, Any]) -> bool:
     return row is not None
 
 
-_UNSET: Any = object()
 ALLOWED_TASK_IDS_ENV = "ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS"
 
 
@@ -405,14 +410,27 @@ def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str
 
 
 def _confirm_returned(task: AssignedTask) -> bool:
-    """Live, read-only: is this task really owned by Robie right now?"""
+    """Live, read-only: is the task back with Robie, under the instructions the report claims?
+
+    Robie owning the task now is not enough: a delayed report can still carry an OLD
+    snapshot of the instructions after a human returned the task with changed ones. The
+    live current request must equal the report row's, or the row is stale and no round opens.
+    An unreadable request is unproven.
+    """
     try:
-        current = PlaywrightTaskReassigner().read_assignee(
+        state = PlaywrightTaskReassigner().read_task_state(
             task.task_id, task.applicant_id, description=task.description)
     except Exception as e:  # noqa: BLE001 — unreadable is unproven
         logger.warning(f"Live return check failed for {task.task_id}: {e}")
         return False
-    return str(current).strip().casefold() == ROBIE_NAME.casefold()
+    if str(state.get("assignee") or "").strip().casefold() != ROBIE_NAME.casefold():
+        return False
+    live = " ".join(str(state.get("description") or "").split()).casefold()
+    if not live or live != " ".join(task.description.split()).casefold():
+        logger.info(f"Task {task.task_id}: the report's instructions are not the live ones "
+                    "(old snapshot); no new round from this report")
+        return False
+    return True
 
 
 def _report_age_minutes(report: Any) -> float | None:
@@ -435,7 +453,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     _ensure_intake_table(store)
 
     if not dry_run:
-        recovered = recover_stale_running(store)
+        recovered = recover_stale_running(store, allowed=allowed)
         if recovered:
             logger.warning(f"Recovered {len(recovered)} stale RUNNING job(s): {recovered}")
         # Work already under way is finished first, with calls off, whatever the report says.
@@ -606,6 +624,14 @@ def resume_task(
     """
     import json
 
+    try:
+        allowed = allowed_task_ids()
+    except TaskRestrictionError as e:
+        print(f"Refusing: {e}")
+        return 1
+    if allowed is not None and str(task_id).strip() not in allowed:
+        print(f"Task {task_id} is outside this run's task restriction ({ALLOWED_TASK_IDS_ENV}); nothing changed")
+        return 1
     store = JobStore(db_path or default_db_path())
     job = _find_by_idempotency_key(store, task_idempotency_key(task_id))
     if job is None:

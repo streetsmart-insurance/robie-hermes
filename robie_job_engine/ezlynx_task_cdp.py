@@ -190,8 +190,56 @@ def _cancel_dialog(panel) -> None:
     _unique(panel.get_by_role("button", name="Cancel", exact=True), "task Cancel").click()
 
 
+# The label(s) the Edit Task dialog uses for the task's instructions. UNVERIFIED against the
+# live DOM: Test must observe the real field. Until a label matches exactly one field, the
+# live request cannot be read and a handed-back task never opens a new round (fail closed).
+TASK_DESCRIPTION_LABELS = ("Description", "Task description", "Task note", "Note")
+
+
+def _read_task_description(panel) -> str:
+    """The task's CURRENT instructions from the Edit Task dialog, whitespace-normalized."""
+    for label in TASK_DESCRIPTION_LABELS:
+        field = panel.get_by_label(label, exact=True)
+        found = field.count()
+        if found == 0:
+            continue
+        if found != 1:
+            raise ReassignError(f"Ambiguous task description field {label!r}; request not verifiable")
+        text = ""
+        try:
+            text = field.input_value() or ""
+        except Exception:
+            pass
+        if not text.strip():
+            try:
+                text = field.text_content() or ""
+            except Exception:
+                text = ""
+        return " ".join(text.split())
+    raise ReassignError("Task description field not found; the live request cannot be verified")
+
+
 class PlaywrightTaskReassigner:
     """TaskReassigner implemented against the EZLynx UI (gated)."""
+
+    def read_task_state(
+        self, task_id: str, applicant_id: str, description: str = ""
+    ) -> dict:
+        """Read-only: the task's current assignee AND current instructions.
+
+        Used to prove a handed-back task is really back with Robie, under the same
+        instructions the report claims, before a new round opens.
+        """
+        validate_identity(task_id, applicant_id)
+        with _browser_page() as page:
+            _goto_activity(page, applicant_id)
+            panel = _search_and_open_edit(page, task_id, applicant_id)
+            assignee = _read_assignee_value(_assignee_field(panel))
+            request = _read_task_description(panel)
+            _cancel_dialog(panel)
+        if not assignee:
+            raise ReassignError(f"Could not read assignee for task {task_id}")
+        return {"assignee": assignee, "description": request}
 
     def read_assignee(
         self, task_id: str, applicant_id: str, description: str = ""
