@@ -108,7 +108,8 @@ remove_dry_run_dropin() {
 }
 
 # EnvironmentFile= overrides Environment= no matter the order in the unit.
-# Confirm the effective environment, not the unit text.
+# Confirm the effective environment, not the unit text, and read every
+# EnvironmentFile. A file that assigns either key wins over Environment=.
 verify_effective_write_scope() {
   local shown
   shown="$("${SYSTEMCTL}" show robie-task-intake.service -p Environment --no-pager 2>/dev/null || true)"
@@ -116,6 +117,41 @@ verify_effective_write_scope() {
     echo "systemctl show -p Environment is missing ROBIE_EZLYNX_WRITE_SCOPE=all" >&2
     exit 2
   fi
+}
+
+env_file_assigns_scope() {
+  local path line
+  path="$1"
+  [[ -f "${path}" ]] || return 1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" ]] && continue
+    if [[ "${line}" =~ ^(export[[:space:]]+)?ROBIE_EZLYNX_WRITE_SCOPE= ]] \
+      || [[ "${line}" =~ ^(export[[:space:]]+)?ROBIE_PLAYGROUND= ]]; then
+      return 0
+    fi
+  done < "${path}"
+  return 1
+}
+
+verify_environment_files() {
+  local shown rest token
+  shown="$("${SYSTEMCTL}" show robie-task-intake.service -p EnvironmentFiles --no-pager 2>/dev/null || true)"
+  rest="${shown#*EnvironmentFiles=}"
+  for token in ${rest}; do
+    [[ "${token}" == /* ]] || continue
+    if env_file_assigns_scope "${token}"; then
+      echo "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" >&2
+      exit 2
+    fi
+  done
+}
+
+verify_effective_env() {
+  verify_effective_write_scope
+  verify_environment_files
 }
 
 case "${mode}" in
@@ -149,7 +185,7 @@ case "${mode}" in
     trap cleanup_dry EXIT
     printf '%s\n' '[Service]' 'Environment=ROBIE_TASK_INTAKE_DRY_RUN=1' > "${dry_dropin}"
     "${SYSTEMCTL}" daemon-reload
-    verify_effective_write_scope
+    verify_effective_env
     "${SYSTEMCTL}" start robie-task-intake.service
     trap - EXIT
     cleanup_dry
@@ -161,7 +197,7 @@ case "${mode}" in
     remove_dry_run_dropin
     rmdir "${DEST}/${DROPIN_DIR}" 2>/dev/null || true
     "${SYSTEMCTL}" daemon-reload
-    verify_effective_write_scope
+    verify_effective_env
     "${SYSTEMCTL}" enable --now robie-task-intake.timer robie-task-intake-health.timer
     echo "TIMERS_ENABLED"
     ;;
@@ -169,12 +205,15 @@ case "${mode}" in
     backup_existing
     install_units
     remove_dry_run_dropin
+    # Check the effective environment before the live drop-in exists.
+    # A failed check must not leave live calls switched on.
+    "${SYSTEMCTL}" daemon-reload
+    verify_effective_env
     mkdir -p "${DEST}/${DROPIN_DIR}"
     install -m 0644 \
       "${RELEASE_ROOT}/deploy/systemd/${DROPIN_DIR}/${DROPIN_NAME}.example" \
       "${DEST}/${DROPIN_DIR}/${DROPIN_NAME}"
     "${SYSTEMCTL}" daemon-reload
-    verify_effective_write_scope
     echo "LIVE_DROPIN_INSTALLED"
     ;;
 esac

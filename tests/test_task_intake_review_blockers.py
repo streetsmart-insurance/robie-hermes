@@ -1,7 +1,7 @@
 """Review blockers: labels, backlog, dry-run, cap, and the all-row clock."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -45,7 +45,12 @@ def _task(**overrides) -> AssignedTask:
     return AssignedTask(**base)
 
 
-def _report(*tasks: AssignedTask, message_id: str = "msg-1", digest: str = "digest-1"):
+def _report(
+    *tasks: AssignedTask,
+    message_id: str = "msg-1",
+    digest: str = "digest-1",
+    received_at: str = "2026-10-05T14:00:00Z",
+):
     newest = ""
     for task in tasks:
         if task.created_at_et and task.created_at_et > newest:
@@ -54,7 +59,7 @@ def _report(*tasks: AssignedTask, message_id: str = "msg-1", digest: str = "dige
         message_id=message_id,
         filename="Robie_AI_-_Task_Check-In_synthetic.csv",
         digest=digest,
-        received_at="2026-10-05T14:00:00Z",
+        received_at=received_at,
         tasks=tuple(tasks),
         row_count=len(tasks),
         newest_created_et=newest,
@@ -65,14 +70,16 @@ class _Notes:
     def __init__(self):
         self.notes: list[tuple[str, str]] = []
 
+    def get_discussion_ids(self, applicant_id):
+        del applicant_id
+        # The discussions these fixtures file against. A real client lists
+        # the applicant's discussions; WRITE_SCOPE=all does not skip that.
+        return ["70026158", "70020002", "70020003", "70020004", "70020005"]
+
     def append_note(self, discussion_id, body, note_type="Note", applicant_id=None):
         del note_type, applicant_id
         self.notes.append((discussion_id, body))
         return {"noteId": f"N-{len(self.notes)}"}
-
-    def get_discussion_ids(self, applicant_id):
-        # The exact-client proof: this discussion belongs to the applicant.
-        return ["70026158"]
 
 
 class _Bland:
@@ -101,8 +108,7 @@ class _Phone:
 
 
 def _install_fakes(monkeypatch, notes: _Notes, bland: _Bland):
-    # Standing worker env (Carlo 2026-10-04): all-clients write scope with
-    # Playground guardrails, so the exact-client checks can run.
+    # The intake unit sets both. All-clients still has to prove the discussion.
     monkeypatch.setenv("ROBIE_EZLYNX_WRITE_SCOPE", "all")
     monkeypatch.setenv("ROBIE_PLAYGROUND", "1")
     monkeypatch.setattr(
@@ -276,6 +282,10 @@ def test_hold_note_without_an_id_is_not_repeated(tmp_path, monkeypatch):
     class _Silent:
         def __init__(self):
             self.notes: list[tuple[str, str]] = []
+
+        def get_discussion_ids(self, applicant_id):
+            del applicant_id
+            return ["70026158", "70020004"]
 
         def append_note(self, discussion_id, body, note_type="Note", applicant_id=None):
             del note_type, applicant_id
@@ -555,7 +565,10 @@ def test_called_task_gets_no_later_hold_note_and_no_later_dial(tmp_path, monkeyp
         clock["now"] = moment
         monkeypatch.setattr(
             "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
-            _fetch(_report(saturday, message_id=message_id, digest=message_id)),
+            _fetch(_report(
+                saturday, message_id=message_id, digest=message_id,
+                received_at=moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )),
         )
         assert run_intake(db_path=str(db)) == 0
         assert bland.dials == 1
@@ -675,10 +688,342 @@ def test_lease_refusal_before_a_hold_note_stays_retryable(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
-        _fetch(_report(old, message_id="msg-2", digest="digest-2")),
+        _fetch(_report(old, message_id="msg-1", digest="digest-1")),
     )
     assert run_intake(db_path=str(db)) == 0
     assert len(notes.notes) == 1
     assert "older than the calling window" in notes.notes[0][1]
     assert SeenTaskStore(str(db)).statuses()["90026158"] == "hitl"
     assert bland.dials == 0
+
+
+def test_lease_outage_holds_tasks_that_aged_out_before_the_lease_returns(
+    tmp_path, monkeypatch,
+):
+    """Lease on TEST Monday and Tuesday. Wednesday holds Saturday and Monday.
+
+    Neither task is dialed. Saturday is still inside Monday's window, and
+    Monday's task is still inside Tuesday's window, so the hold has to
+    happen when the pending jobs are about to be dialed.
+    """
+    import json
+
+    from robie_job_engine.models import JobStatus
+    from robie_job_engine.robie_call_handler import _reset_module_state_for_tests
+
+    db = tmp_path / "jobs.db"
+    SeenTaskStore(str(db)).observe(["prior"], report_digest="prior")
+    notes = _Notes()
+    bland = _VoicemailBland()
+    clock = {"now": datetime(2026, 10, 5, 13, 5, tzinfo=timezone.utc)}  # Mon 9:05 ET
+    holder = {"name": "TEST"}
+    _install_fakes(monkeypatch, notes, bland)
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake._intake_now", lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.build_call_dependencies",
+        lambda **kwargs: (_Phone(), bland, None, False),
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.robie_call_handler.RobieCallConfig", _clocked_config(clock),
+    )
+    monkeypatch.setenv("ROBIE_PHONE_LIVE_CALLS", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_GATE_REQUIRED", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_HOLDER", "PRODUCTION")
+
+    def reader():
+        return json.dumps({
+            "version": 1,
+            "state": "IN",
+            "holder": holder["name"],
+            "expires_at": "2027-01-01T00:00:00+00:00",
+        })
+
+    monkeypatch.setattr("robie_job_engine.ezlynx_driver_gate.read_metadata", reader)
+    _reset_module_state_for_tests()
+    saturday = _task(
+        task_id="90026158",
+        discussion_id="70026158",
+        applicant_id="80026158",
+        created_at="2026-10-03T09:05:00",
+        created_at_et="2026-10-03T10:05:00-04:00",
+        created_date="2026-10-03",
+        description="Please call the client about the renewal.",
+        assigned_producer="Pat Example",
+    )
+    monday = _task(
+        task_id="90020002",
+        discussion_id="70020002",
+        applicant_id="80020002",
+        applicant_name="Casey Sample",
+        created_at="2026-10-05T08:00:00",
+        created_at_et="2026-10-05T09:00:00-04:00",
+        created_date="2026-10-05",
+        description="Please call the client about the new vehicle.",
+        assigned_producer="Pat Example",
+    )
+    for message_id, moment in (
+        ("mon", datetime(2026, 10, 5, 13, 5, tzinfo=timezone.utc)),
+        ("tue", datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)),
+    ):
+        clock["now"] = moment
+        monkeypatch.setattr(
+            "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+            _fetch(_report(
+                saturday, monday, message_id=message_id, digest=message_id,
+                received_at=moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )),
+        )
+        assert run_intake(db_path=str(db)) == 0
+        assert bland.dials == 0
+        assert notes.notes == []
+
+    holder["name"] = "PRODUCTION"
+    clock["now"] = datetime(2026, 10, 7, 14, 0, tzinfo=timezone.utc)  # Wed 10:00 ET
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(_report(
+            saturday, monday, message_id="wed", digest="wed",
+            received_at=clock["now"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )),
+    )
+    assert run_intake(db_path=str(db)) == 0
+    assert bland.dials == 0
+    assert len(notes.notes) == 2
+    assert {discussion for discussion, _body in notes.notes} == {"70026158", "70020002"}
+    assert all("older than the calling window" in body for _discussion, body in notes.notes)
+    store = JobStore(str(db))
+    with store.connect() as conn:
+        statuses = [row[0] for row in conn.execute("SELECT status FROM jobs")]
+    assert statuses
+    assert set(statuses) == {JobStatus.AWAITING_HUMAN_INPUT.value}
+
+
+def test_unlabeled_tasks_stay_untouched_and_gate_off_posts_no_note(tmp_path, monkeypatch):
+    """The unit's intake must not file a gate-off note or touch an unlabeled task."""
+    from robie_job_engine.models import JobStatus
+    from robie_job_engine.robie_call_handler import _reset_module_state_for_tests
+    from robie_job_engine.task_assignment_worker import TaskAssignmentWorker
+
+    db = tmp_path / "jobs.db"
+    notes = _Notes()
+    bland = _Bland()
+    clock = {"now": MONDAY}
+    _install_fakes(monkeypatch, notes, bland)
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.build_call_dependencies",
+        lambda **kwargs: (_Phone(), bland, None, False),
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.robie_call_handler.RobieCallConfig", _clocked_config(clock),
+    )
+    monkeypatch.setenv("ROBIE_PHONE_LIVE_CALLS", "1")
+    _reset_module_state_for_tests()
+    labeled = _task(
+        description="Please call the client about the renewal.",
+        assigned_producer="Pat Example",
+    )
+    unlabeled = _task(
+        task_id="90030001",
+        applicant_id="80030001",
+        discussion_id="70030001",
+        activity_labels="",
+        description="Please review the declarations page.",
+        created_by="Pat Example",
+        assigned_producer="Pat Example",
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(_report(labeled, unlabeled)),
+    )
+    assert run_intake(db_path=str(db)) == 0
+    assert bland.dials == 0
+    assert notes.notes == []
+    assert SeenTaskStore(str(db)).statuses() == {"90026158": "baseline"}
+    assert "90030001" not in SeenTaskStore(str(db)).statuses()
+    with JobStore(str(db)).connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+    # The gate-off branch itself posts nothing, even if a job is already waiting.
+    store = JobStore(str(db))
+    job, _created = ensure_task_job(
+        store, unlabeled, live=True,
+        queued_at="2026-10-05T14:00:00+00:00",
+        live_enabled_at="2026-10-05T13:00:00+00:00",
+    )
+    notes.owned = ["70030001"]
+
+    def _owned(applicant_id):
+        del applicant_id
+        return list(notes.owned)
+
+    notes.get_discussion_ids = _owned
+    worker = TaskAssignmentWorker(
+        discussion_client=notes, reassign_enabled=False, task_reassigner=None,
+    )
+    finished = worker.process_job(store, job)
+    assert notes.notes == []
+    assert JobStatus(finished["status"]) == JobStatus.AWAITING_HUMAN_INPUT
+    assert "no note was posted" in (finished.get("last_error") or "").lower()
+
+
+def test_baseline_and_first_seen_hold_survive_older_snapshots(tmp_path, monkeypatch):
+    """#774 does not reopen an older snapshot, and #776 still baselines and holds once."""
+    from robie_job_engine.models import JobStatus
+
+    db = tmp_path / "jobs.db"
+    notes = _Notes()
+    bland = _Bland()
+    _install_fakes(monkeypatch, notes, bland)
+    monkeypatch.setenv("ROBIE_PHONE_LIVE_CALLS", "1")
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.build_call_dependencies",
+        lambda **kwargs: (_Phone(), bland, None, False),
+    )
+    labeled = _task(
+        description="Please call the client about the renewal.",
+        assigned_producer="Pat Example",
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(_report(labeled)),
+    )
+    assert run_intake(db_path=str(db)) == 0
+    assert bland.dials == 0
+    assert notes.notes == []
+    assert SeenTaskStore(str(db)).statuses() == {"90026158": "baseline"}
+    with JobStore(str(db)).connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+    # An older snapshot of a finished call does not reopen the job.
+    store = JobStore(str(db))
+    finished_task = _task(last_modified="2026-10-05T12:00:00")
+    job, created = ensure_task_job(
+        store, finished_task, live=True,
+        queued_at="2026-10-05T14:00:00+00:00",
+        live_enabled_at="2026-10-05T13:00:00+00:00",
+    )
+    assert created is True
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status=? WHERE id=?",
+            (JobStatus.COMPLETE.value, job["id"]),
+        )
+    older, reopened = ensure_task_job(
+        store, _task(last_modified="2026-10-05T09:00:00"),
+        report_received_at="2026-10-05T14:00:00Z",
+        confirm_returned=lambda _task: True,
+    )
+    assert reopened is False
+    assert older["status"] == JobStatus.COMPLETE.value
+    assert int(older["payload"].get("round") or 0) == 0
+
+    # The next delivery is fresh and in-window, but the task is already
+    # baselined and already has a job, so it is not held and not dialed.
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(_report(labeled, message_id="later", digest="later")),
+    )
+    assert run_intake(db_path=str(db)) == 0
+    assert bland.dials == 0
+    assert notes.notes == []
+    assert store.get_job(job["id"])["status"] == JobStatus.COMPLETE.value
+
+
+def test_stale_report_does_not_dial_an_in_window_labeled_call(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    notes = _Notes()
+    bland = _Bland()
+    _install_fakes(monkeypatch, notes, bland)
+    monkeypatch.setenv("ROBIE_PHONE_LIVE_CALLS", "1")
+    monkeypatch.setattr(
+        "robie_job_engine.bland_prod_wiring.build_call_dependencies",
+        lambda **kwargs: (_Phone(), bland, None, False),
+    )
+    stale_at = (MONDAY - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    task = _task(
+        description="Please call the client about the renewal.",
+        assigned_producer="Pat Example",
+    )
+    report = _report(task)
+    report = type(report)(
+        message_id=report.message_id,
+        filename=report.filename,
+        digest=report.digest,
+        received_at=stale_at,
+        tasks=report.tasks,
+        row_count=report.row_count,
+        newest_created_et=report.newest_created_et,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_task_intake.fetch_latest_task_report",
+        _fetch(report),
+    )
+    assert run_intake(db_path=str(db)) == 2
+    assert bland.dials == 0
+    assert notes.notes == []
+    assert SeenTaskStore(str(db)).is_empty()
+    with JobStore(str(db)).connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        status = conn.execute(
+            "SELECT status FROM ezlynx_task_intake_runs"
+        ).fetchone()[0]
+    assert status == "stale"
+
+
+def test_outcome_note_requires_the_discussion_to_belong_to_the_applicant(monkeypatch):
+    from robie_job_engine.ezlynx_discussions import file_note_to_existing_discussion
+
+    monkeypatch.setenv("ROBIE_EZLYNX_WRITE_SCOPE", "all")
+    monkeypatch.setenv("ROBIE_PLAYGROUND", "1")
+
+    class _Client:
+        def __init__(self, ids):
+            self.ids = list(ids)
+            self.posts: list[str] = []
+
+        def get_discussions(self, applicant_id):
+            del applicant_id
+            return [{"discussionId": item, "title": "Task Note"} for item in self.ids]
+
+        def get_discussion_ids(self, applicant_id):
+            del applicant_id
+            return list(self.ids)
+
+        def append_note(self, discussion_id, body, **kwargs):
+            del discussion_id, kwargs
+            self.posts.append(body)
+            return {"noteId": "N-1"}
+
+    foreign = _Client(["999"])
+    refused = file_note_to_existing_discussion(
+        foreign, "80026158", "They answered and I talked to them.",
+        discussion_id="70026158",
+    )
+    assert refused["status"] == "pending"
+    assert foreign.posts == []
+
+    owned = _Client(["70026158"])
+    accepted = file_note_to_existing_discussion(
+        owned, "80026158", "They answered and I talked to them.",
+        discussion_id="70026158",
+    )
+    assert accepted["status"] != "pending" or accepted.get("reason_code") != "no matching discussion"
+    assert accepted.get("reason") != "no matching discussion"
+
+
+def test_intake_unit_does_not_enable_reassignment_or_fill_the_field_contract():
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    unit = (root / "deploy/systemd/robie-task-intake.service").read_text(encoding="utf-8")
+    assert "EZLYNX_TASK_REASSIGN_ENABLED=" not in unit
+    assert "Environment=EZLYNX_TASK_REASSIGN_ENABLED" not in unit
+    assert "ROBIE_TASK_FIELD_CONTRACT_PATH=" not in unit
+    contract = json.loads(
+        (root / "deploy/ezlynx_task_field_contract.json").read_text(encoding="utf-8")
+    )
+    assert contract["fields"] == {}
+    assert contract["status"] == "UNVERIFIED"

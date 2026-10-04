@@ -753,7 +753,9 @@ class TestCallRequestRound(unittest.TestCase):
         self.assertIn("calling Progressive", text)
         self.assertNotIn("on behalf of Jake", text)
         body = ports.discussion_client.appended[0]["body"]
-        self.assertIn("Called Progressive on behalf of Jane Producer", body)
+        self.assertIn("Called Progressive for Jane Producer", body)
+        self.assertIn("about Mary Smith's policy surcharge.", body)
+        self.assertIn("Eva identified herself as an AI assistant", body)
         self.assertIn("They answered and I talked to them.", body)
         self.assertNotIn("Please call", body)
         self.assertNotIn("..", body)

@@ -529,12 +529,12 @@ class TaskAssignmentWorker:
         task = _task_from_payload(payload)
         from .ezlynx_task_cdp import validate_identity
         validate_identity(task.task_id, task.applicant_id)
-        # No write of any kind (note, reassignment, call) before the applicant
-        # is cleared and the discussion is proven to belong to it.
-        self._assert_write_target(task)
         timestamp = utcnow_iso()
 
         if is_test_task(task):
+            # No write of any kind before the applicant is cleared and the
+            # discussion is proven to belong to that applicant.
+            self._assert_write_target(task)
             note = self._note_record(
                 store, job, task.discussion_id,
                 "Roby here — this looks like a test task, so I'm leaving it "
@@ -554,8 +554,30 @@ class TaskAssignmentWorker:
         # Route callback tasks to the Robie Call handler (PR #746) when its
         # ports are wired. The handler runs inside this same durable job —
         # one job per EZLynx task — checkpointing under "robie-call:<id>".
-        if category == "callback" and self._call_handler_available():
+        if category == "callback":
+            from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, production_driver_refused
             from .ezlynx_task_jobs import job_is_dialable
+
+            # A labeled call is never handed back with a gate-off or
+            # reassignment note. If the handler is not wired, the job waits
+            # and nothing is written to the client.
+            if not self._call_handler_available():
+                self._record(
+                    task, "awaiting_human",
+                    "Call handler is not wired; no note posted.",
+                    timestamp,
+                )
+                raise NeedsHuman(
+                    f"Task {task.task_id}: call handler is not wired; no note posted"
+                )
+            # Lease first. A refusal leaves the job PENDING and posts nothing.
+            # The write-target check below also reads the lease, and that
+            # refusal must not be recorded as a human hold.
+            if production_driver_refused():
+                if not getattr(self, "_lease_refused_logged", False):
+                    logger.error(LEASE_NOT_WITH_PRODUCTION)
+                    self._lease_refused_logged = True
+                raise CallHeld(LEASE_NOT_WITH_PRODUCTION)
             if not job_is_dialable(payload):
                 self._record(
                     task, "awaiting_human",
@@ -565,8 +587,11 @@ class TaskAssignmentWorker:
                 raise NeedsHuman(
                     f"Task {task.task_id}: call job is not dialable"
                 )
+            # WRITE_SCOPE=all still has to prove this discussion is the client's.
+            self._assert_write_target(task)
             return self._do_call_task(store, job, task, timestamp)
 
+        self._assert_write_target(task)
         answer = self._human_answer(store, job, task)
         candidates = reassign_candidates(
             task, human_choice=str(answer.get("assign_to") or "").strip() or None
@@ -590,19 +615,22 @@ class TaskAssignmentWorker:
             )
 
         if not (self.reassign_enabled and self.reassigner is not None):
-            target, target_field = candidates[0]
-            self._post_note_verified(
-                store, job, task.discussion_id,
-                f"Roby here — I read this request ({category}) but I can't "
-                f"complete it myself. It needs to go back to {target} "
-                f"({FIELD_LABELS[target_field]}); automatic reassignment is off, so "
-                "please reassign it in EZLynx.",
-                purpose="gate-off",
+            # The gate is off by default, and the intake unit never turns it
+            # on. Do not file a gate-off note or a reassignment note. The job
+            # waits; nothing is written to the client's discussion.
+            target, _target_field = candidates[0]
+            logger.info(
+                "Reassignment gate is off for task %s; no note posted",
+                task.task_id,
             )
-            self._record(task, "awaiting_human", f"Reassignment gate off; flagged for reassign to {target}.", timestamp)
+            self._record(
+                task, "awaiting_human",
+                f"Reassignment gate off; left for a person, no note posted (target {target}).",
+                timestamp,
+            )
             raise NeedsHuman(
                 f"Task {task.task_id}: reassignment gate is off — a human must "
-                f"reassign to {target} in EZLynx."
+                f"reassign to {target} in EZLynx. No note was posted."
             )
 
         reassigned = self._reassign_with_reconciliation(store, job, task, candidates, answer)

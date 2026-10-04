@@ -288,7 +288,7 @@ def _pending_job(store, task: AssignedTask) -> dict[str, Any]:
 
 
 def test_worker_single_honest_note_gate_off(store):
-    """Gate off: one note, no 'working on it' claim, waits for a human."""
+    """Gate off: the job waits, and no note is posted to the client."""
     client = FakeDiscussionClient()
     worker = TaskAssignmentWorker(discussion_client=client, reassign_enabled=False)
     job = _pending_job(store, make_task())
@@ -296,11 +296,8 @@ def test_worker_single_honest_note_gate_off(store):
     result = worker.process_job(store, job)
 
     assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
-    assert len(client.posts) == 1
-    body = client.posts[0][1]
-    assert "working on it" not in body.lower()
-    assert "Carlo Ferrara" in body  # names the handoff target
-    assert "reassign" in body.lower()
+    assert client.posts == []
+    assert "no note was posted" in (result.get("last_error") or "").lower()
 
 
 def test_worker_reassigns_gate_on(store):

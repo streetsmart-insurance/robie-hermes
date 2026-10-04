@@ -153,7 +153,12 @@ def _run(mode: str, root: Path, log: Path) -> subprocess.CompletedProcess[str]:
     systemctl.write_text(
         "#!/bin/bash\n"
         "printf '%s\\n' \"$*\" >> \"$ROBIE_SYSTEMCTL_LOG\"\n"
-        "if [[ \"$*\" == *show* && \"$*\" == *-p\\ Environment* ]]; then\n"
+        "if [[ \"$*\" == *show* && \"$*\" == *-p\\ EnvironmentFiles* ]]; then\n"
+        "  printf '%s\\n' 'EnvironmentFiles='\n"
+        "elif [[ \"$*\" == *show* && \"$*\" == *-p\\ Environment* ]]; then\n"
+        "  if [[ -f \"$ROBIE_UNIT_DEST/robie-task-intake.service.d/20-bland-prod.conf\" ]]; then\n"
+        "    printf '%s\\n' 'LIVE_ALREADY_PRESENT' >> \"$ROBIE_SYSTEMCTL_LOG\"\n"
+        "  fi\n"
         "  printf '%s\\n' 'Environment=ROBIE_EZLYNX_WRITE_SCOPE=all ROBIE_PLAYGROUND=1'\n"
         "fi\n"
         "exit 0\n",
@@ -209,6 +214,8 @@ def test_installer_dry_run_enable_live_and_rollback(tmp_path):
 
     live = _run("--live", tmp_path, log)
     assert live.returncode == 0, live.stderr
+    assert "LIVE_ALREADY_PRESENT" not in log.read_text(encoding="utf-8")
+    assert "show robie-task-intake.service -p EnvironmentFiles" in log.read_text(encoding="utf-8")
     dropin = (dest / "robie-task-intake.service.d" / "20-bland-prod.conf").read_text(encoding="utf-8")
     assert "ROBIE_PHONE_LIVE_CALLS=1" in dropin
     assert "super-secret-value-xyz" not in live.stdout + live.stderr
@@ -252,6 +259,83 @@ def test_installer_refuses_when_the_effective_env_lacks_write_scope(tmp_path):
     assert proc.returncode == 2
     assert "ROBIE_EZLYNX_WRITE_SCOPE=all" in proc.stderr
     assert "show robie-task-intake.service -p Environment" in log.read_text(encoding="utf-8")
+
+
+def _live_systemctl(root: Path, log: Path, *, environment: str, environment_files: str) -> Path:
+    systemctl = root / "systemctl"
+    systemctl.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$ROBIE_SYSTEMCTL_LOG\"\n"
+        "if [[ \"$*\" == *show* && \"$*\" == *-p\\ EnvironmentFiles* ]]; then\n"
+        f"  printf '%s\\n' 'EnvironmentFiles={environment_files}'\n"
+        "elif [[ \"$*\" == *show* && \"$*\" == *-p\\ Environment* ]]; then\n"
+        f"  printf '%s\\n' '{environment}'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IEXEC)
+    return systemctl
+
+
+def _live_env(root: Path, systemctl: Path, log: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update({
+        "ROBIE_UNIT_DEST": str(root / "systemd"),
+        "ROBIE_RELEASE_ROOT": str(ROOT),
+        "ROBIE_SYSTEMCTL": str(systemctl),
+        "ROBIE_SYSTEMCTL_LOG": str(log),
+        "ROBIE_BACKUP_ROOT": str(root / "backups"),
+    })
+    return env
+
+
+def test_live_refuses_before_installing_the_dropin_when_scope_is_missing(tmp_path):
+    log = tmp_path / "systemctl.log"
+    systemctl = _live_systemctl(
+        tmp_path, log,
+        environment="Environment=ROBIE_ENV=PRODUCTION",
+        environment_files="",
+    )
+    proc = subprocess.run(
+        ["bash", str(INSTALLER), "--live"],
+        check=False, capture_output=True, text=True,
+        env=_live_env(tmp_path, systemctl, log),
+    )
+    assert proc.returncode == 2
+    assert "ROBIE_EZLYNX_WRITE_SCOPE=all" in proc.stderr
+    assert not (tmp_path / "systemd" / "robie-task-intake.service.d" / "20-bland-prod.conf").exists()
+
+
+def test_live_refuses_when_an_environment_file_sets_scope_or_playground(tmp_path):
+    log = tmp_path / "systemctl.log"
+    env_file = tmp_path / "override.env"
+    env_file.write_text("export ROBIE_PLAYGROUND=1\n", encoding="utf-8")
+    systemctl = _live_systemctl(
+        tmp_path, log,
+        environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=f"{env_file} (ignore_errors)",
+    )
+    proc = subprocess.run(
+        ["bash", str(INSTALLER), "--live"],
+        check=False, capture_output=True, text=True,
+        env=_live_env(tmp_path, systemctl, log),
+    )
+    assert proc.returncode == 2
+    assert "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in proc.stderr
+    assert not (tmp_path / "systemd" / "robie-task-intake.service.d" / "20-bland-prod.conf").exists()
+
+    env_file.write_text(
+        "# ROBIE_PLAYGROUND=1\n# export ROBIE_EZLYNX_WRITE_SCOPE=\n",
+        encoding="utf-8",
+    )
+    commented = subprocess.run(
+        ["bash", str(INSTALLER), "--live"],
+        check=False, capture_output=True, text=True,
+        env=_live_env(tmp_path, systemctl, log),
+    )
+    assert commented.returncode == 0, commented.stderr
+    assert (tmp_path / "systemd" / "robie-task-intake.service.d" / "20-bland-prod.conf").is_file()
 
 
 def test_enable_live_and_rollback_remove_a_leftover_dry_run_dropin(tmp_path):
