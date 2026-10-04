@@ -230,7 +230,10 @@ class ThreadBoundPage:
 
     def get_by_text(self, *args, **kwargs):
         self._touch("get_by_text")
-        return _CountLocator(0)
+        value = args[0] if args else kwargs.get("name") or kwargs.get("value")
+        if value == "JE-KILL-01":
+            return _CountLocator(0)
+        return _CountLocator(1)
 
     def get_by_label(self, *args, **kwargs):
         self._touch("get_by_label")
@@ -572,19 +575,27 @@ class JeKillPlaywrightAffinityTests(unittest.TestCase):
 
 
 class _DelayedLabelControlPage:
-    """Fake documents table: label_control is 0 until appear_after_s after goto/reload."""
+    """Fake documents table: row and label_control can settle independently."""
 
     def __init__(
         self,
         *,
         appear_after_s: float | None,
         count_when_ready: int = 1,
+        row_appear_after_s: float | None = 0.0,
+        applied_label_count: int = 0,
+        document_name: str = "je-kill-1.pdf",
     ) -> None:
         self.url = "https://app.ezlynx.com/web/account/test-account/documents"
         self.appear_after_s = appear_after_s
         self.count_when_ready = count_when_ready
+        self.row_appear_after_s = row_appear_after_s
+        self.applied_label_count = applied_label_count
+        self.document_name = document_name
         self.nav_at: float | None = None
         self.clicks = 0
+        self.labeled = False
+        self.readback_ready = False
         self.locator_queries: list[tuple[str, str]] = []
 
     def _mark_nav(self) -> None:
@@ -592,13 +603,20 @@ class _DelayedLabelControlPage:
 
     def goto(self, url, **kwargs):
         self.url = url
+        self.readback_ready = False
         self._mark_nav()
 
     def reload(self, **kwargs):
+        self.readback_ready = True
         self._mark_nav()
 
+    def _ready(self, delay: float | None) -> bool:
+        if self.nav_at is None or delay is None:
+            return False
+        return time.monotonic() - self.nav_at >= delay
+
     def _control_locator(self):
-        return _DelayedCountLocator(self)
+        return _DelayedCountLocator(self, kind="label_control")
 
     def get_by_role(self, role, name="", exact=True):
         self.locator_queries.append(("role", str(name)))
@@ -606,10 +624,18 @@ class _DelayedLabelControlPage:
             return _CountLocator(0)
         if name == "Labels":
             return self._control_locator()
-        return _CountLocator(1)
+        return _ApplyOnClickLocator(self, count=1, apply=(name == "Apply"))
 
     def get_by_text(self, value, exact=True):
         self.locator_queries.append(("text", str(value)))
+        if value == "JE-KILL-01":
+            if self.labeled:
+                return _CountLocator(1)
+            if self.readback_ready:
+                return _CountLocator(self.applied_label_count)
+            return _ApplyOnClickLocator(self, count=1)
+        if value == self.document_name:
+            return _DelayedCountLocator(self, kind="row")
         return _CountLocator(0)
 
     def get_by_label(self, *args, **kwargs):
@@ -630,18 +656,19 @@ class _DelayedLabelControlPage:
 
 
 class _DelayedCountLocator:
-    def __init__(self, page: _DelayedLabelControlPage) -> None:
+    def __init__(self, page: _DelayedLabelControlPage, *, kind: str) -> None:
         self.page = page
+        self.kind = kind
 
     def count(self):
-        if self.page.nav_at is None or self.page.appear_after_s is None:
-            return 0
-        if time.monotonic() - self.page.nav_at < self.page.appear_after_s:
-            return 0
-        return self.page.count_when_ready
+        if self.kind == "row":
+            return 1 if self.page._ready(self.page.row_appear_after_s) else 0
+        if self.page._ready(self.page.appear_after_s):
+            return self.page.count_when_ready
+        return 0
 
     def click(self):
-        if self.count() != 1:
+        if self.kind == "label_control" and self.count() != 1:
             raise AssertionError("clicked before label_control was uniquely present")
         self.page.clicks += 1
 
@@ -855,6 +882,18 @@ class JeKillEnsureCleanDestinationTests(unittest.TestCase):
         )
 
 
+class _ApplyOnClickLocator(_CountLocator):
+    def __init__(self, page: _DelayedLabelControlPage, *, count: int, apply: bool = False) -> None:
+        super().__init__(count)
+        self.page = page
+        self._apply = apply
+
+    def click(self):
+        if self._apply:
+            self.page.labeled = True
+        self.page.clicks += 1
+
+
 class JeKillLabelControlSettleTests(unittest.TestCase):
     """Post-navigation race: wait for unique fixture label_control, never guess."""
 
@@ -916,18 +955,48 @@ class JeKillLabelControlSettleTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(page.clicks, 0)
 
-    def test_fresh_page_state_waits_for_unique_label_control_after_reload(self):
+    def test_fresh_page_state_waits_for_unique_documents_row_then_not_applied(self):
         scenario = self._scenario()
-        page = _DelayedLabelControlPage(appear_after_s=0.15)
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=0.15,
+        )
         port = self._port(scenario, page)
         observed = port.fresh_page_state(ACTION, scenario.payload())
         self.assertEqual(observed, {})
-        self.assertIn(("role", "Labels"), page.locator_queries)
+        self.assertIn(("text", scenario.document_name), page.locator_queries)
+        self.assertIn(("text", "JE-KILL-01"), page.locator_queries)
         self.assertNotIn(("role", "Add label"), page.locator_queries)
 
-    def test_fresh_page_state_stays_blocked_when_label_control_stays_zero(self):
+    def test_fresh_page_state_not_applied_when_row_unique_and_label_control_zero(self):
         scenario = self._scenario()
-        page = _DelayedLabelControlPage(appear_after_s=None)
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=0.0,
+            applied_label_count=0,
+        )
+        port = self._port(scenario, page)
+        observed = port.fresh_page_state(ACTION, scenario.payload())
+        self.assertEqual(observed, {})
+        self.assertEqual(page.clicks, 0)
+
+    def test_fresh_page_state_applied_when_row_unique_and_applied_label_one(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=0.0,
+            applied_label_count=1,
+        )
+        port = self._port(scenario, page)
+        observed = port.fresh_page_state(ACTION, scenario.payload())
+        self.assertEqual(observed, scenario.payload())
+
+    def test_fresh_page_state_stays_blocked_when_documents_row_stays_zero(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=None,
+        )
         port = self._port(scenario, page)
         with patch(
             "robie_job_engine.je_kill_live.LABEL_CONTROL_SETTLE_TIMEOUT_MS",
@@ -935,9 +1004,23 @@ class JeKillLabelControlSettleTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"PLAYWRIGHT_BLOCKED: click target matched 0 elements; refuse to guess",
+                r"PLAYWRIGHT_BLOCKED: documents row matched 0 elements; refuse to guess",
             ):
                 port.fresh_page_state(ACTION, scenario.payload())
+
+    def test_fresh_page_state_refuses_non_unique_applied_label(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=0.0,
+            applied_label_count=2,
+        )
+        port = self._port(scenario, page)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"PLAYWRIGHT_BLOCKED: applied label matched 2 elements; refuse to guess",
+        ):
+            port.fresh_page_state(ACTION, scenario.payload())
 
     def test_css_fixture_label_control_is_used_not_page_wide_add_label_role(self):
         row_css = (
@@ -962,12 +1045,107 @@ class JeKillLabelControlSettleTests(unittest.TestCase):
         self.assertIn("LABEL_CONTROL_SETTLE_TIMEOUT_MS", source)
         self.assertIn("_wait_unique", source)
         self.assertIn("_wait_label_control", source)
+        self.assertIn("_wait_documents_row", source)
+        self.assertIn("documents row", source)
         self.assertEqual(LABEL_CONTROL_SETTLE_TIMEOUT_MS, 15_000)
         self.assertNotIn('get_by_role("button", name="Add label"', source)
         self.assertNotIn("get_by_role('button', name='Add label'", source)
         self.assertNotIn('name="Add label"', source)
         self.assertNotIn("document-checkbox-", source)
         self.assertNotIn("except Exception:\n            pass", source)
+        self.assertNotIn("self._wait_label_control()\n            return {}", source)
+
+    def _run_prepared_resume(self, scenario, page):
+        port = self._port(scenario, page)
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            attempts = Path(tmp) / "action-attempts.jsonl"
+            worker = FixtureWorker(
+                HermesCuaEzlynxWorker(port),
+                port,
+                phase="before_action",
+                attempts=attempts,
+            )
+            verifier = EzlynxDestinationVerifier(port)
+            store = JobStore(db)
+            job = store.create_job(
+                ACTION,
+                scenario.payload(),
+                idempotency_key="je-kill-prepared-resume",
+                max_attempts=3,
+            )
+            store.checkpoint(
+                job["id"],
+                "action_intent",
+                {"action": ACTION, "state": "PREPARED", "run_id": "dead-child"},
+            )
+            final = JobEngine(
+                store,
+                {"hermes-cua": worker},
+                {ACTION: verifier},
+                reconcilers={ACTION: verifier},
+                lease_seconds=2,
+                enforce_recording_policy=False,
+                call_worker_on_calling_thread=True,
+            ).run(job["id"])
+            reconciliation = store.get_checkpoint(job["id"], "action_reconciliation")
+            attempt_text = (
+                attempts.read_text(encoding="utf-8") if attempts.is_file() else ""
+            )
+            return final, reconciliation, attempt_text
+
+    def test_prepared_resume_clicks_once_when_row_unique_and_label_not_applied(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=0.15,
+            row_appear_after_s=0.0,
+            applied_label_count=0,
+        )
+        final, reconciliation, attempt_text = self._run_prepared_resume(scenario, page)
+        self.assertEqual(final["status"], JobStatus.COMPLETE)
+        self.assertEqual(reconciliation["outcome"], "NOT_APPLIED")
+        self.assertTrue(reconciliation["authoritative"])
+        self.assertEqual(reconciliation["detail"]["method"], "FRESH_PAGE_READBACK")
+        self.assertEqual(attempt_text.count("before_action"), 1)
+        self.assertTrue(page.labeled)
+        self.assertNotIn(("role", "Add label"), page.locator_queries)
+
+    def test_prepared_resume_still_blocked_when_click_control_never_unique(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=None,
+            row_appear_after_s=0.0,
+            applied_label_count=0,
+        )
+        with patch(
+            "robie_job_engine.je_kill_live.LABEL_CONTROL_SETTLE_TIMEOUT_MS",
+            250,
+        ):
+            final, reconciliation, _attempt_text = self._run_prepared_resume(
+                scenario, page
+            )
+        self.assertEqual(reconciliation["outcome"], "NOT_APPLIED")
+        self.assertNotEqual(final["status"], JobStatus.COMPLETE)
+        self.assertFalse(page.labeled)
+        self.assertEqual(page.clicks, 0)
+
+    def test_row_never_appears_is_unknown_waiting_not_a_click(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(
+            appear_after_s=0.0,
+            row_appear_after_s=None,
+        )
+        with patch(
+            "robie_job_engine.je_kill_live.LABEL_CONTROL_SETTLE_TIMEOUT_MS",
+            250,
+        ):
+            final, reconciliation, attempt_text = self._run_prepared_resume(
+                scenario, page
+            )
+        self.assertEqual(reconciliation["outcome"], "UNKNOWN")
+        self.assertEqual(final["status"], JobStatus.WAITING)
+        self.assertFalse(page.labeled)
+        self.assertEqual(attempt_text, "")
 
 
 if __name__ == "__main__":

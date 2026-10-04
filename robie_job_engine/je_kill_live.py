@@ -45,9 +45,12 @@ POSITIONAL_MARKERS = (".first", ".last", ".nth", ":nth", "nth=")
 GREENLET_THREAD_SWITCH = (
     "Cannot switch to a different thread — Current: <greenlet"
 )
-# Angular documents table is empty at domcontentloaded. Wait for the
-# Carlo-approved fixture label_control (row-scoped CSS, not page-wide
-# "Add label") to be uniquely present before the opening click.
+# Angular documents table is empty at domcontentloaded. The opening
+# click waits for the Carlo-approved fixture label_control (row-scoped
+# CSS, not page-wide "Add label") to be uniquely present. Readback /
+# reconcile waits for the documents ROW (document_name), then decides
+# APPLIED vs NOT_APPLIED from applied_label. label_control count==0
+# during readback is not a terminal click-target block.
 LABEL_CONTROL_SETTLE_TIMEOUT_MS = 15_000
 UNIQUE_LOCATOR_POLL_INTERVAL_S = 0.1
 
@@ -400,6 +403,19 @@ class PersistentChromeEzlynxPort:
             LABEL_CONTROL_SETTLE_TIMEOUT_MS,
         )
 
+    def _documents_row_locator(self) -> Any:
+        """Approved fixture document_name — the row, not the Add label control."""
+        return self._locator(
+            {"kind": "text", "value": self.scenario.document_name, "exact": True}
+        )
+
+    def _wait_documents_row(self) -> Any:
+        return self._wait_unique(
+            self._documents_row_locator(),
+            "documents row",
+            LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+        )
+
     def preflight(self) -> None:
         """Fail closed on tab/auth before a kill cycle. Disconnect after."""
         self._connect()
@@ -600,23 +616,13 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
+        self._wait_documents_row()
         loc = self._locator(self.scenario.applied_label)
-        deadline = time.monotonic() + max(0.0, LABEL_CONTROL_SETTLE_TIMEOUT_MS / 1000.0)
-        while time.monotonic() < deadline:
-            if loc.count() > 0:
-                break
-            label_ctrl = self._locator(self.scenario.label_control)
-            if label_ctrl.count() > 0:
-                break
-            time.sleep(UNIQUE_LOCATOR_POLL_INTERVAL_S)
         count = loc.count()
         if count == 0:
-            self._wait_label_control()
             return {}
         if count != 1:
-            raise RuntimeError(
-                f"authoritative applied-label readback matched {count} elements"
-            )
+            raise self._blocked_count("applied label", count)
         return dict(expected)
 
 
