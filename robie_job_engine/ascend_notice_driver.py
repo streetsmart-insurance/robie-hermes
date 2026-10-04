@@ -1419,6 +1419,16 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = "unknown_notice_type"
         return result
 
+    # API poller dedupe. Mailbox allowlisting in this file is owned by the
+    # in-flight Prod-readiness change; this is the only hook added for the
+    # API source. A store miss leaves the email driver responsible.
+    covered_key = _api_source_already_filed(notice, notice_type, program_uuid)
+    if covered_key:
+        result.reason = "api_already_filed"
+        result.detail["event_key"] = covered_key
+        result.detail["duplicate_source"] = "ascend_api"
+        return result
+
     category = category_for(notice_type)
     canonical = category_title(category)
     if category:
@@ -1857,6 +1867,29 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
 # ---------------------------------------------------------------------------
 # Run + CLI
 # ---------------------------------------------------------------------------
+
+
+def _api_source_already_filed(
+    notice: EmailNotice, notice_type: str, program_uuid: str
+) -> str:
+    """Event key when the API poller already filed this email. Empty if not."""
+    program_id = str(program_uuid or "").strip()
+    if not program_id:
+        return ""
+    try:
+        from .ascend_api_notice_source import email_covered_by_api
+
+        found = email_covered_by_api(
+            program_id=program_id,
+            notice_type=notice_type,
+            subject=notice.subject,
+            body=notice.body,
+            internal_date=notice.internal_date,
+        )
+    except Exception as exc:  # noqa: BLE001 - email stays responsible
+        logger.warning("ascend api dedupe lookup failed: %s", type(exc).__name__)
+        return ""
+    return str(found or "")
 
 
 def _reason_prefix(reason: str) -> str:

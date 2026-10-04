@@ -1764,6 +1764,8 @@ def test_write_scope_all_is_only_on_the_ascend_notice_unit():
             if scope_line in path.read_text(encoding="utf-8"):
                 hits.append(path.relative_to(root).as_posix())
     assert sorted(hits) == [
+        "deploy/systemd/robie-ascend-api-notice.service",
+        "deploy/systemd/robie-ascend-api-notice.service.d/10-write-scope.conf",
         "deploy/systemd/robie-ascend-notice-driver.service",
         "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf",
     ]

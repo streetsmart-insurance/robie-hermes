@@ -1,0 +1,29 @@
+[Unit]
+Description=ROBIE Ascend API notice source (dry-run unless ASCEND_API_SOURCE_LIVE=1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+Environment=ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-prod-api-key/versions/latest
+# GET only. The poller uses ascend_sync.AscendApiClient, the same secret the
+# hourly robie-ascend-sync unit uses. Do not set ASCEND_API_SOURCE_LIVE here.
+# Live filing is a drop-in that sets ASCEND_API_SOURCE_LIVE=1.
+# Write scope matches the #762 notice unit. The driver still refuses every
+# write that is not a category note or an allowed task.
+Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
+Environment=ROBIE_PLAYGROUND=1
+Environment=ASCEND_API_NOTICE_DB=/opt/streetsmart-hermes/robie-job-engine/data/ascend_api_notice_events.db
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ascend_api_notice_source
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
