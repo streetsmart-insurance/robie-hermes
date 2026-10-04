@@ -530,6 +530,22 @@ def _instruction_ambiguity(instruction: str) -> Optional[str]:
     return None
 
 
+def _test_intake_skips_applicant_lookup(ports: RobieCallPorts) -> bool:
+    """True only for the Test intake wiring that has no applicant phone.
+
+    The regression battery sets ROBIE_ENV=TEST for synthetic runs. A fake
+    phone port in those tests must still be called. The skip is the no-op
+    reader installed by build_call_dependencies on Test.
+    """
+    from .bland_prod_wiring import _no_applicant_phone
+    from .call_pickup import is_test_server
+
+    if not is_test_server():
+        return False
+    lookup = getattr(ports, "phone_lookup", None)
+    return getattr(lookup, "_fetch", None) is _no_applicant_phone
+
+
 def _phone_is_mobile(ports: RobieCallPorts, task: Dict[str, Any], applicant_id: str) -> bool:
     flag = _pick(task, "phone_is_mobile").lower()
     if flag in ("1", "true", "yes"):
@@ -2202,10 +2218,11 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
-    # Test never reads the applicant phone record. The Bland port posts
-    # only Jake's cell. A typed Robie Call number still decides whether
-    # the call is allowed; it is not the number that is posted.
-    if is_test_server() and phone_policy != "typed_only":
+    # Real Test intake never reads the applicant phone record. The Bland
+    # port posts only Jake's cell. A typed Robie Call number still decides
+    # whether the call is allowed; it is not the number that is posted.
+    # Injected phone ports still run, including under ROBIE_ENV=TEST.
+    if _test_intake_skips_applicant_lookup(ports) and phone_policy != "typed_only":
         log.info("test server: skipping applicant phone lookup for task %s", task_id)
         phone, phone_ambiguity = "+10000000000", None
         explicit_phone = None
