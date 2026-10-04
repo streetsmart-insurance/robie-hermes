@@ -1377,3 +1377,44 @@ def test_unmatched_applicant_is_one_ask_list_and_is_not_filed(tmp_path, monkeypa
     assert summary["ask"][0]["insured_name"] == INSURED
     assert summary["ask"][0]["reason"].startswith("applicant_unresolved")
     assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+
+
+def test_live_unreadable_note_bodies_do_not_post(tmp_path, monkeypatch):
+    """POST /notes returns no note id; the duplicate check reads note bodies.
+    When that read fails, the live path holds and the key stays unfiled."""
+    fired = []
+    monkeypatch.setattr(
+        driver.zapier_tasks,
+        "fire_task",
+        lambda payload, *, dry_run=False: fired.append(payload) or {"ok": True},
+    )
+    programs = [_program(3, "cancelled", "2026-09-24T12:36:00Z", balance_cents=41210)]
+    loans = [_loan(3, 3, "canceled", "2026-09-24T12:36:00Z")]
+    pages = {
+        source.FEED_PROGRAMS: {"data": programs, "meta": {"next": None}},
+        source.FEED_LOANS: {"data": loans, "meta": {"next": None}},
+        source.FEED_INVOICES: {"data": [], "meta": {"next": None}},
+        source.FEED_PAYOUTS: {"data": [], "meta": {"next": None}},
+    }
+    store = source.EventKeyStore(tmp_path / "events.db")
+    rows = [{"discussionId": "d1", "title": "Ascend - Cancellation Notices"}]
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    ctx = driver_ctx(rows)
+
+    def _fail(_discussion_id):
+        raise discussions.DiscussionApiError(503, "with-notes unavailable")
+
+    ctx.discussion_client.get_discussion_with_notes = _fail
+    live = source.run_once(
+        client=FeedClient(pages),
+        store=store,
+        driver_ctx=ctx,
+        now=datetime(2026, 10, 4, 16, 0, tzinfo=timezone.utc),
+        since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    result = live["results"][0]
+    assert result["status"] == "skipped"
+    assert result["reason"].startswith("existing_note_unreadable:")
+    assert ctx.discussion_client._urlopen.posts_to("/notes") == []
+    assert not store.is_filed(result["event_key"])
+    assert fired == []

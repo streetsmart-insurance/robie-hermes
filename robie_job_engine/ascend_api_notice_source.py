@@ -2394,6 +2394,13 @@ def _file_category_note(
             "reason": "existing_note_duplicate",
             "detail": detail,
         }
+    if not ctx.dry_run and chosen_id and note_match.get("bodies_error"):
+        # Note text could not be read; do not post a note that may be there.
+        return {
+            "status": "skipped",
+            "reason": f"existing_note_unreadable: {note_match['bodies_error']}",
+            "detail": detail,
+        }
     try:
         if chosen_id:
             authorize_notice_write(

@@ -1005,11 +1005,12 @@ def find_best_certificate_discussion(
 ) -> tuple[str, str] | None:
     """Find the best existing certificate discussion to append the filing note to.
 
-    The with-note creation endpoint (POST v8/discussions/with-note) returns
-    HTTP 500 for every payload shape (proven 2026-09-29: the endpoint exists
-    but its server-side handler is broken). Appending to an existing
-    certificate discussion via POST v8/discussions/{id}/notes is the proven
-    path, so prefer it over creating a new discussion.
+    Appending to an existing certificate discussion via
+    POST v8/discussions/{id}/notes keeps related filings together, so prefer
+    it over creating a new discussion. (The 2026-09-29 HTTP 500s from
+    POST v8/discussions/with-note came from a flat request body. The nested
+    Postman shape built by build_with_note_payload works: discussion
+    850001255, 2026-10-04.)
 
     Selection rules (fail-closed):
     - Only discussions whose title mentions certificate/cert/coi qualify.
@@ -1104,10 +1105,9 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
       (c) the exact auto title already on the applicant in EZLynx —
           destination-based catch for a create whose ledger row never landed;
       (c2) the best existing certificate discussion on the applicant —
-          appended to via the proven append-note API. The with-note creation
-          endpoint is broken server-side (HTTP 500, proven 2026-09-29), so
-          an existing certificate discussion is preferred over creating one.
-          Fail-closed: no confident match means no guess;
+          appended to via the append-note API. An existing certificate
+          discussion is preferred over creating one so related filings stay
+          together. Fail-closed: no confident match means no guess;
       (d) create via POST v8/discussions/with-note with the filing note as
           the first note, then prove it with a fresh GET read-back.
 
@@ -1162,12 +1162,13 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
             record, verified, deps, res, message_id, applicant_id,
             did, title, "exact title already on the applicant", dry_run)
 
-    # (c2) best existing certificate discussion on the applicant. The
-    # with-note creation endpoint is broken server-side (HTTP 500 for every
-    # payload shape, proven 2026-09-29), so prefer appending the filing note
-    # to the applicant's existing certificate discussion via the proven
-    # append-note API. Fail-closed: no confident match means no guess — the
-    # caller falls through to (d).
+    # (c2) best existing certificate discussion on the applicant. Prefer
+    # appending the filing note to it via the append-note API so related
+    # filings stay together. (The 2026-09-29 with-note HTTP 500s were caused
+    # by a flat request body; the nested Postman shape now used by
+    # build_with_note_payload works, discussion 850001255 on 2026-10-04.)
+    # Fail-closed: no confident match means no guess — the caller falls
+    # through to (d).
     best = find_best_certificate_discussion(client, applicant_id,
                                             holder_names)
     if best:
