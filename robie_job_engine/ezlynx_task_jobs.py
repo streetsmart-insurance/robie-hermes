@@ -70,6 +70,7 @@ def job_payload_for_task(
         "task_created_by": task.created_by,
         "assigned_producer": task.assigned_producer,
         "csr": task.csr,
+        "labels": task.labels,
         "report_message_id": report_message_id,
         "report_digest": report_digest,
     }
