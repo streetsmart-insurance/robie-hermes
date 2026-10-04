@@ -543,6 +543,12 @@ class TaskAssignmentWorker:
                     f"confirmed ({type(exc).__name__}); the task shows {current or 'unknown'!r}. "
                     "Check EZLynx, then resume this job."
                 ) from exc
+            if str(verified).strip().casefold() != name.casefold():
+                save("uncertain", name, error=f"reassigner reported {str(verified)!r}")
+                raise NeedsHuman(
+                    f"Task {task.task_id}: asked to return the task to {name} but EZLynx "
+                    f"reported {str(verified)!r}; nothing more was sent. A human must look at the task."
+                )
             save("applied", name, verified_assignee=str(verified))
             return result(name, field, str(verified))
 
@@ -796,6 +802,9 @@ class TaskIntakeVerifier:
         target = str(reassigned.get("to") or "").strip()
         if not target:
             return "reassignment record has no target"
+        verified = str(reassigned.get("verified_assignee") or "").strip()
+        if verified.casefold() != target.casefold():
+            return f"assignee read back as {verified!r}, not the intended return owner {target!r}"
         task = _task_from_payload(job.get("payload") or {})
         if str(action.get("reassign_field") or "") == "human_choice":
             if self.store is None:

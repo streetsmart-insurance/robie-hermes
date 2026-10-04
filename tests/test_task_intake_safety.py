@@ -628,3 +628,24 @@ def test_real_request_mentioning_test_lookalike_words_is_handed_back_not_acknowl
     task = make_task(description="Customer has a problem with the latest quote, please fix")
     job = _work(store, _worker(disc, owners), task)
     assert owners.calls == ["Carlo Ferrara"] and job["status"] == JobStatus.VERIFYING.value
+
+
+def test_a_reassigner_that_reports_the_wrong_person_never_completes(store):
+    class Liar(Owners):
+        def reassign(self, task_id, applicant_id, new_assignee, **kwargs):
+            super().reassign(task_id, applicant_id, new_assignee, **kwargs)
+            return "Someone Else"
+    disc, owners = Discussions(), Liar()
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert disc.posts == []
+
+
+def test_verifier_rejects_a_read_back_that_is_not_the_intended_owner(store):
+    disc, owners = Discussions(), Owners()
+    job = _work(store, _worker(disc, owners), make_task())
+    action = store.get_checkpoint(job["id"], "action")
+    action["reassigned"]["verified_assignee"] = "Mike Sosa"
+    store.checkpoint(job["id"], "action", action)
+    owners.assignee = "Mike Sosa"
+    assert _verify(store, job["id"], disc, owners)["status"] != JobStatus.COMPLETE.value
