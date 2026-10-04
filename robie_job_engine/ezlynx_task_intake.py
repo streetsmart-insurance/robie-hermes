@@ -907,8 +907,9 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             "Task restriction dropped %s unrelated task(s)",
             len(report.tasks) - len(tasks),
         )
-    # The production unit only dials Robie Call and Robie lead follow-up.
-    # Anything else stays untouched: no discussion lookup, no job, no note.
+    # Unlabeled tasks stay untouched: no discussion lookup, no job, no note.
+    # Call labels are Robie Call, Robie lead follow-up, and — when enabled —
+    # the nine Splice workflow labels.
     if not _include_unlabeled_tasks():
         labeled = [task for task in tasks if _labeled_call(task)]
         skipped = len(tasks) - len(labeled)
@@ -1001,10 +1002,20 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     # none of them. Unlabeled tasks are not baselined: they are not calls,
     # and a label added later is still a first sighting.
     from .bland_prod_wiring import live_calls_enabled
+    from .call_pickup import (
+        SPLICE_WORKFLOW_IDS,
+        classify_call_request,
+        splice_task_predates_enablement,
+        splice_workflows_enabled,
+    )
     from .ezlynx_seen_tasks import SeenTaskStore
-    from .ezlynx_task_jobs import remember_live_mode
+    from .ezlynx_task_jobs import remember_live_mode, remember_splice_workflows
 
     seen = SeenTaskStore(store.path)
+    splice_on = splice_workflows_enabled()
+    splice_at = remember_splice_workflows(
+        store, enabled=splice_on, now=_intake_now().isoformat(),
+    )
     if seen.is_empty():
         labeled_ids = [task.task_id for task in tasks if _labeled_call(task)]
         non_call = [task for task in tasks if not _labeled_call(task)]
@@ -1024,6 +1035,28 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             )
             return 0
         tasks = non_call
+
+    # Tasks that already carried a Splice label when those labels turned on
+    # are baseline and never dialed. The two live labels are not in this set.
+    if splice_at:
+        already = []
+        for task in tasks:
+            decision = classify_call_request(getattr(task, "activity_labels", "") or "")
+            if decision.workflow_id not in SPLICE_WORKFLOW_IDS:
+                continue
+            created = (
+                str(getattr(task, "created_at", "") or "")
+                or str(getattr(task, "created_at_et", "") or "")
+                or str(getattr(task, "created_date", "") or "")
+            )
+            if splice_task_predates_enablement(created, splice_at):
+                already.append(task.task_id)
+        if already:
+            seen.baseline(already, report_digest=report.digest)
+            logger.warning(
+                "Baselined %s splice-labeled task(s) created before enablement; dialed none.",
+                len(already),
+            )
 
     new_ids, dropped = seen.observe(
         [task.task_id for task in tasks], report_digest=report.digest,
@@ -1123,6 +1156,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                 live=live,
                 queued_at=queued_at,
                 live_enabled_at=enabled_at,
+                splice_enabled_at=splice_at,
                 report_received_at=report.received_at,
                 confirm_returned=_confirm_returned,
             )

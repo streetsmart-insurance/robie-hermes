@@ -1,7 +1,8 @@
 """Call labels, the lead follow-up script, and once-per-day dedupe.
 
-Bland, RingCentral, and EZLynx are fakes. No live dial. The nine Splice
-scripts stay in code and are not selected by a label.
+Bland, RingCentral, and EZLynx are fakes. No live dial. Short names such
+as "Robie audit" are not the nine official labels and do not select a
+script. Official labels are covered in test_splice_workflow_labels.
 """
 from __future__ import annotations
 
@@ -234,7 +235,17 @@ def test_lead_follow_up_uses_the_sales_center_frame_without_opt_in(tmp_path):
     assert len(still.bland.calls) == 1
 
 
-def test_splice_labels_do_not_trigger_a_call(tmp_path):
+def test_splice_labels_do_not_trigger_a_call(tmp_path, monkeypatch):
+    # Official labels stay off unless Test or the Production flag is on.
+    # "Robie returned mail", "Robie renewal reach-out", and "Robie
+    # unresponsive" are the same names as three official labels once case
+    # and hyphens are ignored, so this test pins Production-off.
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    monkeypatch.delenv("ROBIE_SPLICE_WORKFLOWS_LIVE", raising=False)
+    monkeypatch.setattr(
+        "robie_job_engine.call_pickup.socket.gethostname",
+        lambda: "hermes-poc-01",
+    )
     store = CallOptInStore(tmp_path / "optin.sqlite")
     store.record_opt_in(TEST_APPLICANT, source="applicant-created")
     for label, note in (

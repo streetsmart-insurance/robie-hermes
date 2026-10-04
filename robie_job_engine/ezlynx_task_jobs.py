@@ -59,6 +59,33 @@ def job_is_dialable(payload: dict[str, Any]) -> bool:
     return True
 
 
+def remember_splice_workflows(store: Any, *, enabled: bool, now: str) -> str:
+    """When the nine Splice labels first became enabled.
+
+    Empty when they are off. The timestamp is written once and is not
+    moved forward, so tasks created before that moment stay ineligible.
+    """
+    with store.connect() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS splice_workflow_enablement (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled_at TEXT NOT NULL
+            )"""
+        )
+        row = conn.execute(
+            "SELECT enabled_at FROM splice_workflow_enablement WHERE id=1"
+        ).fetchone()
+        if row is not None:
+            return str(row["enabled_at"] or "")
+        if not enabled:
+            return ""
+        conn.execute(
+            "INSERT INTO splice_workflow_enablement (id, enabled_at) VALUES (1, ?)",
+            (now,),
+        )
+    return now
+
+
 def remember_live_mode(store: Any, *, live: bool, now: str) -> str:
     """Return when live mode was first enabled. Record it on the first live run."""
     with store.connect() as conn:
@@ -95,6 +122,7 @@ def job_payload_for_task(
     live: bool = False,
     queued_at: str = "",
     live_enabled_at: str = "",
+    splice_enabled_at: str = "",
 ) -> dict[str, Any]:
     """Job payload carrying every ID the worker needs.
 
@@ -125,6 +153,7 @@ def job_payload_for_task(
         "created_at": task.created_at,
         "created_at_et": task.created_at_et,
         "workflow": _workflow_id(task),
+        "splice_enabled_at": splice_enabled_at,
         "report_message_id": report_message_id,
         "report_digest": report_digest,
         "queued_at": queued_at,
@@ -249,6 +278,7 @@ def ensure_task_job(
     live: bool = False,
     queued_at: str = "",
     live_enabled_at: str = "",
+    splice_enabled_at: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Return the durable job for this task, creating it if needed.
 
@@ -268,6 +298,7 @@ def ensure_task_job(
     payload = job_payload_for_task(
         task, report_message_id=report_message_id, report_digest=report_digest,
         live=live, queued_at=queued_at, live_enabled_at=live_enabled_at,
+        splice_enabled_at=splice_enabled_at,
     )
     key = task_idempotency_key(task.task_id)
     existing = _find_by_idempotency_key(store, key)
@@ -315,6 +346,9 @@ def ensure_task_job(
         payload["queued_at"] = existing_payload.get("queued_at") or payload["queued_at"]
         payload["live_enabled_at"] = (
             existing_payload.get("live_enabled_at") or payload["live_enabled_at"]
+        )
+        payload["splice_enabled_at"] = (
+            existing_payload.get("splice_enabled_at") or payload["splice_enabled_at"]
         )
     else:
         payload["dialable"] = False

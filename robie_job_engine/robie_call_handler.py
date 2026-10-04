@@ -466,11 +466,12 @@ def _pick(task: Dict[str, Any], logical: str) -> str:
 
 
 def is_call_task(task: Dict[str, Any]) -> bool:
-    """True only when an Activity Label is exactly Robie Call or lead follow-up.
+    """True when an Activity Label is a live call label or an enabled Splice label.
 
-    Title and description text never start a call. "Do not call",
-    "[CALLBACK REQUIRED]", and a Splice label such as "Robie audit"
-    are not call tasks.
+    Title and description text never start a call. "Do not call" and
+    "[CALLBACK REQUIRED]" are not call tasks. A short name such as
+    "Robie audit" is not a label. The nine full Splice labels are call
+    tasks only while splice_workflows_enabled is true.
     """
     from .call_pickup import classify_call_request
 
@@ -1946,21 +1947,60 @@ def _handle_call_task(
             "duplicate_reason": "same instruction already handled for applicant",
         }
 
-    # Robie Call is free-form. Only the lead follow-up label uses a script.
-    # The nine Splice workflows stay available to render, and a label cannot
-    # select them.
+    # Robie Call is free-form. Lead follow-up and each enabled Splice
+    # label use that workflow's script, spoken for the assigned producer.
     from .call_pickup import (
-        LEAD_WORKFLOW_ID,
+        SPLICE_WORKFLOW_IDS,
         calling_day,
         classify_call_request,
         note_dedupe_key,
+        splice_task_predates_enablement,
+        splice_test_account_reason,
     )
     from .splice_scripts import get_workflow
 
     decision = classify_call_request(_pick(task, "activity_labels"), "")
     workflow = None
-    if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
-        workflow = get_workflow(LEAD_WORKFLOW_ID)
+    if decision.action == "workflow" and decision.workflow_id:
+        workflow = get_workflow(decision.workflow_id)
+        if workflow is None:
+            return fail(
+                f"label selected unknown workflow {decision.workflow_id}; not dialing"
+            )
+    if workflow is not None and workflow.id in SPLICE_WORKFLOW_IDS:
+        splice_at = str(task.get("splice_enabled_at") or "")
+        created_raw = _pick(task, "created_date")
+        if splice_at and splice_task_predates_enablement(created_raw, splice_at):
+            return fail(
+                "task was labeled before this workflow was enabled; not dialing"
+            )
+        account_reason = splice_test_account_reason(applicant_id)
+        if account_reason:
+            log.warning(
+                "splice test account blocked task %s: %s", task_id, account_reason,
+            )
+            clar_note = (
+                "Robie did not place this call. On the Test server this "
+                "workflow dials only Jake Ferrara's own client account, and "
+                "only his test phone. This task is not that account, or that "
+                "account is not configured. Buster Brown is not the test "
+                "client for these labels."
+            )
+            wb = _writeback_once(
+                ports, task_id, "clarification_test_account",
+                applicant_id, clar_note, title_hint=None)
+            alerted = _chat_alert(
+                ports, config,
+                f"Robie Call BLOCKED for applicant {applicant_id} (task "
+                f"{task_id}): {account_reason}. No call was placed.",
+            )
+            return fail(
+                f"{account_reason}; not dialing",
+                writeback=wb,
+                chat_alerted=alerted,
+                skipped_test_account=True,
+                clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+            )
     note_topic = workflow.title if workflow is not None else instruction
 
     # ---- 3c. Ambiguity guard ------------------------------------------------
