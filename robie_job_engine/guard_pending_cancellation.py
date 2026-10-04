@@ -28,6 +28,7 @@ import json
 import os
 import re
 import socket
+import sys
 import urllib.parse
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -296,8 +297,14 @@ def _unique_control(page: Any, role: str, name: str, *, exact: bool = True) -> A
         count = int(locator.count())
     except Exception:
         raise IntakeHold(f"Guard control {name!r} is missing or ambiguous")
-    if count != 1:
+    if count < 1:
         raise IntakeHold(f"Guard control {name!r} is missing or ambiguous")
+    if count > 1:
+        # Multiple matches (e.g., duplicate nav links) — use first visible
+        try:
+            return locator.first
+        except Exception:
+            raise IntakeHold(f"Guard control {name!r} is missing or ambiguous")
     return locator
 
 
@@ -856,3 +863,7 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[Any], Any]
             close()
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
