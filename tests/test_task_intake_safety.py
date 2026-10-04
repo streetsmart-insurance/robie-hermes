@@ -90,7 +90,7 @@ class Locator:
 
 
 class Page:
-    url = cdp._activity_url("25486692")
+    url = cdp._activity_url("220250093")
     def __init__(self, rows, panel):
         self.rows = rows
         self.panel = panel
@@ -103,7 +103,7 @@ class Page:
 
 
 def dom():
-    attrs = {"data-task-id": "63429523", "data-applicant-id": "25486692"}
+    attrs = {"data-task-id": "63429523", "data-applicant-id": "220250093"}
     row, panel = Locator(attrs.copy()), Locator(attrs.copy())
     row.children[("button", "Edit this task")] = Locator()
     panel.children[("label", "Assign this task")] = Locator()
@@ -117,7 +117,7 @@ def test_missing_ambiguous_task_refused(count):
     page = dom()
     page.rows.n = count
     with pytest.raises(cdp.ReassignError):
-        cdp._search_and_open_edit(page, "63429523", "25486692")
+        cdp._search_and_open_edit(page, "63429523", "220250093")
     assert page.rows.clicks == 0
 
 
@@ -125,7 +125,7 @@ def test_duplicate_descriptions_different_ids_select_exact_only():
     page = dom()
     # Selector intentionally has no description/text API; unrelated duplicate
     # descriptions cannot become candidates or authorize a page-wide Edit.
-    assert cdp._search_and_open_edit(page, "63429523", "25486692") is page.panel
+    assert cdp._search_and_open_edit(page, "63429523", "220250093") is page.panel
     assert page.rows.children[("button", "Edit this task")].clicks == 1
 
 
@@ -135,7 +135,7 @@ def test_foreign_applicant_refused(where):
     if where == "url": page.url = cdp._activity_url("999")
     else: (page.rows if where == "row" else page.panel).attrs["data-applicant-id"] = "999"
     with pytest.raises(cdp.ReassignError):
-        cdp._search_and_open_edit(page, "63429523", "25486692")
+        cdp._search_and_open_edit(page, "63429523", "220250093")
     assert page.panel.children[("button", "Save")].clicks == 0
 
 
@@ -148,7 +148,7 @@ def test_changed_assignee_never_overwritten(monkeypatch):
     monkeypatch.setattr(cdp, "_goto_activity", lambda *args: None)
     monkeypatch.setenv(cdp.REASSIGN_GATE_ENV, "1")
     with pytest.raises(cdp.ReassignError, match="Assignee changed"):
-        cdp.PlaywrightTaskReassigner().reassign("63429523", "25486692", "Carlo Ferrara")
+        cdp.PlaywrightTaskReassigner().reassign("63429523", "220250093", "Carlo Ferrara")
     assert page.panel.children[("button", "Save")].clicks == 0
 
 
@@ -223,3 +223,407 @@ def test_changed_intent_cannot_bypass_reservation(context):
     with pytest.raises(UnverifiedNoteError):
         TaskAssignmentWorker(discussion_client=client)._post_note_verified(store, job, "849945654", "different text")
     assert len(client.posts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Task-flow reliability review: wrong-client writes, duplicate effects,
+# resume/recovery, false completion. Real durable JobStore, synthetic
+# destinations. These prove source behavior only; they are NOT live proof.
+# ---------------------------------------------------------------------------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from robie_job_engine import ezlynx_task_intake as intake  # noqa: E402
+from robie_job_engine.ezlynx_task_inbox import IngestedReport  # noqa: E402
+from robie_job_engine.ezlynx_task_intake_health import check_intake  # noqa: E402
+from robie_job_engine.ezlynx_task_jobs import _find_by_idempotency_key, task_idempotency_key  # noqa: E402
+from robie_job_engine.models import JobStatus  # noqa: E402
+from robie_job_engine.task_assignment_worker import TaskIntakeVerifier, is_test_task  # noqa: E402
+
+
+class Discussions:
+    """Sequential note ids; the applicant owns exactly `ids`."""
+
+    def __init__(self, ids=("849945654",)):
+        self.ids = list(ids)
+        self.posts = []
+        self.latest = "note-000"
+        self.notes = []
+
+    def get_discussion_ids(self, applicant_id):
+        return list(self.ids)
+
+    def append_note(self, discussion_id, body):
+        self.posts.append((discussion_id, body))
+        self.latest = f"note-{len(self.posts)}"
+        self.notes.append(self.latest)
+        return {"note_id": self.latest}
+
+    def get_discussion(self, discussion_id):
+        return {"title": "Task Note", "mostRecentNoteId": self.latest,
+                "noteCount": 5 + len(self.notes),
+                "notes": [{"id": n} for n in self.notes]}
+
+
+class Owners:
+    def __init__(self, assignee="Robie AI", unresolved=(), crash_after_save=None, fail_before_save=None):
+        self.assignee = assignee
+        self.unresolved = set(unresolved)
+        self.crash_after_save = crash_after_save
+        self.fail_before_save = fail_before_save
+        self.calls = []
+
+    def reassign(self, task_id, applicant_id, new_assignee, description="", expected_assignee="Robie AI"):
+        if new_assignee in self.unresolved:
+            raise cdp.AssigneeUnresolvedError("Missing or ambiguous assignee option; no edit")
+        if self.fail_before_save:
+            exc, self.fail_before_save = self.fail_before_save, None
+            raise exc
+        if self.assignee.casefold() != expected_assignee.casefold():
+            raise cdp.ReassignError("Assignee changed since intake; reassignment not sent")
+        self.calls.append(new_assignee)
+        self.assignee = new_assignee
+        if self.crash_after_save:
+            exc, self.crash_after_save = self.crash_after_save, None
+            raise exc
+        return new_assignee
+
+    def read_assignee(self, task_id, applicant_id, description=""):
+        return self.assignee
+
+
+def _worker(disc, owners=None, gate=True):
+    return TaskAssignmentWorker(discussion_client=disc, task_reassigner=owners,
+                                reassign_enabled=gate and owners is not None)
+
+
+def _work(store, worker, task):
+    job, _ = ensure_task_job(store, task)
+    return worker.process_job(store, job)
+
+
+def _verify(store, job_id, disc, owners, **kwargs):
+    verifier = TaskIntakeVerifier(discussion_client=disc, task_reassigner=owners, **kwargs)
+    action = store.get_checkpoint(job_id, "action") or {}
+    intake._build_engine(store, verifier)._verify(store.get_job(job_id), action)
+    return store.get_job(job_id)
+
+
+def _age(store, job_id, hours):
+    stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with store.transaction() as conn:
+        conn.execute("UPDATE jobs SET updated_at=? WHERE id=?", (stamp, job_id))
+
+
+@pytest.fixture
+def store(tmp_path):
+    return JobStore(tmp_path / "jobs.db")
+
+
+# ---- wrong-client writes ---------------------------------------------------
+
+def test_discussion_not_on_applicant_blocks_every_write(store):
+    disc, owners = Discussions(ids=["111"]), Owners()
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert disc.posts == [] and owners.calls == []
+
+
+def test_applicant_outside_write_allowlist_blocks_every_write(store):
+    disc, owners = Discussions(), Owners()
+    result = _work(store, _worker(disc, owners), make_task(applicant_id="25486692"))
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert disc.posts == [] and owners.calls == []
+
+
+def test_unprovable_discussion_ownership_blocks_every_write(store):
+    class NoLookup:
+        posts = []
+        def append_note(self, *a): self.posts.append(a); return {"note_id": "n"}
+        def get_discussion(self, *a): return {}
+    client, owners = NoLookup(), Owners()
+    result = _work(store, _worker(client, owners), make_task())
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert client.posts == [] and owners.calls == []
+
+
+def test_verifier_rejects_discussion_not_on_applicant(store):
+    disc, owners = Discussions(), Owners()
+    job = _work(store, _worker(disc, owners), make_task())
+    assert job["status"] == JobStatus.VERIFYING.value
+    disc.ids = ["111"]
+    assert _verify(store, job["id"], disc, owners)["status"] != JobStatus.COMPLETE.value
+
+
+def test_reassigner_refuses_non_allowlisted_applicant_before_browser(monkeypatch):
+    monkeypatch.setenv("EZLYNX_TASK_REASSIGN_ENABLED", "1")
+    with pytest.raises(Exception) as caught:
+        cdp.PlaywrightTaskReassigner().reassign("63429523", "25486692", "Carlo Ferrara")
+    assert not isinstance(caught.value, AssertionError), "browser was opened"
+    assert "allowlist" in str(caught.value)
+
+
+# ---- duplicate effects, resume, reopen -----------------------------------
+
+def test_resume_after_question_posts_new_step_note_and_reassigns_once(store):
+    disc, owners = Discussions(), Owners()
+    first = _work(store, _worker(disc, None), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value and len(disc.posts) == 1
+    store.resume(first["id"])
+    second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
+    assert len(disc.posts) == 2 and owners.calls == ["Carlo Ferrara"]
+    assert _verify(store, first["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+
+
+@pytest.mark.parametrize("second_ask", ["Please call the client about their quote.",
+                                        "New ask: also email the client"])
+def test_second_request_after_handback_gets_its_own_note(store, second_ask):
+    disc, owners = Discussions(), Owners()
+    worker = _worker(disc, owners)
+    job = _work(store, worker, make_task())
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+    owners.assignee = "Robie AI"  # staff hands it back to Robie with a new ask
+    job2, created = ensure_task_job(
+        store, make_task(last_modified="2026-10-04T09:00:00", description=second_ask))
+    assert not created and job2["status"] == JobStatus.PENDING.value
+    after = worker.process_job(store, job2)
+    assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
+    assert len(disc.posts) == 2 and owners.calls == ["Carlo Ferrara", "Carlo Ferrara"]
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+
+
+def test_test_task_note_not_reposted_when_report_version_changes(store):
+    disc, owners = Discussions(), Owners()
+    worker = _worker(disc, owners)
+    task = make_task(description="Test task for Roby - please ignore")
+    job = _work(store, worker, task)
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+    job2, _ = ensure_task_job(store, make_task(description=task.description,
+                                               last_modified="2026-10-04T09:00:00"))
+    after = worker.process_job(store, job2)
+    assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
+    assert len(disc.posts) == 1 and owners.calls == []
+
+
+def test_save_landed_but_receipt_lost_is_reconciled_not_repeated(store):
+    disc, owners = Discussions(), Owners(crash_after_save=TimeoutError("lost after save"))
+    result = _work(store, _worker(disc, owners), make_task())
+    assert result["status"] == JobStatus.VERIFYING.value, result.get("last_error")
+    assert owners.calls == ["Carlo Ferrara"] and len(disc.posts) == 1
+
+
+def test_process_death_after_save_then_restart_does_not_save_twice(store):
+    disc, owners = Discussions(), Owners(crash_after_save=SystemExit("killed after save"))
+    job, _ = ensure_task_job(store, make_task())
+    with pytest.raises(SystemExit):
+        _worker(disc, owners).process_job(store, job)
+    assert store.get_job(job["id"])["status"] == JobStatus.RUNNING.value
+    restarted = JobStore(store.path)
+    far_future = datetime.now(timezone.utc) + timedelta(hours=3)
+    assert intake.recover_stale_running(restarted, now=far_future) == [job["id"]]
+    result = _worker(disc, owners).process_job(restarted, restarted.get_job(job["id"]))
+    assert result["status"] == JobStatus.VERIFYING.value, result.get("last_error")
+    assert owners.calls == ["Carlo Ferrara"]
+
+
+def test_unknown_save_with_owner_unchanged_pauses_then_retries_once_on_resume(store):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert owners.calls == [] and disc.posts == []
+    store.resume(first["id"])
+    second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
+    assert owners.calls == ["Carlo Ferrara"]
+
+
+def test_unknown_save_with_owner_changed_by_someone_else_pauses_no_save(store):
+    disc, owners = Discussions(), Owners(assignee="Someone Else", fail_before_save=TimeoutError("x"))
+    job, _ = ensure_task_job(store, make_task())
+    store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    store.checkpoint(job["id"], "task-reassign-intent:0", {
+        "task_id": "63429523", "applicant_id": "220250093", "target": "Carlo Ferrara",
+        "expected_assignee": "Robie AI", "state": "attempting", "skipped": []})
+    store.transition(job["id"], JobStatus.PENDING, expected={JobStatus.RUNNING})
+    result = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert owners.calls == [] and disc.posts == []
+
+
+def test_unresolvable_first_owner_falls_through_in_order(store):
+    disc, owners = Discussions(), Owners(unresolved={"Carlo Ferrara"})
+    task = make_task(assigned_producer="Mike Sosa", csr="Jazmin Molina")
+    job = _work(store, _worker(disc, owners), task)
+    assert job["status"] == JobStatus.VERIFYING.value, job.get("last_error")
+    assert owners.calls == ["Mike Sosa"]
+    assert _verify(store, job["id"], disc, owners)["status"] == JobStatus.COMPLETE.value
+
+
+def test_robie_is_never_its_own_return_target(store):
+    disc, owners = Discussions(), Owners()
+    task = make_task(created_by="Robie AI", assigned_producer="Mike Sosa")
+    job = _work(store, _worker(disc, owners), task)
+    assert owners.calls == ["Mike Sosa"] and job["status"] == JobStatus.VERIFYING.value
+
+
+def test_verifier_rejects_a_return_owner_that_skipped_precedence(store):
+    disc, owners = Discussions(), Owners()
+    task = make_task(assigned_producer="Mike Sosa", csr="Jazmin Molina")
+    job = _work(store, _worker(disc, owners), task)
+    action = store.get_checkpoint(job["id"], "action")
+    action["reassigned"] = {"to": "Jazmin Molina", "verified_assignee": "Jazmin Molina"}
+    store.checkpoint(job["id"], "action", action)
+    owners.assignee = "Jazmin Molina"
+    assert _verify(store, job["id"], disc, owners)["status"] != JobStatus.COMPLETE.value
+
+
+def test_resume_with_answer_uses_the_chosen_owner(store):
+    disc, owners = Discussions(), Owners()
+    task = make_task(created_by="", assigned_producer="", csr="")
+    first = _work(store, _worker(disc, owners), task)
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task(task.task_id, db_path=store.path, assign_to="Mike Sosa") == 0
+    second = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert second["status"] == JobStatus.VERIFYING.value, second.get("last_error")
+    assert owners.calls == ["Mike Sosa"]
+    done = _verify(store, first["id"], disc, owners, store=store)
+    assert done["status"] == JobStatus.COMPLETE.value
+
+
+def test_uncertain_note_pauses_for_a_human_instead_of_failing_and_never_reposts(store):
+    disc, owners = Discussions(), Owners()
+    original = disc.append_note
+    def accepted_then_timeout(*args):
+        original(*args)
+        raise TimeoutError("accepted before receipt")
+    disc.append_note = accepted_then_timeout
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    store.resume(first["id"])
+    again = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert again["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert len(disc.posts) == 1
+
+
+def test_human_can_adopt_the_confirmed_note_id_and_work_continues(store):
+    disc, owners = Discussions(), Owners()
+    original = disc.append_note
+    def accepted_then_timeout(*args):
+        original(*args)
+        raise TimeoutError("accepted before receipt")
+    disc.append_note = accepted_then_timeout
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-1") == 0
+    after = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert after["status"] == JobStatus.VERIFYING.value, after.get("last_error")
+    assert len(disc.posts) == 1
+
+
+def test_legacy_uncertain_note_intent_still_blocks_a_repost(store):
+    disc, owners = Discussions(), Owners()
+    job, _ = ensure_task_job(store, make_task())
+    store.checkpoint(job["id"], "task-note-intent", {
+        "task_id": "63429523", "applicant_id": "220250093", "discussion_id": "849945654",
+        "body_sha256": "0" * 64, "state": "uncertain", "note_id": ""})
+    result = _worker(disc, owners).process_job(store, store.get_job(job["id"]))
+    assert result["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert disc.posts == []
+
+
+# ---- recovery and visibility ------------------------------------------------
+
+def test_stale_running_job_is_recovered_and_a_fresh_one_is_not(store):
+    old, _ = ensure_task_job(store, make_task(task_id="1001"))
+    fresh, _ = ensure_task_job(store, make_task(task_id="1002"))
+    for job in (old, fresh):
+        store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    _age(store, old["id"], 3)
+    assert intake.recover_stale_running(store) == [old["id"]]
+    assert store.get_job(old["id"])["status"] == JobStatus.PENDING.value
+    assert store.get_job(fresh["id"])["status"] == JobStatus.RUNNING.value
+
+
+def _wire_intake(monkeypatch, report, disc, owners, gate):
+    monkeypatch.setattr("robie_job_engine.report_email_source.build_default_gmail_service", lambda: object())
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: report)
+    monkeypatch.setattr(intake, "_build_discussion_client", lambda: disc)
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: owners)
+    monkeypatch.setattr(intake, "reassign_enabled", lambda: gate["on"])
+
+
+def _report(task):
+    return IngestedReport(message_id="m1", filename="Robie_AI_-_Task_Check-In_1.csv",
+                          digest="d", received_at="1", tasks=(task,))
+
+
+def test_resumed_job_is_worked_even_when_the_delivery_was_already_processed(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners, gate = make_task(), Discussions(), Owners(), {"on": False}
+    _wire_intake(monkeypatch, _report(task), disc, owners, gate)
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id))
+    assert job["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    gate["on"] = True
+    assert intake.resume_task(task.task_id, db_path=db) == 0
+    assert intake.run_intake(db_path=db) == 0  # same delivery, already processed
+    final = JobStore(db).get_job(job["id"])
+    assert final["status"] == JobStatus.COMPLETE.value, final.get("last_error")
+    assert owners.calls == ["Carlo Ferrara"]
+
+
+def test_a_task_that_cannot_get_a_job_is_recorded_as_partial_not_ok(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    _wire_intake(monkeypatch, _report(task), disc, owners, {"on": False})
+    monkeypatch.setattr(intake, "ensure_task_job", Mock(side_effect=OSError("disk full")))
+    assert intake.run_intake(db_path=db) == 2
+    with JobStore(db).connect() as conn:
+        status = conn.execute("SELECT status FROM ezlynx_task_intake_runs").fetchone()[0]
+    assert status == "partial"
+
+
+def test_health_flags_waiting_verifying_and_queued_jobs_and_names_the_owner(store, monkeypatch):
+    import robie_job_engine.ezlynx_task_intake_health as health
+    from test_ezlynx_task_intake import _record_run
+    _record_run(store, message_id="m1", status="ok", minutes_ago=5)
+    waiting, _ = ensure_task_job(store, make_task(task_id="2001"))
+    store.transition(waiting["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    store.transition(waiting["id"], JobStatus.AWAITING_HUMAN_INPUT, expected={JobStatus.RUNNING},
+                     error="needs an owner", resume_status=JobStatus.PENDING, release_lease=True)
+    fresh_wait, _ = ensure_task_job(store, make_task(task_id="2002"))
+    store.transition(fresh_wait["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    store.transition(fresh_wait["id"], JobStatus.AWAITING_HUMAN_INPUT, expected={JobStatus.RUNNING},
+                     error="needs an owner", resume_status=JobStatus.PENDING, release_lease=True)
+    verifying, _ = ensure_task_job(store, make_task(task_id="2003"))
+    store.transition(verifying["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    store.transition(verifying["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING}, release_lease=True)
+    queued, _ = ensure_task_job(store, make_task(task_id="2004"))
+    for job in (waiting, verifying, queued):
+        _age(store, job["id"], 6)
+    monkeypatch.setattr(health, "default_db_path", lambda: store.path)
+    monkeypatch.setenv("TASK_INTAKE_OWNER", "Carlo Ferrara")
+    problems = check_intake()
+    text = "\n".join(problems)
+    assert "2001" in text and "waiting on a person" in text and "Carlo Ferrara" in text
+    assert "2003" in text and "2004" in text
+    assert "2002" not in text
+
+
+# ---- false completion --------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("Customer has a problem with the latest quote, please fix", False),
+    ("Please contest the latest charge for Robert", False),
+    ("Test task for Roby - please ignore", True),
+    ("This is a test for Robie", True),
+])
+def test_is_test_task_requires_whole_words(text, expected):
+    assert is_test_task(make_task(description=text)) is expected
+
+
+def test_real_request_mentioning_test_lookalike_words_is_handed_back_not_acknowledged(store):
+    disc, owners = Discussions(), Owners()
+    task = make_task(description="Customer has a problem with the latest quote, please fix")
+    job = _work(store, _worker(disc, owners), task)
+    assert owners.calls == ["Carlo Ferrara"] and job["status"] == JobStatus.VERIFYING.value

@@ -58,7 +58,7 @@ def make_task(**overrides: Any) -> AssignedTask:
         task_id="63429523",
         title="Task Note",
         description="Please call the client about their quote.",
-        applicant_id="25486692",
+        applicant_id="220250093",
         applicant_name="Jake N Ferrara",
         assigned_to="Robie AI",
         due_date="2026-10-05",
@@ -100,6 +100,10 @@ class FakeDiscussionClient:
         self._count = 5
         self.force_latest: str | None = None
         self._posted = already_posted
+        self.discussion_ids: list[str] = ["849945654"]
+
+    def get_discussion_ids(self, applicant_id: str) -> list[str]:
+        return list(self.discussion_ids)
 
     def append_note(self, discussion_id: str, body: str) -> dict[str, Any]:
         self.posts.append((discussion_id, body))
@@ -155,7 +159,7 @@ def _job_payload(task: AssignedTask) -> dict[str, Any]:
 
 def test_parse_routing_columns():
     row = (
-        '63429523,25486692,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
+        '63429523,220250093,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
         '2026-10-03,2026-10-03T10:00:00,"Call about quote",Task Note,849945654,'
         'Carlo Ferrara,,Jazmin Molina'
     )
@@ -169,7 +173,7 @@ def test_parse_routing_columns():
 def test_parse_without_routing_columns_ok():
     headers = CSV_HEADERS.replace(",Task Created By,Assigned Producer,CSR", "")
     row = (
-        '63429523,25486692,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
+        '63429523,220250093,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
         '2026-10-03,2026-10-03T10:00:00,"Call about quote",Task Note,849945654'
     )
     tasks = parse_task_report(headers + "\n" + row + "\n")
@@ -190,7 +194,7 @@ def test_ensure_task_job_creates_pending_with_ids(store):
     assert job["status"] == JobStatus.PENDING.value
     payload = job["payload"]
     assert payload["task_id"] == "63429523"
-    assert payload["applicant_id"] == "25486692"
+    assert payload["applicant_id"] == "220250093"
     assert payload["discussion_id"] == "849945654"
     assert payload["locator"] == "ezlynx-discussion:849945654"
 
@@ -299,7 +303,7 @@ def test_worker_reassigns_gate_on(store):
     result = worker.process_job(store, job)
 
     assert result["status"] == JobStatus.VERIFYING.value
-    assert reassigner.calls == [("63429523", "25486692", "Carlo Ferrara")]
+    assert reassigner.calls == [("63429523", "220250093", "Carlo Ferrara")]
     # The task description is passed through so the CDP flow can search for it.
     assert reassigner.last_description == "Please call the client about their quote."
     assert len(client.posts) == 1
@@ -510,7 +514,7 @@ class _FakeService:
 
 def _good_csv() -> str:
     return make_csv([
-        '63429523,25486692,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
+        '63429523,220250093,Jake N Ferrara,Robie AI,Open,2026-10-05,Normal,'
         '2026-10-03,2026-10-03T10:00:00,"Call about quote",Task Note,849945654,'
         'Carlo Ferrara,,'
     ])
