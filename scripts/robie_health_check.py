@@ -23,6 +23,7 @@ Runs via cron (hourly). Checks the things that have actually bitten us:
       - Task-verifier health (stuck PENDING/UNVERIFIED tasks, journal errors)
       - 4359 Tuesday email proof (evidence-latest.json from most recent Tue)
       - Chat intake liveness (reuses production_preflight.check_chat_intake)
+      - Preflight alert delivery (journal JSON alert_delivery_failed)
 
 Output:
   - JSON status file (always written, even when healthy)
@@ -1077,13 +1078,13 @@ def check_4359_tuesday_proof() -> tuple[bool, str, dict]:
 
 
 def check_chat_intake() -> tuple[bool, str, dict]:
-    """Is the Hermes Chat listener actually receiving inbound messages?
+    """Is the Hermes Chat listener up?
 
-    Reuses robie_job_engine/production_preflight.check_chat_intake: fails when
-    the gateway journal shows the listener wedged, or when inbound has gone
-    silent with no 'connected' marker. On 2026-09-28 this caught a real
-    outage: last inbound 2026-09-23, zero '[GoogleChat] Connected' markers in
-    7 days of journal — the listener wasn't initializing its subscription.
+    Reuses robie_job_engine/production_preflight.check_chat_intake. Connected
+    is read from the gateway log and the journal. A quiet inbox is INFO while
+    the listener is connected and hermes-gateway is active. Fails when the
+    gateway is inactive, the latest marker is a disconnect or error, or
+    neither source has a connect marker.
     """
     extra: dict = {}
     try:
@@ -1095,9 +1096,63 @@ def check_chat_intake() -> tuple[bool, str, dict]:
         extra["error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
         return False, f"chat intake check failed: {type(exc).__name__}", extra
     extra["evidence"] = result.get("evidence", "")
+    if result.get("severity"):
+        extra["severity"] = result.get("severity")
     if result.get("ok"):
         return True, result.get("evidence", "chat intake live"), extra
     return False, result.get("evidence", "chat intake problem"), extra
+
+
+def _last_preflight_startup(journal: str) -> str | None:
+    found = None
+    for line in str(journal or "").splitlines():
+        if "preflight startup:" in line and "ROBIE_CHAT_SA_KEY_FILE=" in line:
+            found = line.strip()
+    return found
+
+
+def check_preflight_alert_delivery(journal: str | None = None) -> tuple[bool, str, dict]:
+    """Can the hourly preflight actually deliver its Chat alert?
+
+    Reads the preflight unit journal. Missing output is not a failure (the
+    probe cannot see a run). Fails when the latest result has
+    ``alert_delivery_failed`` true, or when the latest startup line shows
+    ``ROBIE_CHAT_SA_KEY_FILE`` unset — a green run never posts, so the unset
+    key would otherwise stay invisible until the next real no.
+    """
+    extra: dict = {}
+    try:
+        if journal is None:
+            journal = _journal_since("robie-production-preflight.service", "36 hours ago")
+        try:
+            from robie_job_engine.production_preflight import parse_preflight_alert_state
+        except Exception:
+            sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+            from robie_job_engine.production_preflight import parse_preflight_alert_state
+
+        text = journal or ""
+        parsed = parse_preflight_alert_state(text)
+        startup = _last_preflight_startup(text)
+    except Exception as exc:
+        extra["error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
+        return True, f"preflight alert delivery not visible: {type(exc).__name__}", extra
+    if startup:
+        extra["startup"] = startup[-240:]
+    if parsed:
+        extra["alert_delivery_failed"] = parsed.get("alert_delivery_failed")
+        error = parsed.get("chat_post_error")
+        if error:
+            extra["chat_post_error"] = str(error)[:200]
+        if parsed.get("alert_delivery_failed") is True:
+            detail = str(error or "chat post failed")[:200]
+            return False, f"preflight alerts broken: {detail}", extra
+    if startup and "ROBIE_CHAT_SA_KEY_FILE=(unset)" in startup:
+        return False, (
+            "preflight alerts broken: ROBIE_CHAT_SA_KEY_FILE is unset"
+        ), extra
+    if not parsed and not startup:
+        return True, "no preflight JSON in recent journal", extra
+    return True, "preflight alert delivery ok", extra
 
 
 def check_duplicate_guard() -> tuple[bool, str, dict]:
@@ -1429,6 +1484,7 @@ CHECKS = [
     ("task_verifier_health", check_task_verifier_health),
     ("tuesday_4359_proof", check_4359_tuesday_proof),
     ("chat_intake", check_chat_intake),
+    ("preflight_alert_delivery", check_preflight_alert_delivery),
     ("duplicate_guard", check_duplicate_guard),
 ]
 
