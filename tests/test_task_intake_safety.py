@@ -298,6 +298,14 @@ class Owners:
                                  else ([fail_before_save] if fail_before_save else []))
         self.calls = []
         self.attempts = []
+        self.live_description = None  # None: the live request equals what the caller passes
+        self.state_error = None
+
+    def read_task_state(self, task_id, applicant_id, description=""):
+        if self.state_error is not None:
+            raise self.state_error
+        return {"assignee": self.assignee,
+                "description": self.live_description if self.live_description is not None else description}
 
     def reassign(self, task_id, applicant_id, new_assignee, description="", expected_assignee="Robie AI"):
         self.attempts.append(new_assignee)
@@ -1261,3 +1269,162 @@ def test_the_task_restriction_also_limits_owed_recovery(tmp_path, monkeypatch):
     monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "70000001")  # not this task
     assert intake._recover_owed(store) == 0
     assert store.get_job(job["id"])["status"] == JobStatus.VERIFYING.value
+
+
+# ---------------------------------------------------------------------------
+# Clara's third review of #774 (7c3e4ea).
+# ---------------------------------------------------------------------------
+
+# ---- 1. verify the CURRENT request before opening a new round ------------------------------------
+
+def test_an_old_snapshot_cannot_open_a_round_after_a_human_returns_the_task_with_new_instructions(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    old = make_task(description="Please send me the declarations page.")
+    disc, owners = Discussions(), Owners()
+    holder = {"report": _report(old, message_id="m1")}
+    _wire_intake(monkeypatch, None, disc, owners, {"on": True})
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(old.task_id))
+    assert job["status"] == JobStatus.COMPLETE.value and len(disc.posts) == 1
+    # A human returns the task to Robie with CHANGED instructions...
+    owners.assignee = "Robie AI"
+    owners.live_description = "Please send me the ID card instead."
+    # ...but the report that arrives next is an OLD snapshot: Robie's old wording, a later
+    # Last Modified, received after the handback.
+    holder["report"] = _report(make_task(description=old.description, last_modified="2026-10-05T09:00:00"),
+                               message_id="m2")
+    assert intake.run_intake(db_path=db) == 0
+    same = JobStore(db).get_job(job["id"])
+    assert same["status"] == JobStatus.COMPLETE.value and int(same["payload"].get("round") or 0) == 0
+    assert len(disc.posts) == 1, "worked an old snapshot's instructions"
+    # A report carrying the real current instructions does open the round, with THOSE instructions.
+    holder["report"] = _report(make_task(description=owners.live_description,
+                                         last_modified="2026-10-05T10:00:00"), message_id="m3")
+    assert intake.run_intake(db_path=db) == 0
+    final = JobStore(db).get_job(job["id"])
+    assert final["status"] == JobStatus.COMPLETE.value and int(final["payload"]["round"]) == 1
+    assert final["payload"]["description"] == owners.live_description
+    assert len(disc.posts) == 2
+
+
+def test_an_unreadable_live_request_never_opens_a_round(tmp_path, monkeypatch):
+    db = str(tmp_path / "jobs.db")
+    task, disc, owners = make_task(), Discussions(), Owners()
+    holder = {"report": _report(task, message_id="m1")}
+    _wire_intake(monkeypatch, None, disc, owners, {"on": True})
+    monkeypatch.setattr(intake, "fetch_latest_task_report", lambda service: holder["report"])
+    assert intake.run_intake(db_path=db) == 0
+    job = _find_by_idempotency_key(JobStore(db), task_idempotency_key(task.task_id))
+    owners.assignee = "Robie AI"
+    owners.state_error = RuntimeError("the task description field is not on the page")
+    holder["report"] = _report(make_task(last_modified="2026-10-05T09:00:00"), message_id="m2")
+    assert intake.run_intake(db_path=db) == 0
+    assert JobStore(db).get_job(job["id"])["status"] == JobStatus.COMPLETE.value
+    assert len(disc.posts) == 1
+
+
+class _Field:
+    def __init__(self, value, count=1):
+        self.value, self.n = value, count
+    def count(self): return self.n
+    def input_value(self): return self.value
+    def text_content(self): return self.value
+
+
+class _Panel:
+    def __init__(self, fields): self.fields = fields
+    def get_by_label(self, name, exact): return self.fields.get(name, _Field("", count=0))
+
+
+def test_the_task_description_is_read_from_exactly_one_labelled_field():
+    assert cdp._read_task_description(_Panel({"Description": _Field("  Send the  dec page ")})) == "Send the dec page"
+    with pytest.raises(cdp.ReassignError):
+        cdp._read_task_description(_Panel({}))
+    with pytest.raises(cdp.ReassignError):
+        cdp._read_task_description(_Panel({"Description": _Field("a", count=2)}))
+
+
+# ---- 2. the Test task restriction covers stale recovery and the manual resume command --------------
+
+def test_stale_recovery_skips_jobs_the_restriction_excludes(store, monkeypatch):
+    kept, _ = ensure_task_job(store, make_task(task_id="1001"))
+    excluded, _ = ensure_task_job(store, make_task(task_id="1002"))
+    for job in (kept, excluded):
+        store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        _age(store, job["id"], 3)
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "1001")
+    assert intake.recover_stale_running(store) == [kept["id"]]
+    assert store.get_job(excluded["id"])["status"] == JobStatus.RUNNING.value
+
+
+def test_stale_recovery_in_a_test_environment_without_a_restriction_does_nothing(store, monkeypatch):
+    job, _ = ensure_task_job(store, make_task())
+    store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+    _age(store, job["id"], 3)
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    monkeypatch.delenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", raising=False)
+    assert intake.recover_stale_running(store) == []
+
+
+@pytest.mark.parametrize("kwargs", [
+    {}, {"assign_to": "Mike Sosa"}, {"note_id": "note-1"}, {"allow_retry_save": True},
+])
+def test_manual_resume_refuses_excluded_jobs_and_changes_nothing(store, monkeypatch, kwargs):
+    disc, owners = Discussions(), Owners(fail_before_save=TimeoutError("page died"))
+    first = _work(store, _worker(disc, owners), make_task())
+    assert first["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    before = {kind: store.get_checkpoint(first["id"], kind) for kind in
+              ("task-reassign-intent:0", "human-answer:0", "task-note-intent:0:handoff")}
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "70000001")
+    assert intake.resume_task("63429523", db_path=store.path, **kwargs) == 1
+    assert store.get_job(first["id"])["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    after = {kind: store.get_checkpoint(first["id"], kind) for kind in before}
+    assert after == before, "an excluded job's permissions were changed"
+
+
+def test_manual_resume_in_a_test_environment_requires_the_restriction(store, monkeypatch):
+    disc, owners = Discussions(), Owners()
+    first = _work(store, _worker(disc, None), make_task())
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    monkeypatch.delenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", raising=False)
+    assert intake.resume_task("63429523", db_path=store.path) == 1
+    assert store.get_job(first["id"])["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+
+
+def test_manual_resume_still_works_for_an_allowed_job(store, monkeypatch):
+    disc, owners = Discussions(), Owners()
+    first = _work(store, _worker(disc, None), make_task())
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS", "63429523")
+    assert intake.resume_task("63429523", db_path=store.path) == 0
+    assert store.get_job(first["id"])["status"] == JobStatus.PENDING.value
+
+
+# ---- 3. a wrong (nonexistent) adopted note ID must not stick -------------------------------------------
+
+def test_a_nonexistent_adopted_note_id_can_be_corrected(store):
+    disc, owners = Discussions(), Owners()
+    first = _uncertain_note_job(store, disc, owners)
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-999") == 0
+    wrong = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert wrong["status"] == JobStatus.AWAITING_HUMAN_INPUT.value
+    assert intake.resume_task("63429523", db_path=store.path, note_id="note-1") == 0, \
+        "the wrong ID stayed stuck on the record"
+    right = _worker(disc, owners).process_job(store, store.get_job(first["id"]))
+    assert right["status"] == JobStatus.VERIFYING.value, right.get("last_error")
+    assert len(disc.posts) == 1
+
+
+# ---- live calls stay separately gated: only OWED recovery force-disables them ------------------------------
+
+def test_a_normal_pass_keeps_main_call_wiring_and_only_owed_recovery_disables_it(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / "jobs.db")
+    monkeypatch.setattr(intake, "_build_discussion_client", lambda: Discussions())
+    monkeypatch.setattr(intake, "PlaywrightTaskReassigner", lambda: Owners())
+    monkeypatch.setattr(intake, "reassign_enabled", lambda: True)
+    monkeypatch.setattr("robie_job_engine.bland_prod_wiring.build_call_dependencies",
+                        lambda: ("PHONE", "BLAND", "TRANSFER", True))
+    normal, _ = intake._build_worker_and_engine(store)
+    assert (normal.phone_lookup, normal.bland_client, normal.call_dry_run) == ("PHONE", "BLAND", True)
+    owed, _ = intake._build_worker_and_engine(store, allow_calls=False)
+    assert owed.phone_lookup is None and owed.bland_client is None
