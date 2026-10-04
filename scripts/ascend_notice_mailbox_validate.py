@@ -10,7 +10,8 @@ addresses are printed. No label, read-state, note or task change.
   ROBIE_ENV=TEST PYTHONPATH=. python3 scripts/ascend_notice_mailbox_validate.py \\
       --mailbox <mailbox> --delegation-service-account <service account email> --days 7
 
-Blocked until the Gmail delegation service account exists (see #760).
+Blocked until the Gmail delegation service account exists (tracking issue TBD;
+#760 is unrelated — it is "Disable Ascend notice driver schedule").
 """
 
 from __future__ import annotations
