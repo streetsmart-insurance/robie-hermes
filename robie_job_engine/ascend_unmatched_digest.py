@@ -53,6 +53,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .ascend_api_notice_source import (
+    CATCHUP_REVIEW,
     FILE_ATTEMPT_LIMIT,
     EventKeyStore,
     _iso,
@@ -126,6 +127,7 @@ REASONS = frozenset(
         POLICY_OUTCOME_NOT_IN_EZLYNX,
         POLICY_OUTCOME_MULTIPLE,
         POLICY_OUTCOME_INCOMPLETE,
+        CATCHUP_REVIEW,
     }
 )
 
@@ -134,6 +136,9 @@ _REASON_WORDS = {
     POLICY_OUTCOME_NOT_IN_EZLYNX: "That policy number is not in EZLynx.",
     POLICY_OUTCOME_MULTIPLE: "More than one EZLynx client matched.",
     POLICY_OUTCOME_INCOMPLETE: "The EZLynx search did not finish, so Robie did not guess.",
+    CATCHUP_REVIEW: (
+        "This notice is older than 72 hours, so Robie left it for someone to review."
+    ),
 }
 
 _NOTICE_WORDS = {
@@ -160,7 +165,7 @@ _FIX_LINE_CHECKED = (
 _FIX_LINE_AS_SHOWN = (
     "Fix the policy number in EZLynx and it drops off this list "
     "once Robie matches it and files the note. "
-    "The policy number is as shown in EZLynx."
+    "The policy number is as Ascend sent it."
 )
 _READY_WHEN_NOTES_OFF = "Ready, will file once Robie's Ascend notes are on."
 _READY_WHEN_NOTES_ON = (
@@ -539,6 +544,34 @@ def _read_program_policy_numbers(
     if not isinstance(record, dict):
         return None
     numbers = [str(number).strip() for number in policy_numbers_of(record) if str(number).strip()]
+    if not numbers:
+        # Program records do not carry a policy number. The billable does.
+        # This read does not use the poll's cache, so a correction in Ascend
+        # is visible on the next digest. The same deadline covers this GET.
+        billable_getter = getattr(ascend_client, "get_billables", None)
+        if not callable(billable_getter):
+            return None
+        if deadline is not None and ticks() >= deadline:
+            raise PolicyBudgetExpired()
+        try:
+            billable_payload = billable_getter(program_id)
+        except PolicyBudgetExpired:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep the saved number and continue
+            logger.warning(
+                "digest recheck could not read Ascend billables for %s: %s",
+                program_id,
+                type(exc).__name__,
+            )
+            return None
+        rows = billable_payload.get("data") if isinstance(billable_payload, dict) else None
+        if not isinstance(rows, list):
+            rows = []
+        record = dict(record)
+        record["billables"] = [row for row in rows if isinstance(row, dict)]
+        numbers = [
+            str(number).strip() for number in policy_numbers_of(record) if str(number).strip()
+        ]
     if not numbers:
         return None
     row["policy_numbers"] = numbers
@@ -1480,6 +1513,18 @@ class _AscendProgramRead:
         if not program:
             raise ValueError("program id is required")
         return self._client.get(f"{FEED_PROGRAMS}/{program}")
+
+    def get_billables(self, program_id: str) -> Any:
+        """GET /v1/billables?program_id= the way the poll does. No cache."""
+        from .ascend_api_notice_source import FEED_BILLABLES, PAGE_SIZE
+
+        program = str(program_id or "").strip()
+        if not program:
+            raise ValueError("program id is required")
+        return self._client.get(
+            FEED_BILLABLES,
+            {"program_id": program, "page_size": PAGE_SIZE},
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

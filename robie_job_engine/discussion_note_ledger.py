@@ -294,14 +294,32 @@ def notice_anchors(text: str) -> dict[str, list[str]]:
 
 
 def anchors_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """True when the due date, the amount, or the invoice number is shared."""
-    if set(left.get("amounts") or []).intersection(right.get("amounts") or []):
+    """True when this is the same bill, not merely the same dollar amount.
+
+    A due date or invoice number that both sides name and that differs
+    rules the match out, even when the amount is the same. The amount
+    counts by itself only when neither side pair has a due date and
+    neither side pair has an invoice number.
+    """
+    left_dues = {str(item) for item in (left.get("due_dates") or []) if str(item)}
+    right_dues = {str(item) for item in (right.get("due_dates") or []) if str(item)}
+    left_invoices = {
+        str(item).upper() for item in (left.get("invoice_numbers") or []) if str(item)
+    }
+    right_invoices = {
+        str(item).upper() for item in (right.get("invoice_numbers") or []) if str(item)
+    }
+    if left_dues and right_dues and not left_dues.intersection(right_dues):
+        return False
+    if left_invoices and right_invoices and not left_invoices.intersection(right_invoices):
+        return False
+    if left_dues.intersection(right_dues) or left_invoices.intersection(right_invoices):
         return True
-    if set(left.get("due_dates") or []).intersection(right.get("due_dates") or []):
-        return True
-    left_invoices = {str(item).upper() for item in (left.get("invoice_numbers") or []) if item}
-    right_invoices = {str(item).upper() for item in (right.get("invoice_numbers") or []) if item}
-    return bool(left_invoices.intersection(right_invoices))
+    if (left_dues and right_dues) or (left_invoices and right_invoices):
+        return False
+    left_amounts = {str(item) for item in (left.get("amounts") or []) if str(item)}
+    right_amounts = {str(item) for item in (right.get("amounts") or []) if str(item)}
+    return bool(left_amounts.intersection(right_amounts))
 
 
 def _row_anchors(row: dict[str, Any]) -> dict[str, list[str]]:

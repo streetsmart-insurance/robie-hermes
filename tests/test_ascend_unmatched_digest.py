@@ -422,7 +422,7 @@ def test_sample_digest_is_plain_english():
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
         "Fix the policy number in EZLynx and it drops off this list once Robie matches it and files the note. "
-        "The policy number is as shown in EZLynx."
+        "The policy number is as Ascend sent it."
     )
     assert "or Ascend" not in body
     for forbidden in ("event_key", "program_id", "late_payment", "applicant_id", "unmatched_reason"):
@@ -1687,6 +1687,254 @@ def test_an_older_ledger_row_is_not_this_months_filing(tmp_path, monkeypatch):
     assert all("recent_same_notice" not in str(row.get("reason") or "") for row in live["results"])
 
 
+def test_recheck_reads_the_policy_number_from_the_billable(tmp_path, monkeypatch):
+    """A program record has no policy number. The billable does."""
+    monkeypatch.delenv(source.LIVE_ENV, raising=False)
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key="moved",
+            event_type="late_payment",
+            program_id="prog-1",
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=("HO-OLD",),
+            insured_name="Fixture Hauling LLC",
+            subject="Past due payment for Fixture Hauling LLC",
+            body="Policy ID HO-OLD\nCustomer Fixture Hauling LLC\n",
+            program={"id": "prog-1"},
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+
+    class AscendRead:
+        def __init__(self):
+            self.programs: list[str] = []
+            self.billables: list[str] = []
+
+        def get_program(self, program_id):
+            self.programs.append(program_id)
+            return {"id": program_id, "insured": {"business_name": "Fixture Hauling LLC"}}
+
+        def get_billables(self, program_id):
+            self.billables.append(program_id)
+            return {"data": [{"id": "bill-1", "program_id": program_id, "policy_number": "HO-NEW"}]}
+
+    ascend = AscendRead()
+    result = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=True,
+        mailer=lambda **_kwargs: {"kind": "gmail"},
+        ezlynx_client=_PolicySearch({"HO-NEW": _policy_hit("HO-NEW", "220250093")}),
+        ascend_client=ascend,
+        refresh=False,
+    )
+    row = store.list_unmatched()[0]
+    assert ascend.programs == ["prog-1"]
+    assert ascend.billables == ["prog-1"]
+    assert row["policy_numbers"] == ["HO-NEW"]
+    assert "Policy ID HO-NEW" in row["body"]
+    assert "HO-NEW" in result["body"]
+    assert os.environ.get(source.LIVE_ENV) != "1"
+
+
+def test_same_amount_and_a_different_due_date_is_not_the_same_bill():
+    from robie_job_engine.discussion_note_ledger import anchors_overlap, notice_anchors
+
+    october = notice_anchors(
+        "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due: "
+        "$412.10 was due 10/04/2026."
+    )
+    november = notice_anchors(
+        "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due: "
+        "$412.10 was due 11/04/2026."
+    )
+    assert anchors_overlap(october, november) is False
+    assert anchors_overlap(october, october) is True
+    amount_only = notice_anchors("The balance is $412.10.")
+    assert anchors_overlap(amount_only, notice_anchors("Past due $412.10.")) is True
+    invoices = notice_anchors("Invoice No. INV-3003 $412.10")
+    other = notice_anchors("Invoice No. INV-3004 $412.10")
+    assert anchors_overlap(invoices, other) is False
+
+
+def test_a_later_due_date_does_not_close_this_bill(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        driver.zapier_tasks, "fire_task", lambda payload, *, dry_run=False: {"ok": True}
+    )
+    store, _summary = _run_unmatched(tmp_path, monkeypatch, TrapEzlynx())
+    saved = store.list_unmatched()[0]
+    store.mark_ready_to_file(saved["event_key"], "2026-10-05T14:00:00Z")
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
+    ctx.discussion_client = _discussion_with(
+        {
+            "noteId": "n-next",
+            "body": (
+                "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due: "
+                "$412.10 was due 11/04/2026."
+            ),
+            "createdAt": saved["first_seen"],
+        }
+    )
+    live = source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW,
+    )
+    assert len(ctx.discussion_client._urlopen.posts_to("/notes")) == 1
+    assert all("recent_same_notice" not in str(row.get("reason") or "") for row in live["results"])
+
+
+def test_a_zone_less_ezlynx_note_time_is_eastern():
+    posted = driver._note_posted_at({"createdAt": "2026-10-05T10:30:00"})
+    assert posted == datetime(2026, 10, 5, 14, 30, tzinfo=timezone.utc)
+
+    class Talk:
+        def get_discussion(self, discussion_id):
+            return {
+                "discussionId": discussion_id,
+                "notes": [
+                    {
+                        "noteId": "n-east",
+                        "body": (
+                            "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due: "
+                            "$412.10 was due 10/04/2026."
+                        ),
+                        "createdAt": "2026-10-05T10:30:00",
+                    }
+                ],
+            }
+
+    hit = driver.recent_same_notice(
+        Talk(),
+        applicant_id=HELPERS.APPLICANT,
+        discussion_id="d1",
+        policy_numbers=["HO-998877"],
+        notice_type=triage.LATE_PAYMENT,
+        now=datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc),
+        not_before=datetime(2026, 10, 5, 14, 0, tzinfo=timezone.utc),
+        notice_text=(
+            "This policy has a past-due payment of $412.10 which was due on 10/04/2026.\n"
+            "Invoice No. INV-3003"
+        ),
+    )
+    assert hit == {"note_id": "n-east", "source": "discussion"}
+
+
+def test_a_transient_failure_does_not_spend_a_filing_attempt(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key="ready-1",
+            event_type="late_payment",
+            program_id=HELPERS._pid(1),
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=("HO-998877",),
+            insured_name="Fixture Hauling LLC",
+            subject="Past due payment for Fixture Hauling LLC",
+            body="Policy ID HO-998877\nCustomer Fixture Hauling LLC\n",
+            program={"id": HELPERS._pid(1)},
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+    store.mark_ready_to_file("ready-1", "2026-10-05T14:00:00Z")
+    calls: list[str] = []
+
+    def _down(_ctx, item):
+        calls.append(str(item.event_key))
+        return {
+            "event_key": item.event_key,
+            "event_type": item.event_type,
+            "status": "skipped",
+            "reason": "discussion_error: Discussion API POST failed: HTTP 500",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _down)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert calls == ["ready-1"]
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    calls.clear()
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(minutes=15),
+    )
+    assert calls == []
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(hours=2),
+    )
+    assert calls == ["ready-1"]
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+
+    def _mismatch(_ctx, item):
+        return {
+            "event_key": item.event_key,
+            "event_type": item.event_type,
+            "status": "skipped",
+            "reason": "applicant_unresolved",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _mismatch)
+    # The retry at +2h was still an HTTP 500, so it armed another two-hour hold.
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(hours=4),
+    )
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 1
+
+
+def test_an_old_catchup_notice_is_listed_instead_of_dropped(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.advance_cursor(NOW - timedelta(days=10))
+    old = (NOW - timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pages = _unmatched_pages()
+    pages[source.FEED_PROGRAMS]["data"][0]["updated_at"] = old
+    pages[source.FEED_INVOICES]["data"][0]["updated_at"] = old
+    seen: list[str] = []
+    monkeypatch.setattr(
+        source,
+        "_file_through_driver",
+        lambda _ctx, item: seen.append(item.event_key),
+    )
+    caplog.set_level("WARNING")
+    summary = source.run_once(
+        client=HELPERS.FeedClient(pages),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert summary["catchup_capped"] is True
+    assert "capped at 72 hours" in caplog.text
+    assert seen == []
+    rows = store.list_unmatched()
+    assert len(rows) == 1
+    assert rows[0]["reason"] == source.CATCHUP_REVIEW
+    assert rows[0]["resolved_at"] in (None, "")
+    assert store.cursor() == NOW
+    mailed = digest.run_digest(stores=[store], now=NOW, live=False, refresh=False)
+    assert "older than 72 hours" in mailed["body"]
+
+
 def test_dry_run_does_not_store_the_reread_policy_number(tmp_path, monkeypatch):
     store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
     store.upsert_unmatched(
@@ -1797,7 +2045,7 @@ def test_production_digest_uses_the_poll_read_client(tmp_path, monkeypatch, caps
     assert code == 0
     assert calls["configured"] == 0
     assert calls["gets"] == ["/v1/programs/prog-1"]
-    assert "The policy number is as shown in EZLynx." in printed
+    assert "The policy number is as Ascend sent it." in printed
     assert "or Ascend" not in printed
     row = store.list_unmatched()[0]
     assert row["policy_numbers"] == ["HO-998877"]
@@ -1979,5 +2227,6 @@ def test_existing_database_gains_unmatched_tables(tmp_path):
         "file_attempts",
         "last_attempt_at",
         "file_failure",
+        "transient_hold_until",
     } <= columns
     assert "live" in poll_columns

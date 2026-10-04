@@ -85,6 +85,12 @@ STORE_FILE_MODE = 0o644
 STORE_DIR_MODE = 0o755
 DEFAULT_LOOKBACK_MINUTES = 20
 CURSOR_OVERLAP_MINUTES = 5
+# A poll that could not file does not move the cursor. The next filing
+# poll still must not treat a multi-day gap as one live batch, and it
+# must not drop the older notices when the cursor finally moves.
+CATCHUP_LIMIT = timedelta(hours=72)
+CATCHUP_REVIEW = "older than the catch-up window"
+TRANSIENT_BACKOFF = timedelta(hours=2)
 PAGE_SIZE = 25
 MAX_PAGES = 40
 STALL_RUNS = 4
@@ -1023,17 +1029,21 @@ class EventKeyStore:
                 (moment, key),
             )
 
-    def list_ready_to_file(self, limit: int = READY_FILE_LIMIT) -> list[dict[str, Any]]:
+    def list_ready_to_file(
+        self, limit: int = READY_FILE_LIMIT, *, now: str = ""
+    ) -> list[dict[str, Any]]:
         """Open rows the digest matched. Never-tried rows come first.
 
         A row that has already failed sorts after every row that has not
         been tried, then by the oldest attempt, then by ``ready_at``. After
         ``FILE_ATTEMPT_LIMIT`` failures the row stays on the email and is
-        not picked again. At most ``limit`` rows.
+        not picked again. At most ``limit`` rows. A row in a transient
+        hold stays off the list until that time.
         """
         cap = max(0, int(limit))
         if cap == 0:
             return []
+        moment = str(now or "").strip() or _iso(_now())
         with self._connect() as conn:
             try:
                 fetched = conn.execute(
@@ -1043,6 +1053,11 @@ class EventKeyStore:
                       AND ready_at IS NOT NULL AND ready_at != ''
                       AND subject != '' AND body != ''
                       AND COALESCE(file_attempts, 0) < ?
+                      AND (
+                        transient_hold_until IS NULL
+                        OR transient_hold_until = ''
+                        OR transient_hold_until <= ?
+                      )
                     ORDER BY CASE
                         WHEN last_attempt_at IS NULL OR last_attempt_at = '' THEN 0
                         ELSE 1
@@ -1052,7 +1067,7 @@ class EventKeyStore:
                     event_key
                     LIMIT ?
                     """,
-                    (FILE_ATTEMPT_LIMIT, cap),
+                    (FILE_ATTEMPT_LIMIT, moment, cap),
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
@@ -1084,6 +1099,23 @@ class EventKeyStore:
         if row is None or row["file_attempts"] is None:
             return 0
         return int(row["file_attempts"])
+
+    def note_transient_hold(self, event_key: str, hold_until: str) -> None:
+        """Wait out an EZLynx 5xx or timeout without using an attempt."""
+        key = str(event_key or "").strip()
+        moment = str(hold_until or "").strip()
+        if not key or not moment:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE unmatched_notices
+                SET transient_hold_until = ?
+                WHERE event_key = ?
+                  AND (resolved_at IS NULL OR resolved_at = '')
+                """,
+                (moment, key),
+            )
 
     def refresh_unmatched_policy(
         self,
@@ -1231,7 +1263,8 @@ def _ensure_unmatched_tables(conn: sqlite3.Connection) -> None:
             program_json TEXT NOT NULL DEFAULT '{}',
             file_attempts INTEGER NOT NULL DEFAULT 0,
             last_attempt_at TEXT,
-            file_failure TEXT NOT NULL DEFAULT ''
+            file_failure TEXT NOT NULL DEFAULT '',
+            transient_hold_until TEXT
         );
         CREATE TABLE IF NOT EXISTS ezlynx_policy_index (
             policy_key TEXT NOT NULL,
@@ -1265,6 +1298,7 @@ def _ensure_unmatched_columns(conn: sqlite3.Connection) -> None:
         ("file_attempts", "INTEGER NOT NULL DEFAULT 0"),
         ("last_attempt_at", "TEXT"),
         ("file_failure", "TEXT NOT NULL DEFAULT ''"),
+        ("transient_hold_until", "TEXT"),
     )
     for name, ddl in additions:
         if name not in have:
@@ -1314,6 +1348,26 @@ def _already_in_ezlynx(outcome: dict[str, Any]) -> bool:
     if detail.get("existing_note_duplicate"):
         return True
     return False
+
+
+def _hold_transient(store: EventKeyStore, event_key: str, seen_at: str) -> None:
+    """Park a ready row for two hours. This does not count as a failed attempt."""
+    moment = parse_time(seen_at) or _now()
+    store.note_transient_hold(event_key, _iso(moment + TRANSIENT_BACKOFF))
+
+
+def _is_transient_failure(reason: str) -> bool:
+    """True for an EZLynx 5xx or a timeout, not for a wrong policy number.
+
+    ``discussion_error`` counts only when the text also names an HTTP 5xx
+    or a timeout. A short outage must not use up the five filing attempts.
+    """
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    if "timeout" in text or "timed out" in text:
+        return True
+    return re.search(r"http\s*5\d\d", text) is not None
 
 
 def _poll_will_file(live: bool) -> bool:
@@ -2437,6 +2491,25 @@ def _window_start(store: EventKeyStore, now: datetime) -> datetime:
     return now - timedelta(minutes=minutes)
 
 
+def _catchup_review_before(window: datetime, now: datetime) -> datetime | None:
+    """When the cursor is older than 72 hours, notices before this time are reviewed.
+
+    Call this only for a window that came from the cursor. An explicit
+    ``since`` or ``LOOKBACK_ENV`` is the range the caller asked to see.
+    The fetch still starts at the cursor, so older notices are stored
+    instead of disappearing when the cursor moves forward. Returns None
+    when the gap is inside the cap.
+    """
+    floor = now - CATCHUP_LIMIT
+    if window >= floor:
+        return None
+    logger.warning(
+        "Ascend poll catch-up is capped at 72 hours; updates before %s go to the review list",
+        _iso(floor),
+    )
+    return floor
+
+
 def build_client() -> Any:
     """The same client and secret path the hourly ``robie-ascend-sync`` uses."""
     from .ascend_sync import AscendApiClient
@@ -2483,6 +2556,10 @@ def run_once(
     started = _iso(moment)
     live = live_enabled()
     window = since or _window_start(store, moment)
+    # The cap is for a cursor that fell behind. An explicit ``since`` or the
+    # LOOKBACK_ENV window is the range the caller asked to see.
+    from_cursor = since is None and store.cursor() is not None
+    review_before = _catchup_review_before(window, moment) if from_cursor else None
     since_iso = _iso(window)
     wrapped = client if isinstance(client, GetOnlyClient) else GetOnlyClient(client)
     feeds, errors = poll_feeds(wrapped, since_iso)
@@ -2557,6 +2634,35 @@ def run_once(
     ask: list[dict[str, str]] = []
     seen_at = _iso(moment)
     for notice in notices:
+        occurred = parse_time(notice.occurred_at) or parse_time(notice.anchor)
+        if review_before is not None and occurred is not None and occurred < review_before:
+            outcome = {
+                "event_key": notice.event_key,
+                "event_type": notice.event_type,
+                "status": "skipped",
+                "reason": "catchup_review",
+                "detail": {"unmatched_reason": CATCHUP_REVIEW},
+            }
+            plain = _remember_unmatched(
+                "persist",
+                persist_unmatched_notice,
+                store,
+                notice,
+                outcome,
+                seen_at=seen_at,
+            )
+            ask.append(
+                {
+                    "event_key": notice.event_key,
+                    "event_type": notice.event_type,
+                    "program_id": notice.program_id,
+                    "insured_name": notice.insured_name,
+                    "reason": "catchup_review",
+                    "unmatched_reason": str(plain or CATCHUP_REVIEW),
+                }
+            )
+            results.append(outcome)
+            continue
         if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
             _resolve_keys(notice)
             results.append(
@@ -2639,6 +2745,7 @@ def run_once(
         "dry_run": not live,
         "live": filing,
         "since": since_iso,
+        "catchup_capped": review_before is not None,
         "http_methods": ["GET"],
         "feeds": {path: len(feeds.get(path) or []) for path in FEEDS},
         "errors": errors,
@@ -2855,7 +2962,7 @@ def _file_ready_unmatched(
     """
     if not live_enabled():
         return []
-    ready = store.list_ready_to_file(limit)
+    ready = store.list_ready_to_file(limit, now=seen_at)
     extra: list[dict[str, Any]] = []
     queued: list[tuple[dict[str, Any], ApiNotice]] = []
     for row in ready:
@@ -2888,6 +2995,8 @@ def _file_ready_unmatched(
                     store.record_filed(notice)
                     store.resolve_unmatched(notice.event_key, seen_at)
                     outcome = {**outcome, "status": "done"}
+                elif _is_transient_failure(str(outcome.get("reason") or "")):
+                    _hold_transient(store, notice.event_key, seen_at)
                 else:
                     store.note_ready_attempt(
                         notice.event_key,
@@ -2900,11 +3009,15 @@ def _file_ready_unmatched(
                     "ready-to-file %s failed: %s", notice.event_key, type(exc).__name__
                 )
                 try:
-                    store.note_ready_attempt(
-                        notice.event_key,
-                        seen_at,
-                        plain_file_failure(f"error: {type(exc).__name__}"),
-                    )
+                    blown = f"error: {type(exc).__name__}: {exc}"
+                    if _is_transient_failure(blown):
+                        _hold_transient(store, notice.event_key, seen_at)
+                    else:
+                        store.note_ready_attempt(
+                            notice.event_key,
+                            seen_at,
+                            plain_file_failure(blown),
+                        )
                 except Exception as record_exc:  # noqa: BLE001 - a locked store must not abort the poll
                     logger.warning(
                         "ready-to-file %s attempt was not recorded: %s",

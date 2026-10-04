@@ -1687,6 +1687,14 @@ def _compact_policy(value: str) -> str:
 
 
 def _note_posted_at(row: dict[str, Any]) -> datetime | None:
+    # EZLynx note timestamps often have no offset. Naive EZLynx report
+    # timestamps are already treated as agency-local America/New_York
+    # (see task_verifier). The same assumption applies to a zone-less
+    # note stamp. A stamp that already carries an offset is converted
+    # from that offset.
+    from zoneinfo import ZoneInfo
+
+    eastern = ZoneInfo("America/New_York")
     for key in _NOTE_TIME_KEYS:
         raw = str(row.get(key) or "").strip()
         if not raw:
@@ -1696,7 +1704,7 @@ def _note_posted_at(row: dict[str, Any]) -> datetime | None:
         except ValueError:
             continue
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=eastern)
         return parsed.astimezone(timezone.utc)
     return None
 
