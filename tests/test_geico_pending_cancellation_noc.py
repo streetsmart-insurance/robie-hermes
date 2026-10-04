@@ -951,8 +951,10 @@ class NavigationTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.output = Path(self.tmp.name) / "pull"
 
-    def test_home_navigation_downloads_personal_notices_and_holds_billing_only(self):
-        page = NavPage(start="home")
+    def test_chip_navigation_downloads_personal_notices_and_holds_billing_only(self):
+        # bda3df83 removed the Client Alerts fallback: the live Gateway exposes
+        # Pending Cancellations as a count-suffixed filter chip, clicked directly.
+        page = NavPage(chip_mode="open")
         browser = PlaywrightGeicoNocBrowser(page)
         receipt = run_pull(
             browser,
@@ -966,7 +968,8 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual((self.output / PERSONAL_NAMES[0]).read_bytes(), pdf_bytes(GUEVARA.encode()))
         self.assertEqual((self.output / PERSONAL_NAMES[1]).read_bytes(), pdf_bytes(PANELLA.encode()))
         self.assertFalse((self.output / f"{COMMERCIAL} NOC Geico.pdf").exists())
-        self.assertEqual(page.clicks[:2], ["Client Alerts", "Pending Cancellations"])
+        self.assertEqual(page.clicks[0], "Pending Cancellations (3)")
+        self.assertNotIn("Client Alerts", page.clicks)
         self.assertIn("Documents", page.clicks)
         self.assertIn("Pending Cancellation Notice", page.clicks)
         self.assertIn("CANCELLATION NOTICE", page.clicks)
