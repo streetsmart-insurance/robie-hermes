@@ -98,15 +98,19 @@ class AscendApiTests(unittest.TestCase):
         self.assertEqual(plan["requests"][0], {"method": "POST", "path": "/programs"})
         self.assertEqual(plan["requests"][1], {"method": "POST", "path": "/billables"})
 
-    def test_forbidden_account_is_refused_at_any_depth(self):
+    def test_pawiva_and_221398001_payloads_validate(self):
+        # Carlo 2026-09-11: PAWIVA / 221398001 are no longer excluded from
+        # the live Ascend API. The remaining Production refusal for
+        # ascend.create_program is the action gate's Test-pass requirement
+        # (engine._perform -> hold_reason_for_job), not payload content.
         request_payload = payload()
         request_payload["program"]["metadata"] = {"customer": "PAWIVA"}
-        with self.assertRaisesRegex(AscendPayloadError, "forbidden account"):
-            validate_create_payload(request_payload)
+        plan = validate_create_payload(request_payload)
+        self.assertFalse(plan["network_performed"])
         request_payload = payload()
         request_payload["program"]["metadata"] = {"account": "221398001"}
-        with self.assertRaisesRegex(AscendPayloadError, "forbidden account"):
-            validate_create_payload(request_payload)
+        plan = validate_create_payload(request_payload)
+        self.assertFalse(plan["network_performed"])
 
     def test_unknown_fields_and_invalid_money_fail_closed(self):
         request_payload = payload()
