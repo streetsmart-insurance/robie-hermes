@@ -6,8 +6,10 @@ Synthetic fixtures only. No network, no EZLynx write, no email send.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
+from urllib import error as urlerror
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1755,9 +1757,16 @@ def test_same_amount_and_a_different_due_date_is_not_the_same_bill():
     assert anchors_overlap(october, october) is True
     amount_only = notice_anchors("The balance is $412.10.")
     assert anchors_overlap(amount_only, notice_anchors("Past due $412.10.")) is True
+    assert anchors_overlap(october, amount_only) is False
     invoices = notice_anchors("Invoice No. INV-3003 $412.10")
     other = notice_anchors("Invoice No. INV-3004 $412.10")
     assert anchors_overlap(invoices, other) is False
+    assert anchors_overlap(invoices, amount_only) is False
+    other_amount = notice_anchors(
+        "LATE PAYMENT notice from Ascend. Policy HO-998877 is past due: "
+        "$398.00 was due 10/04/2026."
+    )
+    assert anchors_overlap(october, other_amount) is False
 
 
 def test_a_later_due_date_does_not_close_this_bill(tmp_path, monkeypatch):
@@ -1932,7 +1941,266 @@ def test_an_old_catchup_notice_is_listed_instead_of_dropped(tmp_path, monkeypatc
     assert rows[0]["resolved_at"] in (None, "")
     assert store.cursor() == NOW
     mailed = digest.run_digest(stores=[store], now=NOW, live=False, refresh=False)
-    assert "older than 72 hours" in mailed["body"]
+    assert "too old to file automatically, please check by hand" in mailed["body"]
+
+
+def test_a_catchup_row_is_not_filed_when_one_client_matches(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.advance_cursor(NOW - timedelta(hours=80))
+    old = (NOW - timedelta(hours=75)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pages = _unmatched_pages()
+    pages[source.FEED_PROGRAMS]["data"][0]["updated_at"] = old
+    pages[source.FEED_INVOICES]["data"][0]["updated_at"] = old
+    seen: list[str] = []
+
+    def _spy(_ctx, item):
+        seen.append(item.event_key)
+        return {"event_key": item.event_key, "status": "done", "reason": ""}
+
+    monkeypatch.setattr(source, "_file_through_driver", _spy)
+    source.run_once(
+        client=HELPERS.FeedClient(pages),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert seen == []
+    row = store.list_unmatched()[0]
+    assert row["reason"] == source.CATCHUP_REVIEW
+    mailed = digest.run_digest(
+        stores=[store],
+        now=NOW,
+        live=True,
+        mailer=lambda **_kwargs: {"kind": "gmail"},
+        ezlynx_client=_PolicySearch({HELPERS.POLICY: _policy_hit(HELPERS.POLICY, HELPERS.APPLICANT)}),
+        refresh=False,
+    )
+    assert mailed["ready_count"] == 0
+    assert "too old to file automatically, please check by hand" in mailed["body"]
+    assert not str(store.list_unmatched()[0].get("ready_at") or "").strip()
+    store.mark_ready_to_file(row["event_key"], "2026-10-05T14:00:00Z")
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(minutes=15),
+    )
+    assert seen == []
+    assert store.list_unmatched()[0]["resolved_at"] in (None, "")
+
+
+def test_an_already_filed_notice_is_not_reopened_by_catchup(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.advance_cursor(NOW - timedelta(hours=80))
+    old = (NOW - timedelta(hours=75)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pages = _unmatched_pages()
+    pages[source.FEED_PROGRAMS]["data"][0]["updated_at"] = old
+    pages[source.FEED_INVOICES]["data"][0]["updated_at"] = old
+    source.run_once(
+        client=HELPERS.FeedClient(pages),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    saved = store.list_unmatched()[0]
+    store.record_filed(
+        source.ApiNotice(
+            event_key=saved["event_key"],
+            event_type=saved["notice_type"],
+            program_id=saved["program_id"],
+            anchor=saved["first_seen"],
+            occurred_at=saved["first_seen"],
+        )
+    )
+    store.resolve_unmatched(saved["event_key"], "2026-10-05T14:00:00Z")
+    store.advance_cursor(NOW - timedelta(hours=80))
+    seen: list[str] = []
+    monkeypatch.setattr(source, "_file_through_driver", lambda _ctx, item: seen.append(item.event_key))
+    summary = source.run_once(
+        client=HELPERS.FeedClient(pages),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(minutes=15),
+    )
+    assert seen == []
+    assert any(row["reason"] == "api_already_filed" for row in summary["results"])
+    reopened = [
+        row for row in store.list_unmatched() if not str(row.get("resolved_at") or "").strip()
+    ]
+    assert reopened == []
+
+
+def test_the_unconfirmed_guard_after_a_timeout_does_not_spend_an_attempt(tmp_path, monkeypatch):
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    store = source.EventKeyStore(tmp_path / "ascend-api" / "events.db")
+    store.upsert_unmatched(
+        source.ApiNotice(
+            event_key="ready-1",
+            event_type="late_payment",
+            program_id=HELPERS._pid(1),
+            anchor="2026-10-01T00:00:00Z",
+            occurred_at="2026-10-01T00:00:00Z",
+            policy_numbers=("HO-998877",),
+            insured_name="Fixture Hauling LLC",
+            subject="Past due payment for Fixture Hauling LLC",
+            body="Policy ID HO-998877\nCustomer Fixture Hauling LLC\n",
+            program={"id": HELPERS._pid(1)},
+        ),
+        reason=driver.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        seen_at="2026-10-01T00:00:00Z",
+    )
+    store.mark_ready_to_file("ready-1", "2026-10-05T14:00:00Z")
+
+    def _down(_ctx, item):
+        return {
+            "event_key": item.event_key,
+            "status": "skipped",
+            "reason": "discussion_error: Discussion API POST failed: HTTP 500",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _down)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW,
+    )
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+
+    def _guard(_ctx, item):
+        return {
+            "event_key": item.event_key,
+            "status": "skipped",
+            "reason": "note_not_filed: None: I couldn't confirm that note was added.",
+        }
+
+    monkeypatch.setattr(source, "_file_through_driver", _guard)
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=HELPERS.driver_ctx(),
+        now=NOW + timedelta(hours=2),
+    )
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    assert store.list_unmatched()[0]["resolved_at"] in (None, "")
+
+
+class _FlakyNotePost:
+    """The first note POST is HTTP 500. Later posts succeed."""
+
+    def __init__(self, *, show_landed_body: bool):
+        self.calls: list[dict] = []
+        self.posted_body = ""
+        self.failures_left = 1
+        self.show_landed_body = show_landed_body
+
+    def __call__(self, url, *, data=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "data": data})
+        if "connect/token" in url:
+            return HELPERS.FakeResponse({"access_token": "tok123", "expires_in": 3600})
+        if "by-applicant" in url:
+            return HELPERS.FakeResponse([{"discussionId": "d1", "title": "Ascend - Payments"}])
+        if data and "/notes" in url:
+            self.posted_body = json.loads(data.decode("utf-8")).get("body") or ""
+            if self.failures_left:
+                self.failures_left -= 1
+                raise urlerror.HTTPError(
+                    url, 500, "Server Error", {}, io.BytesIO(b"down")
+                )
+            return HELPERS.FakeResponse({"noteId": "n-retry"})
+        if "v8/discussions/" in url:
+            notes = []
+            if self.show_landed_body and self.posted_body:
+                notes.append({"noteId": "n-landed", "body": self.posted_body})
+            return HELPERS.FakeResponse(
+                {
+                    "discussionId": "d1",
+                    "title": "Ascend - Payments",
+                    "mostRecentNoteId": "n-retry",
+                    "notes": notes,
+                }
+            )
+        raise AssertionError(url)
+
+    def posts_to(self, needle):
+        return [call for call in self.calls if needle in call["url"] and call["data"]]
+
+
+def _discussion_that_fails_the_first_note(show_landed_body: bool):
+    from robie_job_engine import ezlynx_discussions as discussions
+
+    poster = _FlakyNotePost(show_landed_body=show_landed_body)
+    config = discussions.DiscussionApiConfig(
+        discussion_base_url="https://app.uatezlynx.com/DiscussionApi/",
+        token_endpoint="https://identity.example.com/connect/token",
+        client_id="street_smart_api",
+        client_secret="secret",
+        username="SSRobie",
+        integration_group_id="159",
+    )
+    client = discussions.DiscussionApiClient(config, urlopen=poster)
+    return client, poster
+
+
+def _ready_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        driver.zapier_tasks, "fire_task", lambda payload, *, dry_run=False: {"ok": True}
+    )
+    store, _summary = _run_unmatched(tmp_path, monkeypatch, TrapEzlynx())
+    saved = store.list_unmatched()[0]
+    store.mark_ready_to_file(saved["event_key"], "2026-10-05T14:00:00Z")
+    monkeypatch.setenv(source.LIVE_ENV, "1")
+    return store
+
+
+def test_a_retry_marks_filed_when_the_note_body_is_already_there(tmp_path, monkeypatch):
+    store = _ready_row(tmp_path, monkeypatch)
+    client, poster = _discussion_that_fails_the_first_note(True)
+    ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
+    ctx.discussion_client = client
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW,
+    )
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW + timedelta(hours=2),
+    )
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    assert store.list_unmatched()[0]["resolved_at"]
+
+
+def test_a_retry_posts_once_when_the_note_never_landed(tmp_path, monkeypatch):
+    store = _ready_row(tmp_path, monkeypatch)
+    client, poster = _discussion_that_fails_the_first_note(False)
+    ctx = HELPERS.driver_ctx([{"discussionId": "d1", "title": "Ascend - Payments"}])
+    ctx.discussion_client = client
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW,
+    )
+    assert len(poster.posts_to("/notes")) == 1
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    source.run_once(
+        client=HELPERS.FeedClient(_empty_feeds()),
+        store=store,
+        driver_ctx=ctx,
+        now=NOW + timedelta(hours=2),
+    )
+    assert len(poster.posts_to("/notes")) == 2
+    assert int(store.list_unmatched()[0]["file_attempts"] or 0) == 0
+    assert store.list_unmatched()[0]["resolved_at"]
 
 
 def test_dry_run_does_not_store_the_reread_policy_number(tmp_path, monkeypatch):

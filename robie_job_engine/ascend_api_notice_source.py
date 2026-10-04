@@ -1038,7 +1038,8 @@ class EventKeyStore:
         been tried, then by the oldest attempt, then by ``ready_at``. After
         ``FILE_ATTEMPT_LIMIT`` failures the row stays on the email and is
         not picked again. At most ``limit`` rows. A row in a transient
-        hold stays off the list until that time.
+        hold stays off the list until that time. A catch-up review row
+        stays off the list even if something marked it ready.
         """
         cap = max(0, int(limit))
         if cap == 0:
@@ -1053,6 +1054,7 @@ class EventKeyStore:
                       AND ready_at IS NOT NULL AND ready_at != ''
                       AND subject != '' AND body != ''
                       AND COALESCE(file_attempts, 0) < ?
+                      AND COALESCE(reason, '') != ?
                       AND (
                         transient_hold_until IS NULL
                         OR transient_hold_until = ''
@@ -1067,7 +1069,7 @@ class EventKeyStore:
                     event_key
                     LIMIT ?
                     """,
-                    (FILE_ATTEMPT_LIMIT, moment, cap),
+                    (FILE_ATTEMPT_LIMIT, CATCHUP_REVIEW, moment, cap),
                 ).fetchall()
             except sqlite3.OperationalError:
                 return []
@@ -1354,6 +1356,19 @@ def _hold_transient(store: EventKeyStore, event_key: str, seen_at: str) -> None:
     """Park a ready row for two hours. This does not count as a failed attempt."""
     moment = parse_time(seen_at) or _now()
     store.note_transient_hold(event_key, _iso(moment + TRANSIENT_BACKOFF))
+
+
+def _unconfirmed_guard_after_transient(reason: str, row: dict[str, Any]) -> bool:
+    """The note-ledger guard after a 5xx is not a failed filing attempt.
+
+    The first post left a sent-unconfirmed row. The retry says the note
+    could not be confirmed. That refusal spends an attempt only when this
+    row was not already parked for a transient failure.
+    """
+    text = str(reason or "").lower()
+    if "couldn't confirm that note was added" not in text:
+        return False
+    return bool(str(row.get("transient_hold_until") or "").strip())
 
 
 def _is_transient_failure(reason: str) -> bool:
@@ -2634,6 +2649,19 @@ def run_once(
     ask: list[dict[str, str]] = []
     seen_at = _iso(moment)
     for notice in notices:
+        # A notice already filed stays closed. Checking this before the
+        # catch-up split keeps a stuck cursor from reopening it as a review row.
+        if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
+            _resolve_keys(notice)
+            results.append(
+                {
+                    "event_key": notice.event_key,
+                    "event_type": notice.event_type,
+                    "status": "skipped",
+                    "reason": "api_already_filed",
+                }
+            )
+            continue
         occurred = parse_time(notice.occurred_at) or parse_time(notice.anchor)
         if review_before is not None and occurred is not None and occurred < review_before:
             outcome = {
@@ -2662,17 +2690,6 @@ def run_once(
                 }
             )
             results.append(outcome)
-            continue
-        if store.is_filed(notice.event_key) or any(store.is_filed(key) for key in notice.alias_keys):
-            _resolve_keys(notice)
-            results.append(
-                {
-                    "event_key": notice.event_key,
-                    "event_type": notice.event_type,
-                    "status": "skipped",
-                    "reason": "api_already_filed",
-                }
-            )
             continue
         if notice.remittance or notice.event_type == triage.AGENCY_REMITTANCE:
             outcome = _file_remittance(ctx, notice)
@@ -2991,11 +3008,14 @@ def _file_ready_unmatched(
                     )
                     continue
                 outcome = _file_through_driver(ctx, notice)
+                reason = str(outcome.get("reason") or "")
                 if _already_in_ezlynx(outcome):
                     store.record_filed(notice)
                     store.resolve_unmatched(notice.event_key, seen_at)
                     outcome = {**outcome, "status": "done"}
-                elif _is_transient_failure(str(outcome.get("reason") or "")):
+                elif _is_transient_failure(reason) or _unconfirmed_guard_after_transient(
+                    reason, _row
+                ):
                     _hold_transient(store, notice.event_key, seen_at)
                 else:
                     store.note_ready_attempt(

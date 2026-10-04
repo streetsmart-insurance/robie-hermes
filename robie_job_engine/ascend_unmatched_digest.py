@@ -137,7 +137,7 @@ _REASON_WORDS = {
     POLICY_OUTCOME_MULTIPLE: "More than one EZLynx client matched.",
     POLICY_OUTCOME_INCOMPLETE: "The EZLynx search did not finish, so Robie did not guess.",
     CATCHUP_REVIEW: (
-        "This notice is older than 72 hours, so Robie left it for someone to review."
+        "This notice is too old to file automatically, please check by hand."
     ),
 }
 
@@ -666,6 +666,11 @@ def recheck_open_unmatched(
     ready = 0
     stopped = False
     for row in rows:
+        # Older than the catch-up window stays on the email for a person.
+        # The digest does not mark it ready, so the poll does not file it.
+        if str(row.get("reason") or "") == CATCHUP_REVIEW:
+            still_open.append(row)
+            continue
         if stopped or (deadline is not None and ticks() >= deadline):
             stopped = True
             still_open.append(row)
@@ -743,6 +748,8 @@ def item_line(item: dict[str, Any]) -> str:
     phrase = _policy_phrase(list(item.get("policy_numbers") or []))
     if phrase:
         parts.append(phrase)
+    if str(item.get("reason") or "") == CATCHUP_REVIEW:
+        return ", ".join(parts) + ". " + _REASON_WORDS[CATCHUP_REVIEW]
     if int(item.get("file_attempts") or 0) >= FILE_ATTEMPT_LIMIT:
         reason = str(item.get("file_failure") or "").strip() or "The note was not filed."
         return ", ".join(parts) + ". " + _HANDED_BACK + " " + reason

@@ -1625,6 +1625,98 @@ def _list_category_discussion(
     return chosen, match_count
 
 
+_UNCONFIRMED_GUARD = "I couldn't confirm that note was added."
+
+
+def _confirm_landed_note(
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    note_id: str,
+) -> None:
+    """Upgrade the sent-unconfirmed row once the discussion shows the body."""
+    from .discussion_note_ledger import (
+        CONFIRMED,
+        DiscussionNoteLedgerError,
+        record_posted_note,
+    )
+
+    try:
+        record_posted_note(
+            applicant_id,
+            discussion_id,
+            note_text=note_text,
+            note_id=note_id,
+            source="discussion_reread",
+            refresh=True,
+            confirmation=CONFIRMED,
+        )
+    except DiscussionNoteLedgerError as exc:
+        logger.warning("landed note was not confirmed in the ledger: %s", exc)
+
+
+def _settle_unconfirmed_note(
+    client: Any,
+    applicant_id: str,
+    discussion_id: str,
+    note_text: str,
+    filed: dict[str, Any],
+) -> dict[str, Any]:
+    """Look once before a retry posts over a sent-unconfirmed ledger row.
+
+    A 5xx on the note POST leaves that row, and the next call is refused
+    without reading EZLynx. If this discussion already has the note body,
+    the row is confirmed and nothing is posted. If it does not, that exact
+    row is cleared and the note is posted once.
+    """
+    if _UNCONFIRMED_GUARD not in str(filed.get("reason") or ""):
+        return filed
+    getter = getattr(client, "get_discussion", None)
+    if not callable(getter):
+        return filed
+    try:
+        record = getter(discussion_id)
+    except Exception as exc:  # noqa: BLE001 - leave the guard; do not post blind
+        logger.warning(
+            "unconfirmed note re-read failed for discussion %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return filed
+    matched = discussions.find_identical_note(record, note_text)
+    if matched is not None:
+        note_id = _note_id_from(matched)
+        _confirm_landed_note(applicant_id, discussion_id, note_text, note_id)
+        return {
+            "status": "filed",
+            "reason": "The note was already on the discussion.",
+            "applicant_id": applicant_id,
+            "discussion_id": discussion_id,
+            "discussion_title": filed.get("discussion_title"),
+            "note_id": note_id or None,
+            "read_back": True,
+            "verified_by": "text",
+        }
+    try:
+        from .discussion_note_ledger import undo_unconfirmed_note
+
+        undo_unconfirmed_note(applicant_id, discussion_id, note_text=note_text)
+    except Exception as exc:  # noqa: BLE001 - do not post while the guard row remains
+        logger.warning(
+            "unconfirmed note row was not cleared for discussion %s: %s",
+            discussion_id,
+            type(exc).__name__,
+        )
+        return filed
+    return discussions.file_note_to_existing_discussion(
+        client,
+        applicant_id,
+        note_text,
+        discussion_id=discussion_id,
+        dry_run=False,
+    )
+
+
 def _read_existing_note(
     client: Any,
     applicant_id: str,
@@ -2302,12 +2394,18 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 except EzlynxDriverGateRefused as exc:
                     result.reason = f"driver_gate_refused: {exc}"
                     return result
-                filed = discussions.file_note_to_existing_discussion(
+                filed = _settle_unconfirmed_note(
                     ctx.discussion_client,
                     resolution.applicant_id,
+                    chosen_id,
                     note_text,
-                    discussion_id=chosen_id,
-                    dry_run=False,
+                    discussions.file_note_to_existing_discussion(
+                        ctx.discussion_client,
+                        resolution.applicant_id,
+                        note_text,
+                        discussion_id=chosen_id,
+                        dry_run=False,
+                    ),
                 )
         elif ctx.dry_run:
             authorize_notice_write(
@@ -2392,12 +2490,18 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                         "reason": "recovered category discussion already has this note",
                     }
                 else:
-                    filed = discussions.file_note_to_existing_discussion(
+                    filed = _settle_unconfirmed_note(
                         ctx.discussion_client,
                         resolution.applicant_id,
+                        chosen_id,
                         note_text,
-                        discussion_id=chosen_id,
-                        dry_run=False,
+                        discussions.file_note_to_existing_discussion(
+                            ctx.discussion_client,
+                            resolution.applicant_id,
+                            note_text,
+                            discussion_id=chosen_id,
+                            dry_run=False,
+                        ),
                     )
             else:
                 created_id = str(filed.get("discussion_id") or "").strip()

@@ -297,9 +297,9 @@ def anchors_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """True when this is the same bill, not merely the same dollar amount.
 
     A due date or invoice number that both sides name and that differs
-    rules the match out, even when the amount is the same. The amount
-    counts by itself only when neither side pair has a due date and
-    neither side pair has an invoice number.
+    rules the match out. The same due date with a different amount is a
+    different bill. The amount counts by itself only when neither side
+    has a due date and neither side has an invoice number.
     """
     left_dues = {str(item) for item in (left.get("due_dates") or []) if str(item)}
     right_dues = {str(item) for item in (right.get("due_dates") or []) if str(item)}
@@ -309,17 +309,24 @@ def anchors_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
     right_invoices = {
         str(item).upper() for item in (right.get("invoice_numbers") or []) if str(item)
     }
+    left_amounts = {str(item) for item in (left.get("amounts") or []) if str(item)}
+    right_amounts = {str(item) for item in (right.get("amounts") or []) if str(item)}
+    if left_amounts and right_amounts and not left_amounts.intersection(right_amounts):
+        return False
     if left_dues and right_dues and not left_dues.intersection(right_dues):
         return False
     if left_invoices and right_invoices and not left_invoices.intersection(right_invoices):
         return False
-    if left_dues.intersection(right_dues) or left_invoices.intersection(right_invoices):
-        return True
-    if (left_dues and right_dues) or (left_invoices and right_invoices):
-        return False
-    left_amounts = {str(item) for item in (left.get("amounts") or []) if str(item)}
-    right_amounts = {str(item) for item in (right.get("amounts") or []) if str(item)}
-    return bool(left_amounts.intersection(right_amounts))
+    if (
+        not left_dues
+        and not right_dues
+        and not left_invoices
+        and not right_invoices
+    ):
+        return bool(left_amounts.intersection(right_amounts))
+    return bool(
+        left_dues.intersection(right_dues) or left_invoices.intersection(right_invoices)
+    )
 
 
 def _row_anchors(row: dict[str, Any]) -> dict[str, list[str]]:
