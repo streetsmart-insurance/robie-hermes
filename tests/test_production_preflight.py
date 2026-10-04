@@ -49,6 +49,7 @@ from robie_job_engine.production_preflight import (
     format_preflight_startup,
     main,
     parse_preflight_alert_state,
+    resolve_preflight_env_files,
     run_production_preflight,
 )
 from robie_job_engine.store import JobStore
@@ -165,6 +166,36 @@ class CheckContractTests(unittest.TestCase):
         self.assertIn("OnCalendar=*-*-* 00,07..23:00:00 America/New_York", TIMER)
         self.assertIn("Unit=robie-production-preflight.service", TIMER)
         self.assertIn("WantedBy=timers.target", TIMER)
+
+    def test_chat_alert_units_run_as_hermes_with_the_live_key(self):
+        key_line = (
+            "Environment=ROBIE_CHAT_SA_KEY_FILE="
+            "/etc/streetsmart-hermes/robie-chat-sa-key.json"
+        )
+        wrong_key = "/etc/streetsmart-hermes/secrets/robie-chat-sa.json"
+        units = {
+            "deploy/systemd/robie-production-preflight.service": (
+                "-m robie_job_engine.production_preflight"
+            ),
+            "deploy/systemd/robie-health-check.service": "scripts/robie_health_check.py",
+            "deploy/systemd/robie-health-digest.service": (
+                "scripts/robie_health_check.py --daily-digest"
+            ),
+        }
+        for rel, exec_fragment in units.items():
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("User=streetsmart-hermes\n", text, rel)
+            self.assertIn("Group=streetsmart-hermes\n", text, rel)
+            self.assertIn(key_line, text, rel)
+            self.assertNotIn(wrong_key, text, rel)
+            self.assertNotIn("robie-recording.env", text, rel)
+            self.assertNotIn("EnvironmentFile=/etc/streetsmart-hermes/robie-recording.env", text, rel)
+            self.assertIn(exec_fragment, text, rel)
+            self.assertNotIn("User=carlo", text, rel)
+        health = (ROOT / "deploy/systemd/robie-health-check.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("--daily-digest", health)
 
     def test_gateway_drop_in_runs_preflight_after_restart_without_failing_unit(self):
         self.assertIn(
@@ -815,7 +846,7 @@ class AlertDeliveryTests(unittest.TestCase):
         self.assertIn("ROBIE_CHAT_SA_KEY_FILE=(unset)", line)
         self.assertIn(f"{missing} (missing)", line)
         self.assertIn("preflight startup:", line)
-        present_key = "/etc/streetsmart-hermes/secrets/robie-chat-sa.json"
+        present_key = "/etc/streetsmart-hermes/robie-chat-sa-key.json"
         with patch.dict(os.environ, {"ROBIE_CHAT_SA_KEY_FILE": present_key}):
             named = format_preflight_startup(
                 [("/etc/streetsmart-hermes/hermes-email-watcher.env", True)]
@@ -829,6 +860,16 @@ class AlertDeliveryTests(unittest.TestCase):
             refused = format_preflight_startup([(DEFAULT_PREFLIGHT_ENV_FILE, False)])
         self.assertIn("(inline JSON refused)", refused)
         self.assertNotIn("service_account", refused)
+
+    def test_empty_systemd_env_files_do_not_invent_recording_env(self):
+        def runner(_cmd):
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ROBIE_PREFLIGHT_ENV_FILE", None)
+            files = resolve_preflight_env_files(runner=runner)
+        self.assertEqual(files, [])
+        self.assertNotIn(DEFAULT_PREFLIGHT_ENV_FILE, [path for path, _exists in files])
 
     def test_main_prints_error_and_exits_3_when_alert_fails(self):
         report = {
@@ -979,7 +1020,7 @@ class AlertDeliveryTests(unittest.TestCase):
         self.assertIn("ROBIE_CHAT_SA_KEY_FILE is unset", detail)
         later = (
             unset
-            + "\npreflight startup: ROBIE_CHAT_SA_KEY_FILE=/etc/streetsmart-hermes/secrets/robie-chat-sa.json; "
+            + "\npreflight startup: ROBIE_CHAT_SA_KEY_FILE=/etc/streetsmart-hermes/robie-chat-sa-key.json; "
             "env file /etc/streetsmart-hermes/hermes-email-watcher.env (present)\n"
         )
         ok, detail, _extra = module.check_preflight_alert_delivery(journal=later)

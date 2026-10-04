@@ -55,6 +55,8 @@ CHAT_JOB_ACTION = "hermes.google_chat_task"
 DEFAULT_CHAT_INTAKE_FRESH_SECONDS = 6 * 60 * 60
 # hermes-gateway writes this line to the gateway log, not the systemd journal.
 DEFAULT_GATEWAY_LOG = "/opt/streetsmart-hermes/.hermes/logs/gateway.log"
+# Historical EnvironmentFile. The preflight unit does not load it: the file
+# is not on the host, and the Chat key is set on the unit itself.
 DEFAULT_PREFLIGHT_ENV_FILE = "/etc/streetsmart-hermes/robie-recording.env"
 PREFLIGHT_UNIT = "robie-production-preflight.service"
 EXIT_OK = 0
@@ -1124,7 +1126,9 @@ def resolve_preflight_env_files(
     """EnvironmentFile paths this process was pointed at, and whether each exists.
 
     ``ROBIE_PREFLIGHT_ENV_FILE`` wins. Otherwise ask systemd which files the
-    preflight unit loads. The repo unit's only file is the default.
+    preflight unit loads. The unit does not load the missing
+    ``robie-recording.env``. An empty systemd answer stays empty so the
+    startup line does not invent that path.
     """
     explicit = os.environ.get("ROBIE_PREFLIGHT_ENV_FILE", "").strip()
     paths: list[str] = []
@@ -1148,8 +1152,6 @@ def resolve_preflight_env_files(
                     paths.append(match)
         except Exception:
             paths = []
-        if not paths:
-            paths.append(DEFAULT_PREFLIGHT_ENV_FILE)
     return [(path, Path(path).is_file()) for path in paths]
 
 

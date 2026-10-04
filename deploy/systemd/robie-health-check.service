@@ -1,0 +1,21 @@
+[Unit]
+Description=ROBIE hourly health check (quiet when healthy; Chat on failure)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_CHAT_SA_KEY_FILE=/etc/streetsmart-hermes/robie-chat-sa-key.json
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/robie_health_check.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp/robie-health
+
+[Install]
+WantedBy=multi-user.target
