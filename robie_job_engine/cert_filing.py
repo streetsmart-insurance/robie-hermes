@@ -1321,7 +1321,8 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
             zap = deps.zapier.create_task(
                 applicant_id=applicant_id, title=title,
                 email_subject=getattr(record, "subject", ""),
-                note_text=note_text)
+                note_text=note_text,
+                discussion_id=str(res.discussion_id or ""))
         except Exception as exc:
             res.hold_reasons.append(f"task creation failed: {exc}")
             res.status = PARTIAL if res.status == FILED else res.status
@@ -1330,7 +1331,9 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
         # later sweep's re-drive must HOLD on this pending fire, never
         # re-fire (duplicate EZLynx task). Never let bookkeeping break
         # the filing.
-        if getattr(zap, "fired", False) and cb_store is not None:
+        direct_proven = getattr(zap, "verified", False) is True
+        if getattr(zap, "fired", False) and cb_store is not None \
+                and not direct_proven:
             try:
                 filing_id = getattr(zap, "filing_id", "") or ""
                 if filing_id:
@@ -1350,7 +1353,16 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
         # the callback store is present there is no fallback to the
         # title-based prover seam.
         proof = None
-        if cb_store is not None:
+        if direct_proven:
+            # Direct Task API: the task was read back from EZLynx with the
+            # reviewer's user id, so it is proven without a Zap callback.
+            proof = {"task_id": str(getattr(zap, "task_id", "") or "")
+                     or str(getattr(zap, "note_id", "") or ""),
+                     "assignee": getattr(deps.zapier, "assignee", "")}
+            res.evidence.append(
+                "task read back from EZLynx via the direct Task API "
+                f"(note {getattr(zap, 'note_id', '')})")
+        elif cb_store is not None:
             cb_proof = cb_store.get_proof_by_filing(
                 getattr(zap, "filing_id", "") or "")
             if cb_proof is not None:
