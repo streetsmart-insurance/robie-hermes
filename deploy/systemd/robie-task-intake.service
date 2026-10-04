@@ -35,10 +35,17 @@ EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
 # robie-ezlynx.env, robie-accountability.env) set ROBIE_EZLYNX_WRITE_SCOPE
 # or ROBIE_PLAYGROUND. The installer reads `systemctl show -p Environment`
 # and refuses to continue unless that effective environment contains
-# ROBIE_EZLYNX_WRITE_SCOPE=all.
+# ROBIE_EZLYNX_WRITE_SCOPE=all. It also reads every file from
+# `systemctl show -p EnvironmentFiles` and refuses if any of them sets
+# ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND, because EnvironmentFile=
+# overrides Environment=. The check runs before the live drop-in is installed.
 Environment=ROBIE_EZLYNX_WRITE_SCOPE=all
 Environment=ROBIE_PLAYGROUND=1
 ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0750 /opt/streetsmart-hermes/robie-job-engine/data
+# This unit does not set EZLYNX_TASK_REASSIGN_ENABLED (it stays off) and
+# does not set ROBIE_TASK_FIELD_CONTRACT_PATH. The empty field contract
+# keeps task Saves blocked. Unlabeled tasks are not touched. A gated-off
+# reassignment posts no note.
 ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ezlynx_task_intake
 NoNewPrivileges=true
 PrivateTmp=true

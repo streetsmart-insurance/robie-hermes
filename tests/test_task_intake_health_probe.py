@@ -1,11 +1,18 @@
 """Task intake health: stall, identical reports, and quiet hours."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from robie_job_engine.task_intake_health import RECOVERY_LINE, check_task_intake, main
+from robie_job_engine.task_intake_health import (
+    LEASE_RECOVERY_LINE,
+    RECOVERY_LINE,
+    _environment_file_paths,
+    check_task_intake,
+    main,
+)
 
 NY = ZoneInfo("America/New_York")
 
@@ -268,6 +275,224 @@ def test_driver_lease_not_with_production_is_red_during_business_hours(monkeypat
         now=_at(5, 10), heartbeats=[fresh], driver_reader=reader("PRODUCTION"),
     )
     assert held_by_production == []
+
+
+def test_driver_lease_alerts_once_then_one_recovery_line(monkeypatch):
+    import json
+
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_GATE_REQUIRED", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_HOLDER", "PRODUCTION")
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    episode: dict = {}
+
+    def reader(holder: str):
+        def _read() -> str:
+            return json.dumps({
+                "version": 1,
+                "state": "IN",
+                "holder": holder,
+                "expires_at": "2027-01-01T00:00:00+00:00",
+            })
+        return _read
+
+    moment = _at(5, 10)
+    first = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert first == ["driver lease not with PRODUCTION"]
+    assert episode["lease_open"] is True
+    second = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert second == []
+    sunday = check_task_intake(
+        now=_at(4, 12), heartbeats=[fresh], driver_reader=reader("TEST"), episode=episode,
+    )
+    assert sunday == []
+    assert episode["lease_open"] is True
+    back = check_task_intake(
+        now=moment, heartbeats=[fresh], driver_reader=reader("PRODUCTION"), episode=episode,
+    )
+    assert back == [LEASE_RECOVERY_LINE]
+    assert episode["lease_open"] is False
+    quiet = check_task_intake(
+        now=moment, heartbeats=[fresh],
+        driver_reader=reader("PRODUCTION"), episode=episode,
+    )
+    assert quiet == []
+
+
+def test_lease_episode_is_remembered_across_probe_runs(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_GATE_REQUIRED", "1")
+    monkeypatch.setenv("ROBIE_EZLYNX_DRIVER_HOLDER", "PRODUCTION")
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE ezlynx_task_intake_heartbeats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT, status TEXT, message_id TEXT, digest TEXT,
+            newest_created_et TEXT, row_count INTEGER, error TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO ezlynx_task_intake_heartbeats
+           (created_at, status, message_id, digest, newest_created_et, row_count, error)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("2026-10-05T14:00:00+00:00", "ok", "m", "d", "2026-10-05T09:50:00-04:00", 1, ""),
+    )
+    conn.commit()
+    conn.close()
+
+    def reader(holder: str):
+        def _read() -> str:
+            return json.dumps({
+                "version": 1,
+                "state": "IN",
+                "holder": holder,
+                "expires_at": "2027-01-01T00:00:00+00:00",
+            })
+        return _read
+
+    moment = _at(5, 10)
+    first = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("TEST"))
+    assert first == ["driver lease not with PRODUCTION"]
+    second = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("TEST"))
+    assert second == []
+    back = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("PRODUCTION"))
+    assert back == [LEASE_RECOVERY_LINE]
+    quiet = check_task_intake(now=moment, db_path=str(db), driver_reader=reader("PRODUCTION"))
+    assert quiet == []
+
+
+def test_environment_file_that_sets_scope_or_playground_is_red(tmp_path):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    env_file = tmp_path / "override.env"
+    env_file.write_text(
+        "# ROBIE_PLAYGROUND=1\n# ROBIE_EZLYNX_WRITE_SCOPE=all\nOTHER=1\n",
+        encoding="utf-8",
+    )
+    shown = f"EnvironmentFiles={env_file} (ignore_errors)"
+    quiet = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+    )
+    assert quiet == []
+    env_file.write_text("export ROBIE_PLAYGROUND=0\n", encoding="utf-8")
+    red = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+    )
+    assert any(
+        "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
+        for item in red
+    )
+
+
+def test_environment_file_paths_keep_every_prefixed_line():
+    """systemd 255 has no leading dash. ignore_errors=yes is optional."""
+    shown = (
+        "EnvironmentFiles=/etc/recording.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=/etc/accountability.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=/etc/streetsmart-hermes/robie-recording.env (ignore_errors=yes)\n"
+        "EnvironmentFiles=-/etc/also-optional.env\n"
+    )
+    assert _environment_file_paths(shown) == [
+        "/etc/recording.env",
+        "/etc/accountability.env",
+        "/etc/streetsmart-hermes/robie-recording.env",
+        "/etc/also-optional.env",
+    ]
+
+
+def test_second_environment_file_that_sets_playground_is_red(tmp_path, monkeypatch):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    first = tmp_path / "recording.env"
+    second = tmp_path / "accountability.env"
+    first.write_text("OTHER=1\n", encoding="utf-8")
+    second.write_text("ROBIE_PLAYGROUND=0\n", encoding="utf-8")
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ENV_CHECK", str(tmp_path / "missing-state.json"))
+    missing = "/etc/streetsmart-hermes/robie-recording.env"
+    shown = (
+        f"EnvironmentFiles={missing} (ignore_errors=yes)\n"
+        f"EnvironmentFiles={first} (ignore_errors=yes)\n"
+        f"EnvironmentFiles={second} (ignore_errors=yes)\n"
+    )
+    details: list[str] = []
+    red = check_task_intake(
+        now=_at(5, 10),
+        heartbeats=[fresh],
+        effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+        environment_files=shown,
+        details=details,
+    )
+    assert any(
+        "an EnvironmentFile sets ROBIE_EZLYNX_WRITE_SCOPE or ROBIE_PLAYGROUND" in item
+        for item in red
+    )
+    assert not any(missing in item for item in red)
+    assert not any(missing in line for line in details)
+
+
+def test_unreadable_environment_file_is_detail_and_does_not_page(tmp_path, monkeypatch):
+    fresh = _beat(
+        created_at="2026-10-05T14:00:00+00:00",
+        newest_created_et="2026-10-05T09:50:00-04:00",
+    )
+    blocked = tmp_path / "accountability.env"
+    blocked.write_text("OTHER=1\n", encoding="utf-8")
+    blocked.chmod(0)
+    state = tmp_path / "env-check.json"
+    state.write_text(json.dumps({
+        "ok": True,
+        "problem": "",
+        "files": [{
+            "path": str(blocked),
+            "optional": True,
+            "readable": True,
+            "assigns": False,
+        }],
+    }), encoding="utf-8")
+    monkeypatch.setenv("ROBIE_TASK_INTAKE_ENV_CHECK", str(state))
+    shown = f"EnvironmentFiles=-{blocked} (ignore_errors=yes)\n"
+    try:
+        details: list[str] = []
+        quiet = check_task_intake(
+            now=_at(5, 10),
+            heartbeats=[fresh],
+            effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+            environment_files=shown,
+            details=details,
+        )
+        assert quiet == []
+        assert any("could not read EnvironmentFile" in line and str(blocked) in line for line in details)
+        assert any("recorded it as clean" in line for line in details)
+        again: list[str] = []
+        still_quiet = check_task_intake(
+            now=_at(5, 10),
+            heartbeats=[fresh],
+            effective_environment="Environment=ROBIE_EZLYNX_WRITE_SCOPE=all",
+            environment_files=shown,
+            details=again,
+        )
+        assert still_quiet == []
+        assert any(str(blocked) in line for line in again)
+    finally:
+        blocked.chmod(0o644)
 
 
 def test_effective_environment_must_name_the_all_clients_scope():

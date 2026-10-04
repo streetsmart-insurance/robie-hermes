@@ -101,7 +101,11 @@ class FakeReassigner:
         return self.current
 
     def read_task_state(self, task_id, applicant_id, description=""):
-        """The live pre-Save state the worker must prove before any Save."""
+        """The live pre-Save state the worker must prove before any Save.
+
+        A labeled call's stored row carries "Robie Call". The live read has
+        to agree, or the worker refuses the Save and never calls reassign.
+        """
         return {"assignee": self.current, "description": description, "created_by": "Jane Producer",
                 "assigned_producer": "Jane Producer", "csr": "", "activity_labels": "Robie Call"}
 

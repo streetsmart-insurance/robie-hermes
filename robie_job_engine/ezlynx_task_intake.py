@@ -63,7 +63,6 @@ from .ezlynx_task_inbox import TaskInboxError, fetch_latest_task_report
 from .ezlynx_task_jobs import (
     ACTION_TYPE,
     _find_by_idempotency_key,
-    _received_time,
     ensure_task_job,
     task_idempotency_key,
 )
@@ -122,322 +121,6 @@ def _already_processed(store: JobStore, message_id: str) -> bool:
             (message_id,),
         ).fetchone()
     return row is not None
-
-
-def _record_run(
-    store: JobStore,
-    *,
-    message_id: str,
-    digest: str,
-    filename: str,
-    task_count: int,
-    jobs_created: int,
-    status: str,
-    error: str = "",
-) -> None:
-    with store.connect() as conn:
-        conn.execute(
-            """INSERT INTO ezlynx_task_intake_runs
-               (message_id, digest, filename, task_count, jobs_created, status, error, created_at)
-               VALUES (?,?,?,?,?,?,?,?)
-               ON CONFLICT(message_id) DO UPDATE SET
-                 status=excluded.status, error=excluded.error,
-                 task_count=excluded.task_count, jobs_created=excluded.jobs_created,
-                 created_at=excluded.created_at""",
-            (message_id, digest, filename, task_count, jobs_created, status, error, utcnow_iso()),
-        )
-
-
-def _build_discussion_client():
-    """DiscussionApiClient from the standard secret path (fail-closed)."""
-    from urllib.parse import urlparse
-
-    from .ezlynx_api import load_ezlynx_api_config
-    from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
-
-    api_config = load_ezlynx_api_config()
-    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    config = DiscussionApiConfig(
-        discussion_base_url=origin + "/DiscussionApi/",
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
-    )
-    return DiscussionApiClient(config)
-
-
-def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
-    """JobEngine with our independent verifier — the only path to COMPLETE."""
-    from .engine import JobEngine
-
-    return JobEngine(store, {}, {ACTION_TYPE: verifier})
-
-
-STALE_RUNNING_MINUTES = 45
-MAX_REPORT_AGE_MINUTES = 90
-_UNSET: Any = object()  # "read the restriction from the environment"
-
-
-class _ClientUnavailable(Exception):
-    """The EZLynx discussion client could not be built (fail-closed)."""
-
-
-def recover_stale_running(
-    store: JobStore, *, now: datetime | None = None,
-    stale_minutes: int = STALE_RUNNING_MINUTES, allowed: Any = _UNSET,
-) -> list[str]:
-    """Return task jobs a crash left RUNNING to PENDING so they are worked again.
-
-    Safe only when the original worker can no longer act, so a live lease is
-    never touched: a job is recovered when its lease has lapsed, or (no lease
-    was ever taken) when it has been RUNNING longer than `stale_minutes`. The
-    check and the update are one transaction, so a worker that renews its lease
-    just before cannot be recovered underneath itself, and a worker that lost
-    its lease finds its next fence (or fenced transition) refused.
-    """
-    now = now or datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=stale_minutes)
-    if allowed is _UNSET:
-        try:
-            allowed = allowed_task_ids()
-        except TaskRestrictionError:
-            return []  # a Test run without its restriction changes nothing
-    recovered: list[str] = []
-    for candidate in store.list_jobs_by_status({JobStatus.RUNNING}):
-        if candidate.get("action_type") != ACTION_TYPE or not _is_allowed(candidate, allowed):
-            continue
-        with store.transaction() as conn:
-            row = conn.execute(
-                "SELECT status, lease_owner, lease_expires_at, updated_at FROM jobs WHERE id=?",
-                (candidate["id"],),
-            ).fetchone()
-            if row is None or row["status"] != JobStatus.RUNNING.value:
-                continue
-            expires = _parse_ts(row["lease_expires_at"])
-            if row["lease_owner"] and expires is not None:
-                if expires > now:
-                    continue  # the owner is alive and renewing: never touch it
-            else:
-                updated = _parse_ts(row["updated_at"])
-                if updated is not None and updated > cutoff:
-                    continue  # no lease was taken, but it is not old enough to presume dead
-            conn.execute(
-                """UPDATE jobs SET status=?, lease_owner=NULL, lease_expires_at=NULL,
-                   last_error=?, updated_at=? WHERE id=? AND status=?""",
-                (JobStatus.PENDING.value,
-                 "recovered after its worker's lease lapsed (crash); effects reconcile by "
-                 "reading EZLynx and are never repeated blindly",
-                 now.isoformat(), candidate["id"], JobStatus.RUNNING.value),
-            )
-        recovered.append(candidate["id"])
-    return recovered
-
-
-def _build_worker_and_engine(store: JobStore, *, allow_calls: bool = True):
-    try:
-        discussion_client = _build_discussion_client()
-    except Exception as e:  # noqa: BLE001
-        raise _ClientUnavailable(str(e)) from e
-
-    reassigner: Any = None
-    if reassign_enabled():
-        reassigner = PlaywrightTaskReassigner()
-        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
-    else:
-        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
-
-    if allow_calls:
-        from .bland_prod_wiring import build_call_dependencies
-        from .call_opt_in import CallOptInStore
-        from .call_opt_out import CallOptOutStore
-        from .call_pickup import CallDedupeStore
-
-        phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
-        store_dir = os.path.dirname(store.path)
-        call_kwargs: dict[str, Any] = dict(
-            phone_lookup=phone_lookup, bland_client=bland_client, call_dry_run=call_dry_run,
-            transfer_lookup=transfer_lookup,
-            opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
-            opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
-            call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
-        )
-    else:
-        # Recovery of work that already took an effect never places or queues a call:
-        # the worker's lease checks do not cover every effect inside the call handler.
-        call_kwargs = {}
-    worker = TaskAssignmentWorker(
-        discussion_client=discussion_client,
-        task_reassigner=reassigner,
-        reassign_enabled=reassign_enabled(),
-        **call_kwargs,
-    )
-    verifier = TaskIntakeVerifier(
-        discussion_client=discussion_client, task_reassigner=reassigner, store=store
-    )
-    return worker, _build_engine(store, verifier)
-
-
-def _has_effect_intent(store: JobStore, job: dict[str, Any]) -> bool:
-    """True when this round already reserved or applied an external effect.
-
-    Such a job still owes follow-up (reconcile, note, verify) even after the
-    reassignment it made removed the task from Robie's report.
-    """
-    round_no = job_round(job)
-    with store.connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM checkpoints WHERE job_id=? AND (kind=? OR kind LIKE ? OR (kind=? AND ?=0)) LIMIT 1",
-            (job["id"], f"{REASSIGN_KIND_PREFIX}{round_no}", f"{NOTE_KIND_PREFIX}{round_no}:%",
-             LEGACY_NOTE_KIND, round_no),
-        ).fetchone()
-    return row is not None
-
-
-ALLOWED_TASK_IDS_ENV = "ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS"
-
-
-class TaskRestrictionError(Exception):
-    """The Test-only task restriction is required but missing, or unusable."""
-
-
-def allowed_task_ids() -> frozenset[str] | None:
-    """Task IDs this intake may touch at all; None means no restriction.
-
-    ROBIE_ENV=TEST requires the restriction: unset, empty, or no valid ID refuses the
-    run, so a Test run can never ingest an unrelated task. Elsewhere it is optional,
-    but once set it is exact (a set-but-empty value allows nothing).
-    """
-    raw = os.environ.get(ALLOWED_TASK_IDS_ENV)
-    is_test = os.environ.get("ROBIE_ENV", "").strip().upper() == "TEST"
-    ids = frozenset(part.strip() for part in (raw or "").split(",")
-                    if re.fullmatch(r"[1-9][0-9]*", part.strip()))
-    if is_test and not ids:
-        raise TaskRestrictionError(
-            f"ROBIE_ENV=TEST requires {ALLOWED_TASK_IDS_ENV} (comma-separated task IDs)")
-    if raw is None:
-        return None
-    return ids
-
-
-def _is_allowed(job: dict[str, Any], allowed: frozenset[str] | None) -> bool:
-    return allowed is None or str((job.get("payload") or {}).get("task_id") or "") in allowed
-
-
-def _owed_jobs(store: JobStore, allowed: frozenset[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(PENDING jobs that already took an effect, jobs awaiting verification)."""
-    pending = [j for j in store.list_jobs_by_status({JobStatus.PENDING})
-               if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)
-               and _has_effect_intent(store, j)]
-    verifying = [j for j in store.list_jobs_by_status({JobStatus.VERIFYING})
-                 if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)]
-    return pending, verifying
-
-
-def _verify_awaiting(store: JobStore, engine: Any, allowed: frozenset[str] | None) -> int:
-    done = 0
-    for row in store.list_jobs_by_status({JobStatus.VERIFYING}):
-        if row.get("action_type") != ACTION_TYPE or not _is_allowed(row, allowed):
-            continue
-        try:
-            fresh = store.get_job(row["id"])
-            engine._verify(fresh, store.get_checkpoint(fresh["id"], "action") or {})
-            done += 1
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"verify raised for {row['id']}: {e}")
-    return done
-
-
-def _recover_owed(store: JobStore, allowed: Any = _UNSET) -> int:
-    """Finish work that already took an effect, whatever the latest report says.
-
-    Never needs a report, is not subject to the report age limit, and runs with
-    calls disabled. Returns how many jobs it worked or verified.
-    """
-    if allowed is _UNSET:
-        try:
-            allowed = allowed_task_ids()
-        except TaskRestrictionError:
-            return 0
-    pending, verifying = _owed_jobs(store, allowed)
-    if not pending and not verifying:
-        return 0
-    worker, engine = _build_worker_and_engine(store, allow_calls=False)
-    handled = 0
-    for job in pending:
-        task_id = str((job.get("payload") or {}).get("task_id") or "")
-        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
-            continue
-        try:
-            worker.process_job(store, store.get_job(job["id"]))
-            handled += 1
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"process_job raised for {task_id}: {e}")
-    return handled + _verify_awaiting(store, engine, allowed)
-
-
-def _work_new(store: JobStore, jobs: list[dict[str, Any]], in_report: set[str],
-              allowed: frozenset[str] | None = None):
-    """Work NEW tasks shown by a FRESH report, then verify what is awaiting.
-
-    Only a task the fresh report shows is started; owed recovery is separate.
-    """
-    worker, engine = _build_worker_and_engine(store)
-    for job in jobs:
-        payload = job.get("payload") or {}
-        task_id = str(payload.get("task_id") or "")
-        if task_id not in in_report or not _is_allowed(job, allowed):
-            continue
-        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
-            continue
-        try:
-            worker.process_job(store, store.get_job(job["id"]))
-        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
-            logger.error(f"process_job raised for {task_id}: {e}")
-    _verify_awaiting(store, engine, allowed)
-    return worker
-
-
-def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str, Any]]:
-    """PENDING jobs for tasks in the report that a human resumed after its delivery ran."""
-    found = []
-    for task in tasks:
-        job = _find_by_idempotency_key(store, task_idempotency_key(task.task_id))
-        if job is not None and JobStatus(job["status"]) == JobStatus.PENDING:
-            found.append(job)
-    return found
-
-
-def _confirm_returned(task: AssignedTask) -> bool:
-    """Live, read-only: is the task back with Robie, under the request the report describes?
-
-    The same proof that gates every Save: Robie must own it now and EVERY consequential field
-    (instructions, Created By, Producer, CSR, labels) must match the report row, each actually
-    read live. A field the read cannot return is unproven, never assumed to match or be blank.
-    """
-    try:
-        state = PlaywrightTaskReassigner().read_task_state(
-            task.task_id, task.applicant_id, description=task.description)
-    except Exception as e:  # noqa: BLE001 — unreadable is unproven
-        logger.warning(f"Live return check failed for {task.task_id}: {e}")
-        return False
-    problem = routing_proof_problem(state, task, expected_assignee=ROBIE_NAME)
-    if problem:
-        logger.info(f"Task {task.task_id}: {problem}; no new round from this report")
-        return False
-    return True
-
-
-def _report_age_minutes(report: Any) -> float | None:
-    # Gmail internalDate arrives as millisecond epoch; fixtures and older
-    # callers may use ISO. _received_time parses both; unparseable is unknown.
-    received = _received_time(getattr(report, "received_at", ""))
-    if received is None:
-        return None
-    return (datetime.now(timezone.utc) - received).total_seconds() / 60
 
 
 HEARTBEAT_DDL = """
@@ -700,10 +383,40 @@ def _production_lease_refused() -> bool:
     return production_driver_refused()
 
 
+def _discussion_belongs_to_applicant(client: Any, applicant_id: str, discussion_id: str) -> bool:
+    """True when this discussion is exactly one of the applicant's.
+
+    A client with no lookup cannot prove it, so the note is refused.
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` does not skip this check.
+    """
+    lookup = getattr(client, "get_discussion_ids", None)
+    if lookup is None:
+        logger.error(
+            "discussion %s was not posted; client cannot list applicant %s's discussions",
+            discussion_id, applicant_id,
+        )
+        return False
+    try:
+        owned = [str(item).strip() for item in lookup(applicant_id)]
+    except Exception as exc:  # noqa: BLE001 — unreadable is not proof
+        logger.error(
+            "discussion ownership read failed for applicant %s: %s", applicant_id, exc,
+        )
+        return False
+    return owned.count(discussion_id) == 1
+
+
 def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
     body = _HOLD_UNPARSEABLE if reason == "unparseable" else _HOLD_TOO_OLD
     discussion_id = str(getattr(task, "discussion_id", "") or "")
+    applicant_id = str(getattr(task, "applicant_id", "") or "")
     if not discussion_id:
+        return False
+    if not _discussion_belongs_to_applicant(client, applicant_id, discussion_id):
+        logger.error(
+            "hold note not sent for %s; discussion %s is not applicant %s's",
+            getattr(task, "task_id", ""), discussion_id, applicant_id,
+        )
         return False
     response = client.append_note(
         discussion_id,
@@ -714,6 +427,438 @@ def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
         return False
     note_id = str(response.get("noteId") or response.get("note_id") or "")
     return bool(note_id)
+
+
+def _park_stale_job(store: JobStore, job: dict[str, Any], reason: str) -> None:
+    """Take a too-old PENDING job off the dial list. The next tick must not call."""
+    if JobStatus(job["status"]) != JobStatus.PENDING:
+        return
+    try:
+        store.transition(
+            job["id"],
+            JobStatus.AWAITING_HUMAN_INPUT,
+            expected={JobStatus.PENDING},
+            error=f"calling window: {reason}"[:500],
+            resume_status=JobStatus.PENDING,
+            release_lease=True,
+        )
+    except Exception as e:  # noqa: BLE001 — leaving it pending is logged; the filter will not dial it
+        logger.error("could not park job %s off the dial list: %s", job.get("id"), e)
+
+
+def _finish_hold(seen: Any, statuses: dict[str, str], task_id: str, posted: bool) -> None:
+    if posted:
+        seen.mark(task_id, "hitl")
+        statuses[task_id] = "hitl"
+        return
+    seen.mark(task_id, "hitl_attempted")
+    statuses[task_id] = "hitl_attempted"
+    logger.error(
+        "hold note for %s had no note id; recorded the attempt and will not repeat",
+        task_id,
+    )
+
+
+def _send_hold(
+    client: Any,
+    seen: Any,
+    statuses: dict[str, str],
+    task: Any,
+    reason: str,
+    *,
+    logged: list[bool],
+) -> str:
+    """Post one hold note. Returns posted, attempted, or deferred.
+
+    A lease refusal before the note is sent stays deferred and retryable.
+    """
+    from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION, EzlynxDriverGateRefused
+
+    task_id = str(task.task_id)
+    try:
+        posted = _post_hold_note(client, task, reason)
+    except EzlynxDriverGateRefused as e:
+        if not logged[0]:
+            logger.error(LEASE_NOT_WITH_PRODUCTION)
+            logged[0] = True
+        logger.error("hold note not sent for %s: %s", task_id, e)
+        seen.mark(task_id, "deferred")
+        statuses[task_id] = "deferred"
+        return "deferred"
+    except Exception as e:  # noqa: BLE001
+        logger.error("hold note failed for %s: %s", task_id, e)
+        _finish_hold(seen, statuses, task_id, False)
+        return "attempted"
+    _finish_hold(seen, statuses, task_id, posted)
+    return "posted" if posted else "attempted"
+
+
+def _retry_deferred_holds(store: JobStore, tasks: list[Any]) -> None:
+    """A hold the lease blocked is tried again on the next tick of the same delivery."""
+    from .ezlynx_seen_tasks import SeenTaskStore
+
+    seen = SeenTaskStore(store.path)
+    statuses = seen.statuses()
+    known_jobs = set(_jobs_for_report(store, tasks))
+    now = _intake_now()
+    holds: list[tuple[Any, str]] = []
+    for task in tasks:
+        task_id = str(task.task_id)
+        if statuses.get(task_id) != "deferred" or task_id in known_jobs:
+            continue
+        if not _labeled_call(task):
+            continue
+        block = _age_block(task, now, _max_task_age_hours())
+        if block:
+            holds.append((task, block))
+    if not holds:
+        return
+    try:
+        client = _build_discussion_client()
+    except Exception as e:  # noqa: BLE001 — stay deferred and try the next tick
+        logger.error("deferred hold note not sent; discussion client unavailable: %s", e)
+        return
+    logged = [False]
+    for task, reason in holds:
+        _send_hold(client, seen, statuses, task, reason, logged=logged)
+
+
+def _drop_pending_past_the_calling_window(
+    store: JobStore,
+    jobs: list[dict[str, Any]],
+    tasks: list[Any],
+    seen: Any,
+    discussion_client: Any,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Re-check age immediately before a dial.
+
+    A job left PENDING through a long lease outage can be past the calling
+    window by the time PRODUCTION holds the lease. That task gets the hold
+    note and is not dialed. A lease refusal before the note is sent leaves
+    the job PENDING and deferred.
+    """
+    by_id = {str(task.task_id): task for task in tasks}
+    statuses = seen.statuses()
+    dialable: list[dict[str, Any]] = []
+    logged = [False]
+    max_hours = _max_task_age_hours()
+    for job in jobs:
+        if JobStatus(job["status"]) != JobStatus.PENDING:
+            continue
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        task = by_id.get(task_id)
+        if task is None or not _labeled_call(task):
+            dialable.append(job)
+            continue
+        block = _age_block(task, now, max_hours)
+        if not block:
+            dialable.append(job)
+            continue
+        status = statuses.get(task_id, "")
+        if status in {"hitl", "hitl_attempted"}:
+            _park_stale_job(store, job, block)
+            continue
+        if discussion_client is None:
+            logger.error(
+                "hold note not sent for %s; discussion client unavailable", task_id,
+            )
+            continue
+        outcome = _send_hold(
+            discussion_client, seen, statuses, task, block, logged=logged,
+        )
+        if outcome == "deferred":
+            continue
+        _park_stale_job(store, job, block)
+    return dialable
+STALE_RUNNING_MINUTES = 45
+MAX_REPORT_AGE_MINUTES = 90
+_UNSET: Any = object()  # "read the restriction from the environment"
+
+
+class _ClientUnavailable(Exception):
+    """The EZLynx discussion client could not be built (fail-closed)."""
+
+
+def recover_stale_running(
+    store: JobStore, *, now: datetime | None = None,
+    stale_minutes: int = STALE_RUNNING_MINUTES, allowed: Any = _UNSET,
+) -> list[str]:
+    """Return task jobs a crash left RUNNING to PENDING so they are worked again.
+
+    Safe only when the original worker can no longer act, so a live lease is
+    never touched: a job is recovered when its lease has lapsed, or (no lease
+    was ever taken) when it has been RUNNING longer than `stale_minutes`. The
+    check and the update are one transaction, so a worker that renews its lease
+    just before cannot be recovered underneath itself, and a worker that lost
+    its lease finds its next fence (or fenced transition) refused.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=stale_minutes)
+    if allowed is _UNSET:
+        try:
+            allowed = allowed_task_ids()
+        except TaskRestrictionError:
+            return []  # a Test run without its restriction changes nothing
+    recovered: list[str] = []
+    for candidate in store.list_jobs_by_status({JobStatus.RUNNING}):
+        if candidate.get("action_type") != ACTION_TYPE or not _is_allowed(candidate, allowed):
+            continue
+        with store.transaction() as conn:
+            row = conn.execute(
+                "SELECT status, lease_owner, lease_expires_at, updated_at FROM jobs WHERE id=?",
+                (candidate["id"],),
+            ).fetchone()
+            if row is None or row["status"] != JobStatus.RUNNING.value:
+                continue
+            expires = _parse_ts(row["lease_expires_at"])
+            if row["lease_owner"] and expires is not None:
+                if expires > now:
+                    continue  # the owner is alive and renewing: never touch it
+            else:
+                updated = _parse_ts(row["updated_at"])
+                if updated is not None and updated > cutoff:
+                    continue  # no lease was taken, but it is not old enough to presume dead
+            conn.execute(
+                """UPDATE jobs SET status=?, lease_owner=NULL, lease_expires_at=NULL,
+                   last_error=?, updated_at=? WHERE id=? AND status=?""",
+                (JobStatus.PENDING.value,
+                 "recovered after its worker's lease lapsed (crash); effects reconcile by "
+                 "reading EZLynx and are never repeated blindly",
+                 now.isoformat(), candidate["id"], JobStatus.RUNNING.value),
+            )
+        recovered.append(candidate["id"])
+    return recovered
+
+
+def _build_worker_and_engine(store: JobStore, *, allow_calls: bool = True):
+    try:
+        discussion_client = _build_discussion_client()
+    except Exception as e:  # noqa: BLE001
+        raise _ClientUnavailable(str(e)) from e
+
+    reassigner: Any = None
+    if reassign_enabled():
+        reassigner = PlaywrightTaskReassigner()
+        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
+    else:
+        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
+
+    if allow_calls:
+        from .bland_prod_wiring import build_call_dependencies
+        from .call_opt_in import CallOptInStore
+        from .call_opt_out import CallOptOutStore
+        from .call_pickup import CallDedupeStore
+
+        phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
+        store_dir = os.path.dirname(store.path)
+        call_kwargs: dict[str, Any] = dict(
+            phone_lookup=phone_lookup, bland_client=bland_client, call_dry_run=call_dry_run,
+            transfer_lookup=transfer_lookup,
+            opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
+            opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
+            call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+        )
+    else:
+        # Recovery of work that already took an effect never places or queues a call:
+        # the worker's lease checks do not cover every effect inside the call handler.
+        call_kwargs = {}
+    worker = TaskAssignmentWorker(
+        discussion_client=discussion_client,
+        task_reassigner=reassigner,
+        reassign_enabled=reassign_enabled(),
+        **call_kwargs,
+    )
+    verifier = TaskIntakeVerifier(
+        discussion_client=discussion_client, task_reassigner=reassigner, store=store
+    )
+    return worker, _build_engine(store, verifier)
+
+
+def _has_effect_intent(store: JobStore, job: dict[str, Any]) -> bool:
+    """True when this round already reserved or applied an external effect.
+
+    Such a job still owes follow-up (reconcile, note, verify) even after the
+    reassignment it made removed the task from Robie's report.
+    """
+    round_no = job_round(job)
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM checkpoints WHERE job_id=? AND (kind=? OR kind LIKE ? OR (kind=? AND ?=0)) LIMIT 1",
+            (job["id"], f"{REASSIGN_KIND_PREFIX}{round_no}", f"{NOTE_KIND_PREFIX}{round_no}:%",
+             LEGACY_NOTE_KIND, round_no),
+        ).fetchone()
+    return row is not None
+
+
+ALLOWED_TASK_IDS_ENV = "ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS"
+
+
+class TaskRestrictionError(Exception):
+    """The Test-only task restriction is required but missing, or unusable."""
+
+
+def allowed_task_ids() -> frozenset[str] | None:
+    """Task IDs this intake may touch at all; None means no restriction.
+
+    ROBIE_ENV=TEST requires the restriction: unset, empty, or no valid ID refuses the
+    run, so a Test run can never ingest an unrelated task. Elsewhere it is optional,
+    but once set it is exact (a set-but-empty value allows nothing).
+    """
+    raw = os.environ.get(ALLOWED_TASK_IDS_ENV)
+    is_test = os.environ.get("ROBIE_ENV", "").strip().upper() == "TEST"
+    ids = frozenset(part.strip() for part in (raw or "").split(",")
+                    if re.fullmatch(r"[1-9][0-9]*", part.strip()))
+    if is_test and not ids:
+        raise TaskRestrictionError(
+            f"ROBIE_ENV=TEST requires {ALLOWED_TASK_IDS_ENV} (comma-separated task IDs)")
+    if raw is None:
+        return None
+    return ids
+
+
+def _is_allowed(job: dict[str, Any], allowed: frozenset[str] | None) -> bool:
+    return allowed is None or str((job.get("payload") or {}).get("task_id") or "") in allowed
+
+
+def _owed_jobs(store: JobStore, allowed: frozenset[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(PENDING jobs that already took an effect, jobs awaiting verification)."""
+    pending = [j for j in store.list_jobs_by_status({JobStatus.PENDING})
+               if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)
+               and _has_effect_intent(store, j)]
+    verifying = [j for j in store.list_jobs_by_status({JobStatus.VERIFYING})
+                 if j.get("action_type") == ACTION_TYPE and _is_allowed(j, allowed)]
+    return pending, verifying
+
+
+def _verify_awaiting(store: JobStore, engine: Any, allowed: frozenset[str] | None) -> int:
+    done = 0
+    for row in store.list_jobs_by_status({JobStatus.VERIFYING}):
+        if row.get("action_type") != ACTION_TYPE or not _is_allowed(row, allowed):
+            continue
+        try:
+            fresh = store.get_job(row["id"])
+            engine._verify(fresh, store.get_checkpoint(fresh["id"], "action") or {})
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"verify raised for {row['id']}: {e}")
+    return done
+
+
+def _recover_owed(store: JobStore, allowed: Any = _UNSET) -> int:
+    """Finish work that already took an effect, whatever the latest report says.
+
+    Never needs a report, is not subject to the report age limit, and runs with
+    calls disabled. Returns how many jobs it worked or verified.
+    """
+    if allowed is _UNSET:
+        try:
+            allowed = allowed_task_ids()
+        except TaskRestrictionError:
+            return 0
+    pending, verifying = _owed_jobs(store, allowed)
+    if not pending and not verifying:
+        return 0
+    worker, engine = _build_worker_and_engine(store, allow_calls=False)
+    handled = 0
+    for job in pending:
+        task_id = str((job.get("payload") or {}).get("task_id") or "")
+        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
+            continue
+        try:
+            worker.process_job(store, store.get_job(job["id"]))
+            handled += 1
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"process_job raised for {task_id}: {e}")
+    return handled + _verify_awaiting(store, engine, allowed)
+
+
+def _work_new(store: JobStore, jobs: list[dict[str, Any]], in_report: set[str],
+              allowed: frozenset[str] | None = None):
+    """Work NEW tasks shown by a FRESH report, then verify what is awaiting.
+
+    Only a task the fresh report shows is started; owed recovery is separate.
+    """
+    worker, engine = _build_worker_and_engine(store)
+    for job in jobs:
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        if task_id not in in_report or not _is_allowed(job, allowed):
+            continue
+        if JobStatus(store.get_job(job["id"])["status"]) != JobStatus.PENDING:
+            continue
+        try:
+            worker.process_job(store, store.get_job(job["id"]))
+        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
+            logger.error(f"process_job raised for {task_id}: {e}")
+    _verify_awaiting(store, engine, allowed)
+    return worker
+
+
+def _resumable_jobs(store: JobStore, tasks: list[AssignedTask]) -> list[dict[str, Any]]:
+    """PENDING jobs for tasks in the report that a human resumed after its delivery ran."""
+    found = []
+    for task in tasks:
+        job = _find_by_idempotency_key(store, task_idempotency_key(task.task_id))
+        if job is not None and JobStatus(job["status"]) == JobStatus.PENDING:
+            found.append(job)
+    return found
+
+
+def _confirm_returned(task: AssignedTask) -> bool:
+    """Live, read-only: is the task back with Robie, under the request the report describes?
+
+    The same proof that gates every Save: Robie must own it now and EVERY consequential field
+    (instructions, Created By, Producer, CSR, labels) must match the report row, each actually
+    read live. A field the read cannot return is unproven, never assumed to match or be blank.
+    """
+    try:
+        state = PlaywrightTaskReassigner().read_task_state(
+            task.task_id, task.applicant_id, description=task.description)
+    except Exception as e:  # noqa: BLE001 — unreadable is unproven
+        logger.warning(f"Live return check failed for {task.task_id}: {e}")
+        return False
+    problem = routing_proof_problem(state, task, expected_assignee=ROBIE_NAME)
+    if problem:
+        logger.info(f"Task {task.task_id}: {problem}; no new round from this report")
+        return False
+    return True
+
+
+def _include_unlabeled_tasks() -> bool:
+    """Production intake dials only the two call labels.
+
+    The task-flow safety tests patch this so handoff, resume, and the
+    live-return checks still run. The systemd unit does not set anything
+    that turns it on, so an unlabeled task gets no lookup, job, or note.
+    """
+    return False
+
+
+def _report_age_minutes(report: Any) -> float | None:
+    """Age of the report in minutes. Epoch milliseconds or an ISO timestamp.
+
+    Unknown text is unknown age, which the caller treats as stale. The
+    clock is ``_intake_now`` so a test can pin Monday without the wall
+    clock making a fresh ISO delivery look old.
+    """
+    text = str(getattr(report, "received_at", "") or "").strip()
+    if not text:
+        return None
+    digits = text[1:] if text.startswith("-") else text
+    if digits.isdigit():
+        try:
+            received = datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    else:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        received = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return (_intake_now() - received).total_seconds() / 60
 
 
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
@@ -756,13 +901,81 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         return 0
 
     # Unrelated tasks stop HERE: before any lookup, job, cap count or note.
-    tasks = [t for t in report.tasks if allowed is None or t.task_id in allowed]
+    tasks = [t for t in report.tasks if allowed is None or str(t.task_id) in allowed]
     if len(tasks) != len(report.tasks):
-        logger.info(f"Task restriction dropped {len(report.tasks) - len(tasks)} unrelated task(s)")
+        logger.info(
+            "Task restriction dropped %s unrelated task(s)",
+            len(report.tasks) - len(tasks),
+        )
+    # The production unit only dials Robie Call and Robie lead follow-up.
+    # Anything else stays untouched: no discussion lookup, no job, no note.
+    if not _include_unlabeled_tasks():
+        labeled = [task for task in tasks if _labeled_call(task)]
+        skipped = len(tasks) - len(labeled)
+        if skipped:
+            logger.info("Leaving %s unlabeled task(s) untouched", skipped)
+        tasks = labeled
 
     newest_et = str(getattr(report, "newest_created_et", "") or "") or newest_created_et(tasks)
     age = _report_age_minutes(report)
     fresh = age is not None and age <= MAX_REPORT_AGE_MINUTES
+    if not fresh:
+        # A stale (or undated) report describes a past state of the queue.
+        # Never baseline it and never start new work from it. Owed recovery
+        # already ran above and is not subject to this limit.
+        msg = (
+            f"Report {report.message_id} is "
+            f"{'of unknown age' if age is None else f'{int(age)} min old'} "
+            f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it."
+        )
+        logger.error(msg)
+        if dry_run:
+            logger.info(
+                "[DRY-RUN] %s Robie tasks; a stale report would not be baselined, "
+                "dialed, or written. No jobs, no EZLynx writes, no worker. %s",
+                len(tasks), msg,
+            )
+        if not _already_processed(store, report.message_id) and not dry_run:
+            _record_run(
+                store, message_id=report.message_id, digest=report.digest,
+                filename=report.filename, task_count=len(tasks), jobs_created=0,
+                status="stale", error=msg,
+            )
+        _heartbeat(
+            store, status="failed", message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count, error=msg,
+        )
+        return 2
+
+    if _already_processed(store, report.message_id):
+        # A job left PENDING (lease refused after the delivery was recorded,
+        # or the call was queued) is still eligible. A finished job is not
+        # touched. A hold note the lease deferred is retried on this same
+        # delivery once PRODUCTION holds the lease.
+        pending = [
+            job for job in _jobs_for_report(store, tasks).values()
+            if JobStatus(job["status"]) == JobStatus.PENDING
+        ]
+        lease_refused = _production_lease_refused()
+        if not pending or lease_refused:
+            if pending and lease_refused:
+                from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
+                logger.error(LEASE_NOT_WITH_PRODUCTION)
+            elif not lease_refused:
+                _retry_deferred_holds(store, tasks)
+            logger.info(f"Delivery {report.message_id} already processed — quiet.")
+            _heartbeat(
+                store, status="ok", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count,
+                error=_stored_cap_error(store, report.message_id),
+            )
+            return 0
+        logger.info(
+            "Delivery %s already processed; continuing %s pending job(s)",
+            report.message_id, len(pending),
+        )
+
+    logger.info(f"Delivery {report.message_id}: {len(tasks)} Robie AI tasks")
 
     if dry_run:
         from .ezlynx_write_scope import all_clients_scope_honored, describe_write_scope
@@ -784,84 +997,33 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         )
         return 2 if scope_error else 0
 
-    if _already_processed(store, report.message_id):
-        # Already ran. NEW work still needs a fresh report; a stale one starts nothing.
-        if not fresh:
-            logger.error(f"Latest report {report.message_id} is stale "
-                         f"({'unknown age' if age is None else f'{int(age)} min'}); "
-                         "no new work is started.")
-            return 2
-        resumed = _resumable_jobs(store, tasks)
-        # A job left PENDING (lease refused after the delivery was recorded,
-        # or the call was queued) is still eligible. A finished job is not
-        # touched, and no second note is posted.
-        pending = [
-            job for job in _jobs_for_report(store, tasks).values()
-            if JobStatus(job["status"]) == JobStatus.PENDING
-        ]
-        if not resumed and (not pending or _production_lease_refused()):
-            if pending:
-                from .ezlynx_driver_gate import LEASE_NOT_WITH_PRODUCTION
-                logger.error(LEASE_NOT_WITH_PRODUCTION)
-            logger.info(f"Delivery {report.message_id} already processed — quiet.")
-            _heartbeat(
-                store, status="ok", message_id=report.message_id, digest=report.digest,
-                newest_et=newest_et, row_count=report.row_count,
-                error=_stored_cap_error(store, report.message_id),
-            )
-            return 0
-        to_work = resumed if resumed else pending
-        logger.info(f"Delivery {report.message_id} already processed; "
-                    f"working {len(to_work)} resumed/pending job(s).")
-        try:
-            _work_new(store, to_work, {t.task_id for t in tasks}, allowed)
-        except _ClientUnavailable as e:
-            logger.error(f"Discussion client unavailable: {e}")
-            return 2
-        return 0
-
-    if not fresh:
-        # A stale (or undated) report describes a past state of the queue: tasks may
-        # already have been handed on. Never start new work from it.
-        msg = (f"Report {report.message_id} is "
-               f"{'of unknown age' if age is None else f'{int(age)} min old'} "
-               f"(limit {MAX_REPORT_AGE_MINUTES}); refusing to start new work from it.")
-        logger.error(msg)
-        _record_run(
-            store, message_id=report.message_id, digest=report.digest,
-            filename=report.filename, task_count=len(tasks), jobs_created=0,
-            status="stale", error=msg,
-        )
-        _heartbeat(
-            store, status="failed", message_id=report.message_id, digest=report.digest,
-            newest_et=newest_et, row_count=report.row_count, error=msg,
-        )
-        return 2
-
-    logger.info(f"Delivery {report.message_id}: {len(tasks)} Robie AI tasks")
-
-    # Seen-task store. An empty or missing table is the first run: record
-    # every current id as baseline and dial none of them. A missing jobs.db
-    # creates that empty table, so it cannot re-dial the report.
+    # Seen-task store. An empty table baselines labeled calls and dials
+    # none of them. Unlabeled tasks are not baselined: they are not calls,
+    # and a label added later is still a first sighting.
     from .bland_prod_wiring import live_calls_enabled
     from .ezlynx_seen_tasks import SeenTaskStore
     from .ezlynx_task_jobs import remember_live_mode
 
     seen = SeenTaskStore(store.path)
     if seen.is_empty():
-        seen.baseline([task.task_id for task in tasks], report_digest=report.digest)
-        msg = f"First-run baseline: recorded {len(tasks)} tasks and dialed none."
-        logger.warning(msg)
-        _record_run(
-            store, message_id=report.message_id, digest=report.digest,
-            filename=report.filename, task_count=len(tasks), jobs_created=0,
-            status="ok", error=msg,
-        )
-        _heartbeat(
-            store, status="ok", message_id=report.message_id, digest=report.digest,
-            newest_et=newest_et, row_count=report.row_count, error=msg,
-        )
-        return 0
+        labeled_ids = [task.task_id for task in tasks if _labeled_call(task)]
+        non_call = [task for task in tasks if not _labeled_call(task)]
+        if labeled_ids:
+            seen.baseline(labeled_ids, report_digest=report.digest)
+        if not non_call:
+            msg = f"First-run baseline: recorded {len(labeled_ids)} tasks and dialed none."
+            logger.warning(msg)
+            _record_run(
+                store, message_id=report.message_id, digest=report.digest,
+                filename=report.filename, task_count=len(tasks), jobs_created=0,
+                status="ok", error=msg,
+            )
+            _heartbeat(
+                store, status="ok", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=msg,
+            )
+            return 0
+        tasks = non_call
 
     new_ids, dropped = seen.observe(
         [task.task_id for task in tasks], report_digest=report.digest,
@@ -897,41 +1059,18 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         if cap_alert:
             logger.error(cap_alert)
 
-    # 2. One durable job per chosen task ID (774's handback proof + 776's dialable terms).
     jobs_created = 0
     jobs: list[dict[str, Any]] = []
     failures: list[str] = []
-    queued_at = utcnow_iso()
-    for task in chosen:
-        previously_seen = task.task_id not in new_ids
-        try:
-            job, created = ensure_task_job(
-                store, task,
-                report_message_id=report.message_id, report_digest=report.digest,
-                report_received_at=report.received_at, confirm_returned=_confirm_returned,
-                reopen_terminal=not previously_seen,
-                live=live,
-                queued_at=queued_at,
-                live_enabled_at=enabled_at,
-            )
-            jobs.append(job)
-            if created and not previously_seen:
-                jobs_created += 1
-        except Exception as e:  # noqa: BLE001 — one bad task must not kill the batch
-            logger.error(f"ensure_task_job failed for {task.task_id}: {e}")
-            failures.append(f"{task.task_id}: {type(e).__name__}")
-
-    # 3. Hold notes for labeled calls that are too old (or undated): posted once,
-    # never repeated. Needs the discussion client; the worker build below reuses it.
     discussion_client: Any = None
-    if hold:
+    if not lease_blocked and (hold or chosen):
         try:
             discussion_client = _build_discussion_client()
         except Exception as e:  # noqa: BLE001
             logger.error(f"Discussion client unavailable: {e}")
             _record_run(
                 store, message_id=report.message_id, digest=report.digest,
-                filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
+                filename=report.filename, task_count=len(tasks), jobs_created=0,
                 status="failed", error=f"discussion client: {e}",
             )
             _heartbeat(
@@ -939,6 +1078,8 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                 newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
             )
             return 2
+
+    if not lease_blocked:
         from .ezlynx_driver_gate import EzlynxDriverGateRefused
 
         lease_note_logged = False
@@ -968,17 +1109,41 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                     task.task_id,
                 )
 
+    queued_at = utcnow_iso()
+    for task in chosen:
+        # A labeled call that already has a job is not in `chosen`. A new
+        # labeled call may reopen a terminal job. An unlabeled handoff
+        # (safety tests only) reopens when the live return is proven.
+        reopen = (not _labeled_call(task)) or (task.task_id in new_ids)
+        try:
+            job, created = ensure_task_job(
+                store, task,
+                report_message_id=report.message_id, report_digest=report.digest,
+                reopen_terminal=reopen,
+                live=live,
+                queued_at=queued_at,
+                live_enabled_at=enabled_at,
+                report_received_at=report.received_at,
+                confirm_returned=_confirm_returned,
+            )
+            jobs.append(job)
+            if created and task.task_id in new_ids:
+                jobs_created += 1
+        except Exception as e:  # noqa: BLE001 — one bad task must not kill the batch
+            logger.error(f"ensure_task_job failed for {task.task_id}: {e}")
+            failures.append(f"{task.task_id}: {type(e).__name__}")
+
+    run_error = LEASE_NOT_WITH_PRODUCTION if lease_blocked else cap_alert
     # A lease refusal is not a finished delivery. Leaving the message
     # unrecorded lets the next tick dial the same pending job, or post
     # the hold note, once PRODUCTION holds the lease.
     if lease_blocked:
         _heartbeat(
             store, status="ok", message_id=report.message_id, digest=report.digest,
-            newest_et=newest_et, row_count=report.row_count, error=LEASE_NOT_WITH_PRODUCTION,
+            newest_et=newest_et, row_count=report.row_count, error=run_error,
         )
         return 0
 
-    # 4. Work PENDING jobs for tasks in THIS fresh report only, then verify.
     in_report = {t.task_id for t in tasks}
     pending_ids = {job["id"] for job in jobs}
     for task_id, job in _jobs_for_report(store, tasks).items():
@@ -989,51 +1154,121 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         jobs.append(job)
         pending_ids.add(job["id"])
 
-    if not jobs and not hold and not failures:
-        _record_run(
-            store, message_id=report.message_id, digest=report.digest,
-            filename=report.filename, task_count=len(tasks), jobs_created=0,
-            status="ok", error=cap_alert,
-        )
-        _heartbeat(
-            store, status="ok", message_id=report.message_id, digest=report.digest,
-            newest_et=newest_et, row_count=report.row_count, error=cap_alert,
-        )
-        return 0
+    if jobs and discussion_client is None:
+        try:
+            discussion_client = _build_discussion_client()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Discussion client unavailable: {e}")
+            _heartbeat(
+                store, status="failed", message_id=report.message_id, digest=report.digest,
+                newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+            )
+            return 2
 
-    try:
-        worker = _work_new(store, jobs, in_report, allowed)
-    except _ClientUnavailable as e:
-        logger.error(f"Discussion client unavailable: {e}")
+    # Age is checked again here, not only when the job was first created.
+    # A lease outage can leave a PENDING job until it is too old to dial.
+    if jobs:
+        jobs = _drop_pending_past_the_calling_window(
+            store, jobs, tasks, seen, discussion_client, now,
+        )
+
+    failure_error = ("no durable job for: " + "; ".join(failures))[:500] if failures else ""
+    if not jobs:
+        status = "partial" if failures else "ok"
         _record_run(
             store, message_id=report.message_id, digest=report.digest,
             filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-            status="failed", error=f"discussion client: {e}",
+            status=status, error=failure_error or run_error,
         )
         _heartbeat(
-            store, status="failed", message_id=report.message_id, digest=report.digest,
-            newest_et=newest_et, row_count=report.row_count, error=f"discussion client: {e}",
+            store, status="failed" if failures else "ok",
+            message_id=report.message_id, digest=report.digest,
+            newest_et=newest_et, row_count=report.row_count,
+            error=failure_error or run_error,
         )
-        return 2
+        return 2 if failures else 0
 
-    # 5. Record the run. A task that could not get a job is NOT a healthy run.
+    # 4. Build the worker. The discussion client is already open.
+    # Reassignment stays off unless EZLYNX_TASK_REASSIGN_ENABLED=1. The
+    # unit does not set that, and a gated-off handoff posts no note.
+    reassigner: Any = None
+    if reassign_enabled():
+        reassigner = PlaywrightTaskReassigner()
+        logger.info("Reassignment gate is ON — PlaywrightTaskReassigner active")
+    else:
+        logger.info("Reassignment gate is OFF — tasks needing handoff will wait for a human")
+
+    from .bland_prod_wiring import build_call_dependencies
+
+    phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
+    from .call_opt_in import CallOptInStore
+    from .call_opt_out import CallOptOutStore
+    from .call_pickup import CallDedupeStore
+
+    store_dir = os.path.dirname(store.path)
+    worker = TaskAssignmentWorker(
+        discussion_client=discussion_client,
+        task_reassigner=reassigner,
+        reassign_enabled=reassign_enabled(),
+        phone_lookup=phone_lookup,
+        bland_client=bland_client,
+        call_dry_run=call_dry_run,
+        transfer_lookup=transfer_lookup,
+        opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
+        opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
+        call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+    )
+    verifier = TaskIntakeVerifier(
+        discussion_client=discussion_client, task_reassigner=reassigner, store=store,
+    )
+    engine = _build_engine(store, verifier)
+
+    # 5. Work PENDING jobs for tasks in THIS report only.
+    # Includes a job left pending by an earlier lease refusal.
+    # Re-read the row first. The list was built earlier, and a job can
+    # leave PENDING before this loop reaches it.
+    for job in jobs:
+        payload = job.get("payload") or {}
+        task_id = str(payload.get("task_id") or "")
+        if task_id not in in_report:
+            continue
+        try:
+            current = store.get_job(job["id"])
+            if JobStatus(current["status"]) != JobStatus.PENDING:
+                continue
+            worker.process_job(store, current)
+        except Exception as e:  # noqa: BLE001 — process_job already fail-closeds; belt and suspenders
+            logger.error(f"process_job raised for {task_id}: {e}")
+
+    # 6. Independently verify VERIFYING jobs (fresh EZLynx read-back).
+    for job in jobs:
+        fresh = store.get_job(job["id"])
+        if JobStatus(fresh["status"]) != JobStatus.VERIFYING:
+            continue
+        try:
+            action = store.get_checkpoint(fresh["id"], "action") or {}
+            engine._verify(fresh, action)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"verify raised for {fresh['id']}: {e}")
+
+    # 7. Record the run. A task that could not get a job is NOT a healthy run.
     status = "partial" if failures else "ok"
-    run_error = cap_alert or (("no durable job for: " + "; ".join(failures))[:500] if failures else "")
+    recorded_error = failure_error or cap_alert
     _record_run(
         store, message_id=report.message_id, digest=report.digest,
         filename=report.filename, task_count=len(tasks), jobs_created=jobs_created,
-        status=status, error=run_error,
+        status=status, error=recorded_error,
     )
     _heartbeat(
-        store, status="ok", message_id=report.message_id, digest=report.digest,
-        newest_et=newest_et, row_count=report.row_count, error=run_error,
+        store, status="failed" if failures else "ok",
+        message_id=report.message_id, digest=report.digest,
+        newest_et=newest_et, row_count=report.row_count, error=recorded_error,
     )
     actions = {}
     for r in worker.results:
         actions[r.action] = actions.get(r.action, 0) + 1
     logger.info(f"Intake pass done: {actions}")
     return 2 if failures else 0
-
 
 def _unconfirmed_note_intents(store: JobStore, job: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Unconfirmed, receipt-less note intents of THIS round only."""
@@ -1155,7 +1390,11 @@ def resume_task(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="EZLynx task intake (Robie AI)")
     parser.add_argument("--db", default=None, help="Job Engine DB path")
-    parser.add_argument("--dry-run", action="store_true", help="Ingest only; no EZLynx writes")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Log the report only. No EZLynx writes, no job rows, no worker. "
+             "ROBIE_TASK_INTAKE_DRY_RUN=1 does the same.",
+    )
     parser.add_argument("--resume", metavar="TASK_ID", default=None,
                         help="Resume the waiting job for one task ID")
     parser.add_argument("--assign-to", metavar="NAME", default=None,
