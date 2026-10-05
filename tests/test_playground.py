@@ -198,7 +198,9 @@ class GuardrailTests(unittest.TestCase):
                         self.assertIn("already has a title", replies[0])
                     else:
                         self.assertIn("I can't", replies[0])
-                    self.assertIn("Practice mode", replies[0])
+                    # 2026-10-05: no "Practice mode" tag without explicit test client
+                    # (live-thread misfire fix) — the reply content is what matters here
+                    self.assertNotIn("Practice mode", replies[0])
                     self.assertNotIn("Ref: job", replies[0])
                     self.assertNotRegex(replies[0], r"[0-9a-f]{8}-[0-9a-f]{4}-")
         self.assertEqual(writer.calls, [])
@@ -538,20 +540,12 @@ class CarrierAndPracticeTests(unittest.TestCase):
         reader = Reader()
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
+            # Buster Brown (explicit test client) is tagged even with all-clients closed
             with mock.patch.dict(os.environ, _env(), clear=False):
-                self.assertTrue(buster_brown_only_mode())
-                tagged = handle_playground_chat(
-                    db,
-                    "what can you do",
-                    conversation_id=SPACE,
-                    thread_id="t-help",
-                    message_id="m-help",
-                    requested_by="Casey",
-                    now=WHEN,
-                    read=reader,
-                )
-            self.assertTrue(tagged[0].startswith("Practice mode"))
-            self.assertIn("Here's what I can", tagged[0])
+                self.assertTrue(buster_brown_only_mode("26356199"))
+                self.assertTrue(buster_brown_only_mode("", "Buster Brown"))
+                # No client context -> never tagged (2026-10-05 live-thread misfire fix)
+                self.assertFalse(buster_brown_only_mode())
             with mock.patch.dict(
                 os.environ, _env(ROBIE_EZLYNX_WRITE_SCOPE="all"), clear=False
             ), mock.patch(
@@ -571,6 +565,24 @@ class CarrierAndPracticeTests(unittest.TestCase):
                     read=reader,
                 )
         self.assertFalse(plain[0].startswith("Practice mode"))
+
+    def test_practice_tag_never_fires_without_client_context(self):
+        """Regression test for 2026-10-05 live-thread misfires.
+
+        Replies generated without applicant_id/client_name (e.g., on live
+        email threads like WOW, Top Rank, Sandeep) must never be tagged
+        "Practice mode." — only explicitly-identified test clients get the tag.
+        """
+        # No context at all -> no tag
+        self.assertFalse(buster_brown_only_mode())
+        self.assertFalse(buster_brown_only_mode("", ""))
+        # Real client with ID -> no tag
+        self.assertFalse(buster_brown_only_mode("171483371"))
+        # Real client with name -> no tag
+        self.assertFalse(buster_brown_only_mode("", "Phoenix Realty Investment LLC"))
+        # Explicit test client -> tagged
+        self.assertTrue(buster_brown_only_mode("26356199"))
+        self.assertTrue(buster_brown_only_mode("", "Buster Brown"))
 
     def test_readback_match_and_mismatch(self):
         matched = compare_readback(expected="100 Test Rd", observed="100 test rd")
