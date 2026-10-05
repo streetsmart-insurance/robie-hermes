@@ -94,3 +94,16 @@ def test_retention_xlsx_attachment_and_period_label():
     messages = build_messages(items, recipients, "run-2", period_label="September 2026", attachments=attached)
     assert all(m.attachments == attached for m in messages)
     assert "The monthly spreadsheet is attached." in messages[0].body
+
+
+def test_sheet_link_in_every_email_with_optional_attachment():
+    recipients = {"commercial":"sandy@example.com","personal":"ashley@example.com","trucking":"gabby@example.com","carlo":"carlo@example.com","jake":"jake@example.com"}
+    items = records([HEADERS, ["September 2026", "1", "A", "1", "Auto (Personal)", "P1", "Personal Lines", "X", "Y", "$10", "Needs verification", "Unknown", "", "", "", "Low", "No matched record", "Not available", "", "Review", ""]])
+    url = "https://docs.google.com/spreadsheets/d/abc/edit"
+    attached = (Attachment(filename="x.xlsx", content=b"PK"),)
+    messages = build_messages(items, recipients, "run-3", period_label="September 2026", attachments=attached, sheet_url=url)
+    for message in messages:
+        assert f"Open the September 2026 Google Sheet: {url}" in message.body
+        assert "A copy is also attached as an .xlsx file." in message.body
+    link_only = build_messages(items, recipients, "run-3", period_label="September 2026", sheet_url=url)
+    assert all(not m.attachments and "attached" not in m.body for m in link_only)

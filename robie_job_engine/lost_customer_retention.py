@@ -255,11 +255,34 @@ def build_retention_xlsx(
     return filename, buffer.getvalue()
 
 
-def department_email(department: str, items: Sequence[Mapping[str, str]], *, run_id: str, period_label: str) -> str:
+def spreadsheet_lines(period_label: str, *, sheet_url: str | None, attached: bool) -> list[str]:
+    """Where the recipient opens the monthly spreadsheet."""
+    lines: list[str] = []
+    if sheet_url:
+        lines += [
+            f"Open the {period_label} Google Sheet: {sheet_url}",
+            f"Tabs: {period_label} (Pulse detail) and Account Review.",
+        ]
+    if attached:
+        lines.append(
+            "A copy is also attached as an .xlsx file." if sheet_url else "The monthly spreadsheet is attached."
+        )
+    return lines
+
+
+def department_email(
+    department: str,
+    items: Sequence[Mapping[str, str]],
+    *,
+    run_id: str,
+    period_label: str,
+    sheet_url: str | None = None,
+    attached: bool = True,
+) -> str:
     lines = [
         f"StreetSmart Lost Customer Retention Review — {department}", "",
         f"{period_label} validated review", f"Run ID: {run_id}", "",
-        "The monthly spreadsheet is attached.", "",
+        *spreadsheet_lines(period_label, sheet_url=sheet_url, attached=attached), "",
     ]
     if not items:
         lines += ["No account-level records mapped to this department for the validated period."]
@@ -286,7 +309,14 @@ def department_email(department: str, items: Sequence[Mapping[str, str]], *, run
     return "\n".join(lines)
 
 
-def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str, period_label: str) -> str:
+def executive_email(
+    items: Sequence[Mapping[str, str]],
+    *,
+    run_id: str,
+    period_label: str,
+    sheet_url: str | None = None,
+    attached: bool = True,
+) -> str:
     summary = summarize(items)["groups"]
     total_accounts = len(items)
     total_policies = sum(int(money(x.get("Policy Count"))) for x in items)
@@ -295,7 +325,7 @@ def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str, period_l
     lines = [
         "StreetSmart Lost Customer Retention Review — Executive Trends", "",
         f"{period_label} validated review", f"Run ID: {run_id}",
-        "The monthly spreadsheet is attached.",
+        *spreadsheet_lines(period_label, sheet_url=sheet_url, attached=attached),
         f"Overall: {total_accounts} account-months / {total_policies} policies / ${total_premium:,.2f} flagged annualized premium", "",
         "Department/month totals:",
     ]
@@ -340,6 +370,7 @@ def build_messages(
     *,
     period_label: str,
     attachments: Sequence[Attachment] = (),
+    sheet_url: str | None = None,
 ) -> list[MessageSpec]:
     by_department: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for item in items:
@@ -353,13 +384,16 @@ def build_messages(
             subject=f"Lost Customer Retention Review — {department} — {period_label}",
             body=department_email(
                 department, by_department.get(department, []), run_id=run_id, period_label=period_label,
+                sheet_url=sheet_url, attached=bool(attached),
             ),
             attachments=attached,
         ))
     messages.append(MessageSpec(
         key="executive", to=(recipients["carlo"], recipients["jake"]),
         subject=f"Lost Customer Retention Review — Executive Trends — {period_label}",
-        body=executive_email(items, run_id=run_id, period_label=period_label),
+        body=executive_email(
+            items, run_id=run_id, period_label=period_label, sheet_url=sheet_url, attached=bool(attached),
+        ),
         attachments=attached,
     ))
     return messages

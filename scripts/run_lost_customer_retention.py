@@ -17,6 +17,9 @@ from robie_job_engine.lost_customer_retention import (
     resolve_department, save_state, send_message, summarize,
     validate_monthly_source,
 )
+from robie_job_engine.lost_customer_sheet import (
+    delegated_google_clients, publish_retention_sheet, share_plan, sheet_title,
+)
 
 
 BACKFILL_MONTHS = ("June 2026", "July 2026", "August 2026")
@@ -90,17 +93,31 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
     state_path = Path(config["state_path"])
     state = load_state(state_path)
     previous = state.setdefault("runs", {}).get(run_key, {})
-    xlsx_name, xlsx_bytes = build_retention_xlsx(
-        monthly_tabs=monthly_tabs, review_rows=review, period_label=period,
-    )
-    attachment = Attachment(filename=xlsx_name, content=xlsx_bytes)
-    messages = build_messages(
-        review, config["recipients"], run_id, period_label=period, attachments=(attachment,),
-    )
+    sheet_config = dict(config.get("sheet_delivery") or {})
+    sheet_enabled = bool(sheet_config.get("enabled"))
+    attach_xlsx = bool(sheet_config.get("attach_xlsx", True)) if sheet_enabled else True
+    plan = share_plan(config["recipients"], sheet_config.get("share_roles")) if sheet_enabled else {}
+    attachments: tuple[Attachment, ...] = ()
+    xlsx_name, xlsx_bytes = None, b""
+    if attach_xlsx:
+        xlsx_name, xlsx_bytes = build_retention_xlsx(
+            monthly_tabs=monthly_tabs, review_rows=review, period_label=period,
+        )
+        attachments = (Attachment(filename=xlsx_name, content=xlsx_bytes),)
+
+    def compose(sheet_url):
+        return build_messages(
+            review, config["recipients"], run_id, period_label=period,
+            attachments=attachments, sheet_url=sheet_url,
+        )
+
+    messages = compose("<Google Sheet link created at send time>" if sheet_enabled else None)
     result = {"run_id": run_id, "dry_run": dry_run, "source": monthly,
               "summary": summarize(review), "department_exceptions": department_exceptions,
               "sop_sources": config["sop_sources"],
-              "attachment": {"filename": xlsx_name, "bytes": len(xlsx_bytes)},
+              "attachment": {"filename": xlsx_name, "bytes": len(xlsx_bytes)} if attach_xlsx else None,
+              "google_sheet": {"enabled": sheet_enabled, "title": sheet_title(period),
+                               "owner": sheet_config.get("owner"), "share": plan} if sheet_enabled else None,
               "message_previews": [{"key": m.key, "to": list(m.to), "subject": m.subject,
                                     "bytes": len(m.body.encode()),
                                     "attachments": [a.filename for a in m.attachments]}
@@ -116,6 +133,26 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
         sender = config["sender"]
         if not service_account:
             raise RuntimeError("delegated Gmail service account is unavailable")
+        sheet_record = None
+        if sheet_enabled:
+            # Fail-closed: no email goes out unless the Sheet is created,
+            # verified against the validated source, and shared.
+            owner = str(sheet_config.get("owner") or sender).strip()
+            sheets_as_owner, drive_as_owner = delegated_google_clients(service_account, owner)
+            sheet_record = publish_retention_sheet(
+                sheets=sheets_as_owner, drive=drive_as_owner,
+                source_spreadsheet_id=spreadsheet_id, months=months, period_label=period,
+                monthly_expected=monthly_tabs, review_expected=review, share=plan,
+                digest=digest, existing=state.setdefault("sheets", {}).get(run_key),
+                parent_folder_id=sheet_config.get("parent_folder_id") or None,
+                folder_name=sheet_config.get("folder_name") or "Lost Customer Retention",
+            )
+            sheet_record["owner"] = owner
+            sheet_record["published_at"] = datetime.now(timezone.utc).isoformat()
+            state["sheets"][run_key] = sheet_record
+            save_state(state_path, state)
+            result["google_sheet"] = sheet_record
+            messages = compose(sheet_record["url"])
         gmail = _delegated_gmail_sender(service_account, sender)
         completed = {r.get("key") for r in previous.get("receipts", []) if r.get("message_id")}
         receipts = list(previous.get("receipts", []))
@@ -123,6 +160,8 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
             if spec.key not in completed:
                 receipt = send_message(gmail, sender, spec)
                 receipt["sent_at"] = datetime.now(timezone.utc).isoformat()
+                if sheet_record:
+                    receipt["sheet_url"] = sheet_record["url"]
                 receipts.append(receipt)
                 state["runs"][run_key] = {"digest": digest, "complete": False, "receipts": receipts}
                 save_state(state_path, state)
