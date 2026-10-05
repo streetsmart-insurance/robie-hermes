@@ -407,52 +407,93 @@ class PlaywrightGuardBrowser:
         if groups:
             return parse_document_list(tuple(groups), policy_number=policy_number)
         
-        # Fall back to live link structure
+        # Fall back to live link structure (verified 2026-10-05):
+        # - "Policy Documents" / "Miscellaneous Documents" are BARE TEXT NODES
+        #   (not headings, not links, not in tables/lists)
+        # - Structure is flat: title text, [return to policy center] link,
+        #   "Policy Documents" text, then document <a> siblings,
+        #   then "Miscellaneous Documents" text, then its <a> siblings.
+        # - Document anchors have NO class/id/data-* — only href + target="_blank".
+        # - CRITICAL: identical display texts can be DISTINCT documents
+        #   (different scribeItemIds). Do NOT dedupe by link text.
         docs: list[GuardDocument] = []
-        for title in _DOC_GROUPS:
-            section = page.locator(f'text="{title}"').first
+        import re as _re
+        from datetime import date as _date
+
+        for idx, title in enumerate(_DOC_GROUPS):
+            # Find the element containing this section title text
+            section_elem = page.locator(
+                f'xpath=//*[text()[normalize-space(.)="{title}"]]'
+            ).first
             try:
-                if int(section.count()) < 1:
+                if int(section_elem.count()) < 1:
                     continue
             except Exception:
                 continue
-            
-            all_links = page.locator('a').all()
-            in_section = False
-            for link in all_links:
+
+            next_title = _DOC_GROUPS[idx + 1] if idx + 1 < len(_DOC_GROUPS) else None
+
+            # Walk following siblings in document order, stopping at next section.
+            # Use XPath to get all following siblings (elements and text).
+            # We'll iterate and check each one's text content.
+            siblings = section_elem.locator('xpath=following-sibling::*')
+            try:
+                sib_count = int(siblings.count())
+            except Exception:
+                continue
+
+            for i in range(sib_count):
+                sib = siblings.nth(i)
                 try:
-                    text = _norm(_read_text(link))
-                    if not text:
-                        continue
-                    if text == title:
-                        in_section = True
-                        continue
-                    if text in _DOC_GROUPS and text != title:
-                        in_section = False
-                        break
-                    if in_section and text:
-                        if text.lower() in ("return to policy center",):
-                            continue
-                        import re as _re
-                        from datetime import date as _date
-                        issued = _date.today()
-                        date_match = _re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', text)
-                        if date_match:
-                            try:
-                                m, d, y = map(int, date_match.groups())
-                                issued = _date(y, m, d)
-                            except Exception:
-                                pass
-                        form_part = text.split('-')[0].strip() if '-' in text else text
-                        docs.append(GuardDocument(
-                            group=title,
-                            description=text,
-                            form=form_part,
-                            issued=issued,
-                            policy_number=policy_number,
-                        ))
+                    tag = (sib.evaluate("el => el.tagName.toLowerCase()") or "")
                 except Exception:
                     continue
+
+                # If this sibling contains the next section title text, stop.
+                # The title is a bare text node, likely wrapped in the sibling
+                # or the sibling itself contains it.
+                try:
+                    sib_text = _norm(sib.inner_text() or "")
+                except Exception:
+                    sib_text = ""
+
+                if next_title and next_title.lower() in sib_text.lower():
+                    # This sibling starts the next section; stop.
+                    break
+
+                # Only process <a> elements as documents
+                if tag != "a":
+                    continue
+
+                text = _norm(_read_text(sib))
+                if not text:
+                    continue
+                # Skip the "return to policy center" link
+                if text.lower() in ("return to policy center",):
+                    continue
+
+                href = sib.get_attribute("href") or ""
+
+                issued = _date.today()
+                date_match = _re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', text)
+                if date_match:
+                    try:
+                        m, d, y = map(int, date_match.groups())
+                        issued = _date(y, m, d)
+                    except Exception:
+                        pass
+                form_part = text.split('-')[0].strip() if '-' in text else text
+                docs.append(GuardDocument(
+                    group=title,
+                    description=text,
+                    form=form_part,
+                    issued=issued,
+                    policy_number=policy_number,
+                ))
+                # Note: href with scribeItemId is available on the element
+                # for download; open_document() locates by description text.
+                # Identical texts are distinct docs — the download logic must
+                # handle duplicates by index, not just text match.
         
         if not docs:
             raise IntakeHold("Guard printable documents groups are missing or ambiguous")
