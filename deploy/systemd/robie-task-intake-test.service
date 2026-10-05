@@ -26,15 +26,15 @@ Environment=ROBIE_BLAND_MAX_DURATION_MINUTES=12
 # run, so an untouched unit ingests nothing.
 Environment=ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS=
 # Applicant 25486692 is Jake Ferrara on the Production EZLynx tenant.
-# Notes must use that tenant: ROBIE_EZLYNX_DISCUSSION_API=live reads
-# ezlynx-api-prod via ROBIE_EZLYNX_API_PROD_SECRET, plus ezlynx-username
-# and ezlynx-password. Do not point those secrets at UAT.
-# Writes are limited to that one applicant. Do not open every client:
-# this process talks to the Production tenant. The optional env file is
-# for secret names. It must not replace the applicant list or request
-# every client. EnvironmentFile= overrides Environment=.
+# robie-message-runtime.env holds the EZLynx secret references already
+# on hermes-test-01 (username and password). robie-accountability.env
+# holds the Gmail account for the task report. Those files must not
+# replace the applicant list below. EnvironmentFile= overrides Environment=.
+# The Production API secret is set here so Test does not read UAT.
 Environment=ROBIE_EZLYNX_DISCUSSION_API=live
-EnvironmentFile=-/etc/streetsmart-hermes-test/robie-ezlynx.env
+EnvironmentFile=/etc/streetsmart-hermes-test/robie-message-runtime.env
+EnvironmentFile=/etc/streetsmart-hermes-test/robie-accountability.env
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
 Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692
 ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes-test -g streetsmart-hermes-test -m 0750 /opt/streetsmart-hermes-test/robie-job-engine/data
 ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_task_intake

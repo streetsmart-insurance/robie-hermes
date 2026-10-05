@@ -80,9 +80,11 @@ ambiguous number.
 
 Robie Call dials only a phone number a person typed in the task. It
 never falls back to the client's phone on file. If the task has no
-usable typed number, Robie does not call and writes one short note on
-the task's discussion asking for the number. A bare 10-digit run, and a
-policy, claim, or quote number, still are not dialed.
+usable typed number, or the number might be a policy, claim, or quote
+number, Robie does not call. The note asks for a new Robie Call task
+with the number written after "call" or "phone". Intake does not open
+the same task again once it has a job, so editing that task does not
+cause another dial.
 
 Robie Lead Follow Up is unchanged: a typed number first, then the phone
 on file.
@@ -99,12 +101,21 @@ opt-in. Renewal Reach Out and Unresponsive have no text message.
 `deploy/systemd/robie-task-intake-test.service` and its timer run on
 hermes-test-01 as `streetsmart-hermes-test`, with code under
 `/opt/streetsmart-hermes-test`. `scripts/install-robie-task-intake.sh
---install-test` installs that pair and does not change the Production
-units. `ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS` is empty until an operator
-fills the proof task ids. Applicant `25486692` lives on the Production
-EZLynx tenant, so the Test service must read `ezlynx-api-prod`
-(`ROBIE_EZLYNX_API_PROD_SECRET`) with `ROBIE_EZLYNX_DISCUSSION_API=live`,
-not the UAT API secret. Outcome notes use
+--install-test` installs that pair only when the host is
+`hermes-test-01`, from
+`/opt/streetsmart-hermes-test/releases/current` unless
+`ROBIE_RELEASE_ROOT` is set. It does not change the Production units.
+`--rollback` removes the Test units as well as the Production units.
+`ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS` is empty until an operator
+fills the proof task ids. The unit loads the existing Test files
+`/etc/streetsmart-hermes-test/robie-message-runtime.env` (EZLynx
+secret references) and
+`/etc/streetsmart-hermes-test/robie-accountability.env` (the Gmail
+account for the task report). Applicant `25486692` lives on the
+Production EZLynx tenant, so the unit sets
+`ROBIE_EZLYNX_API_PROD_SECRET` to `ezlynx-api-prod` and
+`ROBIE_EZLYNX_DISCUSSION_API=live`. Test intake then reads that
+Production secret instead of the UAT secret. Outcome notes use
 `ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692` and do not set an
 all-clients write scope, because this box talks to the Production
 tenant. The Test service account needs `secretAccessor`

@@ -2173,11 +2173,12 @@ def _handle_call_task(
         log.warning("ambiguous number in task %s; asking instead of dialing",
                     task_id)
         if phone_policy == "typed_only":
+            # Intake will not open this task again once it has a job.
+            # The note has to ask for a new task.
             clar_note = (
-                "Robie did not call. The task has a number that might be a "
-                "policy, claim, or quote number rather than a phone. Type "
-                "the phone number to call, for example 'call at' followed "
-                "by the number."
+                "Robie did not call because it couldn't tell which number "
+                "to dial. Make a new Robie Call task and write the number "
+                "after 'call' or 'phone'."
             )
         else:
             clar_note = (
@@ -2205,7 +2206,8 @@ def _handle_call_task(
         log.warning("task %s has no typed phone number; asking instead of dialing",
                     task_id)
         clar_note = (
-            "Robie did not call. Type the phone number to call in this task."
+            "Robie did not call because no phone number was typed in this "
+            "task. Make a new Robie Call task with the number to call."
         )
         wb = _writeback_once(
             ports, task_id, "clarification_missing_number",

@@ -656,7 +656,7 @@ def test_robie_call_without_a_typed_number_asks_and_does_not_use_the_file(clean_
     assert bland.dials == 0
     assert looked == []
     assert result.get("clarification_note_filed") is True
-    assert "Type the phone number to call" in clean_state.body
+    assert "Make a new Robie Call task with the number to call." in clean_state.body
 
 
 def test_third_party_with_explicit_number_is_on_behalf_of(clean_state):
@@ -695,7 +695,7 @@ def test_name_mismatch_without_number_asks_for_the_number(clean_state):
     assert result["ok"] is False
     assert bland.dials == 0
     assert "typed" in (result.get("error") or "")
-    assert "Type the phone number to call" in clean_state.body
+    assert "Make a new Robie Call task with the number to call." in clean_state.body
 
 
 def test_transfer_lookup_resolves_assigner_did():

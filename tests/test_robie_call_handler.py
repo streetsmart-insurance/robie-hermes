@@ -289,7 +289,10 @@ class TestPhoneLookup(unittest.TestCase):
         self.assertIn("phone", result["error"])
         self.assertEqual(ports.phone_lookup.calls, [])
         self.assertEqual(ports.bland.calls, [])
-        self.assertIn("Type the phone number to call", ports.discussion_client.appended[0]["body"])
+        self.assertIn(
+            "Make a new Robie Call task with the number to call.",
+            ports.discussion_client.appended[0]["body"],
+        )
 
     def test_garbage_phone_fails_closed(self):
         ports = make_ports(phone_lookup=FakePhonePort({TEST_APPLICANT: "N/A"}))
@@ -640,7 +643,7 @@ class TestCallRequestRound(unittest.TestCase):
         self.assertEqual(ports.bland.calls, [])
         self.assertEqual(ports.phone_lookup.calls, [])
         self.assertIn(
-            "Type the phone number to call",
+            "Make a new Robie Call task with the number to call.",
             ports.discussion_client.appended[0]["body"],
         )
 
@@ -666,7 +669,7 @@ class TestCallRequestRound(unittest.TestCase):
             self.assertEqual(ports.phone_lookup.calls, [], description)
             if index == 0:
                 self.assertIn(
-                    "Type the phone number to call",
+                    "Make a new Robie Call task with the number to call.",
                     ports.discussion_client.appended[0]["body"],
                 )
 
@@ -701,7 +704,7 @@ class TestCallRequestRound(unittest.TestCase):
         self.assertEqual(ports.bland.calls, [])
         self.assertEqual(ports.phone_lookup.calls, [])
         self.assertIn(
-            "Type the phone number to call",
+            "Make a new Robie Call task with the number to call.",
             ports.discussion_client.appended[0]["body"],
         )
 

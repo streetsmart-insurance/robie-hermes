@@ -18,13 +18,16 @@
 #   --live           install the Bland live drop-in and reload systemd.
 #                    Removes a leftover 10-dry-run.conf.
 #   --install-test   install robie-task-intake-test.service and its timer
-#                    for hermes-test-01 and enable that timer. Does not
-#                    change the Production units. The Test unit leaves
+#                    on hermes-test-01 only, from
+#                    /opt/streetsmart-hermes-test/releases/current unless
+#                    ROBIE_RELEASE_ROOT is set. Does not change the
+#                    Production units. The Test unit leaves
 #                    ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS empty until an
 #                    operator fills the proof task ids.
-#   --rollback       stop and disable the timers, remove the units, the
-#                    live drop-in, and any leftover 10-dry-run.conf.
-#                    Backups under the backup root are kept.
+#   --rollback       stop and disable the timers, remove the Production
+#                    units and the Test units, the live drop-in, and any
+#                    leftover 10-dry-run.conf. Backups under the backup
+#                    root are kept.
 #
 # Tests point ROBIE_UNIT_DEST, ROBIE_RELEASE_ROOT, ROBIE_SYSTEMCTL, and
 # ROBIE_BACKUP_ROOT at temp paths. Root is required only for the real
@@ -71,6 +74,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "${mode}" ]] || usage
 
+# --install-test reads the Test tree unless the caller already named one.
+if [[ "${mode}" == "--install-test" && -z "${ROBIE_RELEASE_ROOT:-}" ]]; then
+  RELEASE_ROOT="/opt/streetsmart-hermes-test/releases/current"
+fi
+
 if [[ "${DEST}" == "/etc/systemd/system" && "${EUID}" -ne 0 ]]; then
   echo "installer requires sudo" >&2
   exit 2
@@ -106,7 +114,7 @@ install_units() {
   for unit in "${UNITS[@]}"; do
     source="${RELEASE_ROOT}/deploy/systemd/${unit}"
     if [[ ! -f "${source}" ]]; then
-      echo "unit missing from release: ${unit}" >&2
+      echo "unit missing from release: ${source}" >&2
       exit 2
     fi
     install -m 0644 "${source}" "${DEST}/${unit}"
@@ -253,12 +261,20 @@ verify_effective_env() {
 
 case "${mode}" in
   --rollback)
-    "${SYSTEMCTL}" disable --now robie-task-intake.timer robie-task-intake-health.timer || true
-    "${SYSTEMCTL}" stop robie-task-intake.service robie-task-intake-health.service || true
+    "${SYSTEMCTL}" disable --now \
+      robie-task-intake.timer \
+      robie-task-intake-health.timer \
+      robie-task-intake-test.timer || true
+    "${SYSTEMCTL}" stop \
+      robie-task-intake.service \
+      robie-task-intake-health.service \
+      robie-task-intake-test.service || true
     rm -f "${DEST}/robie-task-intake.service" \
           "${DEST}/robie-task-intake.timer" \
           "${DEST}/robie-task-intake-health.service" \
           "${DEST}/robie-task-intake-health.timer" \
+          "${DEST}/robie-task-intake-test.service" \
+          "${DEST}/robie-task-intake-test.timer" \
           "${DEST}/${DROPIN_DIR}/${DROPIN_NAME}" \
           "${DEST}/${DROPIN_DIR}/10-dry-run.conf"
     rmdir "${DEST}/${DROPIN_DIR}" 2>/dev/null || true
@@ -314,11 +330,17 @@ case "${mode}" in
     echo "LIVE_DROPIN_INSTALLED"
     ;;
   --install-test)
+    host="$(hostname -s 2>/dev/null || hostname)"
+    host="${host%%.*}"
+    if [[ "${host}" != "hermes-test-01" ]]; then
+      echo "refusing --install-test on ${host}; hermes-test-01 only" >&2
+      exit 2
+    fi
     mkdir -p "${DEST}"
     for unit in robie-task-intake-test.service robie-task-intake-test.timer; do
       source="${RELEASE_ROOT}/deploy/systemd/${unit}"
       if [[ ! -f "${source}" ]]; then
-        echo "unit missing from release: ${unit}" >&2
+        echo "unit missing from release: ${source}" >&2
         exit 2
       fi
       if [[ -f "${DEST}/${unit}" ]]; then

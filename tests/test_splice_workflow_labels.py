@@ -764,7 +764,7 @@ def test_robie_call_bare_digits_ask_and_do_not_use_the_file(monkeypatch):
     assert looked == []
     assert result.get("clarification_note_filed") is True
     body = ports.discussion_client.appended[0]["body"]
-    assert "policy, claim, or quote" in body
+    assert "Make a new Robie Call task and write the number after 'call' or 'phone'." in body
     assert "phone on file" not in body
 
 

@@ -194,25 +194,26 @@ def _record_run(
 
 
 def _build_discussion_client():
-    """DiscussionApiClient from the standard secret path (fail-closed)."""
-    from urllib.parse import urlparse
+    """DiscussionApiClient for outcome notes.
 
-    from .ezlynx_api import load_ezlynx_api_config
-    from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
-
-    api_config = load_ezlynx_api_config()
-    parsed = urlparse(str(api_config.document_base_url or api_config.token_endpoint))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    config = DiscussionApiConfig(
-        discussion_base_url=origin + "/DiscussionApi/",
-        token_endpoint=str(api_config.token_endpoint),
-        client_id=str(api_config.client_id),
-        client_secret=str(api_config.client_secret),
-        username=str(api_config.username),
-        integration_group_id=str(api_config.integration_group_id),
-        scope="DiscussionApi openid",
+    Test intake always uses the Production EZLynx tenant. Applicant
+    25486692 lives there, and ``ROBIE_ENV=TEST`` would otherwise read the
+    UAT secret. ``load_discussion_api_config`` with the live target reads
+    ``ezlynx-api-prod``. Who may be written is still the applicant
+    allowlist, which the Test unit sets to that one applicant.
+    """
+    from .ezlynx_api_only_writes import (
+        DISCUSSION_API_ENV,
+        LIVE_DISCUSSION_API,
+        load_discussion_api_config,
     )
-    return DiscussionApiClient(config)
+    from .ezlynx_discussions import DiscussionApiClient
+    from .runtime_env import TEST_ENV_NAME, current_robie_env
+
+    environ = dict(os.environ)
+    if current_robie_env() == TEST_ENV_NAME:
+        environ[DISCUSSION_API_ENV] = LIVE_DISCUSSION_API
+    return DiscussionApiClient(load_discussion_api_config(environ=environ))
 
 
 def _build_engine(store: JobStore, verifier: TaskIntakeVerifier):
