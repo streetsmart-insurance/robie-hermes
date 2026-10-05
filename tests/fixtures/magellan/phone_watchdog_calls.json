@@ -1,0 +1,26 @@
+[
+  {
+    "call_id": "mag-100",
+    "timestamp": "2026-06-12T14:30:00",
+    "phone_number": "(908) 555-0142",
+    "customer_name": "Pat Example",
+    "csr_name": "Ashley",
+    "department": "Personal Lines",
+    "sentiment_score": -0.4,
+    "sentiment_label": "Sad",
+    "key_findings": ["Cancellation", "frustrated about premium"],
+    "coaching_notes": "Customer asked to cancel."
+  },
+  {
+    "call_id": "mag-200",
+    "timestamp": "2026-06-02T09:00:00",
+    "phone_number": "7325550199",
+    "customer_name": "Other Person",
+    "csr_name": "Sandy",
+    "department": "Commercial Lines",
+    "sentiment_score": 0.2,
+    "sentiment_label": "Neutral",
+    "key_findings": [],
+    "coaching_notes": null
+  }
+]
