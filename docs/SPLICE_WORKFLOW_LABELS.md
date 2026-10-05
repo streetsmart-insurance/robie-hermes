@@ -81,8 +81,9 @@ ambiguous number.
 Robie Call dials only a phone number a person typed in the task. It
 never falls back to the client's phone on file. If the task has no
 usable typed number, or the number might be a policy, claim, or quote
-number, Robie does not call. The note asks for a new Robie Call task
-with the number written after "call" or "phone". Intake does not open
+number, Robie does not call. The note asks for a new Robie Call task.
+When the number was unclear, it says to write "call at" or "phone"
+before the number. Intake does not open
 the same task again once it has a job, so editing that task does not
 cause another dial.
 

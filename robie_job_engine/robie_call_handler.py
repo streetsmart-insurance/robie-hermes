@@ -2177,8 +2177,8 @@ def _handle_call_task(
             # The note has to ask for a new task.
             clar_note = (
                 "Robie did not call because it couldn't tell which number "
-                "to dial. Make a new Robie Call task and write the number "
-                "after 'call' or 'phone'."
+                "to dial. Make a new Robie Call task and write 'call at' "
+                "or 'phone' before the number."
             )
         else:
             clar_note = (
