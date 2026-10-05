@@ -537,7 +537,7 @@ def test_called_task_gets_no_later_hold_note_and_no_later_dial(tmp_path, monkeyp
         created_at="2026-10-03T09:05:00",
         created_at_et="2026-10-03T10:05:00-04:00",
         created_date="2026-10-03",
-        description="Please call the client about the renewal.",
+        description="Please call the client about the renewal. Call at 732-555-0142.",
         assigned_producer="Pat Example",
     )
     monkeypatch.setattr(
@@ -621,7 +621,7 @@ def test_lease_on_test_dials_nothing_then_one_call_when_it_returns(tmp_path, mon
         created_at="2026-10-05T08:00:00",
         created_at_et="2026-10-05T09:00:00-04:00",
         created_date="2026-10-05",
-        description="Please call the client about the renewal.",
+        description="Please call the client about the renewal. Call at 732-555-0142.",
         assigned_producer="Pat Example",
     )
     monkeypatch.setattr(

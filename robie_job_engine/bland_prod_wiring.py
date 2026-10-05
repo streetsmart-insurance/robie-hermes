@@ -1,8 +1,8 @@
 """Prod and Test intake wiring for the Bland call path.
 
 ROBIE_PHONE_LIVE_CALLS defaults off, so the worker dry-runs. Nothing here
-opens a socket or reads a secret unless a caller passes a reader and turns
-the live flag on.
+opens a socket or reads a secret unless the environment is Production or
+Test and the live flag is on.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import Any, Callable, Optional
 
 from .bland_call_port import BlandTransportCallPort
+from .call_pickup import is_test_server
 from .ezlynx_applicant_phone import EzlynxApplicantPhoneLookup
 from .ringcentral_transfer_lookup import RingCentralTransferLookup, run_live_check
 
@@ -44,6 +45,11 @@ def fetch_ezlynx_applicant(applicant_id: str) -> Mapping[str, Any] | None:
     return EzlynxApiClient(load_ezlynx_api_config()).get_applicant_phones(applicant_id)
 
 
+def _no_applicant_phone(_applicant_id: str) -> None:
+    """Test dials Jake's cell from Secret Manager, not the applicant record."""
+    return None
+
+
 def build_call_dependencies(
     *,
     env: Mapping[str, str] | None = None,
@@ -58,18 +64,26 @@ def build_call_dependencies(
     The dry-run flag is True unless ROBIE_PHONE_LIVE_CALLS=1. The Bland
     port's execute flag matches that, so a default process cannot dial.
 
-    On ROBIE_ENV=PRODUCTION the phone lookup reads EZLynx Applicant/v2,
-    the Bland port reads Secret Manager, and the transfer lookup uses
-    staff_direct_dials.json. Tests and other environments keep the
+    On Production the phone lookup reads EZLynx Applicant/v2 and the Bland
+    port reads Secret Manager (bland-api-key, bland-dispatcher-kill-switch).
+    On Test (ROBIE_ENV=TEST or hermes-test-01) the port reads Secret Manager
+    too (robie-test-bland-api-key, bland-dispatcher-kill-switch, and
+    robie-test-jake-cell). The applicant phone lookup is not called: every
+    Test dial is forced to Jake's cell. Other environments keep the
     injected fakes, or a phone lookup that returns nothing.
     """
     source = os.environ if env is None else env
     live = live_calls_enabled(source)
-    if _production(source):
-        if fetch_applicant is None:
-            fetch_applicant = fetch_ezlynx_applicant
+    testing = is_test_server(source, hostname)
+    if _production(source) or testing:
         if secret_reader is None:
             secret_reader = production_secret_reader
+    if testing:
+        if fetch_applicant is None:
+            fetch_applicant = _no_applicant_phone
+    elif _production(source):
+        if fetch_applicant is None:
+            fetch_applicant = fetch_ezlynx_applicant
     phone = EzlynxApplicantPhoneLookup(fetch_applicant or (lambda _applicant_id: None))
     bland = BlandTransportCallPort(
         env=source,

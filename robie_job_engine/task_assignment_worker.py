@@ -895,6 +895,7 @@ class TaskAssignmentWorker:
             "dialable": payload.get("dialable") is True,
             "queued_at": payload.get("queued_at") or "",
             "live_enabled_at": payload.get("live_enabled_at") or "",
+            "splice_enabled_at": payload.get("splice_enabled_at") or "",
         }
         reassign_port = (
             _WorkerReassignPortAdapter(self.reassigner, task)
