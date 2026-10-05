@@ -80,6 +80,50 @@ def test_classify_unknown_goes_to_human():
     assert triage.classify_notice("", "") == triage.UNKNOWN
 
 
+def test_classify_new_in_ascend_product_mail_is_ignored_type():
+    subjects = (
+        "New in Ascend: Controls Around Interest Rates",
+        "New in Ascend: Controls Around Interest Rates and how loans show them",
+        "NEW IN ASCEND: Faster reporting",
+        "Re: New in Ascend: Controls Around Interest Rates",
+        "Fwd: New in Ascend: Controls Around Interest Rates",
+        "FW: Re: New in Ascend: checkout updates",
+    )
+    for subject in subjects:
+        assert triage.classify_notice(subject, "") == triage.PRODUCT_MAIL, subject
+        # A product subject that mentions a filing phrase still stays product mail.
+        assert (
+            triage.classify_notice(
+                subject,
+                "Shoreline Builders LLC has a past-due payment of $3,528.22",
+            )
+            == triage.PRODUCT_MAIL
+        ), subject
+    assert triage.PRODUCT_MAIL in triage.IGNORE_TYPES
+    # A real notice that only mentions the phrase later is not product mail.
+    assert (
+        triage.classify_notice(
+            "Past due payment for Shoreline Builders LLC",
+            "See New in Ascend: Controls Around Interest Rates",
+        )
+        == triage.LATE_PAYMENT
+    )
+    assert (
+        triage.classify_notice(
+            "Payment failed for New in Ascend LLC",
+            "",
+        )
+        == triage.LATE_PAYMENT
+    )
+    assert (
+        triage.classify_notice(
+            "",
+            "New in Ascend: Controls Around Interest Rates",
+        )
+        == triage.UNKNOWN
+    )
+
+
 # ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
@@ -257,6 +301,35 @@ def test_triage_unknown_notice_flags_human_review():
     result = triage.triage_notice(client, "Your monthly statement", "nothing useful")
     assert result["notice_type"] == triage.UNKNOWN
     assert result["needs_human_review"] is True
+
+
+def test_triage_new_in_ascend_product_mail_is_ignored_not_human_review():
+    class _Boom:
+        def get_program(self, *_args, **_kwargs):
+            raise AssertionError("product mail must not call Ascend")
+
+        def find_program_by_policy(self, *_args, **_kwargs):
+            raise AssertionError("product mail must not call Ascend")
+
+    result = triage.triage_notice(
+        _Boom(),
+        "New in Ascend: Controls Around Interest Rates",
+        "Shoreline Builders LLC has a past-due payment of $3,528.22, due on 09/11/2026.",
+    )
+    assert result["notice_type"] == triage.PRODUCT_MAIL
+    assert result["needs_human_review"] is False
+    assert result["ignored"] is True
+    assert result["review_reason"] == ""
+    assert result["recommendation"]["zapier_task"] is False
+    assert result["recommendation"]["ezlynx_workflow"] is None
+    assert result["note_text"] == (
+        "PRODUCT MAIL notice from Ascend. This is an Ascend product update."
+    )
+    # Unrecognized mail that is not product mail still needs a person.
+    unknown = triage.triage_notice(_Boom(), "Your monthly statement", "nothing useful")
+    assert unknown["notice_type"] == triage.UNKNOWN
+    assert unknown["needs_human_review"] is True
+    assert unknown["review_reason"] == "Unrecognized Ascend notice type"
 
 
 def test_triage_no_resolvable_program_flags_human_review():

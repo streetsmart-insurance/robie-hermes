@@ -2020,6 +2020,77 @@ def test_intent_to_cancel_never_builds_cancellation_task(no_zap_fire, monkeypatc
         )
 
 
+def test_new_in_ascend_product_mail_is_ignored_not_human_review(no_zap_fire):
+    class _NoProgram:
+        def __init__(self):
+            self.calls = []
+
+        def get_program(self, program_uuid):
+            self.calls.append(("get_program", program_uuid))
+            return None
+
+        def find_program_by_policy(self, policy_number):
+            self.calls.append(("find_program_by_policy", policy_number))
+            return None
+
+    ascend = _NoProgram()
+    product = make_notice(
+        subject="New in Ascend: Controls Around Interest Rates",
+        body=(
+            "Shoreline Builders LLC has a past-due payment of $10.00, "
+            "due on 09/11/2026.\nPolicy ID ZZ-000000"
+        ),
+        message_id="product-1",
+    )
+    unknown = make_notice(
+        subject="Your monthly statement",
+        body="nothing useful",
+        message_id="unknown-1",
+    )
+    unresolved = make_notice(
+        subject="Past due payment for Ghost LLC",
+        body=(
+            "Ghost LLC has a past-due payment of $10.00, due on 09/11/2026.\n"
+            "Policy ID ZZ-000000"
+        ),
+        message_id="blocker-1",
+    )
+    ctx, discussion_client = make_ctx(
+        notices=[product, unknown, unresolved],
+        ascend_client=ascend,
+    )
+    summary = driver.run_driver(ctx)
+    by_id = {item["message_id"]: item for item in summary["results"]}
+
+    product_result = by_id["product-1"]
+    assert product_result["status"] == "ignored"
+    assert product_result["reason"] == "ignored"
+    assert product_result["detail"]["notice_type"] == triage.PRODUCT_MAIL
+    assert "needs_human_review" not in product_result["reason"]
+
+    unknown_result = by_id["unknown-1"]
+    assert unknown_result["status"] == "skipped"
+    assert unknown_result["reason"] == (
+        "needs_human_review: Unrecognized Ascend notice type"
+    )
+
+    blocker = by_id["blocker-1"]
+    assert blocker["status"] == "skipped"
+    assert blocker["reason"].startswith("needs_human_review:")
+    assert "no ascend program" in blocker["reason"].lower()
+    assert "applicant_unresolved" not in blocker["reason"]
+
+    assert summary["ignored"] == 1
+    assert summary["skipped"] == 2
+    assert summary["skipped_by_reason"] == {"needs_human_review": 2}
+    assert summary["breakdown"]["by_notice_type"][triage.PRODUCT_MAIL] == 1
+    assert summary["would_file"] == []
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert no_zap_fire == []
+    # Only the real past-due notice reaches Ascend. Product mail does not.
+    assert ascend.calls == [("find_program_by_policy", "ZZ-000000")]
+
+
 def test_informational_mail_is_ignored_not_skipped(no_zap_fire):
     class _RaisingAscend:
         def get_program(self, *_args, **_kwargs):

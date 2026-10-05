@@ -19,9 +19,11 @@ Actionable families:
                           discussion; the driver sends it to human review.
 
 Informational mail (refund to the customer, potential policies, programs
-ready, sign-in, MSA, and agency remittance) is an explicit ignore type:
+ready, sign-in, MSA, agency remittance, and Ascend product/marketing mail
+whose subject leads with "New in Ascend") is an explicit ignore type:
 status ``ignored``, not a note and not a human-review item. There is no
-house client for remittance.
+house client for remittance. A real notice that merely mentions that
+phrase in the body stays on its own type.
 
 - unknown -- anything else; always routed to human review
 
@@ -61,13 +63,15 @@ UNDERWRITING = "underwriting"
 PAID_OFF = "paid_off"
 SIGN_IN = "sign_in"
 MSA = "msa"
+PRODUCT_MAIL = "product_mail"
 UNKNOWN = "unknown"
 
 # Informational Ascend mail. The driver records status "ignored" and does
 # not open a human-review item. UNKNOWN stays needs_human_review.
 # Payment confirmation, processing payment, paid off, and underwriting
 # file notes. Refund-to-customer, potential policies, programs ready,
-# sign-in, MSA, and agency remittance stay ignored.
+# sign-in, MSA, agency remittance, and "New in Ascend" product mail
+# stay ignored. Unmatched applicants and unresolved programs stay review.
 IGNORE_TYPES = frozenset(
     {
         REFUND,
@@ -76,6 +80,7 @@ IGNORE_TYPES = frozenset(
         SIGN_IN,
         MSA,
         AGENCY_REMITTANCE,
+        PRODUCT_MAIL,
     }
 )
 
@@ -103,8 +108,14 @@ ZAPIER_SOURCE = "inbox-triage"
 # before any cancellation pattern: "[URGENT] ... Policy(s) at risk for
 # cancellation" contains the word "cancellation" and must not become a
 # cancellation task. Cancellation itself is only the two non-payment
-# phrases, not a bare "cancellation".
+# phrases, not a bare "cancellation". Product mail is only a subject that
+# leads with "New in Ascend" (optional Re/Fwd). A later mention, including
+# an insured named that way, does not match.
 _SUBJECT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"^\s*(?:(?:re|fwd|fw)\s*:\s*)*new in ascend\b",
+        PRODUCT_MAIL,
+    ),
     # These subjects also contain "payment", "refund", or "cancel". They
     # have to win before the looser patterns below.
     (r"disputed charge", DISPUTED_CHARGE),
@@ -174,8 +185,9 @@ _CANCEL_EFFECTIVE_RE = re.compile(
 def classify_notice(subject: str, body: str) -> str:
     """Classify an Ascend email into a notice type.
 
-    Never raises on odd input; unrecognized mail is UNKNOWN so the caller
-    routes it to human review.
+    Never raises on odd input. A subject that leads with "New in Ascend"
+    is product mail and is ignored. Other unrecognized mail is UNKNOWN
+    so the caller routes it to human review.
     """
     subject_text = subject or ""
     body_text = body or ""
@@ -351,6 +363,7 @@ _NOTICE_HEADINGS = {
     PAID_OFF: "LOAN PAID OFF",
     SIGN_IN: "SIGN IN",
     MSA: "MSA",
+    PRODUCT_MAIL: "PRODUCT MAIL",
     UNKNOWN: "UNRECOGNIZED",
 }
 
@@ -560,6 +573,8 @@ def _notice_detail(
         return "This is a sign-in message."
     if notice_type == MSA:
         return "This is a master service agreement message."
+    if notice_type == PRODUCT_MAIL:
+        return "This is an Ascend product update."
     return "A person needs to read this message."
 
 
