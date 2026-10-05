@@ -2174,16 +2174,13 @@ def test_write_scope_all_is_only_on_approved_note_units():
             if scope_line in path.read_text(encoding="utf-8"):
                 hits.append(path.relative_to(root).as_posix())
     # Task intake files call-outcome notes on real clients under the same
-    # Playground guardrails. The Test intake unit does the same for the
-    # proof applicant, who lives on the Production EZLynx tenant. It is
-    # not a live-dial switch and it does not widen deletes or status
-    # changes. No other unit may set this.
+    # Playground guardrails. It is not a live-dial switch and it does not
+    # widen deletes or status changes. No other unit may set this.
     assert sorted(hits) == [
         "deploy/systemd/robie-ascend-api-notice.service",
         "deploy/systemd/robie-ascend-api-notice.service.d/10-write-scope.conf",
         "deploy/systemd/robie-ascend-notice-driver.service",
         "deploy/systemd/robie-ascend-notice-driver.service.d/10-write-scope.conf",
-        "deploy/systemd/robie-task-intake-test.service",
         "deploy/systemd/robie-task-intake.service",
     ]
     example = (root / "deploy/systemd/robie-playground.env.example").read_text(encoding="utf-8")

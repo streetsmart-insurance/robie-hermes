@@ -54,8 +54,9 @@ still only his test cell.
 
 `ROBIE_ENV=TEST` still requires `ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS` for
 the whole intake. That list is task ids, not a per-label allowlist. Put
-the proof task ids in it. Write scope for the outcome note has to include
-Jake's applicant id.
+the proof task ids in it. The Test unit sets
+`ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692`, so the outcome note can be
+filed only on Jake's applicant. It does not open every client.
 
 ## What the task does not carry
 
@@ -103,7 +104,10 @@ units. `ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS` is empty until an operator
 fills the proof task ids. Applicant `25486692` lives on the Production
 EZLynx tenant, so the Test service must read `ezlynx-api-prod`
 (`ROBIE_EZLYNX_API_PROD_SECRET`) with `ROBIE_EZLYNX_DISCUSSION_API=live`,
-not the UAT API secret. The Test service account needs `secretAccessor`
+not the UAT API secret. Outcome notes use
+`ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692` and do not set an
+all-clients write scope, because this box talks to the Production
+tenant. The Test service account needs `secretAccessor`
 on `robie-test-jake-cell` and `bland-dispatcher-kill-switch`. The Bland
 key it reads is `robie-test-bland-api-key`. Do not grant those roles
 from this repo.

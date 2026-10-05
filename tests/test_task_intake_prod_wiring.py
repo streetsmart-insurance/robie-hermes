@@ -152,6 +152,7 @@ def test_test_intake_unit_targets_jake_ferrara_and_leaves_task_ids_empty():
     assert "Environment=ROBIE_SPLICE_TEST_APPLICANT_ID=25486692" in TEST_UNIT
     assert "Environment=ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS=" in TEST_UNIT
     assert "Environment=ROBIE_EZLYNX_DISCUSSION_API=live" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692" in TEST_UNIT
     assert "ezlynx-api-prod" in TEST_UNIT
     assert "robie-test-jake-cell" in TEST_UNIT
     assert "bland-dispatcher-kill-switch" in TEST_UNIT
@@ -160,6 +161,20 @@ def test_test_intake_unit_targets_jake_ferrara_and_leaves_task_ids_empty():
     assert "OnUnitActiveSec=5min" in TEST_TIMER
     assert "25486692" not in UNIT
     assert "ROBIE_PHONE_LIVE_CALLS" not in UNIT
+
+
+def test_test_intake_unit_never_sets_write_scope_all():
+    """Test talks to the Production EZLynx tenant. All-clients would cover every real client."""
+    for text in (TEST_UNIT, TEST_TIMER):
+        assert "ROBIE_EZLYNX_WRITE_SCOPE=all" not in text
+        for line in text.splitlines():
+            assignment = line.split("#", 1)[0]
+            assert "ROBIE_EZLYNX_WRITE_SCOPE" not in assignment
+            assert "ROBIE_PLAYGROUND" not in assignment
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*" not in TEST_UNIT
+    assert "220250093" not in TEST_UNIT
+    assert "26356199" not in TEST_UNIT
 
 
 def test_install_test_renders_the_test_unit_without_touching_production(tmp_path):
