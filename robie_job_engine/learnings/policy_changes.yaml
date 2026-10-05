@@ -11,9 +11,9 @@ learnings:
     learned: "2026-10-04"
     source: "Carlo standing rule"
   - id: pc-003
-    rule: "Policy-change emails CC the CSR and AM, the full email content is filed to the correct EZLynx discussion via the Discussion API, and existing carrier threads are continued rather than duplicated."
+    rule: "Every worker email CCs the account manager, the producer, AND the CSR - all three, every time. The full email content is filed to the correct EZLynx discussion via the Discussion API, and existing carrier threads are continued rather than duplicated."
     learned: "2026-10-04"
-    source: "Carlo standing rule"
+    source: "Carlo standing rule, refined 2026-10-05"
   - id: pc-004
     rule: "Any ambiguity or anomaly (name/VIN/date mismatch): EDIT the task itself via the wrench icon - reassign to the AM, set the due date so it surfaces in their queue (same day on a weekday, Monday if found on a weekend), and put the clarification question plus resend instruction in the task body. A discussion note alone is not enough."
     learned: "2026-10-04"
@@ -54,3 +54,27 @@ learnings:
     rule: "Stale items over 14 days with no movement may be nudged via an EZLynx task note (visible to the team lead) without asking Carlo first. Always read the EZLynx notes first so nothing already handled gets chased."
     learned: "2026-10-04"
     source: "Carlo standing permission"
+  - id: pc-014
+    rule: "Contact order for any carrier or third party: try the portal first, then email. Voice calls only with Carlo's explicit per-case authorization."
+    learned: "2026-10-05"
+    source: "Carlo standing rule"
+  - id: pc-015
+    rule: "If a portal's password reset strictly requires an identifier not on file (e.g. the account email), stop and escalate naming exactly what is missing. Never guess or enter random agency emails."
+    learned: "2026-10-05"
+    source: "BHHC portal reset blocked"
+  - id: pc-016
+    rule: "If a change's effective date predates the current policy term, confirm with the carrier whether it applies as a backdate or to the current term before closing the item."
+    learned: "2026-10-05"
+    source: "Force Plumbing term mismatch"
+  - id: pc-017
+    rule: "When a policy number is not found in the carrier portal, search by insured name and address - the renewal may carry a new number or live in another agency's book."
+    learned: "2026-10-05"
+    source: "Neptune Lisi search"
+  - id: pc-018
+    rule: "A taken-over EZLynx task stays in the worker's task queue: tracked and followed up until closed, never dropped silently."
+    learned: "2026-10-05"
+    source: "Carlo standing rule"
+  - id: pc-019
+    rule: "Unsure about something on a task: bring it to Carlo via the hub, not the AM. This overrides the reassign-to-AM step until he says otherwise."
+    learned: "2026-10-05"
+    source: "Carlo standing rule"

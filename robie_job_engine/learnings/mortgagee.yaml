@@ -30,3 +30,23 @@ learnings:
     rule: "The declaration page mortgagee list is authoritative for who must be billed - e.g. Gurzakovic dec page 7: PHH Mortgage Services as first mortgagee plus Unlock Partnership Solutions as additional interest."
     learned: "2026-10-04"
     source: "Gurzakovic direct review"
+  - id: mg-008
+    rule: "Bind before lender upload: a renewal must be bound in the carrier portal BEFORE its docs go to the lender - uploading an unbound renewal does not put coverage in force. Binding itself needs Carlo's approval first."
+    learned: "2026-10-04"
+    source: "Carlo direction (Gurzakovic S-02)"
+  - id: mg-009
+    rule: "Scope lender verification to the renewal window (60 days out), not the full book. Park everything else with its current disposition."
+    learned: "2026-10-05"
+    source: "Carlo standing rule"
+  - id: mg-010
+    rule: "When the insured name differs across sources, verify identity by loan number and property address before concluding anything about the policy."
+    learned: "2026-10-05"
+    source: "Lisi name discrepancy"
+  - id: mg-011
+    rule: "If a premium is recorded as sent to the lender for a policy absent from the agency's carrier book, investigate where the policy was actually written before retransmitting anything."
+    learned: "2026-10-05"
+    source: "Lisi phantom renewal"
+  - id: mg-012
+    rule: "MyCoverageInfo agent portal: look up the loan by loan number plus property ZIP plus borrower's last name; the bulk-upload page takes up to 5 dec pages with loan number and contact email."
+    learned: "2026-10-05"
+    source: "Sadenwater Santander channel research"

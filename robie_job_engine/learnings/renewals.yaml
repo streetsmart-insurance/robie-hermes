@@ -22,3 +22,11 @@ learnings:
     rule: "Every renewal item served to Carlo carries its expiration/renewal date. No exceptions."
     learned: "2026-10-04"
     source: "Carlo standing rule"
+  - id: rn-006
+    rule: "A 'new' queue item may be a non-item: verify the change wasn't already completed months ago, and that the transaction is agency-owned, before working it."
+    learned: "2026-10-05"
+    source: "Amanda Strong / Javier Rivero triage"
+  - id: rn-007
+    rule: "For a recurring daily client follow-up (call plus email plus rolling due date): check the task due date first - if it is already beyond today, today's follow-up was completed; end quietly and never double-contact."
+    learned: "2026-10-05"
+    source: "Tammy Breaker daily setup"

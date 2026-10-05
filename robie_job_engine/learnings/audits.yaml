@@ -30,3 +30,15 @@ learnings:
     rule: "Every audit item served to Carlo carries its expiration/renewal date. No exceptions."
     learned: "2026-10-04"
     source: "Carlo standing rule"
+  - id: au-008
+    rule: "If a carrier portal hard-blocks the network route, park the portal path and fall back to email. Do not retry in a loop."
+    learned: "2026-10-05"
+    source: "Hartford EBC Akamai block"
+  - id: au-009
+    rule: "When the queue's policy number shows as cancelled or rewritten in the carrier portal, verify the surviving policy number against the source document before proceeding."
+    learned: "2026-10-05"
+    source: "Mar Design rewrite resolution"
+  - id: au-010
+    rule: "The audit job is: GET the audit request document, GIVE it to the CSR/AM, TRACK completion. No direct worker-to-client sends."
+    learned: "2026-10-05"
+    source: "Carlo standing rule"
