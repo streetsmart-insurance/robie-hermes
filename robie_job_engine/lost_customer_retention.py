@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import csv
 import hashlib
 import io
 import json
@@ -211,10 +210,56 @@ def summarize(items: Iterable[Mapping[str, str]]) -> dict[str, Any]:
     return {"groups": sorted(result, key=lambda x: (x["month"], x["department"]))}
 
 
-def department_email(department: str, items: Sequence[Mapping[str, str]], *, run_id: str) -> str:
+def format_period_label(months: Sequence[str]) -> str:
+    months = tuple(months)
+    if not months:
+        raise ValueError("period requires at least one month")
+    if len(months) == 1:
+        return months[0]
+    if months == ("June 2026", "July 2026", "August 2026"):
+        return "June–August 2026"
+    return ", ".join(months)
+
+
+def build_retention_xlsx(
+    *,
+    monthly_tabs: Mapping[str, Sequence[Sequence[Any]]],
+    review_rows: Sequence[Mapping[str, str]],
+    period_label: str,
+) -> tuple[str, bytes]:
+    """Build an .xlsx of the monthly Pulse tab(s) plus Account Review rows.
+
+    Drive export is unavailable to the Prod SA (403), so we rebuild from the
+    Sheets values already loaded for validation.
+    """
+    from openpyxl import Workbook
+
+    if not monthly_tabs:
+        raise ValueError("monthly_tabs is required for the retention workbook")
+    workbook = Workbook()
+    first = True
+    for month, rows in monthly_tabs.items():
+        sheet = workbook.active if first else workbook.create_sheet()
+        first = False
+        sheet.title = str(month)[:31]
+        for row in rows:
+            sheet.append(list(row))
+    review_sheet = workbook.create_sheet("Account Review")
+    review_sheet.append(list(REQUIRED_REVIEW_HEADERS))
+    for item in review_rows:
+        review_sheet.append([item.get(header, "") for header in REQUIRED_REVIEW_HEADERS])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    slug = period_label.replace("–", "-").replace(" ", "_").replace(",", "")
+    filename = f"Lost_Customer_Retention_{slug}.xlsx"
+    return filename, buffer.getvalue()
+
+
+def department_email(department: str, items: Sequence[Mapping[str, str]], *, run_id: str, period_label: str) -> str:
     lines = [
         f"StreetSmart Lost Customer Retention Review — {department}", "",
-        "June–August 2026 validated backfill", f"Run ID: {run_id}", "",
+        f"{period_label} validated review", f"Run ID: {run_id}", "",
+        "The monthly spreadsheet is attached.", "",
     ]
     if not items:
         lines += ["No account-level records mapped to this department for the validated period."]
@@ -241,7 +286,7 @@ def department_email(department: str, items: Sequence[Mapping[str, str]], *, run
     return "\n".join(lines)
 
 
-def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str) -> str:
+def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str, period_label: str) -> str:
     summary = summarize(items)["groups"]
     total_accounts = len(items)
     total_policies = sum(int(money(x.get("Policy Count"))) for x in items)
@@ -249,7 +294,8 @@ def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str) -> str:
     statuses = Counter(x.get("Account Status Classification") or UNKNOWN for x in items)
     lines = [
         "StreetSmart Lost Customer Retention Review — Executive Trends", "",
-        "June–August 2026 validated backfill", f"Run ID: {run_id}",
+        f"{period_label} validated review", f"Run ID: {run_id}",
+        "The monthly spreadsheet is attached.",
         f"Overall: {total_accounts} account-months / {total_policies} policies / ${total_premium:,.2f} flagged annualized premium", "",
         "Department/month totals:",
     ]
@@ -271,29 +317,50 @@ def executive_email(items: Sequence[Mapping[str, str]], *, run_id: str) -> str:
 
 
 @dataclass(frozen=True)
+class Attachment:
+    filename: str
+    content: bytes
+    maintype: str = "application"
+    subtype: str = "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@dataclass(frozen=True)
 class MessageSpec:
     key: str
     to: tuple[str, ...]
     subject: str
     body: str
+    attachments: tuple[Attachment, ...] = ()
 
 
-def build_messages(items: Sequence[Mapping[str, str]], recipients: Mapping[str, str], run_id: str) -> list[MessageSpec]:
+def build_messages(
+    items: Sequence[Mapping[str, str]],
+    recipients: Mapping[str, str],
+    run_id: str,
+    *,
+    period_label: str,
+    attachments: Sequence[Attachment] = (),
+) -> list[MessageSpec]:
     by_department: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for item in items:
         by_department[item.get("Department") or UNKNOWN].append(item)
     mapping = tuple((department, key) for department, key in DEPARTMENT_RECIPIENT_KEYS.items())
+    attached = tuple(attachments)
     messages = []
     for department, key in mapping:
         messages.append(MessageSpec(
             key=f"department:{key}", to=(recipients[key],),
-            subject=f"Lost Customer Retention Review — {department} — June–August 2026",
-            body=department_email(department, by_department.get(department, []), run_id=run_id),
+            subject=f"Lost Customer Retention Review — {department} — {period_label}",
+            body=department_email(
+                department, by_department.get(department, []), run_id=run_id, period_label=period_label,
+            ),
+            attachments=attached,
         ))
     messages.append(MessageSpec(
         key="executive", to=(recipients["carlo"], recipients["jake"]),
-        subject="Lost Customer Retention Review — Executive Trends — June–August 2026",
-        body=executive_email(items, run_id=run_id),
+        subject=f"Lost Customer Retention Review — Executive Trends — {period_label}",
+        body=executive_email(items, run_id=run_id, period_label=period_label),
+        attachments=attached,
     ))
     return messages
 
@@ -305,9 +372,26 @@ def send_message(gmail: Any, sender: str, spec: MessageSpec) -> dict[str, Any]:
     message["Subject"] = spec.subject
     message["X-ROBIE-Idempotency-Key"] = spec.key
     message.set_content(spec.body)
+    attached_names = []
+    for attachment in spec.attachments:
+        if not attachment.content:
+            raise RuntimeError(f"empty attachment: {attachment.filename}")
+        message.add_attachment(
+            attachment.content,
+            maintype=attachment.maintype,
+            subtype=attachment.subtype,
+            filename=attachment.filename,
+        )
+        attached_names.append(attachment.filename)
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
     sent = gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
-    return {"key": spec.key, "to": list(spec.to), "message_id": sent.get("id"), "thread_id": sent.get("threadId")}
+    return {
+        "key": spec.key,
+        "to": list(spec.to),
+        "message_id": sent.get("id"),
+        "thread_id": sent.get("threadId"),
+        "attachments": attached_names,
+    }
 
 
 def load_state(path: Path) -> dict[str, Any]:
