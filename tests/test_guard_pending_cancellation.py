@@ -28,10 +28,12 @@ from robie_job_engine.guard_pending_cancellation import (
     main,
     parse_cancellations_grid,
     parse_carrier_date,
+    parse_document_links,
     parse_document_list,
     read_playwright_pdf_view,
     require_guard_url,
     run_pull,
+    scribe_item_id_from_href,
     select_guard_page,
 )
 from robie_job_engine.intake_core import IntakeHold, SourceArchive, SourceItem
@@ -268,6 +270,12 @@ class FakeNode:
         return found
 
     def matches(self, selector):
+        # Attribute-substring selector, e.g. a[href*="scribeItemId=222"].
+        # Mirrors the CSS semantics Playwright uses for the live anchor DOM.
+        attr_match = re.match(r'^([a-zA-Z0-9]+)\[href\*\="([^"]*)"\]$', selector)
+        if attr_match:
+            tag, needle = attr_match.group(1), attr_match.group(2)
+            return self.role == tag and needle in (self.attrs.get("href") or "")
         return {
             "table": self.role == "table",
             "thead": self.role == "thead",
@@ -561,6 +569,55 @@ class ViewerPage(EmailedPage):
             fn(self._viewer)
 
 
+class LiveAnchorGuardPage:
+    """Fake of the LIVE printable-documents DOM: flat document anchors.
+
+    Anchors carry real hrefs like
+    /dotnet/mvc/Workflow/ASCScribe/Home/DownloadScribeItem
+    ?scribeItemId=...&Download=true. Two anchors may share IDENTICAL visible
+    text with DIFFERENT scribeItemIds — the regression fixture.
+    """
+
+    def __init__(self, anchors):
+        # anchors: list of (visible text, href)
+        self.url = (
+            "https://gigezrate.guard.com/dotNet/mvc/workflow/PrintableDocuments"
+            "?linkid=356&MGACODE=PRAU716089&TABLABEL=undefined"
+        )
+        self.anchors = [
+            FakeNode("a", text=text, attrs={"href": href}) for text, href in anchors
+        ]
+        self.clicked_hrefs = []
+        self.clicks = []
+        self._download = None
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.listeners = []
+        self.context = SimpleNamespace(on=self._on, remove_listener=self._off)
+
+    def _on(self, event, fn):
+        if event == "page":
+            self.listeners.append(fn)
+
+    def _off(self, event, fn):
+        if fn in self.listeners:
+            self.listeners.remove(fn)
+
+    def locator(self, selector, has_text=None):
+        found = [node for node in self.anchors if node.matches(selector)]
+        return NodeLocator(found, self)
+
+    def expect_download(self, timeout=None):
+        return _FakeExpect(self)
+
+    def on_click(self, node):
+        href = node.attrs.get("href") or ""
+        self.clicked_hrefs.append(href)
+        scribe = scribe_item_id_from_href(href)
+        path = Path(self._tmpdir.name) / f"scribe-{scribe or 'none'}.pdf"
+        path.write_bytes(pdf_bytes(f"scribe-{scribe}".encode()))
+        self._download = SimpleNamespace(path=lambda: str(path))
+
+
 class PullTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -795,6 +852,125 @@ class SafetyTests(unittest.TestCase):
             folder = qa_pack_dir(Path(tmp), AS_OF)
             self.assertEqual(folder.name, AS_OF.isoformat())
             self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+
+
+class DuplicateScribeIdTests(unittest.TestCase):
+    """Regression: identical display texts can be DISTINCT documents.
+
+    Live DOM inspection (2026-10-05) found document anchors with identical
+    visible text but different scribeItemId values. open_document() used to
+    locate by description text, which could open the WRONG document. It now
+    selects by the durable scribeItemId preserved on GuardDocument.
+    """
+
+    HREF_111 = (
+        "/dotnet/mvc/Workflow/ASCScribe/Home/DownloadScribeItem"
+        "?scribeItemId=111&Download=true"
+    )
+    HREF_222 = (
+        "/dotnet/mvc/Workflow/ASCScribe/Home/DownloadScribeItem"
+        "?scribeItemId=222&Download=true"
+    )
+
+    def _doc(self, scribe_id, href):
+        return GuardDocument(
+            group="Policy Documents",
+            description="Cancellation",
+            form="Cancellation",
+            issued=date(2026, 9, 21),
+            policy_number="PRAU716089",
+            href=href,
+            scribe_item_id=scribe_id,
+        )
+
+    def _dup_anchors(self):
+        # Two anchors, IDENTICAL visible text, DIFFERENT scribeItemIds.
+        return [
+            ("Cancellation", self.HREF_111),
+            ("Cancellation", self.HREF_222),
+        ]
+
+    def test_scribe_item_id_extracted_from_href(self):
+        self.assertEqual(scribe_item_id_from_href(self.HREF_222), "222")
+        self.assertEqual(
+            scribe_item_id_from_href(
+                "https://gigezrate.guard.com/dotNet/mvc/workflow/PrintableDocuments"
+            ),
+            "",
+        )
+        self.assertEqual(scribe_item_id_from_href(""), "")
+
+    def test_parse_document_links_preserves_distinct_ids(self):
+        docs = parse_document_links(
+            (
+                ("Policy Documents", "Cancellation", self.HREF_111),
+                ("Policy Documents", "Cancellation", self.HREF_222),
+            ),
+            policy_number="PRAU716089",
+        )
+        self.assertEqual(len(docs), 2)
+        self.assertEqual([d.scribe_item_id for d in docs], ["111", "222"])
+        self.assertEqual([d.href for d in docs], [self.HREF_111, self.HREF_222])
+        # The durable ledger key must differ: these are two documents.
+        self.assertNotEqual(docs[0].document_id, docs[1].document_id)
+        self.assertIn("scribe-111", docs[0].document_id)
+        self.assertIn("scribe-222", docs[1].document_id)
+
+    def test_document_id_unchanged_without_scribe_id(self):
+        doc = GuardDocument(
+            group="Policy Documents",
+            description="Cancellation",
+            form="GUARD-CXL",
+            issued=date(2026, 9, 21),
+            policy_number="PRAU716089",
+        )
+        self.assertEqual(doc.document_id, "guard:PRAU716089:2026-09-21:cancellation")
+
+    def test_open_document_selects_second_duplicate_by_scribe_id(self):
+        # The whole point: description text alone matches BOTH anchors.
+        # open_document must click the one carrying scribeItemId=222.
+        page = LiveAnchorGuardPage(self._dup_anchors())
+        browser = PlaywrightGuardBrowser(page)
+        observation = browser.open_document(self._doc("222", self.HREF_222))
+        self.assertEqual(page.clicked_hrefs, [self.HREF_222])
+        self.assertFalse(observation.emailed)
+        self.assertEqual(len(observation.downloads), 1)
+        self.assertIn(b"scribe-222", observation.downloads[0])
+
+    def test_open_document_selects_first_duplicate_by_scribe_id(self):
+        page = LiveAnchorGuardPage(self._dup_anchors())
+        browser = PlaywrightGuardBrowser(page)
+        observation = browser.open_document(self._doc("111", self.HREF_111))
+        self.assertEqual(page.clicked_hrefs, [self.HREF_111])
+        self.assertEqual(len(observation.downloads), 1)
+        self.assertIn(b"scribe-111", observation.downloads[0])
+
+    def test_open_document_duplicate_scribe_id_holds(self):
+        # Two anchors carrying the SAME scribeItemId: ambiguous.
+        # Fail closed — nothing is clicked, no document is claimed.
+        page = LiveAnchorGuardPage(
+            [
+                ("Cancellation", self.HREF_222),
+                ("Cancellation Notice", self.HREF_222),
+            ]
+        )
+        browser = PlaywrightGuardBrowser(page)
+        with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+            browser.open_document(self._doc("222", self.HREF_222))
+        self.assertEqual(page.clicked_hrefs, [])
+
+    def test_open_document_missing_scribe_id_holds(self):
+        page = LiveAnchorGuardPage(self._dup_anchors())
+        browser = PlaywrightGuardBrowser(page)
+        with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+            browser.open_document(
+                self._doc(
+                    "999",
+                    "/dotnet/mvc/Workflow/ASCScribe/Home/DownloadScribeItem"
+                    "?scribeItemId=999&Download=true",
+                )
+            )
+        self.assertEqual(page.clicked_hrefs, [])
 
 
 if __name__ == "__main__":

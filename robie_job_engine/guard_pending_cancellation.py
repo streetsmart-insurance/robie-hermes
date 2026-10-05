@@ -134,16 +134,42 @@ class GuardDocument:
     form: str
     issued: date
     policy_number: str
+    # Durable link identity from the live anchor DOM. Document anchors carry
+    # hrefs like /dotnet/mvc/Workflow/ASCScribe/Home/DownloadScribeItem
+    # ?scribeItemId=...&Download=true. Identical display texts can be
+    # DISTINCT documents with different scribeItemIds, so selection and the
+    # ledger key must use the scribeItemId, never description text alone.
+    href: str = ""
+    scribe_item_id: str = ""
 
     @property
     def document_id(self) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", self.description.casefold()).strip("-")
-        return f"guard:{self.policy_number}:{self.issued.isoformat()}:{slug}"
+        base = f"guard:{self.policy_number}:{self.issued.isoformat()}:{slug}"
+        if self.scribe_item_id:
+            # The scribeItemId disambiguates duplicate display texts in the
+            # durable ledger: two "Cancellation" links are two documents.
+            return f"{base}:scribe-{self.scribe_item_id}"
+        return base
 
     @property
     def filename(self) -> str:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", self.description).strip("_")
         return f"{self.policy_number} {safe or 'document'} Guard.pdf"
+
+
+def scribe_item_id_from_href(href: str) -> str:
+    """Extract the durable scribeItemId from a Guard document download href.
+
+    Returns "" when the href carries no usable scribeItemId.
+    """
+    try:
+        query = urllib.parse.urlsplit(href or "").query
+        values = urllib.parse.parse_qs(query).get("scribeItemId", [])
+    except Exception:
+        return ""
+    candidate = _norm(values[0]) if values else ""
+    return candidate if re.fullmatch(r"[A-Za-z0-9_-]+", candidate) else ""
 
 
 def is_cancellation_document(description: str) -> bool:
@@ -232,6 +258,49 @@ def parse_document_list(
                     policy_number=policy_number,
                 )
             )
+    if not docs:
+        raise IntakeHold("Guard printable documents list is empty")
+    return tuple(docs)
+
+
+def parse_document_links(
+    items: tuple[tuple[str, str, str], ...],
+    *,
+    policy_number: str,
+) -> tuple[GuardDocument, ...]:
+    """Parse live-DOM document anchors.
+
+    ``items`` is one entry per document anchor: (group title, anchor text,
+    href). The href's ``scribeItemId`` query param is the durable document
+    identity and is preserved on every GuardDocument: identical anchor texts
+    can be distinct documents with different scribeItemIds.
+    """
+    docs: list[GuardDocument] = []
+    for group, text, href in items:
+        description = _norm(text)
+        if not description:
+            raise IntakeHold("Guard document link text is missing or ambiguous")
+        issued = date.today()
+        date_match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", description)
+        if date_match:
+            try:
+                month, day, year = (int(part) for part in date_match.groups())
+                issued = date(year, month, day)
+            except ValueError:
+                pass
+        form = description.split("-")[0].strip() if "-" in description else description
+        clean_href = href or ""
+        docs.append(
+            GuardDocument(
+                group=_norm(group) or "Policy Documents",
+                description=description,
+                form=form,
+                issued=issued,
+                policy_number=policy_number,
+                href=clean_href,
+                scribe_item_id=scribe_item_id_from_href(clean_href),
+            )
+        )
     if not docs:
         raise IntakeHold("Guard printable documents list is empty")
     return tuple(docs)
@@ -415,10 +484,9 @@ class PlaywrightGuardBrowser:
         #   then "Miscellaneous Documents" text, then its <a> siblings.
         # - Document anchors have NO class/id/data-* — only href + target="_blank".
         # - CRITICAL: identical display texts can be DISTINCT documents
-        #   (different scribeItemIds). Do NOT dedupe by link text.
-        docs: list[GuardDocument] = []
-        import re as _re
-        from datetime import date as _date
+        #   (different scribeItemIds). Do NOT dedupe by link text: the
+        #   scribeItemId is preserved as the durable document identity.
+        items: list[tuple[str, str, str]] = []
 
         for idx, title in enumerate(_DOC_GROUPS):
             # Find the element containing this section title text
@@ -473,41 +541,41 @@ class PlaywrightGuardBrowser:
                     continue
 
                 href = sib.get_attribute("href") or ""
+                items.append((title, text, href))
 
-                issued = _date.today()
-                date_match = _re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', text)
-                if date_match:
-                    try:
-                        m, d, y = map(int, date_match.groups())
-                        issued = _date(y, m, d)
-                    except Exception:
-                        pass
-                form_part = text.split('-')[0].strip() if '-' in text else text
-                docs.append(GuardDocument(
-                    group=title,
-                    description=text,
-                    form=form_part,
-                    issued=issued,
-                    policy_number=policy_number,
-                ))
-                # Note: href with scribeItemId is available on the element
-                # for download; open_document() locates by description text.
-                # Identical texts are distinct docs — the download logic must
-                # handle duplicates by index, not just text match.
-        
-        if not docs:
+        if not items:
             raise IntakeHold("Guard printable documents groups are missing or ambiguous")
-        return tuple(docs)
+        return parse_document_links(tuple(items), policy_number=policy_number)
 
     # -- document open observation --------------------------------------
     def open_document(self, doc: GuardDocument) -> DocumentOpenObservation:
-        """Click the document's Action control and observe the outcome.
+        """Click the document's download control and observe the outcome.
+
+        Selection is by the durable scribeItemId (the live anchor DOM), never
+        by description text: identical display texts can be distinct documents
+        with different scribeItemIds, so text matching can open the WRONG
+        document. The legacy table DOM carries no scribeItemId and falls back
+        to description-text row matching; an ambiguous row holds.
 
         Returns downloads (real file bytes), viewer_pdfs (in-browser render),
         or emailed=True when Guard sends the document by email instead of
         downloading it. Never guesses.
         """
         page = self.page
+        if doc.scribe_item_id:
+            link = page.locator(f'a[href*="scribeItemId={doc.scribe_item_id}"]')
+            try:
+                count = int(link.count())
+            except Exception:
+                count = -1
+            if count != 1:
+                # Zero matches: the document is gone. More than one: a
+                # partial-id collision. Either way, hold — never guess.
+                raise IntakeHold(
+                    "Guard document link for "
+                    f"scribeItemId {doc.scribe_item_id!r} is missing or ambiguous"
+                )
+            return collect_document_observation(page, link.first.click)
         row = page.locator("tr", has_text=doc.description)
         try:
             if int(row.count()) != 1:
