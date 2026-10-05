@@ -1156,13 +1156,16 @@ def check_preflight_alert_delivery(journal: str | None = None) -> tuple[bool, st
 
 
 def check_ascend_driver_stall() -> tuple[bool, str, dict]:
-    """Alert when actionable Ascend notices were seen and nothing was filed.
+    """Alert when actionable Ascend notices were left unfiled and not deduped.
 
     Reads ``/var/lib/robie-ascend-notice-driver/runs.jsonl`` (or
     ``ASCEND_DRIVER_STATE_DIR`` / ``ASCEND_DRIVER_RUN_LOG``). A missing log
-    or fewer than four completed live runs is quiet. Dry runs do not count.
-    Ignored and unrecognized notices do not count as actionable. The
-    health-check user on Production cannot read the system journal, so
+    or fewer than four judged live runs is quiet. Dry runs do not count.
+    Ignored and unrecognized notices do not count as actionable.
+    ``api_already_filed`` and the other intentional dedupe skips count as
+    handled. Records with neither ``deduped`` nor ``skipped_by_reason``
+    are not judged, so a log from before those counters cannot stay red.
+    The health-check user on Production cannot read the system journal, so
     this probe does not call journalctl.
     """
     extra: dict = {}
