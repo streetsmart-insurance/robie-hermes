@@ -408,6 +408,10 @@ _PENDING_CHIP_NAME = re.compile(
     r"^pending cancellations(?:\s*\(\s*\d+\s*\))?$",
     re.IGNORECASE,
 )
+_UNDERWRITING_CHIP_NAME = re.compile(
+    r"^underwriting(?:\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
 _ALL_ALERTS_CHIP_NAME = re.compile(
     r"^all alerts(?:\s*\(\s*\d+\s*\))?$",
     re.IGNORECASE,
@@ -474,6 +478,7 @@ def _chip_toggle(locator: Any) -> str:
 
 
 _PENDING_TOGGLE_TEXT = re.compile(r"^\s*Pending Cancellations", re.IGNORECASE)
+_UNDERWRITING_TOGGLE_TEXT = re.compile(r"^\s*Underwriting", re.IGNORECASE)
 
 
 def _pending_chip_matches(page: Any) -> list[tuple[int, Any]]:
