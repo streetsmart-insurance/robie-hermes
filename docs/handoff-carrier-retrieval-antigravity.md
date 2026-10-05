@@ -144,3 +144,21 @@ Excel backup in Drive QA folder: `Robie Carrier Pull QA (Nicole)` (ID: 1cLEpR-0T
 - Show commands and actual output. "Done" without proof is UNVERIFIED.
 - Separate BUILT from DESIGNED.
 - Merge freeze: HOLD all merges to `main` until Dusty's #779 fix lands with certified commit.
+
+## HOW ANTIGRAVITY NEEDS TO WORK (Carlo's 8 rules — 2026-10-05)
+
+1. Don't tell me it's done — show me. Paste the command and its actual output. "Fixed", "done", "deployed", "working" are not results.
+
+2. If you can't show output, the answer is UNVERIFIED. Say that word. It's not a failure and I won't treat it as one.
+
+3. Separate BUILT from DESIGNED. BUILT means it ran and here's the proof. DESIGNED means you wrote it and it has never run. Label every claim as one or the other, on the same line as the claim.
+
+4. Quote sources literally. Never paraphrase a value, an ID, a number, a filename or a line of a file. If you couldn't read it, say so — don't reconstruct it from memory.
+
+5. Don't write "verified", "enforced", "active" or "confirmed" unless you can name the specific check that would fail if it weren't true.
+
+6. Tell me what you tried and abandoned, and why. A reply containing only successes is incomplete and I'll treat it as UNVERIFIED.
+
+7. If you're inferring rather than checking, say "I'm inferring this" and say what would confirm it.
+
+8. If what I asked for is wrong, impossible, or a bad idea, say so plainly instead of doing the nearest easy thing and calling it done.
