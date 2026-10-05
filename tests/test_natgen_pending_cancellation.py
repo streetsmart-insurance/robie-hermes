@@ -37,12 +37,18 @@ from robie_job_engine.natgen_pending_cancellation import (
     choose_most_recent_noc,
     classify_noc_row,
     click_forms_view,
+    extract_doc_guid,
+    guid_document_id,
+    guid_from_observation,
     main,
     noc_filename,
+    nonrenewal_document_id,
     open_pending_cancellations,
     parse_noc_grid,
+    parse_nonrenewal_grid,
     pdf_bytes_from_observation,
     read_playwright_pdf_view,
+    require_doc_guid,
     require_loopback_cdp,
     require_noc_pdf_parity,
     select_natgen_page,
@@ -1112,6 +1118,164 @@ class LiveReportSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = LocalDeliveryLedger(Path(tmp))
             self.assertIsNone(ledger.first_seen("natgen-noc:x"))
+
+
+class GuidIdentityTests(unittest.TestCase):
+    """The DisplayPDF iid GUID is the durable document identity."""
+
+    GUID_A = "e549962d-9b21-425d-7db0-08df22c41ea7"
+    GUID_B = "a1111111-2222-3333-4444-555555555555"
+    PDF_URL_A = f"https://natgenagency.com/Policy/DisplayPDF.aspx?iid={GUID_A}"
+
+    def test_extract_guid_from_displaypdf_url(self):
+        self.assertEqual(extract_doc_guid(self.PDF_URL_A), self.GUID_A)
+
+    def test_extract_guid_uppercases_to_lower(self):
+        upper = self.GUID_A.upper()
+        url = f"https://natgenagency.com/Policy/DisplayPDF.aspx?iid={upper}"
+        self.assertEqual(extract_doc_guid(url), self.GUID_A)
+
+    def test_extract_guid_rejects_wrong_path(self):
+        with self.assertRaises(IntakeHold):
+            extract_doc_guid("https://natgenagency.com/Policy/PolicySummary.aspx?iid=" + self.GUID_A)
+
+    def test_extract_guid_rejects_wrong_host(self):
+        with self.assertRaises(IntakeHold):
+            extract_doc_guid("https://example.com/Policy/DisplayPDF.aspx?iid=" + self.GUID_A)
+
+    def test_extract_guid_rejects_missing_iid(self):
+        with self.assertRaises(IntakeHold):
+            extract_doc_guid("https://natgenagency.com/Policy/DisplayPDF.aspx")
+
+    def test_extract_guid_rejects_malformed_guid(self):
+        with self.assertRaises(IntakeHold):
+            extract_doc_guid("https://natgenagency.com/Policy/DisplayPDF.aspx?iid=not-a-guid")
+
+    def test_require_doc_guid_ok(self):
+        self.assertEqual(require_doc_guid(self.GUID_A), self.GUID_A)
+
+    def test_require_doc_guid_rejects_blank(self):
+        with self.assertRaises(IntakeHold):
+            require_doc_guid("")
+
+    def test_guid_document_id_format(self):
+        self.assertEqual(
+            guid_document_id("2031936859 00", self.GUID_A),
+            f"natgen:2031936859 00:{self.GUID_A}",
+        )
+
+    def test_same_text_different_guid_is_distinct(self):
+        # The reported duplicate-text failure mode: identical display text,
+        # different GUIDs must key as distinct ledger documents.
+        a = guid_document_id("2031936859 00", self.GUID_A)
+        b = guid_document_id("2031936859 00", self.GUID_B)
+        self.assertNotEqual(a, b)
+
+    def test_guid_from_observation_single_page(self):
+        obs = NocOpenObservation(
+            downloads=(),
+            pages=(PagePdfView(url=self.PDF_URL_A, pdfs=(b"%PDF-1.4 x",)),),
+        )
+        self.assertEqual(guid_from_observation(obs), self.GUID_A)
+
+    def test_guid_from_observation_ignores_non_pdf_pages(self):
+        obs = NocOpenObservation(
+            downloads=(),
+            pages=(
+                PagePdfView(url="https://natgenagency.com/Policy/PolicySummary.aspx", pdfs=()),
+                PagePdfView(url=self.PDF_URL_A, pdfs=(b"%PDF-1.4 x",)),
+            ),
+        )
+        self.assertEqual(guid_from_observation(obs), self.GUID_A)
+
+    def test_guid_from_observation_conflicting_guids_hold(self):
+        obs = NocOpenObservation(
+            downloads=(),
+            pages=(
+                PagePdfView(url=self.PDF_URL_A, pdfs=(b"%PDF-1.4 x",)),
+                PagePdfView(
+                    url=f"https://natgenagency.com/Policy/DisplayPDF.aspx?iid={self.GUID_B}",
+                    pdfs=(b"%PDF-1.4 y",),
+                ),
+            ),
+        )
+        with self.assertRaises(IntakeHold):
+            guid_from_observation(obs)
+
+    def test_guid_from_observation_no_pages_holds(self):
+        obs = NocOpenObservation(downloads=(b"%PDF-1.4 x",), pages=())
+        with self.assertRaises(IntakeHold):
+            guid_from_observation(obs)
+
+
+class NonRenewalParseTests(unittest.TestCase):
+    """Pending Non-Renewal report parsing (same ?r=5 URL, combobox-switched)."""
+
+    HEADERS = (
+        "POLICY", "NAMED INSURED", "PHONE", "TYPE", "PRODUCT", "DIV",
+        "PROCESSED", "EFFECTIVE", "DESCRIPTION", "PREMIUM", "PRODUCER",
+        "ADDITIONAL PRODUCTS",
+    )
+    ROWS = (
+        ("2035017657 00", "Jane Smith", "555-0100", "Non-Renewal", "HO", "1",
+         "09/20/2026", "11/01/2026", "Non-renewal notice", "$1,200.00", "Carlo", ""),
+        ("2025758382 01", "Bob Jones", "555-0101", "Non-Renewal", "HO", "1",
+         "09/21/2026", "11/02/2026", "Non-renewal notice", "$950.00", "Carlo", ""),
+    )
+    LIST_URL = "https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5"
+
+    def test_live_columns_parse(self):
+        rows = parse_nonrenewal_grid(self.HEADERS, self.ROWS, source_url=self.LIST_URL)
+        self.assertEqual(len(rows), 2)
+        first = rows[0]
+        self.assertEqual(first.policy_number, "2035017657 00")
+        self.assertEqual(first.insured_name, "Jane Smith")
+        self.assertEqual(first.processed_on, date(2026, 9, 20))
+        self.assertEqual(first.effective_on, date(2026, 11, 1))
+        self.assertEqual(first.premium, "$1,200.00")
+        self.assertEqual(first.row_index, 0)
+
+    def test_document_id_format(self):
+        rows = parse_nonrenewal_grid(self.HEADERS, self.ROWS, source_url=self.LIST_URL)
+        self.assertTrue(
+            rows[0].document_id.startswith("natgen-nonrenewal:2035017657 00:2026-09-20:")
+        )
+        self.assertNotEqual(rows[0].document_id, rows[1].document_id)
+
+    def test_header_order_not_load_bearing(self):
+        shuffled = ("EFFECTIVE", "POLICY", "NAMED INSURED", "PROCESSED",
+                    "TYPE", "DESCRIPTION", "PREMIUM")
+        rows_in = (("11/01/2026", "2035017657 00", "Jane Smith", "09/20/2026",
+                    "Non-Renewal", "Non-renewal notice", "$1,200.00"),)
+        rows = parse_nonrenewal_grid(shuffled, rows_in, source_url=self.LIST_URL)
+        self.assertEqual(rows[0].insured_name, "Jane Smith")
+        self.assertEqual(rows[0].effective_on, date(2026, 11, 1))
+
+    def test_empty_rows_hold(self):
+        with self.assertRaises(IntakeHold):
+            parse_nonrenewal_grid(self.HEADERS, (), source_url=self.LIST_URL)
+
+    def test_bad_policy_holds(self):
+        bad = (("ABC",) + self.ROWS[0][1:],)
+        with self.assertRaises(IntakeHold):
+            parse_nonrenewal_grid(self.HEADERS, bad, source_url=self.LIST_URL)
+
+    def test_blank_insured_holds(self):
+        bad = ((self.ROWS[0][0], "") + self.ROWS[0][2:],)
+        with self.assertRaises(IntakeHold):
+            parse_nonrenewal_grid(self.HEADERS, bad, source_url=self.LIST_URL)
+
+    def test_nonrenewal_document_id_helper(self):
+        self.assertEqual(
+            nonrenewal_document_id("2035017657 00", date(2026, 9, 20), date(2026, 11, 1)),
+            "natgen-nonrenewal:2035017657 00:2026-09-20:2026-11-01",
+        )
+
+    def test_dash_separator_normalizes_to_canonical(self):
+        # Live rows read "2035017657 - 00"; the parser normalizes to "2035017657 00".
+        rows_in = (("2035017657 - 00",) + self.ROWS[0][1:],)
+        rows = parse_nonrenewal_grid(self.HEADERS, rows_in, source_url=self.LIST_URL)
+        self.assertEqual(rows[0].policy_number, "2035017657 00")
 
 
 if __name__ == "__main__":
