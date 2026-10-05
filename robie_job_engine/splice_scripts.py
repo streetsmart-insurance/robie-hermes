@@ -1,9 +1,18 @@
 """Spoken frames for the Splice workflows and the lead follow-up.
 
-The nine Splice bodies stay here as reference. A label does not select
-them. Lead follow-up uses the Sales Center frame: on behalf of the
-assigned producer, press 1 to reach that producer, press 2 when a text
-is offered, and press 6 to opt out. There is no opt-out toll-free number.
+Each of the nine Splice bodies is selected by its own EZLynx activity
+label (see call_pickup.SPLICE_LABELS). Lead follow-up uses the same
+frame: on behalf of the assigned producer, press 1 to reach that
+producer, press 2 when a text is offered, and press 6 to opt out.
+There is no opt-out toll-free number.
+
+The spoken body is generic. It uses the client's first name and the
+assigned producer's name. It does not read the task note for audit
+details, recommendation text, which mail came back, which document
+needs a signature, what information was requested, a quote or policy
+number, the prior carrier, or a renewal date. The producer transfer
+number comes from the staff directory, and the dialed number comes
+from the applicant phone record. Neither of those is a task column.
 """
 from __future__ import annotations
 

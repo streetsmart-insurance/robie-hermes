@@ -26,6 +26,8 @@ DROPIN = (
     ROOT / "deploy/systemd/robie-task-intake.service.d/20-bland-prod.conf.example"
 ).read_text(encoding="utf-8")
 INSTALLER = ROOT / "scripts/install-robie-task-intake.sh"
+TEST_UNIT = (ROOT / "deploy/systemd/robie-task-intake-test.service").read_text(encoding="utf-8")
+TEST_TIMER = (ROOT / "deploy/systemd/robie-task-intake-test.timer").read_text(encoding="utf-8")
 
 PROD_ENV = {
     "ROBIE_ENV": "PRODUCTION",
@@ -138,6 +140,165 @@ def test_unit_files_use_the_venv_python_and_the_requested_cadence():
     assert "ROBIE_CALL_SMS_CONFIGURED" not in DROPIN.replace(
         "# ROBIE_CALL_SMS_CONFIGURED is left unset.", ""
     )
+
+
+def test_test_intake_unit_targets_jake_ferrara_and_leaves_task_ids_empty():
+    assert "User=streetsmart-hermes-test" in TEST_UNIT
+    assert "Group=streetsmart-hermes-test" in TEST_UNIT
+    assert "/opt/streetsmart-hermes-test" in TEST_UNIT
+    assert "Environment=ROBIE_ENV=TEST" in TEST_UNIT
+    assert "Environment=ROBIE_PHONE_LIVE_CALLS=1" in TEST_UNIT
+    assert "Environment=ROBIE_PHONE_REAL_CLIENTS" not in TEST_UNIT
+    assert "Environment=ROBIE_SPLICE_TEST_APPLICANT_ID=25486692" in TEST_UNIT
+    assert "Environment=ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS=" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_DISCUSSION_API=live" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest" in TEST_UNIT
+    assert "EnvironmentFile=/etc/streetsmart-hermes-test/robie-message-runtime.env" in TEST_UNIT
+    assert "EnvironmentFile=/etc/streetsmart-hermes-test/robie-accountability.env" in TEST_UNIT
+    assert "robie-ezlynx.env" not in TEST_UNIT
+    assert "ezlynx-api-prod" in TEST_UNIT
+    assert "robie-test-jake-cell" in TEST_UNIT
+    assert "bland-dispatcher-kill-switch" in TEST_UNIT
+    assert "robie-test-bland-api-key" in TEST_UNIT
+    assert "Unit=robie-task-intake-test.service" in TEST_TIMER
+    assert "OnUnitActiveSec=5min" in TEST_TIMER
+    assert "25486692" not in UNIT
+    assert "ROBIE_PHONE_LIVE_CALLS" not in UNIT
+
+
+def test_test_intake_unit_never_sets_write_scope_all():
+    """Test talks to the Production EZLynx tenant. All-clients would cover every real client."""
+    for text in (TEST_UNIT, TEST_TIMER):
+        assert "ROBIE_EZLYNX_WRITE_SCOPE=all" not in text
+        for line in text.splitlines():
+            assignment = line.split("#", 1)[0]
+            assert "ROBIE_EZLYNX_WRITE_SCOPE" not in assignment
+            assert "ROBIE_PLAYGROUND" not in assignment
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692" in TEST_UNIT
+    assert "Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=*" not in TEST_UNIT
+    assert "220250093" not in TEST_UNIT
+    assert "26356199" not in TEST_UNIT
+
+
+def _hostname_env(env: dict[str, str], directory: Path, name: str) -> dict[str, str]:
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "hostname"
+    script.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' '{name}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    updated = dict(env)
+    updated["PATH"] = str(directory) + os.pathsep + updated.get("PATH", "")
+    return updated
+
+
+def test_install_test_renders_the_test_unit_without_touching_production(tmp_path):
+    log = tmp_path / "systemctl.log"
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$ROBIE_SYSTEMCTL_LOG\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IEXEC)
+    env = _hostname_env(os.environ.copy(), tmp_path / "bin", "hermes-test-01")
+    env.update({
+        "ROBIE_UNIT_DEST": str(tmp_path / "systemd"),
+        "ROBIE_RELEASE_ROOT": str(ROOT),
+        "ROBIE_SYSTEMCTL": str(systemctl),
+        "ROBIE_SYSTEMCTL_LOG": str(log),
+        "ROBIE_BACKUP_ROOT": str(tmp_path / "backups"),
+    })
+    proc = subprocess.run(
+        ["bash", str(INSTALLER), "--install-test"],
+        check=False, capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "TEST_INTAKE_INSTALLED" in proc.stdout
+    installed = (tmp_path / "systemd" / "robie-task-intake-test.service").read_text(encoding="utf-8")
+    assert "Environment=ROBIE_SPLICE_TEST_APPLICANT_ID=25486692" in installed
+    assert "Environment=ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS=" in installed
+    assert not (tmp_path / "systemd" / "robie-task-intake.service").exists()
+    assert "enable --now robie-task-intake-test.timer" in log.read_text(encoding="utf-8")
+    rolled = _run("--rollback", tmp_path, log)
+    assert rolled.returncode == 0, rolled.stderr
+    assert not (tmp_path / "systemd" / "robie-task-intake-test.service").exists()
+    assert not (tmp_path / "systemd" / "robie-task-intake-test.timer").exists()
+    assert "robie-task-intake-test.timer" in log.read_text(encoding="utf-8")
+
+
+def test_install_test_refuses_unless_the_host_is_hermes_test_01(tmp_path):
+    env = _hostname_env(os.environ.copy(), tmp_path / "bin", "hermes-poc-01")
+    env.update({
+        "ROBIE_UNIT_DEST": str(tmp_path / "systemd"),
+        "ROBIE_RELEASE_ROOT": str(ROOT),
+        "ROBIE_SYSTEMCTL": "/bin/true",
+    })
+    proc = subprocess.run(
+        ["bash", str(INSTALLER), "--install-test"],
+        check=False, capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 2
+    assert "hermes-test-01 only" in proc.stderr
+    assert not (tmp_path / "systemd" / "robie-task-intake-test.service").exists()
+
+
+def test_install_test_defaults_to_the_test_release_root(tmp_path):
+    env = _hostname_env(os.environ.copy(), tmp_path / "bin", "hermes-test-01")
+    env.update({
+        "ROBIE_UNIT_DEST": str(tmp_path / "systemd"),
+        "ROBIE_SYSTEMCTL": "/bin/true",
+    })
+    env.pop("ROBIE_RELEASE_ROOT", None)
+    proc = subprocess.run(
+        ["bash", str(INSTALLER), "--install-test"],
+        check=False, capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 2
+    assert (
+        "/opt/streetsmart-hermes-test/releases/current/deploy/systemd/"
+        "robie-task-intake-test.service"
+    ) in proc.stderr
+
+
+def test_test_intake_discussion_client_uses_the_prod_tenant(monkeypatch):
+    from robie_job_engine.ezlynx_discussions import DiscussionApiConfig
+    from robie_job_engine.ezlynx_task_intake import _build_discussion_client
+
+    seen = {}
+
+    def load_discussion(**kwargs):
+        seen["environ"] = dict(kwargs.get("environ") or {})
+        return DiscussionApiConfig(
+            discussion_base_url="https://app.ezlynx.com/DiscussionApi/",
+            token_endpoint="https://app.ezlynx.com/auth/connect/token",
+            client_id="id",
+            client_secret="secret",
+            username="SSRobie",
+            integration_group_id="group",
+        )
+
+    def refuse_uat(*_args, **_kwargs):
+        raise AssertionError("Test intake must not load the UAT EZLynx secret")
+
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    monkeypatch.delenv("ROBIE_EZLYNX_DISCUSSION_API", raising=False)
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_api_only_writes.load_discussion_api_config",
+        load_discussion,
+    )
+    monkeypatch.setattr(
+        "robie_job_engine.ezlynx_api.load_ezlynx_api_config",
+        refuse_uat,
+    )
+    client = _build_discussion_client()
+    assert client._config.discussion_base_url.startswith("https://app.ezlynx.com/")
+    assert seen["environ"]["ROBIE_EZLYNX_DISCUSSION_API"] == "live"
+    assert seen["environ"]["ROBIE_ENV"] == "TEST"
 
 
 def test_installer_requires_root_for_the_real_systemd_dir():
