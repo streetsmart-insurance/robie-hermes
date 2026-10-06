@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -68,6 +69,8 @@ DOC_LINE = (
     "the 9:00 AM department Doc."
 )
 PHONE_RUN = re.compile(r"\d{7,}")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -395,6 +398,15 @@ def _write_receipt(app_root: Path, day: date, receipt: Mapping[str, Any]) -> Non
     temporary.replace(path)
 
 
+def _has_open_items(departments: Mapping[str, Any]) -> bool:
+    """True if any department has any open items worth reporting."""
+    for key, _label in OPEN_ITEM_FIELDS:
+        for data in departments.values():
+            if isinstance(data, dict) and _list_len(data.get(key)) > 0:
+                return True
+    return False
+
+
 def run_eod(
     *,
     app_root: Path,
@@ -420,6 +432,45 @@ def run_eod(
             "status": kind,
             "target_date": report_day.isoformat(),
             "text": text,
+        }
+    # Carlo 2026-10-05: Don't post "not ready" status updates to Team Lead Chat.
+    # There's nothing actionable for the team leads — log locally only.
+    if kind == "incomplete":
+        logger.info(
+            "EOD %s: snapshot not ready (%s), skipping Team Lead Chat post. "
+            "Message text logged for debugging: %s",
+            report_day.isoformat(),
+            sources.snapshot_problem,
+            text,
+        )
+        _write_receipt(app_root, report_day, {
+            "target_date": report_day.isoformat(),
+            "status": "incomplete_skipped",
+            "posted_at": datetime.now(timezone.utc).isoformat(),
+            "reason": sources.snapshot_problem,
+        })
+        return {
+            "delivered": False,
+            "status": "incomplete_skipped",
+            "target_date": report_day.isoformat(),
+            "reason": sources.snapshot_problem,
+        }
+    # Carlo 2026-10-05: Don't post when the snapshot is ready but there's
+    # nothing to report (zero open items). Silence is the signal.
+    if sources.departments is not None and not _has_open_items(sources.departments):
+        logger.info(
+            "EOD %s: snapshot ready but zero open items, skipping Team Lead Chat post.",
+            report_day.isoformat(),
+        )
+        _write_receipt(app_root, report_day, {
+            "target_date": report_day.isoformat(),
+            "status": "clean_skipped",
+            "posted_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {
+            "delivered": False,
+            "status": "clean_skipped",
+            "target_date": report_day.isoformat(),
         }
     prior = _read_receipt(app_root, report_day)
     if prior and prior.get("status") == "summary":

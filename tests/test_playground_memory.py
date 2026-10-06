@@ -70,7 +70,9 @@ class MemoryTests(unittest.TestCase):
                 self.assertIn("Commercial team", saved[0])
                 mode = Path(memory_db_path(db)).stat().st_mode & 0o777
                 self.assertEqual(mode, 0o640)
-                self.assertIn("Practice mode", saved[0])
+                # 2026-10-05: no "Practice mode" tag without explicit test client
+                # (live-thread misfire fix) — team memory has no client context
+                self.assertNotIn("Practice mode", saved[0])
                 self.assertNotIn("Ref: job", saved[0])
                 listed = handle_playground_chat(
                     db,
