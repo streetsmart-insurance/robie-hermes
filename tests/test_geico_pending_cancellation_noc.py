@@ -30,7 +30,10 @@ from robie_job_engine.geico_pending_cancellation_noc import (
     classify_line,
     classify_policy_documents,
     collect_notice_observation,
+    extract_document_id,
+    fetch_notice_pdf_direct,
     main,
+    noc_document_id,
     noc_filename,
     parse_alert_grid,
     pdf_bytes_from_observation,
@@ -97,11 +100,15 @@ def prove_grid(*, extra=(), more_pages=False, headers=HEADERS) -> AlertGrid:
     return AlertGrid(LIST_URL, headers, PROVE_ROWS + tuple(extra), more_pages)
 
 
+def _test_doc_uuid(policy_number: str) -> str:
+    return f"00000000-0000-4000-8000-{int(policy_number):012d}"
+
+
 def prove_paths(**overrides) -> dict[str, NoticePath]:
     paths = {
         COMMERCIAL: NoticePath("billing_only"),
-        GUEVARA: NoticePath("noc", "Pending Cancellation Notice"),
-        PANELLA: NoticePath("noc", "CANCELLATION NOTICE"),
+        GUEVARA: NoticePath("noc", "Pending Cancellation Notice", document_id=_test_doc_uuid(GUEVARA)),
+        PANELLA: NoticePath("noc", "CANCELLATION NOTICE", document_id=_test_doc_uuid(PANELLA)),
     }
     paths.update(overrides)
     return paths
@@ -136,7 +143,8 @@ class ScriptedBrowser:
         blob = self.pdfs[policy_number]
         if not blob:
             raise IntakeHold("NOC PDF capture is missing or ambiguous")
-        return blob
+        # Return (document_id, pdf_bytes) per the direct-fetch contract.
+        return _test_doc_uuid(policy_number), blob
 
     def return_to_pending_list(self):
         self.returns += 1
@@ -185,6 +193,135 @@ class ParseTests(unittest.TestCase):
             noc_filename("123")
         with self.assertRaises(IntakeHold):
             noc_filename("../9300116248")
+
+
+class DirectFetchTests(unittest.TestCase):
+    """Direct PDF fetch via document URL — never touches the viewer.
+
+    Verified 2026-10-05: GEICO renders notices in Chrome's PDF viewer inside
+    an iframe that automation cannot operate. The worker extracts the
+    documentId from the notice link href and fetches via the authenticated
+    request context.
+    """
+
+    def test_extract_document_id_from_viewer_url(self):
+        url = "https://edgeextended.geico.com/view-document?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+        self.assertEqual(extract_document_id(url), "eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+
+    def test_extract_document_id_case_insensitive(self):
+        url = "https://edgeextended.geico.com/view?documentId=EAF9B197-7471-3C36-2F23-3ED54027B6D6"
+        self.assertEqual(extract_document_id(url), "eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+
+    def test_extract_document_id_missing_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view-document")
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("")
+
+    def test_extract_document_id_malformed_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view?documentId=not-a-uuid")
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view?documentId=123")
+
+    def test_noc_document_id_with_uuid(self):
+        did = noc_document_id("6253395526", date(2026, 10, 6), "eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+        self.assertEqual(did, "geico-noc:6253395526:2026-10-06:doc-eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+
+    def test_noc_document_id_without_uuid_unchanged(self):
+        did = noc_document_id("6253395526", date(2026, 10, 6))
+        self.assertEqual(did, "geico-noc:6253395526:2026-10-06")
+
+    def test_noc_document_id_bad_uuid_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            noc_document_id("6253395526", date(2026, 10, 6), "not-a-uuid")
+
+    def test_fetch_direct_never_clicks(self):
+        """The notice link is read (href), never clicked. No viewer involved."""
+        token = pdf_bytes(b"direct-fetch")
+        doc_id = "eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+        href = f"https://edgeextended.geico.com/view-document?documentId={doc_id}"
+        clicks = []
+
+        class FakeLocator:
+            def get_attribute(self, name):
+                return href if name == "href" else None
+            def click(self, *a, **k):
+                clicks.append("clicked")
+                raise AssertionError("notice link must never be clicked")
+
+        class FakePage:
+            def __init__(self):
+                self.context = SimpleNamespace(
+                    request=SimpleNamespace(
+                        get=lambda url, timeout: SimpleNamespace(ok=True, body=lambda: token)
+                    )
+                )
+            def get_by_role(self, role, name=None, exact=True):
+                loc = FakeLocator()
+                loc.count = lambda: 1
+                return loc
+
+        # _notice_match uses page.get_by_role; stub it to return our locator.
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        orig = mod._notice_match
+        try:
+            mod._notice_match = lambda page: ("CANCELLATION NOTICE", FakeLocator())
+            got_id, got_bytes = fetch_notice_pdf_direct(FakePage())
+        finally:
+            mod._notice_match = orig
+        self.assertEqual(got_id, doc_id)
+        self.assertEqual(got_bytes, token)
+        self.assertEqual(clicks, [])
+
+    def test_fetch_direct_non_pdf_holds(self):
+        doc_id = "eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+        href = f"https://edgeextended.geico.com/view-document?documentId={doc_id}"
+
+        class FakeLocator:
+            def get_attribute(self, name):
+                return href if name == "href" else None
+
+        class FakePage:
+            def __init__(self):
+                self.context = SimpleNamespace(
+                    request=SimpleNamespace(
+                        get=lambda url, timeout: SimpleNamespace(ok=True, body=lambda: b"<html>not a pdf</html>")
+                    )
+                )
+            def get_by_role(self, role, name=None, exact=True):
+                loc = FakeLocator()
+                loc.count = lambda: 1
+                return loc
+
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        orig = mod._notice_match
+        try:
+            mod._notice_match = lambda page: ("CANCELLATION NOTICE", FakeLocator())
+            with self.assertRaisesRegex(IntakeHold, "not a PDF"):
+                fetch_notice_pdf_direct(FakePage())
+        finally:
+            mod._notice_match = orig
+
+    def test_fetch_direct_missing_href_holds(self):
+        class FakeLocator:
+            def get_attribute(self, name):
+                return None
+
+        class FakePage:
+            def get_by_role(self, role, name=None, exact=True):
+                loc = FakeLocator()
+                loc.count = lambda: 1
+                return loc
+
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        orig = mod._notice_match
+        try:
+            mod._notice_match = lambda page: ("CANCELLATION NOTICE", FakeLocator())
+            with self.assertRaisesRegex(IntakeHold, "no href"):
+                fetch_notice_pdf_direct(FakePage())
+        finally:
+            mod._notice_match = orig
 
 
 class PdfCaptureTests(unittest.TestCase):
@@ -846,7 +983,10 @@ class NavPage:
                     nodes.append(FakeNode("link", "Billing"))
                 if self.billing_open:
                     notice = "CANCELLATION NOTICE" if self.policy == PANELLA else "Pending Cancellation Notice"
-                    nodes.append(FakeNode("link", notice))
+                    # Direct-fetch href with documentId (no viewer click needed).
+                    doc_id = f"00000000-0000-4000-8000-{int(self.policy or '0'):012d}"
+                    href = f"https://edgeextended.geico.com/view-document?documentId={doc_id}"
+                    nodes.append(FakeNode("link", notice, attrs={"href": href}))
             return nodes
         nodes.append(FakeNode("combobox", text=self.combo_text))
         if self.table_visible:
@@ -939,6 +1079,13 @@ class NavContext:
             self.listeners.remove(fn)
 
     def _get(self, url, timeout):
+        # Direct-fetch: return PDF bytes for document URLs.
+        # The documentId encodes the policy number in the last 12 digits.
+        import re
+        m = re.search(r"documentId=00000000-0000-4000-8000-(\d{12})", str(url or ""))
+        if m:
+            policy = str(int(m.group(1)))
+            return SimpleNamespace(ok=True, body=lambda: pdf_bytes(policy.encode()))
         return SimpleNamespace(ok=True, body=lambda: b"")
 
 
@@ -971,13 +1118,16 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(page.clicks[0], "Pending Cancellations (3)")
         self.assertNotIn("Client Alerts", page.clicks)
         self.assertIn("Documents", page.clicks)
-        self.assertIn("Pending Cancellation Notice", page.clicks)
-        self.assertIn("CANCELLATION NOTICE", page.clicks)
+        # Direct-fetch: the notice link is never clicked (viewer is not
+        # operable). The PDF is fetched via the document URL instead.
+        self.assertNotIn("Pending Cancellation Notice", page.clicks)
+        self.assertNotIn("CANCELLATION NOTICE", page.clicks)
         self.assertEqual(page.url, LIST_URL)
         self.assertEqual(page.screenshot_calls, 1)
-        notice_at = page.clicks.index("Pending Cancellation Notice")
-        self.assertLess(page.clicks.index("Documents"), notice_at)
-        self.assertLess(page.clicks.index("Billing"), notice_at)
+        # Direct-fetch: Documents and Billing are clicked to reach the notice
+        # list, but the notice link itself is never clicked.
+        self.assertIn("Documents", page.clicks)
+        self.assertIn("Billing", page.clicks)
 
     def test_filter_chip_selects_pending_cancellations_without_client_alerts(self):
         page = NavPage(chip_mode="open")
