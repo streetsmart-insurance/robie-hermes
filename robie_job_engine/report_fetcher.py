@@ -482,6 +482,20 @@ def fetch_report_rows(
     email CSVs, auth failure, or missing columns.
     """
     spec = get_report_spec(report_id)  # raises ReportRegistryError for unknown ids
+    if spec.report_id == "4659":
+        # Report 4659's export is the tile-click modal flow (Total Open Change
+        # Requests -> detail table -> All results), not the generic Export
+        # button, and the pipeline REQUIRES the two summary-tile values for
+        # the P10 count cross-check. A lossy generic path would ship rows
+        # without that check, so fail closed and point at the dedicated
+        # driver (robie_job_engine.reports.change_tracker.fetch_4659).
+        raise ReportRegistryError(
+            "report 4659 must be fetched via "
+            "robie_job_engine.reports.change_tracker.fetch_4659.fetch_4659_export "
+            "(tile-click modal flow + schema fingerprint + tile count "
+            "cross-check); fetch_report_rows' generic Looker path cannot "
+            "provide the required summary-tile values"
+        )
     # Runtime filters are fingerprinted by start_run() but are NOT applied in
     # the email schedule or the Looker UI. Silently ignoring them would return
     # wrong-scope rows, so fail closed instead of pretending to filter.
