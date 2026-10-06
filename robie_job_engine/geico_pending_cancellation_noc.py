@@ -1259,7 +1259,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, due_on: date, policy_number: str) -> Path:
+    def record(self, source: SourceItem, *, due_on: date, policy_number: str, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("NOC filename is missing or ambiguous")
@@ -1284,6 +1284,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "due_date": due_on.isoformat(),
@@ -1640,7 +1641,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number)
+            saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number, insured_name=alert.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             row = _row_payload(alert, outcome="HELD", reason=str(exc))

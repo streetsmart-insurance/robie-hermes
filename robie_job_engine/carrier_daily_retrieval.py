@@ -287,6 +287,25 @@ def _ledger_issued_dates(pack: Path) -> dict[str, str]:
     return mapping
 
 
+def _ledger_insured_names(pack: Path) -> dict[str, str]:
+    """Map PDF filename -> insured name from carrier ledger JSONs in the pack."""
+    mapping: dict[str, str] = {}
+    for ledger_file in sorted(pack.glob("*-ledger.json")):
+        try:
+            data = json.loads(ledger_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items = data.get("items", {}) if isinstance(data, dict) else {}
+        for _source_id, entry in items.items():
+            if not isinstance(entry, dict):
+                continue
+            fname = entry.get("filename")
+            insured = entry.get("insured_name") or ""
+            if fname and insured:
+                mapping.setdefault(str(fname), str(insured))
+    return mapping
+
+
 def _parse_filename(stem: str) -> tuple[str, str]:
     """Best-effort (policy_number, document_type) from a pack PDF filename."""
     cleaned = _DATE_PAREN_RE.sub("", stem)
@@ -307,13 +326,15 @@ def _filename_doc_date(stem: str) -> str:
 def collect_documents(pack: Path, carrier_display: str, *, as_of: date) -> list[DocumentRow]:
     """Scan a carrier's dated pack folder for downloaded PDFs.
 
-    Insured names are not recoverable from pack filenames or ledgers, so that
-    column is left blank rather than invented.
+    Insured names come from the carrier ledger entries; packs written before
+    ledgers persisted insured names leave the column blank rather than
+    inventing a value.
     """
     rows: list[DocumentRow] = []
     if not pack.is_dir():
         return rows
     issued = _ledger_issued_dates(pack)
+    insured_names = _ledger_insured_names(pack)
     for pdf in sorted(pack.glob("*.pdf")):
         stem = pdf.stem
         policy, doc_type = _parse_filename(stem)
@@ -324,6 +345,7 @@ def collect_documents(pack: Path, carrier_display: str, *, as_of: date) -> list[
                 filename=pdf.name,
                 local_path=pdf,
                 policy_number=policy,
+                insured_name=insured_names.get(pdf.name, ""),
                 document_type=doc_type,
                 document_date=doc_date,
             )

@@ -179,6 +179,51 @@ class DocumentCollectionTests(unittest.TestCase):
             docs = collect_documents(Path(tmp) / "nope", "Guard", as_of=AS_OF)
         self.assertEqual(docs, [])
 
+    def test_insured_name_populated_from_ledger(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = tmp_path_pack_with_insured(
+                Path(tmp),
+                "guard",
+                {"PRAU716089 Cancellation Guard.pdf": ("2026-09-23", "Precision Builders And Improvements")},
+            )
+            docs = collect_documents(pack, "Guard", as_of=AS_OF)
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0].insured_name, "Precision Builders And Improvements")
+
+    def test_insured_name_blank_when_ledger_lacks_it(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = tmp_path_pack_with_insured(
+                Path(tmp), "guard", {"PRAU716089 Cancellation Guard.pdf": ("2026-09-23", "")}
+            )
+            docs = collect_documents(pack, "Guard", as_of=AS_OF)
+        self.assertEqual(len(docs), 1)
+        # blank rather than invented
+        self.assertEqual(docs[0].insured_name, "")
+
+
+def tmp_path_pack_with_insured(tmp_path: Path, name: str, files: dict[str, tuple[str | None, str]]) -> Path:
+    """Create a dated pack folder whose ledger entries carry insured names.
+
+    files: filename -> (issued_date or None, insured_name or "").
+    """
+    pack = tmp_path / name / AS_OF.isoformat()
+    pack.mkdir(parents=True)
+    items = {}
+    for i, (fname, (issued, insured)) in enumerate(files.items()):
+        (pack / fname).write_bytes(PDF_BYTES)
+        entry: dict[str, object] = {"filename": fname, "sha256": "abc", "bytes": 10}
+        if issued is not None:
+            entry["issued_date"] = issued
+        if insured:
+            entry["insured_name"] = insured
+        items[f"doc-{i}"] = entry
+    (pack / f"{name}-ledger.json").write_text(json.dumps({"items": items}))
+    return pack
+
 
 class SheetContentTests(unittest.TestCase):
     def test_header_and_hyperlink_rows(self):

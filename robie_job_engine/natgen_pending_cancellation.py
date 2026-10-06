@@ -1211,7 +1211,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, processed_on: date) -> Path:
+    def record(self, source: SourceItem, *, processed_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME or source.filename.endswith(" HELD.pdf"):
             raise IntakeHold("NOC filename is missing or ambiguous")
@@ -1225,6 +1225,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "processed_date": processed_on.isoformat(),
@@ -1446,7 +1447,7 @@ class NatGenPendingCancellationPortal:
 
     def publish_source(self, source: SourceItem) -> str:
         row = self.noc(source.source_id)
-        path = self.ledger.record(source, processed_on=row.processed_on)
+        path = self.ledger.record(source, processed_on=row.processed_on, insured_name=row.insured_name)
         self._mark_delivered(source.source_id)
         return str(path)
 

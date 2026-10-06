@@ -364,6 +364,53 @@ class NetworkInterceptionTests(unittest.TestCase):
         self.assertEqual(captured, [])
 
 
+class LedgerInsuredNameTests(unittest.TestCase):
+    """record() must persist the insured name so the daily sheet can show it."""
+
+    def test_record_persists_insured_name(self):
+        from robie_job_engine.intake_core import SourceItem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalDeliveryLedger(Path(tmp) / "pull")
+            source = SourceItem(
+                system=PROCESS,
+                source_account="gateway.geico.com",
+                source_id="geico:6253395526:test-doc",
+                source_url="https://gateway.geico.com/#noc=test-doc",
+                received_at="2026-10-06T00:00:00+00:00",
+                filename="6253395526 Cancel_Notice.pdf",
+                content=pdf_bytes(b"test"),
+            )
+            ledger.record(
+                source,
+                due_on=date(2026, 10, 6),
+                policy_number="6253395526",
+                insured_name="Charlemagne Guevara",
+            )
+            data = json.loads((Path(tmp) / "pull" / "geico-noc-ledger.json").read_text())
+        entry = data["items"]["geico:6253395526:test-doc"]
+        self.assertEqual(entry["insured_name"], "Charlemagne Guevara")
+        self.assertEqual(entry["policy_number"], "6253395526")
+
+    def test_record_defaults_insured_name_blank(self):
+        from robie_job_engine.intake_core import SourceItem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalDeliveryLedger(Path(tmp) / "pull")
+            source = SourceItem(
+                system=PROCESS,
+                source_account="gateway.geico.com",
+                source_id="geico:6253395526:test-doc2",
+                source_url="https://gateway.geico.com/#noc=test-doc2",
+                received_at="2026-10-06T00:00:00+00:00",
+                filename="6253395526 Cancel_Notice.pdf",
+                content=pdf_bytes(b"test"),
+            )
+            ledger.record(source, due_on=date(2026, 10, 6), policy_number="6253395526")
+            data = json.loads((Path(tmp) / "pull" / "geico-noc-ledger.json").read_text())
+        self.assertEqual(data["items"]["geico:6253395526:test-doc2"]["insured_name"], "")
+
+
 class ViewerFlowTests(unittest.TestCase):
     """End-to-end viewer flow with mocked Playwright objects (no live portal).
 

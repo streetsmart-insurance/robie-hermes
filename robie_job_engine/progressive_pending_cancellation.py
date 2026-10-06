@@ -644,7 +644,7 @@ class FaoCancellationLedger:
             raise IntakeHold("Existing Progressive FAO file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Progressive FAO filename is missing or ambiguous")
@@ -660,6 +660,7 @@ class FaoCancellationLedger:
             raise IntakeHold("Existing Progressive FAO file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -760,7 +761,7 @@ def _pull_underwriting_memos(
         )
         source.validate()
         try:
-            saved = ledger.record(source, issued_on=doc.document_date)
+            saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
@@ -880,7 +881,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, issued_on=doc.document_date)
+            saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))

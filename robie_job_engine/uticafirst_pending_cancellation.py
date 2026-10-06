@@ -362,7 +362,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, processed_on: date) -> Path:
+    def record(self, source: SourceItem, *, processed_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME or source.filename.endswith(" HELD.pdf"):
             raise IntakeHold("NOC filename is missing or ambiguous")
@@ -376,6 +376,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "processed_date": processed_on.isoformat(),
@@ -738,7 +739,7 @@ def run_pull(
             content=pdf_bytes,
         )
         archive.preserve(item)
-        ledger.record(item, processed_on=txn_date)
+        ledger.record(item, processed_on=txn_date, insured_name=row.insured_name)
         downloaded.append({
             **_row_payload(row, "PULLED"),
             "document_id": document_id,

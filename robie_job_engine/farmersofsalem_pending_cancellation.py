@@ -673,7 +673,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing Farmers of Salem file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, processed_on: date) -> Path:
+    def record(self, source: SourceItem, *, processed_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         path = self.pdf_path(processed_on, source.filename)
         if path.exists():
@@ -685,6 +685,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing Farmers of Salem file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "processed_date": processed_on.isoformat(),
@@ -792,7 +793,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, processed_on=target.doc_date)
+            saved = ledger.record(source, processed_on=target.doc_date, insured_name=item.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_held_row(item, str(exc)))

@@ -623,7 +623,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Utica First filename is missing or ambiguous")
@@ -639,6 +639,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -770,7 +771,7 @@ def run_pull(
             )
             source.validate()
             try:
-                saved = ledger.record(source, issued_on=doc.added_date)
+                saved = ledger.record(source, issued_on=doc.added_date, insured_name=row.insured_name)
                 archive.preserve(source)
             except IntakeHold as exc:
                 held.append(_row_payload(row, outcome="HELD", reason=str(exc)))

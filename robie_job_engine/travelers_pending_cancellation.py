@@ -521,7 +521,7 @@ class TravelersDeliveryLedger:
             raise IntakeHold("Existing Travelers file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         path = self.doc_path(issued_on, source.filename)
         if path.exists():
@@ -535,6 +535,7 @@ class TravelersDeliveryLedger:
             raise IntakeHold("Existing Travelers file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -543,7 +544,8 @@ class TravelersDeliveryLedger:
         return path
 
     def record_row(self, *, document_id: str, filename: str, issued_on: date,
-                   digest: str, size: int, report_document_id: str) -> None:
+                   digest: str, size: int, report_document_id: str,
+                   insured_name: str = "") -> None:
         """Ledger a per-policy row against its date's shared Word document."""
         self.ensure_private()
         data = self._load()
@@ -551,6 +553,7 @@ class TravelersDeliveryLedger:
             raise IntakeHold("Existing Travelers file conflicts with the pull ledger")
         data["items"][document_id] = {
             "filename": filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": size,
             "issued_date": issued_on.isoformat(),
@@ -986,6 +989,7 @@ def run_pull(
                         document_id=row.document_id, filename=filename,
                         issued_on=activity.activity_date, digest=digest,
                         size=len(content), report_document_id=date_doc_id,
+                        insured_name=row.account_name,
                     )
                 except IntakeHold as exc:
                     entry = _row_payload(row, outcome="HELD", reason=str(exc))
