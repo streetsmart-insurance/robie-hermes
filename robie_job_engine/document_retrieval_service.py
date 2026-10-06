@@ -1,6 +1,8 @@
-"""Pull and file FAO, NatGen, and Geico for the previous business day.
+"""Pull and file carrier documents for the previous business day.
 
-Progressive BOP is not in this run. Filing still requires the kill switch
+FAO (Progressive memos), NatGen, Geico NOC, Travelers, Farmers of Salem,
+Guard, Progressive pending cancellations, and Utica First. Progressive BOP
+is not in this run. Filing still requires the kill switch
 ``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1``. When that switch is off, this
 records a hold and does not call a carrier portal or EZLynx.
 
@@ -30,13 +32,21 @@ from .document_retrieval_filing import (
     pack_filing_items,
 )
 
-CARRIERS = ("fao", "natgen", "geico")
+CARRIERS = (
+    "fao", "natgen", "geico",
+    "travelers", "farmersofsalem", "guard", "progressive", "uticafirst",
+)
 LAST_RUN_NAME = "document-retrieval-last-run.json"
 BAD_SIGNALS = ("EZLYNX_WRITE_SCOPE_REFUSED", "document_filed_note_held")
 OUTPUT_ROOTS = {
     "fao": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/progressive"),
     "natgen": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/natgen"),
     "geico": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/geico"),
+    "travelers": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/travelers"),
+    "farmersofsalem": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/farmersofsalem"),
+    "guard": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/guard"),
+    "progressive": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/progressive"),
+    "uticafirst": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/uticafirst"),
 }
 _HELD_STATUSES = frozenset({
     "held",
@@ -58,7 +68,7 @@ def state_dir() -> Path:
 
 
 def carrier_argv(day: date) -> dict[str, list[str]]:
-    """Command arguments for the three Production pulls. BOP is absent."""
+    """Command arguments for the Production pulls. BOP is absent."""
 
     iso = day.isoformat()
     return {
@@ -68,6 +78,11 @@ def carrier_argv(day: date) -> dict[str, list[str]]:
         ],
         "natgen": ["--start", iso, "--end", iso, "--output", str(OUTPUT_ROOTS["natgen"])],
         "geico": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["geico"])],
+        "travelers": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["travelers"])],
+        "farmersofsalem": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["farmersofsalem"])],
+        "guard": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["guard"])],
+        "progressive": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["progressive"])],
+        "uticafirst": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["uticafirst"])],
     }
 
 
@@ -162,7 +177,76 @@ def default_runners(day: date) -> dict[str, Callable[[], dict[str, Any]]]:
             pulled["_exit_code"] = 1
         return pulled
 
-    return {"fao": fao, "natgen": natgen, "geico": geico}
+    def travelers() -> dict[str, Any]:
+        from .travelers_pending_cancellation import main as travelers_main
+
+        pulled = _invoke(travelers_main, commands["travelers"])
+        if int(pulled.get("_exit_code") or 0) != 0:
+            return pulled
+        filing = _file_output("travelers", OUTPUT_ROOTS["travelers"])
+        pulled["filing"] = filing
+        if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+            pulled["_exit_code"] = 1
+        return pulled
+
+    def farmersofsalem() -> dict[str, Any]:
+        from .farmersofsalem_pending_cancellation import main as farmersofsalem_main
+
+        pulled = _invoke(farmersofsalem_main, commands["farmersofsalem"])
+        if int(pulled.get("_exit_code") or 0) != 0:
+            return pulled
+        filing = _file_output("farmersofsalem", OUTPUT_ROOTS["farmersofsalem"])
+        pulled["filing"] = filing
+        if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+            pulled["_exit_code"] = 1
+        return pulled
+
+    def guard() -> dict[str, Any]:
+        from .guard_pending_cancellation import main as guard_main
+
+        pulled = _invoke(guard_main, commands["guard"])
+        if int(pulled.get("_exit_code") or 0) != 0:
+            return pulled
+        filing = _file_output("guard", OUTPUT_ROOTS["guard"])
+        pulled["filing"] = filing
+        if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+            pulled["_exit_code"] = 1
+        return pulled
+
+    def progressive() -> dict[str, Any]:
+        from .progressive_pending_cancellation import main as progressive_main
+
+        pulled = _invoke(progressive_main, commands["progressive"])
+        if int(pulled.get("_exit_code") or 0) != 0:
+            return pulled
+        filing = _file_output("progressive", OUTPUT_ROOTS["progressive"])
+        pulled["filing"] = filing
+        if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+            pulled["_exit_code"] = 1
+        return pulled
+
+    def uticafirst() -> dict[str, Any]:
+        from .utica_pending_cancellation import main as utica_main
+
+        pulled = _invoke(utica_main, commands["uticafirst"])
+        if int(pulled.get("_exit_code") or 0) != 0:
+            return pulled
+        filing = _file_output("uticafirst", OUTPUT_ROOTS["uticafirst"])
+        pulled["filing"] = filing
+        if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+            pulled["_exit_code"] = 1
+        return pulled
+
+    return {
+        "fao": fao,
+        "natgen": natgen,
+        "geico": geico,
+        "travelers": travelers,
+        "farmersofsalem": farmersofsalem,
+        "guard": guard,
+        "progressive": progressive,
+        "uticafirst": uticafirst,
+    }
 
 
 def run_retrieval(
@@ -174,7 +258,7 @@ def run_retrieval(
     hostname: str | None = None,
     today: date | None = None,
 ) -> dict[str, Any]:
-    """Run the three carriers, or hold when the Production gate is closed."""
+    """Run the carriers, or hold when the Production gate is closed."""
 
     env = os.environ if environ is None else environ
     host = socket.gethostname() if hostname is None else hostname
@@ -260,7 +344,7 @@ def _write_last_run(directory: Path, record: Mapping[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Pull and file FAO, NatGen, and Geico.")
+    parser = argparse.ArgumentParser(description="Pull and file carrier documents.")
     parser.add_argument("--business-day", default="", help="YYYY-MM-DD. Default: previous business day.")
     parser.add_argument("--state-dir", default="", help="Where the last-run file is written.")
     args = parser.parse_args(list(argv) if argv is not None else None)

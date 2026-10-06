@@ -51,7 +51,10 @@ TEST_FILING_HOST = "hermes-test-01"
 PRODUCTION_HOSTS = frozenset({"hermes-poc-01"})
 PRODUCTION_ENVS = frozenset({"PRODUCTION", "PROD", "LIVE"})
 # Production filing keys. Progressive BOP is not in this set.
-PROD_FILING_CARRIERS = frozenset({"fao", "natgen", "geico"})
+PROD_FILING_CARRIERS = frozenset({
+    "fao", "natgen", "geico",
+    "travelers", "farmersofsalem", "guard", "progressive", "uticafirst",
+})
 TEST_OPT_PREFIX = "/opt/streetsmart-hermes-test/"
 PROD_OPT_PREFIX = "/opt/streetsmart-hermes/"
 STATUS_SHEET_ID = "1HL6Uw5nAJjZ3qtCleUzXUtOC_xmhFPmy0LPbz89v7vw"
@@ -168,6 +171,39 @@ TRAVELERS_ACTIVITY_RULE = sketch_carrier_rule(
     carrier_section="Travelers",
     carrier_label="Travelers",
     document_type="Policy Activity",
+)
+# Cancellation-pull rules for the #798 workers. Workflow titles and folders
+# stay empty until each carrier's Mail Sorting row is known, so the hook
+# files the PDF and creates the Nicole task instead of guessing.
+TRAVELERS_CANCELLATION_RULE = sketch_carrier_rule(
+    carrier_section="Travelers",
+    carrier_label="Travelers",
+    document_type="Cancellation",
+    note_label="Travelers cancellation notice",
+)
+FARMERSOFSALEM_CANCELLATION_RULE = sketch_carrier_rule(
+    carrier_section="Farmers of Salem",
+    carrier_label="Farmers of Salem",
+    document_type="Cancellation",
+    note_label="Farmers of Salem cancellation notice",
+)
+GUARD_CANCELLATION_RULE = sketch_carrier_rule(
+    carrier_section="Guard",
+    carrier_label="Guard",
+    document_type="Cancellation",
+    note_label="Guard cancellation notice",
+)
+PROGRESSIVE_CANCELLATION_RULE = sketch_carrier_rule(
+    carrier_section="Progressive",
+    carrier_label="Progressive",
+    document_type="Cancellation",
+    note_label="Progressive cancellation notice",
+)
+UTICA_CANCELLATION_RULE = sketch_carrier_rule(
+    carrier_section="Utica First",
+    carrier_label="Utica",
+    document_type="Cancellation",
+    note_label="Utica cancellation notice",
 )
 
 
@@ -1587,6 +1623,11 @@ CARRIER_RULES = {
     "bop": PROGRESSIVE_BOP_RULE,
     "geico": GEICO_NOC_RULE,
     "natgen": NATGEN_NOC_RULE,
+    "travelers": TRAVELERS_CANCELLATION_RULE,
+    "farmersofsalem": FARMERSOFSALEM_CANCELLATION_RULE,
+    "guard": GUARD_CANCELLATION_RULE,
+    "progressive": PROGRESSIVE_CANCELLATION_RULE,
+    "uticafirst": UTICA_CANCELLATION_RULE,
 }
 # Production command list. BOP is excluded here, not only by skipping a run.
 PROD_CARRIER_RULES = {
