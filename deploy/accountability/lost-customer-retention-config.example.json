@@ -17,5 +17,18 @@
     "trucking": "gabrielac@streetsmart.insurance",
     "carlo": "carlo@streetsmart.insurance",
     "jake": "jake@streetsmart.insurance"
+  },
+  "sheet_delivery": {
+    "enabled": true,
+    "owner": "robie@streetsmart.insurance",
+    "folder_name": "Lost Customer Retention",
+    "attach_xlsx": true,
+    "share_roles": {
+      "personal": "reader",
+      "commercial": "reader",
+      "trucking": "reader",
+      "carlo": "writer",
+      "jake": "writer"
+    }
   }
 }

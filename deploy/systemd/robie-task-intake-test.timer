@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Test EZLynx Task Check-In intake every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+AccuracySec=30s
+Unit=robie-task-intake-test.service
+
+[Install]
+WantedBy=timers.target

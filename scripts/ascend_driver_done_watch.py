@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Print the Ascend driver stall verdict from the counts file.
 
-Exit 0 when quiet (including fewer than 4 live runs or a missing log).
-Exit 2 when the last 4 completed live runs each saw actionable notices
-and filed nothing. Exit 1 when the log exists but cannot be read.
+Exit 0 when quiet (including fewer than 4 judged live runs or a missing log).
+Exit 2 when the last 4 judged live runs each left actionable notices
+neither filed nor deduped. Exit 1 when the log exists but cannot be read.
 
 This does not post to Chat. The hourly health check
 (``scripts/robie_health_check.py``) runs the same check and alerts.

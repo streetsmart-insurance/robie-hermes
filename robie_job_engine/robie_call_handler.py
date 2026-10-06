@@ -466,11 +466,12 @@ def _pick(task: Dict[str, Any], logical: str) -> str:
 
 
 def is_call_task(task: Dict[str, Any]) -> bool:
-    """True only when an Activity Label is exactly Robie Call or lead follow-up.
+    """True when an Activity Label is a live call label or an enabled Splice label.
 
-    Title and description text never start a call. "Do not call",
-    "[CALLBACK REQUIRED]", and a Splice label such as "Robie audit"
-    are not call tasks.
+    Title and description text never start a call. "Do not call" and
+    "[CALLBACK REQUIRED]" are not call tasks. A short name such as
+    "Robie audit" is not a label. The nine full Splice labels are call
+    tasks only while splice_workflows_enabled is true.
     """
     from .call_pickup import classify_call_request
 
@@ -529,10 +530,30 @@ def _instruction_ambiguity(instruction: str) -> Optional[str]:
     return None
 
 
+def _test_intake_skips_applicant_lookup(ports: RobieCallPorts) -> bool:
+    """True only for the Test intake wiring that has no applicant phone.
+
+    The regression battery sets ROBIE_ENV=TEST for synthetic runs. A fake
+    phone port in those tests must still be called. The skip is the no-op
+    reader installed by build_call_dependencies on Test.
+    """
+    from .bland_prod_wiring import _no_applicant_phone
+    from .call_pickup import is_test_server
+
+    if not is_test_server():
+        return False
+    lookup = getattr(ports, "phone_lookup", None)
+    return getattr(lookup, "_fetch", None) is _no_applicant_phone
+
+
 def _phone_is_mobile(ports: RobieCallPorts, task: Dict[str, Any], applicant_id: str) -> bool:
     flag = _pick(task, "phone_is_mobile").lower()
     if flag in ("1", "true", "yes"):
         return True
+    from .call_pickup import is_test_server
+
+    if is_test_server():
+        return False
     method = getattr(ports.phone_lookup, "is_mobile", None)
     if method is None:
         return False
@@ -1946,21 +1967,61 @@ def _handle_call_task(
             "duplicate_reason": "same instruction already handled for applicant",
         }
 
-    # Robie Call is free-form. Only the lead follow-up label uses a script.
-    # The nine Splice workflows stay available to render, and a label cannot
-    # select them.
+    # Robie Call is free-form. Lead follow-up and each enabled Splice
+    # label use that workflow's script, spoken for the assigned producer.
     from .call_pickup import (
-        LEAD_WORKFLOW_ID,
+        SPLICE_WORKFLOW_IDS,
         calling_day,
         classify_call_request,
+        is_test_server,
         note_dedupe_key,
+        splice_task_predates_enablement,
+        splice_test_account_reason,
     )
     from .splice_scripts import get_workflow
 
     decision = classify_call_request(_pick(task, "activity_labels"), "")
     workflow = None
-    if decision.action == "workflow" and decision.workflow_id == LEAD_WORKFLOW_ID:
-        workflow = get_workflow(LEAD_WORKFLOW_ID)
+    if decision.action == "workflow" and decision.workflow_id:
+        workflow = get_workflow(decision.workflow_id)
+        if workflow is None:
+            return fail(
+                f"label selected unknown workflow {decision.workflow_id}; not dialing"
+            )
+    if workflow is not None and workflow.id in SPLICE_WORKFLOW_IDS:
+        splice_at = str(task.get("splice_enabled_at") or "")
+        created_raw = _pick(task, "created_date")
+        if splice_at and splice_task_predates_enablement(created_raw, splice_at):
+            return fail(
+                "task was labeled before this workflow was enabled; not dialing"
+            )
+        account_reason = splice_test_account_reason(applicant_id)
+        if account_reason:
+            log.warning(
+                "splice test account blocked task %s: %s", task_id, account_reason,
+            )
+            clar_note = (
+                "Robie did not place this call. On the Test server this "
+                "workflow dials only Jake Ferrara's own client account, and "
+                "only his test phone. This task is not that account, or that "
+                "account is not configured. Buster Brown is not the test "
+                "client for these labels."
+            )
+            wb = _writeback_once(
+                ports, task_id, "clarification_test_account",
+                applicant_id, clar_note, title_hint=None)
+            alerted = _chat_alert(
+                ports, config,
+                f"Robie Call BLOCKED for applicant {applicant_id} (task "
+                f"{task_id}): {account_reason}. No call was placed.",
+            )
+            return fail(
+                f"{account_reason}; not dialing",
+                writeback=wb,
+                chat_alerted=alerted,
+                skipped_test_account=True,
+                clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+            )
     note_topic = workflow.title if workflow is not None else instruction
 
     # ---- 3c. Ambiguity guard ------------------------------------------------
@@ -2089,24 +2150,47 @@ def _handle_call_task(
         return fail("kill switch active (ROBIE_CALL_HALT); failing closed")
 
     # ---- 5. Phone lookup ---------------------------------------------------
-    # An explicit number in the task ("Call Progressive at 1-800-776-4737")
-    # overrides the applicant's number on file. The call still logs on the
-    # applicant's account. Policy, claim, and quote numbers are not phones.
-    # A bare digit run that could be either is a question, not a dial.
-    explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
+    # Splice labels dial only the client's phone on file. A number or a
+    # policy number in the task note is ignored.
+    # Robie Call dials only a number typed in the task. It never uses the
+    # phone on file. No usable typed number files one short note and does
+    # not dial.
+    # Robie Lead Follow Up uses a typed number first, then the phone on file.
+    # Policy, claim, and quote numbers are not phones. A bare digit run
+    # that could be either is a question, not a dial, except on a Splice
+    # label, which does not read the note for a number.
+    if workflow is not None and workflow.id in SPLICE_WORKFLOW_IDS:
+        phone_policy = "on_file_only"
+    elif decision.action == "freeform":
+        phone_policy = "typed_only"
+    else:
+        phone_policy = "typed_then_file"
+    explicit_phone = None
+    phone_text_ambiguous = False
+    if phone_policy != "on_file_only":
+        explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
     if phone_text_ambiguous:
         log.warning("ambiguous number in task %s; asking instead of dialing",
                     task_id)
-        clar_note = (
-            "Robie received a call task but couldn't tell which phone to "
-            "dial. The task includes a number that might be a policy, claim, "
-            "or quote number rather than a phone number. Robie will not "
-            "guess and will not dial it. Please update the task with the "
-            "phone to call — for example, 'call at' followed by the number, "
-            "or the word 'phone' or 'cell' before it — or remove the number "
-            "if Robie should use the phone on file. Robie will pick this up "
-            "on the next check."
-        )
+        if phone_policy == "typed_only":
+            # Intake will not open this task again once it has a job.
+            # The note has to ask for a new task.
+            clar_note = (
+                "Robie did not call because it couldn't tell which number "
+                "to dial. Make a new Robie Call task and write 'call at' "
+                "or 'phone' before the number."
+            )
+        else:
+            clar_note = (
+                "Robie received a call task but couldn't tell which phone to "
+                "dial. The task includes a number that might be a policy, claim, "
+                "or quote number rather than a phone number. Robie will not "
+                "guess and will not dial it. Please update the task with the "
+                "phone to call — for example, 'call at' followed by the number, "
+                "or the word 'phone' or 'cell' before it — or remove the number "
+                "if Robie should use the phone on file. Robie will pick this up "
+                "on the next check."
+            )
         wb = _writeback_once(
             ports, task_id, "clarification_ambiguous_number",
             applicant_id, clar_note, title_hint=None)
@@ -2118,7 +2202,33 @@ def _handle_call_task(
             writeback=wb,
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
-    if explicit_phone:
+    if phone_policy == "typed_only" and not explicit_phone:
+        log.warning("task %s has no typed phone number; asking instead of dialing",
+                    task_id)
+        clar_note = (
+            "Robie did not call because no phone number was typed in this "
+            "task. Make a new Robie Call task with the number to call."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_missing_number",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "no phone number typed in the task; asked for the number, "
+            "task left open",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
+    # Real Test intake never reads the applicant phone record. The Bland
+    # port posts only Jake's cell. A typed Robie Call number still decides
+    # whether the call is allowed; it is not the number that is posted.
+    # Injected phone ports still run, including under ROBIE_ENV=TEST.
+    if _test_intake_skips_applicant_lookup(ports) and phone_policy != "typed_only":
+        log.info("test server: skipping applicant phone lookup for task %s", task_id)
+        phone, phone_ambiguity = "+10000000000", None
+        explicit_phone = None
+    elif explicit_phone:
         log.info("using task-provided phone number for task %s", task_id)
         phone, phone_ambiguity = explicit_phone, None
     else:
@@ -2220,7 +2330,11 @@ def _handle_call_task(
     # applicant ("call Mary Smith" on John Doe's account), do NOT dial —
     # the phone belongs to the applicant, not the named person. Fail closed
     # with a clarification note instead of merely flagging it in the note.
-    phone_mismatch = _instruction_phone_mismatch(instruction, phone)
+    phone_mismatch = (
+        None
+        if phone_policy == "on_file_only"
+        else _instruction_phone_mismatch(instruction, phone)
+    )
     name_mismatch = _instruction_name_mismatch(instruction, applicant_name)
     # On-behalf-of calling: the task names someone other than the applicant
     # AND provides an explicit phone ("Call Progressive at 1-800-776-4737"

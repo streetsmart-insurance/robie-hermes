@@ -1,0 +1,49 @@
+[Unit]
+Description=ROBIE EZLynx Task Check-In intake (Test)
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+WorkingDirectory=/
+Environment=PYTHONPATH=/opt/streetsmart-hermes-test/releases/current
+Environment=ROBIE_ENV=TEST
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+Environment=ROBIE_EZLYNX_DRIVER_GATE_REQUIRED=1
+Environment=ROBIE_EZLYNX_DRIVER_HOLDER=TEST
+# All nine Splice labels are on because ROBIE_ENV=TEST. Every dial is
+# forced to Jake's cell (secret robie-test-jake-cell). Do not set
+# ROBIE_PHONE_REAL_CLIENTS. The Bland key is robie-test-bland-api-key.
+# The kill switch is bland-dispatcher-kill-switch.
+Environment=ROBIE_PHONE_LIVE_CALLS=1
+Environment=ROBIE_SPLICE_TEST_APPLICANT_ID=25486692
+Environment=ROBIE_BLAND_ALLOWED_ENVS=TEST
+Environment=ROBIE_BLAND_ALLOWED_HOSTS=hermes-test-01
+Environment=ROBIE_BLAND_MAX_DURATION_MINUTES=12
+# Fill the proof task ids before enabling the timer. Empty refuses the
+# run, so an untouched unit ingests nothing.
+Environment=ROBIE_TASK_INTAKE_ALLOWED_TASK_IDS=
+# Applicant 25486692 is Jake Ferrara on the Production EZLynx tenant.
+# robie-message-runtime.env holds the EZLynx secret references already
+# on hermes-test-01 (username and password). robie-accountability.env
+# holds the Gmail account for the task report. Those files must not
+# replace the applicant list below. EnvironmentFile= overrides Environment=.
+# The Production API secret is set here so Test does not read UAT.
+Environment=ROBIE_EZLYNX_DISCUSSION_API=live
+EnvironmentFile=/etc/streetsmart-hermes-test/robie-message-runtime.env
+EnvironmentFile=/etc/streetsmart-hermes-test/robie-accountability.env
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+Environment=ROBIE_EZLYNX_WRITE_APPLICANT_IDS=25486692
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes-test -g streetsmart-hermes-test -m 0750 /opt/streetsmart-hermes-test/robie-job-engine/data
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.ezlynx_task_intake
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes-test/robie-job-engine/data
+TimeoutStartSec=120min
+
+[Install]
+WantedBy=multi-user.target
