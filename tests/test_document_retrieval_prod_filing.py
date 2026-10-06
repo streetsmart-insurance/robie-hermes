@@ -1,4 +1,4 @@
-"""Production filing for FAO, NatGen, and Geico. BOP stays blocked."""
+"""Production filing for the allowlisted carriers. BOP stays blocked."""
 
 from __future__ import annotations
 
@@ -168,7 +168,10 @@ class ProdGateTests(unittest.TestCase):
         self.assertEqual(bop["status"], "disabled")
         self.assertIn("BOP", bop["reason"])
         self.assertNotIn("bop", PROD_CARRIER_RULES)
-        self.assertEqual(set(PROD_CARRIER_RULES), {"fao", "natgen", "geico"})
+        self.assertEqual(
+            set(PROD_CARRIER_RULES),
+            {"fao", "natgen", "geico", "travelers", "farmersofsalem", "guard", "progressive", "uticafirst"},
+        )
         self.assertIn("bop", active_carrier_rules(ENABLED, HOST))
 
     def test_test_filing_is_unchanged(self):
@@ -360,14 +363,24 @@ class TwoMemoNoteTests(unittest.TestCase):
 
 
 class RetrievalServiceTests(unittest.TestCase):
-    def test_commands_cover_three_carriers_on_prod_paths(self):
+    def test_commands_cover_all_carriers_on_prod_paths(self):
         commands = service.carrier_argv(date(2026, 9, 25))
-        self.assertEqual(set(commands), {"fao", "natgen", "geico"})
+        self.assertEqual(
+            set(commands),
+            {"fao", "natgen", "geico", "travelers", "farmersofsalem", "guard", "progressive", "uticafirst"},
+        )
         self.assertNotIn("bop", commands)
         for argv in commands.values():
             folder = argv[-1]
             self.assertTrue(folder.startswith("/opt/streetsmart-hermes/"))
             self.assertNotIn("streetsmart-hermes-test", folder)
+
+    def test_new_carrier_runners_follow_the_pull_then_file_pattern(self):
+        runners = service.default_runners(date(2026, 9, 25))
+        self.assertEqual(set(runners), set(service.CARRIERS))
+        for name in ("travelers", "farmersofsalem", "guard", "progressive", "uticafirst"):
+            self.assertIn(name, service.OUTPUT_ROOTS)
+            self.assertIn(name, service.PROD_CARRIER_RULES)
 
     def test_switch_off_holds_without_calling_runners(self):
         called = []
