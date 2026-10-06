@@ -35,6 +35,7 @@ from robie_job_engine.natgen_pending_cancellation import (
     build_parser,
     cancel_effective_date_in_pdf,
     choose_most_recent_noc,
+    choose_nonrenewal_issued,
     classify_noc_row,
     click_forms_view,
     extract_doc_guid,
@@ -1276,6 +1277,98 @@ class NonRenewalParseTests(unittest.TestCase):
         rows_in = (("2035017657 - 00",) + self.ROWS[0][1:],)
         rows = parse_nonrenewal_grid(self.HEADERS, rows_in, source_url=self.LIST_URL)
         self.assertEqual(rows[0].policy_number, "2035017657 00")
+
+
+class NonRenewalIssuedRowTests(unittest.TestCase):
+    """Pick the "Non-renewal issued" history row (2026-10-05 live proof).
+
+    The pending row's FORMS cell reads "--" (no View link, controls == 0);
+    the notice PDF is on the "Non-renewal issued" row's View link
+    (DisplayPDF.aspx?iid={guid}).
+    """
+
+    def _entries(self, *labels_with_controls):
+        entries = []
+        for index, (label, controls) in enumerate(labels_with_controls):
+            entries.append(HistoryEntry(
+                label=label,
+                on=date(2026, 9, 25),
+                controls=controls,
+                row_index=index,
+            ))
+        return entries
+
+    def test_picks_issued_row_and_skips_pending_dash_row(self):
+        # Live 2026-10-05: 2025758382 01 (Treasure Remodeling LLC). The
+        # "Pending non-renewal" row's FORMS cell is "--" (0 controls); the
+        # "Non-renewal issued" row carries the View link.
+        entries = self._entries(
+            ("Pending non-renewal", 0),
+            ("Non-renewal issued", 1),
+        )
+        chosen = choose_nonrenewal_issued(entries)
+        self.assertEqual(chosen.row_index, 1)
+        self.assertEqual(chosen.label, "Non-renewal issued")
+
+    def test_issued_row_guid_extracts_from_displaypdf_url(self):
+        # The issued row's View link: DisplayPDF.aspx?iid={guid}. The durable
+        # ledger key keeps the natgen:<policy>:<doc-guid> format.
+        entries = self._entries(("Non-renewal issued", 1),)
+        choose_nonrenewal_issued(entries)
+        guid = extract_doc_guid(
+            "https://natgenagency.com/Policy/DisplayPDF.aspx"
+            "?iid=9a3ff818-9f9f-4f27-6fe8-08df22c42a7b"
+        )
+        self.assertEqual(
+            guid_document_id("2025758382 01", guid),
+            "natgen:2025758382 01:9a3ff818-9f9f-4f27-6fe8-08df22c42a7b",
+        )
+
+    def test_missing_issued_row_holds_not_issued(self):
+        # Live 2026-10-05: 2035017657 00 (Genesis Pool Solutions LLC) had no
+        # "Non-renewal issued" row: notice not issued yet. HOLD, do not fail.
+        entries = self._entries(("Pending non-renewal", 0),)
+        with self.assertRaises(IntakeHold) as ctx:
+            choose_nonrenewal_issued(entries)
+        self.assertIn("not yet issued", str(ctx.exception))
+
+    def test_pending_row_dash_alone_never_picked(self):
+        # A history with only pending rows (FORMS "--") must hold, never
+        # guess the PDF from a row with no View link.
+        entries = self._entries(
+            ("Pending non-renewal", 0),
+            ("Policy issued", 1),
+        )
+        with self.assertRaises(IntakeHold):
+            choose_nonrenewal_issued(entries)
+
+    def test_duplicate_issued_rows_hold(self):
+        entries = self._entries(
+            ("Non-renewal issued", 1),
+            ("Non-renewal issued", 1),
+        )
+        with self.assertRaises(IntakeHold):
+            choose_nonrenewal_issued(entries)
+
+    def test_issued_row_without_pdf_control_holds(self):
+        # An issued row whose FORMS cell is "--" (0 controls) holds instead
+        # of clicking a link that is not there.
+        entries = self._entries(("Non-renewal issued", 0),)
+        with self.assertRaises(IntakeHold):
+            choose_nonrenewal_issued(entries)
+
+    def test_issued_label_match_is_case_insensitive(self):
+        entries = self._entries(("NON-RENEWAL ISSUED", 1),)
+        chosen = choose_nonrenewal_issued(entries)
+        self.assertEqual(chosen.row_index, 0)
+
+    def test_cancellation_labels_not_picked_for_nonrenewal(self):
+        entries = self._entries(
+            ("Pending Cancellation", 1),
+            ("Pending non-renewal", 0),
+        )
+        with self.assertRaises(IntakeHold):
+            choose_nonrenewal_issued(entries)
 
 
 if __name__ == "__main__":

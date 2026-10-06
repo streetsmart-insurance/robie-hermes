@@ -521,6 +521,38 @@ def choose_most_recent_noc(entries: tuple[HistoryEntry, ...] | list[HistoryEntry
     return top[0]
 
 
+# Live Policy Summary history: a Pending Non-Renewal report row's FORMS cell
+# reads "--" (no View link; controls == 0). The notice PDF lives on the
+# separate "Non-renewal issued" transaction row's View link
+# (DisplayPDF.aspx?iid={guid}). 2026-10-05 live proof: policy 2025758382 01
+# (Treasure Remodeling LLC) pulled its NRN PDF from the "Non-renewal issued"
+# row; policy 2035017657 00 (Genesis Pool Solutions LLC) had no such row —
+# the notice was not issued yet.
+_NONRENEWAL_ISSUED_LABEL = "non-renewal issued"
+NONRENEWAL_NOT_ISSUED = "NatGen non-renewal notice not yet issued"
+
+
+def choose_nonrenewal_issued(entries: tuple[HistoryEntry, ...] | list[HistoryEntry]) -> HistoryEntry:
+    """Pick the single "Non-renewal issued" history row for a non-renewal record.
+
+    The pending row's FORMS cell is "--" (controls == 0), so it is never
+    picked; the PDF lives on the issued row. No issued row means the notice
+    has not been issued yet: hold, do not fail. An issued row without
+    exactly one PDF control holds instead of guessing.
+    """
+    chosen = [
+        entry for entry in entries
+        if _norm(entry.label).casefold() == _NONRENEWAL_ISSUED_LABEL
+    ]
+    if not chosen:
+        raise IntakeHold(NONRENEWAL_NOT_ISSUED)
+    if len(chosen) != 1:
+        raise IntakeHold("NatGen Non-renewal issued row in Policy History is missing or ambiguous")
+    if chosen[0].controls != 1:
+        raise IntakeHold("NatGen Non-renewal issued document is missing or ambiguous")
+    return chosen[0]
+
+
 def cancel_effective_date_in_pdf(content: bytes) -> date:
     """Read the labeled cancel effective date. Unlabeled or disagreeing dates hold."""
     if not _is_pdf(content):
