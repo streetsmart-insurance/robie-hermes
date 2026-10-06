@@ -245,6 +245,42 @@ class StallVerdictTests(unittest.TestCase):
         self.assertIn("done=0", verdict["detail"])
         self.assertEqual(verdict["runs_found"], 4)
 
+    def test_all_human_review_is_quiet_not_stalled(self):
+        """Regression (2026-10-06): 4 runs with done=0 where every notice
+        was legitimately deferred to humans must NOT page as a stall.
+        The driver is healthy; the backlog is reported informationally."""
+        records = [_live(3, human_deferred=3) for _ in range(4)]
+        verdict = evaluate_stall(records)
+        self.assertEqual(verdict["status"], "OK")
+        self.assertIn("not stalled", verdict["detail"])
+        self.assertEqual(verdict["human_deferred_backlog"], 12)
+        self.assertIn("12 notice(s) awaiting human review", verdict["detail"])
+
+    def test_applicant_unresolved_is_quiet_not_stalled(self):
+        records = [_live(2, human_deferred=2) for _ in range(4)]
+        verdict = evaluate_stall(records)
+        self.assertEqual(verdict["status"], "OK")
+
+    def test_human_deferred_falls_back_to_skipped_by_reason(self):
+        """Records written before the human_deferred counter existed are
+        judged from skipped_by_reason."""
+        records = [
+            _live(3, skipped_by_reason={"needs_human_review: triage": 2,
+                                        "applicant_unresolved: none": 1})
+            for _ in range(4)
+        ]
+        verdict = evaluate_stall(records)
+        self.assertEqual(verdict["status"], "OK")
+        self.assertEqual(verdict["human_deferred_backlog"], 12)
+
+    def test_truly_unhandled_still_alerts(self):
+        """One run with work the driver actually dropped still pages,
+        even alongside human-deferred notices."""
+        records = [_live(4, human_deferred=1) for _ in range(4)]  # 3 truly unhandled each
+        verdict = evaluate_stall(records)
+        self.assertEqual(verdict["status"], "ALERT")
+        self.assertIn("done=0", verdict["detail"])
+
     def test_success_on_the_latest_live_run_is_quiet(self):
         records = [_live(3) for _ in range(3)] + [_live(3, done=2)]
         verdict = evaluate_stall(records)
@@ -289,15 +325,19 @@ class StallVerdictTests(unittest.TestCase):
         quiet = evaluate_stall([excluded for _ in range(4)])
         self.assertEqual(quiet["status"], "OK")
         self.assertEqual(quiet["last_runs"][0]["actionable_seen"], 0)
-        still_actionable = {
+        # Bare needs_human_review is a legitimate human deferral, not a
+        # stall (behavior change 2026-10-06): the driver triaged and
+        # handed the notices to a human. It surfaces as backlog, not ALERT.
+        human_deferred = {
             "dry_run": False,
             "notices_seen": 4,
             "done": 0,
             "ignored": 0,
             "skipped_by_reason": {"needs_human_review": 4},
         }
-        alert = evaluate_stall([still_actionable for _ in range(4)])
-        self.assertEqual(alert["status"], "ALERT")
+        quiet2 = evaluate_stall([human_deferred for _ in range(4)])
+        self.assertEqual(quiet2["status"], "OK")
+        self.assertEqual(quiet2["human_deferred_backlog"], 16)
 
     def test_already_filed_notices_are_healthy(self):
         # Tonight's first live shape: 6 seen, 4 already filed by the API
@@ -331,7 +371,35 @@ class StallVerdictTests(unittest.TestCase):
         self.assertEqual(evaluate_stall([mixed for _ in range(4)])["status"], "OK")
 
     def test_unhandled_actionable_notices_still_fail(self):
+        # Genuinely dropped work (an API error the driver neither filed,
+        # deduped, nor deferred) still pages.
         stalled = _live(
+            4,
+            done=0,
+            notices_seen=6,
+            ignored=2,
+            deduped=0,
+            skipped_by_reason={"ezlynx_api_error: timeout": 4},
+        )
+        verdict = evaluate_stall([stalled for _ in range(4)])
+        self.assertEqual(verdict["status"], "ALERT")
+        self.assertIn("done=0", verdict["detail"])
+        self.assertEqual(verdict["last_runs"][0]["truly_unhandled"], 4)
+
+        partial = _live(
+            4,
+            done=0,
+            deduped=2,
+            skipped_by_reason={"api_already_filed": 2, "ezlynx_api_error: timeout": 2},
+        )
+        partial_verdict = evaluate_stall([partial for _ in range(4)])
+        self.assertEqual(partial_verdict["status"], "ALERT")
+        self.assertEqual(partial_verdict["last_runs"][0]["truly_unhandled"], 2)
+
+    def test_applicant_unresolved_alone_is_quiet(self):
+        # Behavior change 2026-10-06: applicant_unresolved is a legitimate
+        # human deferral, not a stall.
+        deferred = _live(
             4,
             done=0,
             notices_seen=6,
@@ -339,20 +407,9 @@ class StallVerdictTests(unittest.TestCase):
             deduped=0,
             skipped_by_reason={"applicant_unresolved": 4},
         )
-        verdict = evaluate_stall([stalled for _ in range(4)])
-        self.assertEqual(verdict["status"], "ALERT")
-        self.assertIn("done=0", verdict["detail"])
-        self.assertEqual(verdict["last_runs"][0]["unhandled"], 4)
-
-        partial = _live(
-            4,
-            done=0,
-            deduped=2,
-            skipped_by_reason={"api_already_filed": 2, "applicant_unresolved": 2},
-        )
-        partial_verdict = evaluate_stall([partial for _ in range(4)])
-        self.assertEqual(partial_verdict["status"], "ALERT")
-        self.assertEqual(partial_verdict["last_runs"][0]["unhandled"], 2)
+        verdict = evaluate_stall([deferred for _ in range(4)])
+        self.assertEqual(verdict["status"], "OK")
+        self.assertEqual(verdict["human_deferred_backlog"], 16)
 
     def test_records_without_dedupe_counters_do_not_stay_red(self):
         # Written before deduped and skipped_by_reason. They look like a
