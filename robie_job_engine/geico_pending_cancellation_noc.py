@@ -146,15 +146,47 @@ class NoticePath:
 # GEICO serves cancellation notice PDFs from edgeextended.geico.com with a
 # documentId query param (observed live 2026-10-05:
 # eaf9b197-7471-3c36-2f23-3ed54027b6d6). The UUID is the durable document
-# identity for the ledger. Chrome's built-in PDF viewer renders these inside
-# an iframe that browser automation cannot operate (verified 2026-10-05:
-# Download, Save to Drive, and Print buttons all unreachable), so the worker
-# fetches the PDF bytes directly via the authenticated request context and
-# never clicks viewer controls.
+# identity for the ledger.
+#
+# Live 2026-10-05 correction: the notice link's href is literally "#" — the
+# Angular app (edgeextended.geico.com) fetches the document ID via XHR into
+# JavaScript runtime state, so there is NO UUID in the markup. Clicking the
+# link opens the consolidated document viewer:
+#   /documents/consolidated-document-viewer?documentId={uuid}&token={session}&visitAppId=E01&convToken=
+# The viewer URL itself returns an HTML shell (Angular + PDF.js), NOT raw PDF
+# bytes. The PDF loads client-side via XHR; the PDF.js iframe has
+# src="about:blank". The worker clicks the link, reads the viewer URL for the
+# documentId, and captures the PDF bytes from the viewer's XHR via Playwright
+# network interception. Fallback: the viewer's Download button via frames.
+CONSOLIDATED_VIEWER_PATH = "/documents/consolidated-document-viewer"
 _DOCUMENT_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+_DOWNLOAD_BUTTON_NAME = re.compile(r"download", re.IGNORECASE)
+
+
+def is_consolidated_viewer_url(url: str) -> bool:
+    """True if the URL is GEICO's consolidated document viewer."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (host == "geico.com" or host.endswith(".geico.com")):
+        return False
+    return parsed.path.rstrip("/").lower().endswith(CONSOLIDATED_VIEWER_PATH)
+
+
+def extract_viewer_document_id(url: str) -> str:
+    """Extract the document UUID from a consolidated-viewer URL.
+
+    Fail-closed: not a viewer URL, or missing/ambiguous documentId, raises
+    IntakeHold.
+    """
+    if not is_consolidated_viewer_url(url):
+        raise IntakeHold("NOC viewer URL is missing or ambiguous")
+    return extract_document_id(url)
 
 
 def extract_document_id(url: str) -> str:
@@ -174,36 +206,172 @@ def extract_document_id(url: str) -> str:
     return ids[0].lower()
 
 
-def fetch_notice_pdf_direct(page: Any) -> tuple[str, bytes]:
-    """Fetch the cancellation notice PDF directly via document URL.
+def _pdf_response_handler(captured: list[bytes]) -> Callable[[Any], None]:
+    """Build a Playwright response listener that captures PDF XHR bodies.
 
-    Extracts the documentId from the notice link's href in the DOM, then
-    fetches the PDF bytes through the page's authenticated request context.
-    Never clicks the notice link and never touches the PDF viewer — the
-    viewer iframe is not operable by automation (verified 2026-10-05).
+    Only responses with a PDF content-type or a PDF-looking URL are kept,
+    and only if the body starts with %PDF. Everything else (including the
+    viewer's HTML shell) is ignored. The caller decides what to do with zero
+    or multiple captures.
+    """
+    def on_response(response: Any) -> None:
+        try:
+            url = str(getattr(response, "url", "") or "")
+            headers = getattr(response, "headers", None)
+            content_type = ""
+            if isinstance(headers, dict):
+                content_type = str(headers.get("content-type", "") or "").lower()
+            if "application/pdf" not in content_type and not _url_looks_like_pdf(url):
+                return
+            body_fn = getattr(response, "body", None)
+            if not callable(body_fn):
+                return
+            body = body_fn()
+            if isinstance(body, (bytes, bytearray)) and _is_pdf(body):
+                captured.append(bytes(body))
+        except Exception:
+            pass
+    return on_response
 
-    Returns (document_id, pdf_bytes). Fail-closed on any ambiguity.
+
+def _find_viewer_page(page: Any, opened: list[Any]) -> Any:
+    """Return the consolidated-viewer page: a new tab or the current tab.
+
+    Fail-closed if no viewer URL is found.
+    """
+    for item in opened:
+        if is_consolidated_viewer_url(str(getattr(item, "url", "") or "")):
+            return item
+    if is_consolidated_viewer_url(str(getattr(page, "url", "") or "")):
+        return page
+    raise IntakeHold("NOC viewer did not open")
+
+
+def _settle_viewer_pages(page: Any, opened: list[Any], timeout_ms: int) -> None:
+    """Wait for viewer pages to load so their PDF XHR can complete."""
+    for target in (page, *opened):
+        wait = getattr(target, "wait_for_load_state", None)
+        if callable(wait):
+            try:
+                wait("domcontentloaded", timeout=timeout_ms)
+            except Exception:
+                pass
+    # Give the PDF.js XHR a moment to complete after DOM load.
+    sleeper = getattr(page, "wait_for_timeout", None)
+    if callable(sleeper):
+        try:
+            sleeper(min(3000, timeout_ms))
+        except Exception:
+            pass
+
+
+def _click_viewer_download(viewer: Any, timeout_ms: int) -> bytes | None:
+    """Click the viewer's Download button via frame traversal.
+
+    Live 2026-10-05: the button was inside an iframe that browser automation
+    could not operate. Playwright's frame API may reach it. Returns PDF bytes,
+    or None if the button is not found/operable (the caller holds on None).
+    """
+    frames: list[Any] = [viewer]
+    get_frames = getattr(viewer, "frames", None)
+    if callable(get_frames):
+        try:
+            frames.extend(get_frames())
+        except Exception:
+            pass
+    elif isinstance(get_frames, (list, tuple)):
+        # Real Playwright exposes page.frames as a property (list).
+        frames.extend(get_frames)
+    for frame in frames:
+        get_by_role = getattr(frame, "get_by_role", None)
+        if not callable(get_by_role):
+            continue
+        try:
+            button = get_by_role("button", name=_DOWNLOAD_BUTTON_NAME)
+        except Exception:
+            continue
+        if _locator_count(button) != 1:
+            continue
+        expect = getattr(viewer, "expect_download", None)
+        if not callable(expect):
+            return None
+        try:
+            with expect(timeout=timeout_ms) as download_info:
+                button.click(timeout=timeout_ms)
+            blob = _download_bytes(download_info.value)
+        except Exception:
+            continue
+        if _is_pdf(blob):
+            return bytes(blob)
+        # A non-PDF download is not the notice; keep looking.
+    return None
+
+
+def fetch_notice_pdf_via_viewer(
+    page: Any,
+    *,
+    timeout_ms: int = DOWNLOAD_TIMEOUT_MS,
+) -> tuple[str, bytes]:
+    """Click the notice link, capture the viewer URL's documentId, intercept the PDF XHR.
+
+    Live 2026-10-05: the notice link href is "#" (Angular fetches the document
+    ID via XHR). Clicking opens the consolidated document viewer with
+    documentId in the URL. The viewer URL itself returns HTML (Angular +
+    PDF.js), not PDF bytes; the PDF loads client-side via XHR. This function
+    captures those XHR bytes via Playwright network interception. If
+    interception yields nothing, it falls back to the viewer's Download button
+    via frame traversal. Fail-closed at every step.
+
+    Returns (document_id, pdf_bytes).
     """
     notice = _notice_match(page)
     if not isinstance(notice, tuple):
         raise IntakeHold("NOC PDF capture is missing or ambiguous")
     _, locator = notice
-    get_attr = getattr(locator, "get_attribute", None)
-    href = ""
-    if callable(get_attr):
+
+    context = page.context
+    captured: list[bytes] = []
+    opened: list[Any] = []
+    on_response = _pdf_response_handler(captured)
+
+    def on_page(new_page: Any) -> None:
+        opened.append(new_page)
+
+    context.on("response", on_response)
+    context.on("page", on_page)
+    try:
+        click = getattr(locator, "click", None)
+        if not callable(click):
+            raise IntakeHold("NOC PDF capture is missing or ambiguous")
         try:
-            href = str(get_attr("href") or "")
-        except Exception:
-            href = ""
-    if not href:
-        raise IntakeHold("NOC document link has no href")
-    document_id = extract_document_id(href)
-    if not _allowed_pdf_url(href):
-        raise IntakeHold("NOC document URL is not a Geico host")
-    body = _http_get(page, href)
-    if not _is_pdf(body):
-        raise IntakeHold("NOC download is not a PDF")
-    return document_id, body
+            click(timeout=timeout_ms)
+        except Exception as exc:
+            raise IntakeHold("NOC notice link did not open") from exc
+
+        _settle_viewer_pages(page, opened, timeout_ms)
+
+        viewer = _find_viewer_page(page, opened)
+        document_id = extract_viewer_document_id(str(getattr(viewer, "url", "") or ""))
+
+        if len(captured) == 1:
+            return document_id, captured[0]
+        if len(captured) > 1:
+            raise IntakeHold("NOC PDF capture is missing or ambiguous")
+
+        downloaded = _click_viewer_download(viewer, timeout_ms)
+        if downloaded is not None:
+            return document_id, downloaded
+        raise IntakeHold("NOC PDF capture is missing or ambiguous")
+    finally:
+        remover = getattr(context, "remove_listener", None)
+        if callable(remover):
+            for event, handler in (("response", on_response), ("page", on_page)):
+                try:
+                    remover(event, handler)
+                except Exception:
+                    pass
+        for item in opened:
+            _close_gateway_page(item)
 
 
 @dataclass(frozen=True)
@@ -794,9 +962,10 @@ def notice_issued_on(text: str) -> date | None:
 def open_billing_notices(page: Any) -> NoticePath:
     """Policy tab -> Documents -> Billing tab -> the one Cancellation Notice.
 
-    Extracts the documentId from the notice link's href (no click) so the
-    ledger can use the durable document identity and the PDF can be fetched
-    directly without touching the viewer.
+    Live 2026-10-05: the notice link href is "#" (Angular). The document UUID
+    is not in the markup; it is captured from the viewer URL after the link
+    is clicked during download_notice(). The durable ledger key is resolved
+    after the fetch.
     """
     _settle(page, 6000)
     assert_authenticated(page)
@@ -820,17 +989,11 @@ def open_billing_notices(page: Any) -> NoticePath:
         text = str(item.first.inner_text() or "") if _locator_count(item) >= 1 else ""
     except Exception:
         text = ""
-    # Extract the durable document ID from the notice link href (no click).
-    document_id = ""
-    try:
-        get_attr = getattr(notice[1], "get_attribute", None)
-        href = str(get_attr("href") or "") if callable(get_attr) else ""
-        if href:
-            document_id = extract_document_id(href)
-    except IntakeHold:
-        # Ambiguous href: hold with empty document_id rather than guessing.
-        document_id = ""
-    return NoticePath("noc", notice[0], issued_on=notice_issued_on(text), document_id=document_id)
+    # Live 2026-10-05: the notice link href is "#" (Angular). The document UUID
+    # is not in the markup; it is captured from the viewer URL after the link
+    # is clicked during download_notice(). Leave document_id empty here — the
+    # durable key is resolved after the fetch.
+    return NoticePath("noc", notice[0], issued_on=notice_issued_on(text))
 
 
 def notice_is_stale(issued_on: date | None, due_on: date) -> bool:
@@ -939,16 +1102,17 @@ class PlaywrightGeicoNocBrowser:
         return open_billing_notices(popup)
 
     def download_notice(self, policy_number: str) -> tuple[str, bytes]:
-        """Fetch the NOC PDF directly via the notice link's document URL.
+        """Click the notice link, capture the viewer URL's documentId, intercept the PDF XHR.
 
-        Returns (document_id, pdf_bytes). Never clicks the notice link and
-        never touches the PDF viewer — the viewer iframe is not operable by
-        automation (verified 2026-10-05). Fail-closed on any ambiguity.
+        Returns (document_id, pdf_bytes). The viewer URL returns HTML, not
+        PDF; bytes come from network interception of the viewer's XHR, with
+        the viewer's Download button as fallback. Fail-closed on any
+        ambiguity.
         """
         if not _POLICY_NUMBER.fullmatch(str(policy_number or "").strip()):
             raise IntakeHold("NOC policy number is missing or ambiguous")
         page = self.policy_page if self.policy_page is not None else self.page
-        return fetch_notice_pdf_direct(page)
+        return fetch_notice_pdf_via_viewer(page)
 
     def return_to_pending_list(self) -> None:
         popup, self.policy_page = self.policy_page, None
