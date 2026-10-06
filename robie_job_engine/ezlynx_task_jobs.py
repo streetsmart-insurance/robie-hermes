@@ -59,6 +59,66 @@ def job_is_dialable(payload: dict[str, Any]) -> bool:
     return True
 
 
+def remember_splice_workflows(store: Any, *, enabled: bool, now: str) -> str:
+    """Timestamp of the current on-period for the nine Splice labels.
+
+    Empty while they are off. Each off-to-on transition records a new
+    timestamp, so a task created while the labels were off is older than
+    this moment and is baselined instead of dialed. Staying on does not
+    move the timestamp.
+    """
+    with store.connect() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS splice_workflow_enablement (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled_at TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
+            )"""
+        )
+        columns = {
+            str(info[1])
+            for info in conn.execute("PRAGMA table_info(splice_workflow_enablement)")
+        }
+        if "enabled" not in columns:
+            conn.execute(
+                "ALTER TABLE splice_workflow_enablement "
+                "ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        row = conn.execute(
+            "SELECT enabled_at, enabled FROM splice_workflow_enablement WHERE id=1"
+        ).fetchone()
+        if not enabled:
+            if row is None:
+                conn.execute(
+                    "INSERT INTO splice_workflow_enablement "
+                    "(id, enabled_at, enabled) VALUES (1, '', 0)"
+                )
+            elif int(row["enabled"] or 0) != 0:
+                conn.execute(
+                    "UPDATE splice_workflow_enablement SET enabled=0 WHERE id=1"
+                )
+            return ""
+        if (
+            row is not None
+            and int(row["enabled"] or 0) == 1
+            and str(row["enabled_at"] or "").strip()
+        ):
+            return str(row["enabled_at"])
+        if row is None:
+            conn.execute(
+                "INSERT INTO splice_workflow_enablement "
+                "(id, enabled_at, enabled) VALUES (1, ?, 1)",
+                (now,),
+            )
+        else:
+            conn.execute(
+                "UPDATE splice_workflow_enablement "
+                "SET enabled_at=?, enabled=1 WHERE id=1",
+                (now,),
+            )
+    return now
+
+
 def remember_live_mode(store: Any, *, live: bool, now: str) -> str:
     """Return when live mode was first enabled. Record it on the first live run."""
     with store.connect() as conn:
@@ -95,6 +155,7 @@ def job_payload_for_task(
     live: bool = False,
     queued_at: str = "",
     live_enabled_at: str = "",
+    splice_enabled_at: str = "",
 ) -> dict[str, Any]:
     """Job payload carrying every ID the worker needs.
 
@@ -125,6 +186,7 @@ def job_payload_for_task(
         "created_at": task.created_at,
         "created_at_et": task.created_at_et,
         "workflow": _workflow_id(task),
+        "splice_enabled_at": splice_enabled_at,
         "report_message_id": report_message_id,
         "report_digest": report_digest,
         "queued_at": queued_at,
@@ -249,6 +311,7 @@ def ensure_task_job(
     live: bool = False,
     queued_at: str = "",
     live_enabled_at: str = "",
+    splice_enabled_at: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Return the durable job for this task, creating it if needed.
 
@@ -268,6 +331,7 @@ def ensure_task_job(
     payload = job_payload_for_task(
         task, report_message_id=report_message_id, report_digest=report_digest,
         live=live, queued_at=queued_at, live_enabled_at=live_enabled_at,
+        splice_enabled_at=splice_enabled_at,
     )
     key = task_idempotency_key(task.task_id)
     existing = _find_by_idempotency_key(store, key)
@@ -315,6 +379,9 @@ def ensure_task_job(
         payload["queued_at"] = existing_payload.get("queued_at") or payload["queued_at"]
         payload["live_enabled_at"] = (
             existing_payload.get("live_enabled_at") or payload["live_enabled_at"]
+        )
+        payload["splice_enabled_at"] = (
+            existing_payload.get("splice_enabled_at") or payload["splice_enabled_at"]
         )
     else:
         payload["dialable"] = False

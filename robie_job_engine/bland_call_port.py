@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -48,21 +49,34 @@ REAL_CLIENTS_ENV = "ROBIE_PHONE_REAL_CLIENTS"
 JAKE_CELL_SECRET = "robie-test-jake-cell"
 
 
+def _test_dial_only(
+    env: Mapping[str, str] | None, hostname: str | None,
+) -> bool:
+    """Test never posts a client number, even if real-client dialing is on."""
+    source = {} if env is None else env
+    if str(source.get("ROBIE_ENV") or "").strip().upper() == "TEST":
+        return True
+    short = str(hostname or "").split(".")[0]
+    return short == "hermes-test-01"
+
+
 def select_dial_target(
     phone: str,
     *,
     env: Mapping[str, str] | None,
     secret_reader: Callable[[str], str] | None,
+    hostname: str | None = None,
 ) -> tuple[str | None, str | None]:
     """The number to post, or an error.
 
-    Real client numbers require ROBIE_PHONE_REAL_CLIENTS=1. Otherwise the
-    only number that can be posted is the test cell from Secret Manager
-    secret robie-test-jake-cell. That value is never hardcoded and the
-    full number is never logged.
+    Real client numbers require ROBIE_PHONE_REAL_CLIENTS=1 and a host
+    that is not Test. On Test (ROBIE_ENV=TEST or hermes-test-01) the only
+    number that can be posted is the test cell from Secret Manager secret
+    robie-test-jake-cell. The client phone is never used as a fallback.
+    That value is never hardcoded and the full number is never logged.
     """
     source = {} if env is None else env
-    if source.get(REAL_CLIENTS_ENV) == "1":
+    if source.get(REAL_CLIENTS_ENV) == "1" and not _test_dial_only(source, hostname):
         text = str(phone or "").strip()
         dial = to_e164_us(text) if text.startswith("+") else None
         if not dial:
@@ -184,8 +198,9 @@ class BlandTransportCallPort:
         if halted:
             logger.warning("not dialing; %s", halted)
             return {"success": False, "error": halted, "call_ids": []}
+        host = self.hostname if self.hostname else socket.gethostname()
         dial, target_error = select_dial_target(
-            phone, env=self.env, secret_reader=self.secret_reader,
+            phone, env=self.env, secret_reader=self.secret_reader, hostname=host,
         )
         if target_error or not dial:
             logger.warning("not dialing: %s", target_error or "no dial target")

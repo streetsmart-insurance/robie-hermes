@@ -1,13 +1,26 @@
 """Ascend notice driver stall check.
 
 The driver appends one counts-only record per run. The hourly health check
-reads that file and alerts when the last four completed live runs each saw
-actionable notices and filed nothing (``done == 0``).
+reads that file and alerts when the last four judged live runs each saw
+actionable notices that were neither filed nor intentionally deduped.
+
+Intentional dedupe is ``api_already_filed``, ``existing_note_duplicate``,
+``duplicate_in_run``, and ``recent_same_notice``. Those notices were
+already handled, so a live run whose actionable mail was all already
+filed is healthy. A run that still has actionable notices outside that
+set, and filed none of them, is a stall.
 
 Actionable notices exclude informational mail (status ``ignored``) and
 unrecognized mail (``Unrecognized Ascend notice type`` / notice type
 ``unknown``). Dry runs and fatal starts are recorded and then ignored by
 the stall window.
+
+Records written by this module include ``deduped``. Older records are
+judged from ``skipped_by_reason`` when that map is present, so a log that
+already counted ``api_already_filed`` goes quiet on the next health
+check. A record with neither field is not judged. It cannot hold the
+alert red. It ages out of the window: only the last four judged live
+runs are read.
 
 The file is mode 0644 under a 0755 directory so the health-check user can
 read it. On Production that user is ``carlo_streetsmart_insurance``, who
@@ -29,6 +42,16 @@ STALL_LIVE_RUNS = 4
 UNRECOGNIZED_MARK = "Unrecognized Ascend notice type"
 _UNRECOGNIZED_REASON_KEYS = frozenset(
     {"unknown_notice_type", "unrecognized", UNRECOGNIZED_MARK}
+)
+# Skips that mean the notice was already filed or collapsed. They are
+# handled, not a stall. Prefixes match ``skipped_by_reason`` keys.
+DEDUPE_REASONS = frozenset(
+    {
+        "api_already_filed",
+        "existing_note_duplicate",
+        "duplicate_in_run",
+        "recent_same_notice",
+    }
 )
 
 
@@ -58,6 +81,19 @@ def _is_unrecognized(item: Mapping[str, Any]) -> bool:
     reason = str(item.get("reason") or "")
     notice_type = str(_detail(item).get("notice_type") or "")
     return notice_type == "unknown" or UNRECOGNIZED_MARK in reason
+
+
+def _reason_prefix(key: Any) -> str:
+    return str(key or "").split(":", 1)[0].strip()
+
+
+def deduped_from_reasons(reasons: Mapping[str, Any] | None) -> int:
+    """How many skips were intentional dedupe, from a reason-count map."""
+    total = 0
+    for key, value in (reasons or {}).items():
+        if _reason_prefix(key) in DEDUPE_REASONS:
+            total += int(value or 0)
+    return total
 
 
 def unrecognized_from_reasons(reasons: Mapping[str, Any] | None) -> int:
@@ -99,13 +135,31 @@ def count_actionable(summary: Mapping[str, Any]) -> tuple[int, int]:
     return max(0, seen - ignored - unrecognized), unrecognized
 
 
+def count_deduped(summary: Mapping[str, Any]) -> int:
+    """Intentional dedupe skips on one driver summary."""
+    if "deduped" in summary:
+        return int(summary.get("deduped") or 0)
+    reasons = summary.get("skipped_by_reason")
+    if isinstance(reasons, Mapping):
+        return deduped_from_reasons(reasons)
+    results = summary.get("results")
+    if not isinstance(results, list):
+        return 0
+    total = 0
+    for item in results:
+        if isinstance(item, Mapping) and _reason_prefix(item.get("reason")) in DEDUPE_REASONS:
+            total += 1
+    return total
+
+
 def annotate_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    """Add ``actionable_seen`` and ``unrecognized`` onto a driver summary."""
+    """Add ``actionable_seen``, ``unrecognized``, and ``deduped``."""
     if summary.get("fatal"):
         return summary
     actionable, unrecognized = count_actionable(summary)
     summary["unrecognized"] = unrecognized
     summary["actionable_seen"] = actionable
+    summary["deduped"] = count_deduped(summary)
     return summary
 
 
@@ -138,6 +192,7 @@ def compact_run_record(
         "ignored": int(summary.get("ignored") or 0),
         "unrecognized": unrecognized,
         "actionable_seen": actionable,
+        "deduped": count_deduped(summary),
         "skipped_by_reason": dict(reasons) if isinstance(reasons, Mapping) else {},
     }
 
@@ -207,6 +262,29 @@ def _actionable_of(record: Mapping[str, Any]) -> int:
     return max(0, seen - ignored - unrecognized)
 
 
+def _deduped_of(record: Mapping[str, Any]) -> int | None:
+    """Dedupe count, or None when this record cannot be judged.
+
+    ``deduped`` is the counter this module writes. A record from before
+    that field still counts when it stored ``skipped_by_reason``. A record
+    with neither is left out of the stall window.
+    """
+    if "deduped" in record:
+        return int(record.get("deduped") or 0)
+    reasons = record.get("skipped_by_reason")
+    if isinstance(reasons, Mapping):
+        return deduped_from_reasons(reasons)
+    return None
+
+
+def _left_unhandled(record: Mapping[str, Any]) -> int:
+    """Actionable notices that were neither filed nor deduped."""
+    deduped = _deduped_of(record)
+    if deduped is None:
+        return 0
+    return max(0, _actionable_of(record) - int(record.get("done") or 0) - deduped)
+
+
 def completed_live_run(record: Mapping[str, Any]) -> bool:
     """A finished live run. Dry runs and fatal starts do not count."""
     if record.get("fatal"):
@@ -221,24 +299,36 @@ def evaluate_stall(
     *,
     need: int = STALL_LIVE_RUNS,
 ) -> dict[str, Any]:
-    """Quiet unless the last ``need`` live runs all filed nothing.
+    """Quiet unless the last ``need`` judged live runs each left work undone.
 
-    Fewer than ``need`` completed live runs is quiet. A later success or a
-    live run whose notices were all ignored or unrecognized breaks the streak.
+    A judged run is a completed live run that carries ``deduped`` or
+    ``skipped_by_reason``. Fewer than ``need`` judged runs is quiet. A
+    later filing, a run whose actionable notices were all deduped, or a
+    run whose notices were all ignored or unrecognized breaks the streak.
+    Records with neither counter are not judged, so they do not keep an
+    old false alert red.
     """
     live = [record for record in records if completed_live_run(record)]
-    window = live[-need:]
+    judged = [record for record in live if _deduped_of(record) is not None]
+    window = judged[-need:]
     rows = [
         {
             "at": record.get("at"),
             "actionable_seen": _actionable_of(record),
             "done": int(record.get("done") or 0),
+            "deduped": _deduped_of(record),
+            "unhandled": _left_unhandled(record),
             "ignored": int(record.get("ignored") or 0),
             "unrecognized": int(record.get("unrecognized") or 0),
         }
         for record in window
     ]
-    base = {"need": need, "runs_found": len(window), "last_runs": rows}
+    base = {
+        "need": need,
+        "runs_found": len(window),
+        "unjudged": len(live) - len(judged),
+        "last_runs": rows,
+    }
     if len(window) < need:
         return {
             "status": "OK",
@@ -247,7 +337,9 @@ def evaluate_stall(
             ),
             **base,
         }
-    stalled = all(row["actionable_seen"] > 0 and row["done"] == 0 for row in rows)
+    stalled = all(
+        row["unhandled"] > 0 and row["done"] == 0 for row in rows
+    )
     if stalled:
         return {
             "status": "ALERT",

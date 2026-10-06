@@ -4,6 +4,12 @@
 # ROBIE_CALL_SMS_CONFIGURED is left unset.
 Environment=ROBIE_PHONE_LIVE_CALLS=1
 Environment=ROBIE_PHONE_REAL_CLIENTS=1
+# The nine Splice workflow labels stay off on Production until Carlo
+# sets ROBIE_SPLICE_WORKFLOWS_LIVE=1 after Test proofs. Do not set it here.
+# Test (hermes-test-01) enables those labels in code and still dials only
+# Jake's cell. On Test, set ROBIE_SPLICE_TEST_APPLICANT_ID to Jake
+# Ferrara's own EZLynx applicant id. Never Buster Brown (26356199) or
+# ROBIE Test LLC (220250093).
 Environment=ROBIE_BLAND_ALLOWED_ENVS=PRODUCTION
 Environment=ROBIE_BLAND_ALLOWED_HOSTS=hermes-poc-01
 Environment=ROBIE_BLAND_MAX_DURATION_MINUTES=10

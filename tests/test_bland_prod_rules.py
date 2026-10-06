@@ -110,7 +110,7 @@ def _task(**overrides):
     task = {
         "Task ID": "TASK-RULES",
         "Task Subject": "Please call about renewal",
-        "Task Description": "Please call John about his renewal.",
+        "Task Description": "Please call John about his renewal. Call at 732-555-0142.",
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Assigned Producer": "Jane Producer",
