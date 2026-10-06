@@ -46,7 +46,7 @@ def make_task(**overrides: Any) -> Dict[str, Any]:
     task: Dict[str, Any] = {
         "Task ID": "TASK-1",
         "Task Subject": "Please call about renewal",
-        "Task Description": "Please call John about his renewal. Be friendly.",
+        "Task Description": "Please call John about his renewal. Be friendly. Call at 732-668-8161.",
         "Applicant ID": TEST_APPLICANT,
         "Account Name": "John Test",
         "Task Created By": "carlo1",
@@ -281,14 +281,26 @@ class TestPhoneLookup(unittest.TestCase):
 
     def test_no_phone_fails_closed(self):
         ports = make_ports(phone_lookup=FakePhonePort({}))
-        result = handle_robie_call_task(make_task(), live_config(), ports)
+        task = make_task(**{
+            "Task Description": "Please call John about his renewal. Be friendly.",
+        })
+        result = handle_robie_call_task(task, live_config(), ports)
         self.assertFalse(result["ok"])
         self.assertIn("phone", result["error"])
+        self.assertEqual(ports.phone_lookup.calls, [])
         self.assertEqual(ports.bland.calls, [])
+        self.assertIn(
+            "Make a new Robie Call task with the number to call.",
+            ports.discussion_client.appended[0]["body"],
+        )
 
     def test_garbage_phone_fails_closed(self):
         ports = make_ports(phone_lookup=FakePhonePort({TEST_APPLICANT: "N/A"}))
-        result = handle_robie_call_task(make_task(), live_config(), ports)
+        task = make_task(**{
+            "Activity Labels": "Robie Lead Follow Up",
+            "Task Description": "The lead asked about a homeowners quote.",
+        })
+        result = handle_robie_call_task(task, live_config(), ports)
         self.assertFalse(result["ok"])
         self.assertEqual(ports.bland.calls, [])
 
@@ -307,7 +319,10 @@ class TestPhoneLookup(unittest.TestCase):
         orig_sleep = rch.time.sleep
         rch.time.sleep = lambda s: None
         try:
-            result = handle_robie_call_task(make_task(), live_config(), ports)
+            result = handle_robie_call_task(make_task(**{
+                "Activity Labels": "Robie Lead Follow Up",
+                "Task Description": "The lead asked about a homeowners quote.",
+            }), live_config(), ports)
         finally:
             rch.time.sleep = orig_sleep
         self.assertFalse(result["ok"])
@@ -444,6 +459,10 @@ class TestWriteback(unittest.TestCase):
                     "Applicant ID": applicant,
                     "Task ID": "TASK-REAL",
                     "Account Name": "Avery Sample",
+                    "Task Description": (
+                        "Please call about the renewal. Be friendly. "
+                        "Call at 732-668-8161."
+                    ),
                 }),
                 live_config(),
                 ports,
@@ -503,11 +522,11 @@ class TestIdempotency(unittest.TestCase):
         ports = make_ports()
         handle_robie_call_task(
             make_task(**{"Task ID": "TASK-1",
-                         "Task Description": "Call about the renewal"}),
+                         "Task Description": "Call about the renewal. Call at 732-668-8161."}),
             live_config(), ports)
         handle_robie_call_task(
             make_task(**{"Task ID": "TASK-2",
-                         "Task Description": "Call about the audit"}),
+                         "Task Description": "Call about the audit. Call at 732-668-8161."}),
             live_config(), ports)
         self.assertEqual(len(ports.bland.calls), 2)
 
@@ -549,7 +568,7 @@ class TestInstructionHandling(unittest.TestCase):
 
     def test_instruction_capped(self):
         ports = make_ports()
-        long_desc = "Please call. " + ("x" * 5000)
+        long_desc = "Please call at 732-668-8161. " + ("x" * 5000)
         handle_robie_call_task(make_task(**{"Task Description": long_desc}), live_config(), ports)
         task_text = ports.bland.calls[0]["task_text"]
         self.assertLessEqual(len(task_text), 2000 + 600)  # instruction cap + wrapper
@@ -557,7 +576,10 @@ class TestInstructionHandling(unittest.TestCase):
     def test_subject_used_when_no_description(self):
         ports = make_ports()
         handle_robie_call_task(
-            make_task(**{"Task Description": "", "Task Subject": "Call about renewal"}),
+            make_task(**{
+                "Task Description": "",
+                "Task Subject": "Call about renewal. Call at 732-668-8161.",
+            }),
             live_config(), ports,
         )
         self.assertEqual(len(ports.bland.calls), 1)
@@ -617,9 +639,13 @@ class TestCallRequestRound(unittest.TestCase):
         })
         ports = make_ports()
         result = handle_robie_call_task(task, live_config(), ports)
-        self.assertTrue(result["ok"])
-        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
-        self.assertNotEqual(ports.bland.calls[0]["phone"], "+17685786571")
+        self.assertFalse(result["ok"])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertEqual(ports.phone_lookup.calls, [])
+        self.assertIn(
+            "Make a new Robie Call task with the number to call.",
+            ports.discussion_client.appended[0]["body"],
+        )
 
     def test_policy_claim_quote_and_pol_context_never_dial(self):
         samples = (
@@ -638,8 +664,14 @@ class TestCallRequestRound(unittest.TestCase):
             })
             ports = make_ports()
             result = handle_robie_call_task(task, live_config(), ports)
-            self.assertTrue(result["ok"], description)
-            self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161", description)
+            self.assertFalse(result["ok"], description)
+            self.assertEqual(ports.bland.calls, [], description)
+            self.assertEqual(ports.phone_lookup.calls, [], description)
+            if index == 0:
+                self.assertIn(
+                    "Make a new Robie Call task with the number to call.",
+                    ports.discussion_client.appended[0]["body"],
+                )
 
     def test_clear_phone_wording_or_format_is_dialed(self):
         cases = (
@@ -668,8 +700,13 @@ class TestCallRequestRound(unittest.TestCase):
         })
         ports = make_ports()
         result = handle_robie_call_task(task, live_config(), ports)
-        self.assertTrue(result["ok"])
-        self.assertEqual(ports.bland.calls[0]["phone"], "+17326688161")
+        self.assertFalse(result["ok"])
+        self.assertEqual(ports.bland.calls, [])
+        self.assertEqual(ports.phone_lookup.calls, [])
+        self.assertIn(
+            "Make a new Robie Call task with the number to call.",
+            ports.discussion_client.appended[0]["body"],
+        )
 
     def test_ambiguous_number_asks_instead_of_dialing(self):
         task = make_task(**{
@@ -854,7 +891,7 @@ class TestCallRequestRound(unittest.TestCase):
             result = handle_robie_call_task(
                 make_task(**{
                     "Task ID": "TASK-C",
-                    "Task Description": "Call about the audit documents.",
+                    "Task Description": "Call about the audit documents. Call at 732-668-8161.",
                 }),
                 RobieCallConfig(
                     dry_run=False, now=early,

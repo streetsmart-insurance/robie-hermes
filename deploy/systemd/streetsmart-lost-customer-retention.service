@@ -12,7 +12,7 @@ WorkingDirectory=/opt/streetsmart-hermes/releases/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_ENV=Production
 EnvironmentFile=/etc/streetsmart-hermes/robie-accountability.env
-ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --send
+ExecStart=/opt/streetsmart-hermes/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --send
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

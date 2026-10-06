@@ -16,6 +16,7 @@ from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine.ascend_driver_stall import (
     append_run_record,
+    compact_run_record,
     count_actionable,
     evaluate_stall,
     evaluate_stall_file,
@@ -71,6 +72,7 @@ def _live(actionable: int, done: int = 0, **extra) -> dict:
         "ignored": extra.pop("ignored", 0),
         "unrecognized": extra.pop("unrecognized", 0),
         "actionable_seen": actionable,
+        "deduped": extra.pop("deduped", 0),
     }
     record.update(extra)
     return record
@@ -296,6 +298,115 @@ class StallVerdictTests(unittest.TestCase):
         }
         alert = evaluate_stall([still_actionable for _ in range(4)])
         self.assertEqual(alert["status"], "ALERT")
+
+    def test_already_filed_notices_are_healthy(self):
+        # Tonight's first live shape: 6 seen, 4 already filed by the API
+        # poller, 2 ignored, nothing new to post.
+        tonight = _live(
+            4,
+            done=0,
+            notices_seen=6,
+            ignored=2,
+            deduped=4,
+            skipped_by_reason={"api_already_filed": 4},
+        )
+        verdict = evaluate_stall([tonight for _ in range(4)])
+        self.assertEqual(verdict["status"], "OK")
+        self.assertEqual(verdict["detail"], "ascend driver not stalled")
+        self.assertEqual(verdict["last_runs"][0]["unhandled"], 0)
+
+        mixed = {
+            "dry_run": False,
+            "notices_seen": 6,
+            "done": 0,
+            "ignored": 2,
+            "actionable_seen": 4,
+            "skipped_by_reason": {
+                "api_already_filed": 1,
+                "existing_note_duplicate": 1,
+                "duplicate_in_run": 1,
+                "recent_same_notice": 1,
+            },
+        }
+        self.assertEqual(evaluate_stall([mixed for _ in range(4)])["status"], "OK")
+
+    def test_unhandled_actionable_notices_still_fail(self):
+        stalled = _live(
+            4,
+            done=0,
+            notices_seen=6,
+            ignored=2,
+            deduped=0,
+            skipped_by_reason={"applicant_unresolved": 4},
+        )
+        verdict = evaluate_stall([stalled for _ in range(4)])
+        self.assertEqual(verdict["status"], "ALERT")
+        self.assertIn("done=0", verdict["detail"])
+        self.assertEqual(verdict["last_runs"][0]["unhandled"], 4)
+
+        partial = _live(
+            4,
+            done=0,
+            deduped=2,
+            skipped_by_reason={"api_already_filed": 2, "applicant_unresolved": 2},
+        )
+        partial_verdict = evaluate_stall([partial for _ in range(4)])
+        self.assertEqual(partial_verdict["status"], "ALERT")
+        self.assertEqual(partial_verdict["last_runs"][0]["unhandled"], 2)
+
+    def test_records_without_dedupe_counters_do_not_stay_red(self):
+        # Written before deduped and skipped_by_reason. They look like a
+        # stall and must not be judged, so they age out of the window.
+        historical = {
+            "dry_run": False,
+            "notices_seen": 6,
+            "done": 0,
+            "ignored": 2,
+            "actionable_seen": 4,
+        }
+        old = evaluate_stall([historical for _ in range(4)])
+        self.assertEqual(old["status"], "OK")
+        self.assertEqual(old["runs_found"], 0)
+        self.assertEqual(old["unjudged"], 4)
+        self.assertIn("need 4", old["detail"])
+
+        # The same shape with the reason map already on disk is judged,
+        # and api_already_filed makes it healthy without the new counter.
+        recorded = dict(historical)
+        recorded["skipped_by_reason"] = {"api_already_filed": 4}
+        reinterpreted = evaluate_stall([recorded for _ in range(4)])
+        self.assertEqual(reinterpreted["status"], "OK")
+        self.assertEqual(reinterpreted["detail"], "ascend driver not stalled")
+        self.assertEqual(reinterpreted["unjudged"], 0)
+
+        # One new unhandled run does not alert while the window is short.
+        # Four new unhandled runs do, and the old rows stay outside it.
+        fresh = _live(4, done=0, deduped=0)
+        short = evaluate_stall([historical for _ in range(4)] + [fresh])
+        self.assertEqual(short["status"], "OK")
+        self.assertEqual(short["runs_found"], 1)
+        full = evaluate_stall([historical for _ in range(4)] + [fresh for _ in range(4)])
+        self.assertEqual(full["status"], "ALERT")
+        self.assertEqual(full["runs_found"], 4)
+        self.assertEqual(full["unjudged"], 4)
+
+    def test_compact_record_stores_the_deduped_counter(self):
+        record = compact_run_record(
+            {
+                "dry_run": False,
+                "notices_seen": 6,
+                "done": 0,
+                "ignored": 2,
+                "actionable_seen": 4,
+                "skipped_by_reason": {
+                    "api_already_filed": 3,
+                    "existing_note_duplicate: n1": 1,
+                    "applicant_unresolved": 0,
+                },
+            }
+        )
+        self.assertEqual(record["deduped"], 4)
+        self.assertNotIn("subject", record)
 
     def test_run_log_is_world_readable_under_a_tight_umask(self):
         previous = os.umask(0o077)
