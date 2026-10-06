@@ -32,7 +32,9 @@ Safety (non-negotiable):
   applicant, missing/invalid CSR username on a cancellation, any API
   error, phone numbers in the note text, or a write-scope refusal -> that
   email is skipped, logged, and the driver continues with the rest.
-  Informational mail is ``ignored``, not a human-review skip.
+  Informational mail, including "New in Ascend" product mail, is
+  ``ignored``, not a human-review skip. Unresolved applicants and
+  programs stay human review.
 - Write-scope eligibility is checked before filing. Dry-run reports
   matches blocked only by that allowlist as
   ``would_file_if_write_scope_allowed``, with applicant ids. This driver's
