@@ -216,6 +216,13 @@ def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[s
         print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1, {"error": f"{type(exc).__name__}: {exc}"}
 
+    # The health check reads summary.sent; the worker's destination dict
+    # carries delivery_receipts but no sent count, so a run that emailed
+    # successfully still read as "0 emails sent" (2026-10-05: sent was
+    # None). Copy the dict (don't mutate the worker result) and stamp it.
+    summary = dict(result.destination) if isinstance(result.destination, dict) else {}
+    receipts = summary.get("delivery_receipts") or []
+    summary["sent"] = len(receipts)
     evidence: dict[str, Any] = {
         "mode": args.mode,
         "ran_at": datetime.now(timezone.utc).isoformat(),
@@ -223,9 +230,9 @@ def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[s
         "succeeded": result.succeeded,
         "error": result.error,
         "hold_status": str(result.hold_status) if result.hold_status else None,
-        "summary": result.destination,
+        "summary": summary,
         "detail": result.detail,
-        "would_send" if dry_run else "sent": captured if dry_run else result.destination.get("delivery_receipts"),
+        "would_send" if dry_run else "sent": captured if dry_run else receipts,
     }
     if dry_run:
         evidence["dry_run_note"] = (
