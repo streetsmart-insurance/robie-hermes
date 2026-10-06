@@ -5,13 +5,15 @@ loads the "Policies pending cancel or renewal" report directly, extracts rows
 from all three tabs (Non-Payment, Underwriting, Renewals), and for each policy
 follows Route A: click the policy-number link ("View Policy Summary") on
 clpolicy.foragentsonly.com, open the DOCUMENTS tab, and pull cancellation
-notice documents from the Policy Documents table.
+notice documents from the Policy Documents table. For UNDERWRITING tab rows
+it also pulls standalone underwriting memos (additional-information requests,
+agent review notices) into a separate ``uw_memos`` receipt section.
 
 PDFs open inline in Chrome's PDF viewer via /Express/PDFHandler.ashx on
 clpolicy.foragentsonly.com. Bytes are read back from the viewer tab (blob or
 an HTTP GET on an allowed Progressive host). A document that is not a PDF is
 never kept; a document that cannot be captured is recorded HELD, never
-claimed as downloaded.
+claimed as downloaded. Billing and renewal paperwork are never targeted.
 
 This module does not log in, does not handle MFA, does not upload, note,
 task, or label in EZLynx, and does not register a timer.
@@ -96,6 +98,20 @@ _CANCELLATION_TERMS = frozenset({
     "intent to cancel", "pre-cancellation",
 })
 _CANCELLATION_DOC_TYPES = frozenset({"CANCNTC"})
+# Underwriting memo scope (UNDERWRITING tab rows only): standalone
+# underwriting memos, additional-information requests, agent review notices.
+# Billing and renewal paperwork are explicitly out even if memo-shaped.
+_MEMO_TERMS = frozenset({
+    "memo", "underwriting", "additional information", "info requested",
+    "information requested", "information needed", "agent review",
+    "documentation required", "proof of",
+})
+_BILLING_TERMS = frozenset({
+    "billing", "invoice", "payment", "premium", "statement",
+})
+_RENEWAL_TERMS = frozenset({
+    "renewal", "renew ", " renew", "renewal offer", "renewal reminder",
+})
 _LOGIN_PATHS = ("/login", "/logon", "/signin", "/auth")
 
 
@@ -164,10 +180,48 @@ class FaoDocument:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", self.document_name).strip("_")
         return f"{self.policy_number} {safe or 'document'} Progressive.pdf"
 
+    @property
+    def memo_document_id(self) -> str:
+        """Durable ledger identity for an underwriting memo."""
+        slug = re.sub(r"[^a-z0-9]+", "-", self.document_name.casefold()).strip("-")
+        return f"progressive:{self.policy_number}:memo:{slug}"
+
+    @property
+    def memo_filename(self) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", self.document_name).strip("_")
+        return f"{self.policy_number} {safe or 'document'} UW Memo Progressive.pdf"
+
 
 def is_cancellation_document(document_name: str) -> bool:
     key = _norm(document_name).casefold()
     return any(term in key for term in _CANCELLATION_TERMS)
+
+
+def is_billing_document(document_name: str) -> bool:
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _BILLING_TERMS)
+
+
+def is_renewal_document(document_name: str) -> bool:
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _RENEWAL_TERMS)
+
+
+def is_underwriting_memo(document_name: str) -> bool:
+    """A standalone UW memo: memo-shaped but not a cancellation, billing, or renewal doc.
+
+    Cancellation documents are handled by the cancellation flow and are never
+    double-counted as memos. Billing and renewal paperwork are out of scope
+    even when memo-shaped (e.g. "Billing Memo").
+    """
+    if is_cancellation_document(document_name):
+        return False
+    if is_billing_document(document_name):
+        return False
+    if is_renewal_document(document_name):
+        return False
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _MEMO_TERMS)
 
 
 def parse_cancellations_report(
@@ -646,6 +700,86 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
     return payload
 
 
+def _pull_underwriting_memos(
+    row: CancellationRow,
+    docs: tuple[FaoDocument, ...],
+    browser: Any,
+    ledger: FaoCancellationLedger,
+    archive: SourceArchive,
+    *,
+    as_of: date,
+    held: list[dict[str, Any]],
+    uw_memos: list[dict[str, Any]],
+) -> None:
+    """Pull standalone UW memos for one UNDERWRITING-tab row.
+
+    Runs against the same DOCUMENTS list the cancellation flow read, so a
+    failed DOCUMENTS read already recorded a hold before this is called.
+    Each memo failure is recorded HELD with the policy; nothing is skipped
+    silently. Cancellation documents are excluded (handled separately);
+    billing and renewal paperwork are never targeted.
+    """
+    for doc in docs:
+        if not is_underwriting_memo(doc.document_name):
+            continue
+        memo_id = doc.memo_document_id
+        try:
+            if ledger.delivery_status(
+                document_id=memo_id, filename=doc.memo_filename, issued_on=doc.document_date
+            ):
+                uw_memos.append({
+                    "document_id": memo_id,
+                    "filename": doc.memo_filename,
+                    "policy_number": row.policy_number,
+                    "insured_name": row.insured_name,
+                    "document_name": doc.document_name,
+                    "document_date": doc.document_date.isoformat(),
+                    "outcome": "ALREADY_DELIVERED",
+                })
+                continue
+        except IntakeHold as exc:
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
+            continue
+        capture = browser.capture_document(doc)
+        pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
+        if len(pdfs) != 1:
+            held.append(_row_payload(
+                row, outcome="HELD",
+                reason=f"Progressive FAO memo {doc.document_name!r} capture is missing or ambiguous",
+            ))
+            continue
+        content = pdfs[0]
+        source = SourceItem(
+            system=PROCESS,
+            source_account=FAO_HOST,
+            source_id=memo_id,
+            source_url=f"{row.list_url}#policy={row.policy_number}",
+            received_at=_received_at(as_of),
+            filename=doc.memo_filename,
+            content=content,
+        )
+        source.validate()
+        try:
+            saved = ledger.record(source, issued_on=doc.document_date)
+            archive.preserve(source)
+        except IntakeHold as exc:
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
+            continue
+        uw_memos.append({
+            "document_id": memo_id,
+            "filename": doc.memo_filename,
+            "sha256": source.digest,
+            "bytes": len(content),
+            "policy_number": row.policy_number,
+            "insured_name": row.insured_name,
+            "document_name": doc.document_name,
+            "document_date": doc.document_date.isoformat(),
+            "delivery": doc.delivery,
+            "path": str(saved),
+            "outcome": "PULLED",
+        })
+
+
 def run_pull(
     browser: PlaywrightFaoCancellationBrowser,
     ledger: FaoCancellationLedger,
@@ -656,10 +790,12 @@ def run_pull(
     """Pull Progressive FAO cancellation documents from the pending-cancel report.
 
     For each policy on every report tab: open Policy Summary on CL Express,
-    open the DOCUMENTS tab, and target cancellation notice documents. A real
-    PDF download or viewer PDF is saved; anything else is recorded HELD and
-    never claimed as downloaded. Billing documents are out of scope and are
-    never targeted.
+    open the DOCUMENTS tab, and target cancellation notice documents. For
+    UNDERWRITING tab rows, standalone underwriting memos (additional-info
+    requests, agent review notices) are pulled into the ``uw_memos`` receipt
+    section. A real PDF download or viewer PDF is saved; anything else is
+    recorded HELD and never claimed as downloaded. Billing documents are out
+    of scope and are never targeted.
     """
     from .document_retrieval_filing import require_carrier_pull
 
@@ -673,6 +809,7 @@ def run_pull(
     skipped: list[str] = []
     targeted: list[str] = []
     rows_payload: list[dict[str, Any]] = []
+    uw_memos: list[dict[str, Any]] = []
 
     browser.load_report()
     png = browser.screenshot_report()
@@ -692,6 +829,11 @@ def run_pull(
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
             browser.return_to_report()
             continue
+        if row.reason == "UNDERWRITING":
+            _pull_underwriting_memos(
+                row, docs, browser, ledger, archive,
+                as_of=as_of, held=held, uw_memos=uw_memos,
+            )
         targets = [doc for doc in docs if is_cancellation_document(doc.document_name)]
         if len(targets) != 1:
             held.append(_row_payload(
@@ -770,6 +912,8 @@ def run_pull(
         "targeted": len(targeted),
         "count": len(downloaded),
         "downloaded": downloaded,
+        "uw_memos": uw_memos,
+        "uw_memo_count": len([m for m in uw_memos if m.get("outcome") == "PULLED"]),
         "skipped_already_delivered": skipped,
         "held": held,
         "rows": rows_payload,
