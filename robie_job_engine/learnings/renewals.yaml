@@ -1,0 +1,32 @@
+# Manual-renewals worker learnings
+# Each entry: id (rn-NNN), rule, learned (YYYY-MM-DD), source.
+# Append new learnings at the end. Keep rules to one or two sentences.
+learnings:
+  - id: rn-001
+    rule: "Every manual renewal gets a direct document review of the renewal PDF itself - not just the tracker row. Read the invoice, the bill-to, and the term."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: rn-002
+    rule: "Carrier invoice language like 'policy premium was submitted for payment to: US BANK NA' is carrier-side evidence only. Agency transmission to the lender and the bank's payment receipt need independent evidence before calling it done."
+    learned: "2026-10-04"
+    source: "Lisi Neptune review"
+  - id: rn-003
+    rule: "Distinguish direct system read, worker summary, tracker, and inference. Label anything unresolved UNKNOWN or UNVERIFIED - do not present a summary as a confirmed fact."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: rn-004
+    rule: "JUSTICE 5 LLC (USLI GL1320391) stays separate from the renewal queue. Do not fold it into batch renewal work."
+    learned: "2026-10-04"
+    source: "Carlo direction"
+  - id: rn-005
+    rule: "Every renewal item served to Carlo carries its expiration/renewal date. No exceptions."
+    learned: "2026-10-04"
+    source: "Carlo standing rule"
+  - id: rn-006
+    rule: "A 'new' queue item may be a non-item: verify the change wasn't already completed months ago, and that the transaction is agency-owned, before working it."
+    learned: "2026-10-05"
+    source: "Amanda Strong / Javier Rivero triage"
+  - id: rn-007
+    rule: "For a recurring daily client follow-up (call plus email plus rolling due date): check the task due date first - if it is already beyond today, today's follow-up was completed; end quietly and never double-contact."
+    learned: "2026-10-05"
+    source: "Tammy Breaker daily setup"
