@@ -115,7 +115,7 @@ jobs:
 
       - name: Build and verify release from exact commit (TEST GATE OVERRIDE)
         if: ${{ inputs.override_test_gate }}
-        id: release
+        id: release_override
         shell: bash
         env:
           REQUESTED_COMMIT: ${{ inputs.commit }}
@@ -196,8 +196,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ARTIFACT_ID: ${{ steps.transfer_bundle.outputs.artifact-id }}
           ARTIFACT_SHA256: ${{ steps.transfer_bundle.outputs.artifact-digest }}
-          ARCHIVE_SHA256: ${{ steps.release.outputs.sha256 }}
-          INSTALLER_SHA256: ${{ steps.release.outputs.installer_sha256 }}
+          ARCHIVE_SHA256: ${{ steps.release.outputs.sha256 || steps.release_override.outputs.sha256 }}
+          INSTALLER_SHA256: ${{ steps.release.outputs.installer_sha256 || steps.release_override.outputs.installer_sha256 }}
           RELEASE_COMMIT: ${{ inputs.commit }}
           REQUESTED_SHA256: ${{ inputs.sha256 }}
         run: |
@@ -210,7 +210,7 @@ jobs:
           REQUESTED_SHA256: ${{ inputs.sha256 }}
         run: |
           set -euo pipefail
-          archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive }}')"
+          archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive || steps.release_override.outputs.archive }}')"
           checksum="${archive}.sha256"
           gcloud compute ssh "${PRODUCTION_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
