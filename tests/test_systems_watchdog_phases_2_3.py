@@ -433,6 +433,28 @@ class Tuesday4359ProofTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("missing", detail)
 
+    def test_tuesday_early_morning_edt_rolls_back(self):
+        """Regression: Tuesday 07:00 EDT (11:00 UTC) is BEFORE the 08:00 ET
+        fire, so the cutoff must be last Tuesday, not today.
+
+        The old code compared now.hour < 8 on a UTC datetime: at 11:00 UTC
+        it saw hour=11, skipped the rollback, and demanded evidence from a
+        run that hadn't fired yet — false-alarming every Tuesday 04:00-08:00
+        EDT (2026-10-06 health alert)."""
+        # Tuesday 2026-10-06 11:00 UTC = 07:00 EDT
+        now = datetime(2026, 10, 6, 11, 0, tzinfo=timezone.utc)
+        self.assertEqual(now.weekday(), 1)  # Tuesday
+        cutoff = h._most_recent_tuesday(now)
+        self.assertEqual(cutoff.date().isoformat(), "2026-09-29")
+        self.assertEqual(cutoff.hour, 8)
+
+    def test_tuesday_after_fire_edt_stays_today(self):
+        """Tuesday 09:00 EDT (13:00 UTC) is after the 08:00 ET fire."""
+        now = datetime(2026, 10, 6, 13, 0, tzinfo=timezone.utc)
+        cutoff = h._most_recent_tuesday(now)
+        self.assertEqual(cutoff.date().isoformat(), "2026-10-06")
+        self.assertEqual(cutoff.hour, 8)
+
 
 # ---------------------------------------------------------------------------
 # Chat intake (passthrough to preflight)
