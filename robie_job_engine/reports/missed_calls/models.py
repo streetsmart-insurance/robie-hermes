@@ -97,3 +97,6 @@ class RunSummary:
     fail_closed: bool = False
     errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Rows written (or that would be written in dry-run) for this date.
+    # Used by the EOD digest poster. Empty when the pull failed.
+    rows: list["SheetRow"] = field(default_factory=list)
