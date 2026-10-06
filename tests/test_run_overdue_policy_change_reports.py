@@ -163,6 +163,46 @@ def test_live_run_verifier_failure_is_recorded_not_fatal(tmp_path, monkeypatch):
     assert "UNVERIFIED" in evidence["verification"]["error"]
 
 
+def test_summary_sent_counts_delivery_receipts(tmp_path, monkeypatch):
+    """Regression (2026-10-05): the evidence writer put receipts at
+    top-level evidence['sent'] but never set summary['sent'], so the
+    health check read summary.get('sent') -> None and reported
+    '0 emails sent' for a run that had actually sent."""
+    import robie_job_engine.run_overdue_policy_change_reports as runner
+
+    receipts = [{"to": "a@x.com", "message_id": "m1"},
+                {"to": "b@x.com", "message_id": "m2"}]
+
+    class FakeResult:
+        succeeded = True
+        error = ""
+        hold_status = None
+        destination = {"delivery_receipts": receipts, "csr_count": 2}
+        detail = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def perform(self, job, idempotency_key=None):
+            return FakeResult()
+
+    class FakeVerifier:
+        def verify(self, job, action):
+            raise RuntimeError("no readback in this test")
+
+    monkeypatch.setattr(runner, "OverduePolicyChangeReportWorker", FakeWorker)
+    args = runner.build_parser().parse_args(
+        ["--mode", "live", "--manifest", "/tmp/m.json",
+         "--sent-store", str(tmp_path / "sent.json"),
+         "--evidence-out", str(tmp_path / "ev.json")])
+    code, evidence = runner.run(args, verifier_factory=FakeVerifier)
+    assert code == 0
+    assert evidence["summary"]["sent"] == 2
+    # The worker's own destination dict must not be mutated.
+    assert "sent" not in FakeResult.destination
+
+
 def test_dry_run_skips_verifier(tmp_path, monkeypatch):
     import robie_job_engine.run_overdue_policy_change_reports as runner
 
