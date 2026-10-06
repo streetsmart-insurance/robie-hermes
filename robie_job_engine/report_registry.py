@@ -32,6 +32,16 @@ MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
 # There is no separate "Open Requests - ROBIE" Custom Filter Set.
 POLICY_CHANGE_4359_SCOPE_MARKER = "Policy Change Request Confirmation Queue - ROBIE"
 
+# Look 4659 title. Scope marker for the weekly Policy Change Request Tracker
+# export (robie_job_engine/reports/change_tracker). The scope is the
+# "Change Request Created Date is in the last 1 year" filter chip, which the
+# change-tracker export driver applies and verifies in the UI (the 30-day
+# default silently under-reports). Look 4659's schema fingerprint is pinned in
+# robie_job_engine/reports/change_tracker/config.py and re-validated on every
+# export (P11); the schema_verified=True flag below reflects that per-export
+# verification, not a one-time check.
+CHANGE_TRACKER_4659_SCOPE_MARKER = "Policy Change Request Summary"
+
 # Shared Looker look ids (agency SharedReports-Streetsmart Insurance-36748).
 # These are Looker look ids, not EZLynx saved-report numbers. SSRobie Saved
 # Reports has zero ``a[href*=report_id]`` links for these queues.
@@ -42,6 +52,7 @@ LOOK_ID_BY_REPORT: dict[str, str] = {
     # has zero saved-report links and emails are the system of record.
     # 4246's daily email is the 4360 Active-filtered transaction feed.
     "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
+    "4659": "4659",  # Policy Change Request Summary (weekly tracker export)
 }
 
 
@@ -82,6 +93,17 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         ("policy_number", "change_request_created_date"),
         filter_name=POLICY_CHANGE_4359_SCOPE_MARKER,
         look_id=LOOK_ID_BY_REPORT["4359"],
+    ),
+    "4659": ReportSpec(
+        "4659",
+        "Policy Change Tracker (weekly)",
+        # True: the export schema is pinned (EXPECTED_4659_COLUMNS) and
+        # re-validated by fingerprint on every single export, so a silent
+        # EZLynx column rename/reorder fails closed (P11).
+        True,
+        ("policy_change_request_id",),
+        filter_name=CHANGE_TRACKER_4659_SCOPE_MARKER,
+        look_id=LOOK_ID_BY_REPORT["4659"],
     ),
 }
 METADATA_ONLY_ALIASES: dict[str, ReportSpec] = {
