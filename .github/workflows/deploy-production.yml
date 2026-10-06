@@ -137,8 +137,10 @@ jobs:
           git clone --no-checkout https://github.com/streetsmart-insurance/robie-hermes.git "${RUNNER_TEMP}/release-src"
           git -C "${RUNNER_TEMP}/release-src" checkout "${REQUESTED_COMMIT}"
           test "$(git -C "${RUNNER_TEMP}/release-src" rev-parse HEAD)" = "${REQUESTED_COMMIT}"
-          # Deterministic build (git archive of the exact commit).
-          bash "${RUNNER_TEMP}/release-src/scripts/build-release.sh" "${RUNNER_TEMP}/override-release" | tee "${RUNNER_TEMP}/override-release.env"
+          # Deterministic build (git archive of the exact commit). Must run
+          # from inside the clone: build-release.sh resolves the repo root
+          # via `git rev-parse --show-toplevel`.
+          (cd "${RUNNER_TEMP}/release-src" && bash scripts/build-release.sh "${RUNNER_TEMP}/override-release") | tee "${RUNNER_TEMP}/override-release.env"
           source "${RUNNER_TEMP}/override-release.env"
           test "${release_commit}" = "${REQUESTED_COMMIT}"
           test "${release_sha256}" = "${REQUESTED_SHA256}"
