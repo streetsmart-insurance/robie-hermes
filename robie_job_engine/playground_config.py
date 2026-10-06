@@ -172,16 +172,12 @@ def is_practice_subject(applicant_id: str = "", client_name: str = "") -> bool:
 def should_tag_practice(applicant_id: str = "", client_name: str = "") -> bool:
     """Practice mode is about the client, not how wide the allowlist is.
 
-    While all-clients is closed, every Playground reply is practice.
-    While it is open, only a test client is tagged.
+    Only an explicitly-identified test client is tagged. Replies without
+    client context are never tagged — this prevents "Practice mode." from
+    leaking onto live email threads when the caller omits applicant_id
+    and client_name (2026-10-05: 8 misfires on WOW, Top Rank, Sandeep threads).
     """
-    from .ezlynx_write_scope import all_clients_scope_honored
-
-    if is_practice_subject(applicant_id, client_name):
-        return True
-    if str(applicant_id or "").strip() or str(client_name or "").strip():
-        return False
-    return not all_clients_scope_honored()
+    return is_practice_subject(applicant_id, client_name)
 
 
 def buster_brown_only_mode(applicant_id: str = "", client_name: str = "") -> bool:
