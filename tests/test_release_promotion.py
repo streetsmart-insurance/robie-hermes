@@ -138,10 +138,21 @@ def test_production_downloads_test_package_before_authentication_and_never_build
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/deploy-production.yml").read_text()
     primary = workflow.split("  lost-customer-retention:")[0]
-    assert "build-release.sh" not in primary
+    # The normal path never builds: build-release.sh may appear ONLY inside the
+    # explicit override-gated step (Carlo override 2026-10-06).
+    lines = primary.splitlines()
+    for i, line in enumerate(lines):
+        if "build-release.sh" in line:
+            # Walk back to the enclosing step's `if:` guard.
+            context = "\n".join(lines[max(0, i - 40):i + 1])
+            assert "TEST GATE OVERRIDE" in context and "inputs.override_test_gate" in context, (
+                "build-release.sh outside the override-gated step"
+            )
     assert "release_promotion download" in primary
     assert primary.index("release_promotion download") < primary.index("google-github-actions/auth")
     assert "inputs.test_run_id" in primary and "inputs.test_artifact_id" in primary
+    # The override requires its own distinct confirmation string.
+    assert "DEPLOY_TO_HERMES_POC_01_OVERRIDE_TEST_GATE" in primary
 
 
 def test_install_only_bundle_cannot_be_promoted_until_independent_qa(tmp_path):
