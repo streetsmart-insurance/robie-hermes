@@ -242,6 +242,156 @@ def noc_document_id(policy_number: str, processed: date, reason: str, cancel_eff
     )
 
 
+# A DisplayPDF document GUID, e.g. e549962d-9b21-425d-7db0-08df22c41ea7.
+# The GUID is the durable document identity: two rows with identical
+# display text are distinct documents when their GUIDs differ.
+_DOC_GUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def require_doc_guid(value: str) -> str:
+    """Validate a NatGen DisplayPDF document GUID (the iid query parameter)."""
+    cleaned = _norm(value)
+    if not _DOC_GUID.fullmatch(cleaned):
+        raise IntakeHold("NatGen document GUID is missing or ambiguous")
+    return cleaned.lower()
+
+
+def extract_doc_guid(url: str) -> str:
+    """Extract and validate the iid document GUID from a DisplayPDF URL."""
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https":
+        raise IntakeHold("NatGen DisplayPDF URL is missing or ambiguous")
+    if host != "natgenagency.com" and not host.endswith(".natgenagency.com"):
+        raise IntakeHold("NatGen DisplayPDF URL is missing or ambiguous")
+    if not parsed.path.lower().endswith("/displaypdf.aspx"):
+        raise IntakeHold("NatGen DisplayPDF URL is missing or ambiguous")
+    query = urllib.parse.parse_qs(parsed.query)
+    values = query.get("iid") or query.get("IID")
+    if not values or len(values) != 1:
+        raise IntakeHold("NatGen DisplayPDF URL is missing or ambiguous")
+    return require_doc_guid(values[0])
+
+
+def guid_document_id(policy_number: str, doc_guid: str) -> str:
+    """Durable ledger identity: natgen:<policy>:<doc-guid>.
+
+    The GUID comes from the DisplayPDF URL at click time. Identical
+    display text with different GUIDs keys as distinct documents.
+    """
+    policy = require_policy_number(policy_number)
+    guid = require_doc_guid(doc_guid)
+    return f"natgen:{policy}:{guid}"
+
+
+def guid_from_observation(observation: "NocOpenObservation") -> str:
+    """Read the document GUID from a capture's DisplayPDF page URLs.
+
+    Exactly one distinct GUID must appear across the observed viewer pages;
+    zero or conflicting GUIDs hold instead of guessing.
+    """
+    guids: list[str] = []
+    for view in observation.pages:
+        try:
+            guid = extract_doc_guid(view.url)
+        except IntakeHold:
+            continue
+        if guid not in guids:
+            guids.append(guid)
+    if len(guids) != 1:
+        raise IntakeHold("NatGen document GUID is missing or ambiguous")
+    return guids[0]
+
+
+# Pending Non-Renewal report headers (column order may vary; by alias).
+# Live columns: POLICY | NAMED INSURED | PHONE | TYPE | PRODUCT | DIV |
+# PROCESSED | EFFECTIVE | DESCRIPTION | PREMIUM | PRODUCER |
+# ADDITIONAL PRODUCTS.
+_NONRENEWAL_HEADER_FIELDS = (
+    ("policy_number", frozenset({"policy number", "policy"})),
+    ("insured_name", frozenset({"insured", "insured name", "named insured"})),
+    ("type", frozenset({"type"})),
+    ("processed_date", frozenset({"processed", "processed date"})),
+    ("effective_date", frozenset({"effective", "effective date"})),
+    ("description", frozenset({"description"})),
+    ("premium", frozenset({"premium"})),
+)
+
+
+@dataclass(frozen=True)
+class NonRenewalRow:
+    document_id: str
+    policy_number: str
+    insured_name: str
+    notice_type: str
+    processed_on: date
+    effective_on: date
+    description: str
+    premium: str
+    row_index: int
+    source_url: str
+
+
+def nonrenewal_document_id(policy_number: str, processed: date, effective: date) -> str:
+    policy = require_policy_number(policy_number)
+    return (
+        f"natgen-nonrenewal:{policy}:{processed.isoformat()}:{effective.isoformat()}"
+    )
+
+
+def parse_nonrenewal_grid(
+    headers: tuple[str, ...],
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    source_url: str,
+) -> tuple[NonRenewalRow, ...]:
+    """Parse the Pending Non-Renewal Agency Activity report.
+
+    Header matching is by alias so column order is not load-bearing.
+    A missing or ambiguous header, row, policy number, or date holds.
+    """
+    indexes = header_indexes(
+        headers,
+        fields=_NONRENEWAL_HEADER_FIELDS,
+        required=("policy_number", "insured_name", "effective_date"),
+    )
+    parsed: list[NonRenewalRow] = []
+    for row_index, cells in enumerate(rows):
+        if len(cells) < len(headers):
+            raise IntakeHold("Pending Non-Renewal row is missing or ambiguous")
+        # Live rows read "2035017657 - 00"; the canonical form is "2035017657 00".
+        policy = require_policy_number(
+            _norm(cells[indexes["policy_number"]]).replace(" - ", " ")
+        )
+        insured = _norm(cells[indexes["insured_name"]])
+        if not insured:
+            raise IntakeHold("Pending Non-Renewal insured name is missing or ambiguous")
+        processed = parse_carrier_date(cells[indexes["processed_date"]])
+        effective = parse_carrier_date(cells[indexes["effective_date"]])
+        parsed.append(
+            NonRenewalRow(
+                document_id=nonrenewal_document_id(policy, processed, effective),
+                policy_number=policy,
+                insured_name=insured,
+                notice_type=_norm(cells[indexes["type"]]),
+                processed_on=processed,
+                effective_on=effective,
+                description=_norm(cells[indexes["description"]]),
+                premium=_norm(cells[indexes["premium"]]),
+                row_index=row_index,
+                source_url=source_url,
+            )
+        )
+    if not parsed:
+        raise IntakeHold("Pending Non-Renewal report has no rows")
+    if len({row.document_id for row in parsed}) != len(parsed):
+        raise IntakeHold("Pending Non-Renewal rows are missing or ambiguous")
+    return tuple(parsed)
+
+
 def parse_carrier_date(value: str) -> date:
     raw = _norm(value)
     try:

@@ -168,7 +168,10 @@ class ProdGateTests(unittest.TestCase):
         self.assertEqual(bop["status"], "disabled")
         self.assertIn("BOP", bop["reason"])
         self.assertNotIn("bop", PROD_CARRIER_RULES)
-        self.assertEqual(set(PROD_CARRIER_RULES), {"fao", "natgen", "geico"})
+        self.assertEqual(
+            set(PROD_CARRIER_RULES),
+            {"fao", "natgen", "geico", "travelers", "farmersofsalem", "guard", "uticafirst"},
+        )
         self.assertIn("bop", active_carrier_rules(ENABLED, HOST))
 
     def test_test_filing_is_unchanged(self):
@@ -360,9 +363,12 @@ class TwoMemoNoteTests(unittest.TestCase):
 
 
 class RetrievalServiceTests(unittest.TestCase):
-    def test_commands_cover_three_carriers_on_prod_paths(self):
+    def test_commands_cover_seven_carriers_on_prod_paths(self):
         commands = service.carrier_argv(date(2026, 9, 25))
-        self.assertEqual(set(commands), {"fao", "natgen", "geico"})
+        self.assertEqual(
+            set(commands),
+            {"fao", "natgen", "geico", "travelers", "farmersofsalem", "guard", "uticafirst"},
+        )
         self.assertNotIn("bop", commands)
         for argv in commands.values():
             folder = argv[-1]

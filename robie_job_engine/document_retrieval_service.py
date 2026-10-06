@@ -30,13 +30,17 @@ from .document_retrieval_filing import (
     pack_filing_items,
 )
 
-CARRIERS = ("fao", "natgen", "geico")
+CARRIERS = ("fao", "natgen", "geico", "travelers", "farmersofsalem", "guard", "uticafirst")
 LAST_RUN_NAME = "document-retrieval-last-run.json"
 BAD_SIGNALS = ("EZLYNX_WRITE_SCOPE_REFUSED", "document_filed_note_held")
 OUTPUT_ROOTS = {
     "fao": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/progressive"),
     "natgen": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/natgen"),
     "geico": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/geico"),
+    "travelers": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/travelers"),
+    "farmersofsalem": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/farmersofsalem"),
+    "guard": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/guard"),
+    "uticafirst": Path("/opt/streetsmart-hermes/robie-job-engine/data/artifacts/carrier-pull-qa/uticafirst"),
 }
 _HELD_STATUSES = frozenset({
     "held",
@@ -58,7 +62,7 @@ def state_dir() -> Path:
 
 
 def carrier_argv(day: date) -> dict[str, list[str]]:
-    """Command arguments for the three Production pulls. BOP is absent."""
+    """Command arguments for the seven Production pulls. BOP is absent."""
 
     iso = day.isoformat()
     return {
@@ -68,6 +72,10 @@ def carrier_argv(day: date) -> dict[str, list[str]]:
         ],
         "natgen": ["--start", iso, "--end", iso, "--output", str(OUTPUT_ROOTS["natgen"])],
         "geico": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["geico"])],
+        "travelers": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["travelers"])],
+        "farmersofsalem": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["farmersofsalem"])],
+        "guard": ["--as-of", iso, "--output-root", str(OUTPUT_ROOTS["guard"])],
+        "uticafirst": ["--as-of", iso, "--qa-root", str(OUTPUT_ROOTS["uticafirst"])],
     }
 
 
@@ -162,7 +170,31 @@ def default_runners(day: date) -> dict[str, Callable[[], dict[str, Any]]]:
             pulled["_exit_code"] = 1
         return pulled
 
-    return {"fao": fao, "natgen": natgen, "geico": geico}
+    def _filed_runner(carrier: str, module: str) -> Callable[[], dict[str, Any]]:
+        """Pull then file, for carriers that file after the pull (like NatGen/Geico)."""
+
+        def run() -> dict[str, Any]:
+            mod = __import__(f"robie_job_engine.{module}", fromlist=["main"])
+            pulled = _invoke(mod.main, commands[carrier])
+            if int(pulled.get("_exit_code") or 0) != 0:
+                return pulled
+            filing = _file_output(carrier, OUTPUT_ROOTS[carrier])
+            pulled["filing"] = filing
+            if str(filing.get("status") or "") not in {"filed", "filed_no_workflow", "skipped_duplicate", "empty"}:
+                pulled["_exit_code"] = 1
+            return pulled
+
+        return run
+
+    return {
+        "fao": fao,
+        "natgen": natgen,
+        "geico": geico,
+        "travelers": _filed_runner("travelers", "travelers_pending_cancellation"),
+        "farmersofsalem": _filed_runner("farmersofsalem", "farmersofsalem_pending_cancellation"),
+        "guard": _filed_runner("guard", "guard_pending_cancellation"),
+        "uticafirst": _filed_runner("uticafirst", "uticafirst_pending_cancellation"),
+    }
 
 
 def run_retrieval(
