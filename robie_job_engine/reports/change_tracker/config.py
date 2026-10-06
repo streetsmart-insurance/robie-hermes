@@ -50,11 +50,12 @@ TILE_TOTAL_OPEN = "Total Open Change Requests"
 
 
 # --- Destination sheet ---------------------------------------------------------
-# X1: Sandeep has not confirmed the canonical spreadsheet URL. The automation
-# fails closed until the id is provided (env var or edit here).
+# 2026-10-06 (Carlo): new workbook created and shared with the production
+# service account. The old workbook 403'd and the owner never shared it.
+# Env var CHANGE_TRACKER_SPREADSHEET_ID still overrides this default.
 CHANGE_TRACKER_SPREADSHEET_ID = os.environ.get(
     "CHANGE_TRACKER_SPREADSHEET_ID", ""
-).strip() or "PENDING_SANDEEP_X1_UNSET"
+).strip() or "1soqTCgWtgxMmhRDRwZzk8UpMnPGPXEv5ScF633tNrCg"
 
 # X2: timezone for tab-date math and Days Open reference date.
 TIMEZONE = "America/New_York"

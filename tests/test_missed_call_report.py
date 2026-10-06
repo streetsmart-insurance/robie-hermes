@@ -616,9 +616,53 @@ def test_cli_bad_dates_exit_1(capsys):
 
 
 def test_x1_canonical_spreadsheet_id_is_default():
-    # X1 LOCKED (Sandeep 2026-10-05): the canonical workbook id is the
-    # default --spreadsheet-id; --dry-run stays the default mode.
-    assert CANONICAL_SPREADSHEET_ID == "1POQ9oAop1AOa6gWsaNVQX3I540WvvX0gmw9XNPK1L5Y"
+    # 2026-10-06 (Carlo): new workbook, shared with the prod service account.
+    # The canonical workbook id is the default --spreadsheet-id; --dry-run
+    # stays the default mode.
+    assert CANONICAL_SPREADSHEET_ID == "1yU1EvvYENwo-nMV-AvQXikbfYCjFWKmpj4l5NeZ_q50"
     args = _build_parser().parse_args([])
-    assert args.spreadsheet_id == "1POQ9oAop1AOa6gWsaNVQX3I540WvvX0gmw9XNPK1L5Y"
+    assert args.spreadsheet_id == "1yU1EvvYENwo-nMV-AvQXikbfYCjFWKmpj4l5NeZ_q50"
     assert args.dry_run is True
+
+
+def test_digest_builds_text_and_posts_to_all_three():
+    # Carlo 2026-10-06: digest goes to ALL THREE departments, overriding the
+    # Personal/Trucking phone-alert blackout.
+    from robie_job_engine.reports.missed_calls.digest import (
+        DEPARTMENT_WEBHOOKS,
+        build_digest_text,
+        post_digests,
+    )
+    from robie_job_engine.reports.missed_calls.models import SheetRow
+
+    assert set(DEPARTMENT_WEBHOOKS) == {"Commercial", "Personal", "Trucking"}
+
+    row = SheetRow(
+        department="Jane Doe",
+        phone_display="(555) 123-4567",
+        phone_digits="15551234567",
+        profile_text="No Account",
+        profile_url="",
+        lookup_state="verified_no_account",
+    )
+    s = RunSummary(target_date="2026-10-06", tab_name="10/6", rows=[row])
+    text = build_digest_text([s])
+    assert "(555) 123-4567" in text
+    assert "Jane Doe" in text
+
+    # Dry-run never posts.
+    result = post_digests([s], dry_run=True)
+    assert all(v["posted"] is False for v in result.values())
+    assert set(result) == {"Commercial", "Personal", "Trucking"}
+
+
+def test_digest_fail_open_when_webhook_missing(monkeypatch):
+    from robie_job_engine.reports.missed_calls.digest import post_digests
+    from robie_job_engine.reports.missed_calls.models import RunSummary
+
+    monkeypatch.delenv("GOOGLE_CHAT_COMMERCIAL_WEBHOOK", raising=False)
+    monkeypatch.delenv("GOOGLE_CHAT_PERSONAL_WEBHOOK", raising=False)
+    monkeypatch.delenv("GOOGLE_CHAT_TRUCKING_WEBHOOK", raising=False)
+    s = RunSummary(target_date="2026-10-06", tab_name="10/6", rows=[])
+    result = post_digests([s], dry_run=False)  # must not raise
+    assert all(v["posted"] is False for v in result.values())

@@ -115,6 +115,7 @@ def run_for_date(
     # Live: ensure tab, then
     #    append only genuinely new phones (append-only, M13/M14).
     new_rows: list[SheetRow] = rows
+    summary.rows = list(new_rows)  # for the EOD digest (posted by cli.py)
     if sheet.dry_run:
         summary.existing_rows_skipped = 0
         summary.rows_appended = 0

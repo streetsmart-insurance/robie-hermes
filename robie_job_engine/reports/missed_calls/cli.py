@@ -114,6 +114,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit run summaries as JSON on stdout.",
     )
+    p.add_argument(
+        "--no-digest",
+        dest="digest",
+        action="store_false",
+        default=True,
+        help="Skip the end-of-day Google Chat digest (posted to all three "
+        "department Spaces in live mode; never posted in dry-run).",
+    )
     return p
 
 
@@ -207,6 +215,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     summaries = run(_client_factory(args.extension_map), index, sheet, dates)
+
+    # EOD digest: live mode only, all three department Spaces (Carlo 2026-10-06:
+    # overrides the Personal/Trucking phone-alert blackout). Fail-open: a
+    # digest failure never fails the report run.
+    if args.digest and not args.dry_run and not any(s.fail_closed for s in summaries):
+        from .digest import post_digests
+
+        digest_result = post_digests(summaries, dry_run=False)
+        for dept, res in digest_result.items():
+            status = "posted" if res.get("posted") else f"SKIPPED ({res.get('skipped')})"
+            print(f"digest {dept}: {status}")
+    elif args.digest and args.dry_run:
+        print("digest: dry-run — no Chat posts")
 
     if args.json:
         import dataclasses

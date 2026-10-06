@@ -37,8 +37,11 @@ DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 SPREADSHEET_TITLE = "Missed Calls Report 2026"
 
-# X1 LOCKED 2026-10-05 (Sandeep): the canonical workbook.
-CANONICAL_SPREADSHEET_ID = "1POQ9oAop1AOa6gWsaNVQX3I540WvvX0gmw9XNPK1L5Y"
+# 2026-10-06 (Carlo): new workbook created and shared with the production
+# service account (hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com).
+# The old workbook (1POQ9oAop1AOa6gWsaNVQX3I540WvvX0gmw9XNPK1L5Y) 403'd for the
+# service account and the owner never shared it. This replaces the X1-locked id.
+CANONICAL_SPREADSHEET_ID = "1yU1EvvYENwo-nMV-AvQXikbfYCjFWKmpj4l5NeZ_q50"
 
 HEADER = ["Department call received", "Phone Number", "Profile", "Was addressed?", "Updated by"]
 
