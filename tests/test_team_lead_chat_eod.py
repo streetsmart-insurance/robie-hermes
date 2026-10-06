@@ -127,6 +127,10 @@ def test_webhook_must_be_the_team_lead_space():
 
 def test_missing_webhook_does_not_post(tmp_path: Path):
     calls: list[str] = []
+    # Set up a snapshot with open items so we reach the webhook check
+    departments = _departments()
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
+    _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
 
     def reader(_resource: str) -> str:
         raise TeamLeadChatWebhookMissing("missing")
@@ -146,6 +150,10 @@ def test_missing_webhook_does_not_post(tmp_path: Path):
 
 def test_wrong_space_does_not_post(tmp_path: Path):
     calls: list[str] = []
+    # Set up a snapshot with open items so we reach the webhook check
+    departments = _departments()
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
+    _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
     result = run_eod(
         app_root=tmp_path,
         day=DAY,
@@ -157,7 +165,8 @@ def test_wrong_space_does_not_post(tmp_path: Path):
     assert calls == []
 
 
-def test_missing_snapshot_posts_incomplete_status_without_metrics(tmp_path: Path):
+def test_missing_snapshot_skips_post_incomplete_status_without_metrics(tmp_path: Path):
+    """Carlo 2026-10-05: incomplete snapshots do NOT post to Team Lead Chat."""
     calls: list[str] = []
     result = run_eod(
         app_root=tmp_path,
@@ -166,15 +175,18 @@ def test_missing_snapshot_posts_incomplete_status_without_metrics(tmp_path: Path
         secret_reader=_reader,
         opener=_opener_factory(calls),
     )
-    assert result["delivered"] is True
-    assert result["status"] == "incomplete"
-    text = calls[0]
-    assert "2026-09-25" in text
-    assert "not ready" in text
-    assert "No call count is shown" in text
-    assert "Overdue tasks" not in text
-    assert PHONE not in text
-    assert "gmail" not in text.casefold()
+    assert result["delivered"] is False
+    assert result["status"] == "incomplete_skipped"
+    assert calls == []
+    # The message text is still available via dry_run for debugging
+    dry = run_eod(
+        app_root=tmp_path,
+        day=DAY,
+        now=NOW,
+        dry_run=True,
+    )
+    assert dry["status"] == "incomplete"
+    assert "not ready" in dry["text"]
 
 
 def test_verified_snapshot_counts_sad_rows_and_hides_pii(tmp_path: Path):
@@ -304,6 +316,7 @@ def test_summary_is_not_posted_twice(tmp_path: Path):
         magellan_sad=[{"Sentiment": "Sad"}],
         magellan_calls_on_target_date=2,
     )
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
     _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
     calls: list[str] = []
     opener = _opener_factory(calls)
@@ -314,19 +327,56 @@ def test_summary_is_not_posted_twice(tmp_path: Path):
     assert len(calls) == 1
 
 
-def test_incomplete_post_can_be_replaced_by_a_later_summary(tmp_path: Path):
+def test_skipped_incomplete_can_be_replaced_by_a_later_summary(tmp_path: Path):
+    """Carlo 2026-10-05: a skipped incomplete does not block a later real summary."""
     calls: list[str] = []
     opener = _opener_factory(calls)
     first = run_eod(app_root=tmp_path, day=DAY, now=NOW, secret_reader=_reader, opener=opener)
     departments = _departments(magellan_sad=[{"Sentiment": "Sad"}], magellan_calls_on_target_date=1)
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
     _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
     second = run_eod(app_root=tmp_path, day=DAY, now=NOW, secret_reader=_reader, opener=opener)
-    assert first["status"] == "incomplete"
+    assert first["status"] == "incomplete_skipped"
+    assert first["delivered"] is False
     assert second["status"] == "summary"
-    assert len(calls) == 2
+    assert len(calls) == 1
+
+
+def test_ready_snapshot_with_zero_open_items_skips_post(tmp_path: Path):
+    """Carlo 2026-10-05: a clean day (zero open items) does not post."""
+    calls: list[str] = []
+    opener = _opener_factory(calls)
+    # All open-item fields are empty lists by default in _departments()
+    departments = _departments()
+    _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
+    result = run_eod(app_root=tmp_path, day=DAY, now=NOW, secret_reader=_reader, opener=opener)
+    assert result["delivered"] is False
+    assert result["status"] == "clean_skipped"
+    assert calls == []
+
+
+def test_ready_snapshot_with_open_items_posts(tmp_path: Path):
+    """A snapshot with actual open items still posts."""
+    calls: list[str] = []
+    opener = _opener_factory(calls)
+    departments = _departments()
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
+    _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
+    result = run_eod(app_root=tmp_path, day=DAY, now=NOW, secret_reader=_reader, opener=opener)
+    assert result["delivered"] is True
+    assert result["status"] == "summary"
+    assert len(calls) == 1
 
 
 def test_cli_refuses_a_webhook_url_in_the_secret_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Set up a snapshot with open items so we reach the webhook check.
+    # Use real now for prepared_at since main() uses real time.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    real_now = datetime.now(ZoneInfo("America/New_York"))
+    departments = _departments()
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
+    _write_snapshot(tmp_path, departments, prepared_at=real_now - timedelta(minutes=1))
     monkeypatch.setenv(ENV_SECRET, WEBHOOK)
     assert main(["--date", DAY.isoformat(), "--app-root", str(tmp_path)]) == 3
 
@@ -349,6 +399,11 @@ def test_dry_run_does_not_read_the_webhook(tmp_path: Path):
 
 def test_post_failure_is_not_success(tmp_path: Path):
     import urllib.error
+
+    # Set up a snapshot with open items so we reach the post logic
+    departments = _departments()
+    departments["Operations"]["overdue_tasks"] = [{"Task": "follow up"}]
+    _write_snapshot(tmp_path, departments, prepared_at=NOW - timedelta(minutes=1))
 
     def opener(_request, timeout=20):
         del timeout
