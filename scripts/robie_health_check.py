@@ -1005,11 +1005,16 @@ def check_task_verifier_health() -> tuple[bool, str, dict]:
 def _most_recent_tuesday(now: datetime) -> datetime:
     """Return the most recent Tuesday 08:00 ET (the 4359 fire time)."""
     # Tuesday is weekday 1. If today is Tuesday before 08:00 ET, the most
-    # recent run is last Tuesday.
+    # recent run is last Tuesday. All math happens in America/New_York:
+    # the timer fires at 08:00 ET, and comparing now.hour on a UTC
+    # datetime false-alarms every Tuesday 04:00-08:00 EDT (11:00 UTC
+    # looks "after 8" in UTC while the 08:00 ET run hasn't fired yet).
     from datetime import timedelta
-    days_back = (now.weekday() - 1) % 7
-    candidate = now.replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=days_back)
-    if days_back == 0 and now.hour < 8:
+    from zoneinfo import ZoneInfo
+    et = now.astimezone(ZoneInfo("America/New_York"))
+    days_back = (et.weekday() - 1) % 7
+    candidate = et.replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=days_back)
+    if days_back == 0 and et.hour < 8:
         candidate -= timedelta(days=7)
     return candidate
 
