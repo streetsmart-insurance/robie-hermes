@@ -20,9 +20,14 @@ on:
         required: false
         type: string
       confirmation:
-        description: Type DEPLOY_TO_HERMES_POC_01
+        description: Type DEPLOY_TO_HERMES_POC_01 (or DEPLOY_TO_HERMES_POC_01_OVERRIDE_TEST_GATE with override_test_gate=true)
         required: true
         type: string
+      override_test_gate:
+        description: Bypass Test certification (requires override confirmation string). Use only on explicit owner override; the release is still built deterministically from the exact commit and sha256-verified.
+        required: false
+        default: false
+        type: boolean
       lost_customer_operation:
         description: Optional lost-customer operation through the protected Production controller
         required: true
@@ -43,7 +48,10 @@ jobs:
   deploy-production:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01' &&
+      (
+        (inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01' && !inputs.override_test_gate) ||
+        (inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01_OVERRIDE_TEST_GATE' && inputs.override_test_gate)
+      ) &&
       inputs.lost_customer_operation == 'none'
     environment: Production
     runs-on: ubuntu-latest
@@ -77,6 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Download and verify the exact Test package (never rebuild)
+        if: ${{ !inputs.override_test_gate }}
         id: release
         shell: bash
         env:
@@ -96,6 +105,46 @@ jobs:
           release_sha256="$(sha256sum "${release_archive}" | cut -d' ' -f1)"
           test "${release_commit}" = "${REQUESTED_COMMIT}"
           test "${release_sha256}" = "${REQUESTED_SHA256}"
+          bash controller/scripts/verify-release.sh "${release_archive}" "${release_archive}.sha256"
+          echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
+          echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
+          echo "sha256=${release_sha256}" >>"${GITHUB_OUTPUT}"
+          echo "installer_sha256=$(sha256sum controller/scripts/deploy-production-release.sh | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
+          mkdir -p "${RUNNER_TEMP}/production-transfer"
+          cp "${release_archive}" "${release_archive}.sha256" controller/scripts/deploy-production-release.sh "${RUNNER_TEMP}/production-transfer/"
+
+      - name: Build and verify release from exact commit (TEST GATE OVERRIDE)
+        if: ${{ inputs.override_test_gate }}
+        id: release
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          REQUESTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          echo "::warning::TEST CERTIFICATION BYPASSED by explicit owner override (override_test_gate=true). Release was NOT installed on Test."
+          {
+            echo "## :warning: TEST GATE OVERRIDDEN"
+            echo
+            echo "This production deployment bypassed Test certification on explicit owner override."
+            echo "The release archive was built deterministically from the exact commit and sha256-verified,"
+            echo "but it was never installed or verified on hermes-test-01."
+            echo
+            echo "- Commit: \`${REQUESTED_COMMIT}\`"
+            echo "- Expected sha256: \`${REQUESTED_SHA256}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+          # Check out the exact release commit (deterministic source).
+          git clone --no-checkout https://github.com/streetsmart-insurance/robie-hermes.git "${RUNNER_TEMP}/release-src"
+          git -C "${RUNNER_TEMP}/release-src" checkout "${REQUESTED_COMMIT}"
+          test "$(git -C "${RUNNER_TEMP}/release-src" rev-parse HEAD)" = "${REQUESTED_COMMIT}"
+          # Deterministic build (git archive of the exact commit).
+          bash "${RUNNER_TEMP}/release-src/scripts/build-release.sh" "${RUNNER_TEMP}/override-release" | tee "${RUNNER_TEMP}/override-release.env"
+          source "${RUNNER_TEMP}/override-release.env"
+          test "${release_commit}" = "${REQUESTED_COMMIT}"
+          test "${release_sha256}" = "${REQUESTED_SHA256}"
+          release_archive="${release_archive}"
+          test -f "${release_archive}"
+          # Same structural verification as the normal path.
           bash controller/scripts/verify-release.sh "${release_archive}" "${release_archive}.sha256"
           echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
           echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
