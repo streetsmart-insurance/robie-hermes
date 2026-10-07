@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 KILL_SWITCH_ENV = "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 NATGEN_WINDOW_DAYS = 14
 
 
@@ -421,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--as-of", default=date.today().isoformat(), help="pull date YYYY-MM-DD")
     parser.add_argument("--output-root", default=None, help="override QA pack root (default: each carrier's own)")
-    parser.add_argument("--cdp-url", default=None, help="CDP endpoint (default: ROBIE_BROWSER_CDP_URL or 127.0.0.1:9222)")
+    parser.add_argument("--cdp-url", default=None, help="CDP endpoint (default: ROBIE_BROWSER_CDP_URL or 127.0.0.1:9223)")
     return parser
 
 

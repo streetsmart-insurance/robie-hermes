@@ -620,12 +620,22 @@ class PlaywrightTravelersBrowser:
     # -- list page ------------------------------------------------------
     def open_direct_bill_activity(self) -> None:
         page = self.page
-        require_travelers_url(str(getattr(page, "url", "") or ""))
-        _unique_control(page, "tab", _AGENCY_REPORTS_TAB).click()
-        _unique_control(page, "link", _REPORT_LINK).click()
+        url = require_travelers_url(str(getattr(page, "url", "") or ""))
+        if "directbillactivity" not in url.lower():
+            try:
+                _unique_control(page, "tab", _AGENCY_REPORTS_TAB).click()
+                _unique_control(page, "link", _REPORT_LINK).click()
+            except Exception:
+                page.goto("https://foragents.travelers.com/Business/billingandpolicyservices/directbillactivity")
         try:
-            page.wait_for_selector("select#select_date", timeout=15000)
+            try:
+                page.wait_for_selector("select#select_date", timeout=1000)
+            except Exception:
+                page.wait_for_selector("select#billingActivityDatesDDL", timeout=14000)
         except Exception as exc:
+            txt = getattr(page, "inner_text", lambda *a: "")("body")
+            if "system is currently unavailable" in txt.lower():
+                raise IntakeHold("Travelers direct bill system is currently unavailable (portal alert)") from exc
             raise IntakeHold("Travelers date selector is missing or ambiguous") from exc
         self._list_url = require_travelers_url(str(getattr(page, "url", "") or ""))
 
@@ -635,6 +645,8 @@ class PlaywrightTravelersBrowser:
         """Read the select_date dropdown; return recent activity dates."""
         page = self.page
         select = page.locator("select#select_date")
+        if select.count() == 0:
+            select = page.locator("select#billingActivityDatesDDL")
         try:
             if int(select.count()) != 1:
                 raise IntakeHold("Travelers date selector is missing or ambiguous")
@@ -655,9 +667,22 @@ class PlaywrightTravelersBrowser:
     def search_date(self, activity: ActivityDate) -> tuple[ListRow, ...]:
         """Select a date, click Search, return the agency rows."""
         page = self.page
-        page.locator("select#select_date").select_option(activity.value)
-        _unique_control(page, "button", _SEARCH_BUTTON).click()
-        page.wait_for_selector("text=Showing", timeout=15000)
+        select = page.locator("select#select_date")
+        if select.count() == 0:
+            select = page.locator("select#billingActivityDatesDDL")
+        select.first.select_option(activity.value)
+        submit = page.locator("input#getBillingActivitybutton")
+        if submit.count() > 0:
+            submit.click()
+        else:
+            _unique_control(page, "button", _SEARCH_BUTTON).click()
+        try:
+            page.wait_for_selector("text=Showing", timeout=15000)
+        except Exception as exc:
+            txt = getattr(page, "inner_text", lambda *a: "")("body")
+            if "system is currently unavailable" in txt.lower():
+                raise IntakeHold("Travelers direct bill system is currently unavailable (portal alert)") from exc
+            raise IntakeHold("Travelers results table did not appear") from exc
         links = page.locator(f'a.{_VIEW_LINK_CLASS}[href="javascript:void(0);"]').all()
         rows: list[tuple[str, str]] = []
         for link in links:
@@ -1034,13 +1059,17 @@ def run_pull(
 
 
 def select_travelers_page(pages: list[Any]) -> Any:
-    """Use the single Travelers foragents portal tab."""
+    """Use the Travelers foragents portal tab."""
     matches = [
         page for page in pages
         if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == TRAVELERS_HOST
     ]
-    if len(matches) != 1:
-        raise IntakeHold("Expected exactly one Travelers portal tab")
+    if not matches:
+        raise IntakeHold("Expected at least one Travelers portal tab")
+    for p in matches:
+        u = str(getattr(p, "url", "") or "").lower()
+        if "directbillactivity" in u:
+            return p
     return matches[0]
 
 
