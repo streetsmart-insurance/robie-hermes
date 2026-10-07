@@ -85,12 +85,15 @@ def get_secret(name: str, *, project: str = DEFAULT_PROJECT) -> str:
     _refuse_key_files()
 
     try:
-        from google.cloud import secret_manager
-    except ImportError as exc:
-        raise SecretManagerAccessError(
-            "NEEDS_AUTH: google-cloud-secret-manager is not installed in this "
-            "environment; the engine cannot read Secret Manager secrets"
-        ) from exc
+        from google.cloud import secretmanager as secret_manager
+    except ImportError:
+        try:
+            from google.cloud import secret_manager
+        except ImportError as exc:
+            raise SecretManagerAccessError(
+                "NEEDS_AUTH: google-cloud-secret-manager is not installed in this "
+                "environment; the engine cannot read Secret Manager secrets"
+            ) from exc
 
     client: Any = secret_manager.SecretManagerServiceClient()
     resource = client.secret_version_path(project_id, secret_name, "latest")

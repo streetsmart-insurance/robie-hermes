@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 QA_ROOT_FOLDER_ID = "1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2"
-STATUS_SPREADSHEET_ID = "1uNPWu18wo0nB0PzKq8p4aWslf_CpIKySjRMyQi45ItM"
+STATUS_SPREADSHEET_ID = "1-3LjNStn4O_5BblcD9HNwFRgRV6Pz_VKaldCWf9gPuc"
 KILL_SWITCH_ENV = "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX"
 
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
@@ -271,7 +271,7 @@ class DocumentRow:
 def _ledger_issued_dates(pack: Path) -> dict[str, str]:
     """Map PDF filename -> issued date from carrier ledger JSONs in the pack."""
     mapping: dict[str, str] = {}
-    for ledger_file in sorted(pack.glob("*-ledger.json")):
+    for ledger_file in sorted(pack.rglob("*-ledger.json")):
         try:
             data = json.loads(ledger_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -290,7 +290,7 @@ def _ledger_issued_dates(pack: Path) -> dict[str, str]:
 def _ledger_insured_names(pack: Path) -> dict[str, str]:
     """Map PDF filename -> insured name from carrier ledger JSONs in the pack."""
     mapping: dict[str, str] = {}
-    for ledger_file in sorted(pack.glob("*-ledger.json")):
+    for ledger_file in sorted(pack.rglob("*-ledger.json")):
         try:
             data = json.loads(ledger_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -335,7 +335,7 @@ def collect_documents(pack: Path, carrier_display: str, *, as_of: date) -> list[
         return rows
     issued = _ledger_issued_dates(pack)
     insured_names = _ledger_insured_names(pack)
-    for pdf in sorted(pack.glob("*.pdf")):
+    for pdf in sorted(pack.rglob("*.pdf")):
         stem = pdf.stem
         policy, doc_type = _parse_filename(stem)
         doc_date = issued.get(pdf.name) or _filename_doc_date(stem) or as_of.isoformat()

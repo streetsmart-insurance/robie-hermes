@@ -106,7 +106,7 @@ class DryRunTests(unittest.TestCase):
             summary = _run_with_patches(Path(tmp), {})
         self.assertEqual(summary["as_of"], "2026-10-05")
         self.assertEqual(summary["mode"], "dry-run")
-        self.assertEqual(summary["totals"], {"ok": 7, "held": 0, "failed": 0})
+        self.assertEqual(summary["totals"], {"ok": 8, "held": 0, "failed": 0})
         for name, r in summary["carriers"].items():
             self.assertEqual(r["status"], "OK", name)
             self.assertEqual(r["downloaded"], 2, name)
@@ -127,9 +127,9 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(carriers["guard"]["status"], "FAILED")
         self.assertIn("RuntimeError", carriers["guard"]["error"])
         # Everyone else still ran.
-        for name in ("geico", "travelers", "natgen", "uticafirst", "farmersofsalem"):
+        for name in ("progressive_bop", "geico", "travelers", "natgen", "uticafirst", "farmersofsalem"):
             self.assertEqual(carriers[name]["status"], "OK", name)
-        self.assertEqual(summary["totals"], {"ok": 5, "held": 1, "failed": 1})
+        self.assertEqual(summary["totals"], {"ok": 6, "held": 1, "failed": 1})
 
     def test_pull_held_details_surface_as_held(self):
         import tempfile

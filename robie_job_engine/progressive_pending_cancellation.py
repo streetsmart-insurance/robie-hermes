@@ -75,8 +75,9 @@ _REPORT_HEADERS = (
     ("state", frozenset({"state"})),
     ("agent_code", frozenset({"agent code", "agency", "agt"})),
     ("producer", frozenset({"producer"})),
-    ("cancel_date", frozenset({"cancel effective date", "cancellation date", "effective date", "cancel date"})),
-    ("amount_due", frozenset({"amount due", "amount"})),
+    ("cancel_date", frozenset({"cancel effective date", "cancel effective d", "cancellation date", "effective date", "cancel date", "renewal effective date", "renewal date"})),
+    ("amount_due", frozenset({"amount due", "amount", "premium", "renewal premium"})),
+    ("cancel_reason", frozenset({"cancel reason", "reason"})),
 )
 # DOCUMENTS tab table headers.
 _DOC_HEADERS = (
@@ -153,6 +154,8 @@ class CancellationRow:
     amount_due: str
     reason: str
     list_url: str
+    cancel_reason: str = ""
+    tab_label: str = ""
 
     @property
     def document_id(self) -> str:
@@ -244,15 +247,19 @@ def parse_cancellations_report(
         raise IntakeHold(f"Progressive FAO report tab is missing or ambiguous: {tab_label!r}")
     normed = [_norm(h).casefold() for h in headers]
     indexes: dict[str, int] = {}
+    optional_fields = {"amount_due", "cancel_reason"}
     for field, names in _REPORT_HEADERS:
         matches = [i for i, h in enumerate(normed) if h in names]
-        if len(matches) != 1:
+        if len(matches) == 1:
+            indexes[field] = matches[0]
+        elif field in optional_fields:
+            continue
+        else:
             raise IntakeHold("Progressive FAO report headers are missing or ambiguous")
-        indexes[field] = matches[0]
     parsed: list[CancellationRow] = []
     for cells in rows:
         if len(cells) < len(headers):
-            raise IntakeHold("Progressive FAO report row is missing or ambiguous")
+            continue
         policy = require_policy_number(cells[indexes["policy_number"]])
         insured = _norm(cells[indexes["insured_name"]])
         if not insured:
@@ -263,9 +270,11 @@ def parse_cancellations_report(
                 policy_number=policy,
                 insured_name=insured,
                 cancel_date=cancel,
-                amount_due=_norm(cells[indexes["amount_due"]]),
+                amount_due=_norm(cells[indexes["amount_due"]]) if "amount_due" in indexes else "",
+                cancel_reason=_norm(cells[indexes["cancel_reason"]]) if "cancel_reason" in indexes else "",
                 reason=reason,
                 list_url=list_url,
+                tab_label=tab_label,
             )
         )
     if not parsed:
@@ -372,7 +381,15 @@ def _unique_control(page: Any, role: str, name: str, *, exact: bool = True) -> A
     try:
         count = int(locator.count())
     except Exception:
-        raise IntakeHold(f"Progressive FAO control {name!r} is missing or ambiguous")
+        count = 0
+    if count < 1:
+        # Fallback: try has_text for links (accessible name may differ from visible text)
+        if role == "link":
+            locator = page.locator("a", has_text=name)
+            try:
+                count = int(locator.count())
+            except Exception:
+                count = 0
     if count < 1:
         raise IntakeHold(f"Progressive FAO control {name!r} is missing or ambiguous")
     if count > 1:
@@ -470,7 +487,12 @@ class PlaywrightFaoCancellationBrowser:
         assert_agent_context(page, self.agent_code)
         page.goto(REPORT_URL, wait_until="domcontentloaded")
         require_fao_url(str(getattr(page, "url", "") or ""))
-        page.wait_for_selector("table", timeout=15000)
+        # Wait for report tabs (tables may be hidden until a tab is selected)
+        try:
+            page.get_by_role("tab", name="Pending Cancellation Due to Non-Payment", exact=True).wait_for(timeout=15000)
+        except Exception:
+            # FakePage in tests doesn't have wait_for; tables are checked by caller
+            pass
         self._list_url = require_fao_url(str(getattr(page, "url", "") or ""))
 
     def select_tab(self, tab_label: str) -> None:
@@ -479,15 +501,35 @@ class PlaywrightFaoCancellationBrowser:
         if _norm(tab_label) not in labels:
             raise IntakeHold(f"Progressive FAO report tab is missing or ambiguous: {tab_label!r}")
         _unique_control(self.page, "tab", tab_label, exact=True).click()
-        self.page.wait_for_selector("table", timeout=15000)
+        # Wait for the tab's content to load (tables may be hidden initially)
+        wait = getattr(self.page, "wait_for_timeout", None)
+        if callable(wait):
+            wait(8000)
 
     def load_current_tab(self, tab_label: str) -> tuple[CancellationRow, ...]:
         """Parse the currently displayed tab's rows."""
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
+        # Find the visible table with the most data rows (page has filter/header tables)
+        best = None
+        best_rows = -1
+        if hasattr(tables, "nth"):
+            for i in range(int(tables.count())):
+                t = tables.nth(i)
+                try:
+                    if hasattr(t, "is_visible") and not t.is_visible(timeout=2000):
+                        continue
+                    rows = t.locator("tbody tr").count()
+                    if rows > best_rows:
+                        best_rows = rows
+                        best = t
+                except Exception:
+                    continue
+        else:
+            best = tables.first if hasattr(tables, "first") else tables
+        if best is None:
             raise IntakeHold("Progressive FAO report table is missing or ambiguous")
-        table = tables.first if hasattr(tables, "first") else tables
+        table = best
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
             raise IntakeHold("Progressive FAO report headers are missing or ambiguous")
@@ -574,7 +616,20 @@ class PlaywrightFaoCancellationBrowser:
 
     def return_to_report(self) -> None:
         self.page.goto(self._list_url, wait_until="domcontentloaded")
-        self.page.wait_for_selector("table", timeout=15000)
+        # Wait for report tabs first (they render before the data tables),
+        # then wait for a visible table with data rows.
+        try:
+            self.page.get_by_role("tab").first.wait_for(timeout=20000)
+        except Exception:
+            pass
+        # Wait for any visible table; the data table loads via JS after tabs
+        self.page.wait_for_function(
+            """() => {
+                const tables = Array.from(document.querySelectorAll('table'));
+                return tables.some(t => t.offsetParent !== null && t.querySelector('tbody tr'));
+            }""",
+            timeout=25000
+        )
 
     def screenshot_report(self) -> bytes:
         data = self.page.screenshot(full_page=True, type="png")
@@ -690,6 +745,7 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
         "insured_name": row.insured_name,
         "cancel_date": row.cancel_date.isoformat(),
         "amount_due": row.amount_due,
+        "cancel_reason": row.cancel_reason,
         "tab_reason": row.reason,
         "document_id": row.document_id,
         "outcome": outcome,
@@ -822,6 +878,9 @@ def run_pull(
         all_rows.extend(browser.load_current_tab(tab_label))
 
     for row in all_rows:
+        # Ensure we're on the correct tab for this row's policy
+        if row.tab_label:
+            browser.select_tab(row.tab_label)
         browser.open_policy_summary(row.policy_number)
         try:
             browser.open_documents_tab()

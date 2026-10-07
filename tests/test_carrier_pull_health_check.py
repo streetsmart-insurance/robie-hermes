@@ -66,7 +66,7 @@ def test_all_ok_stays_quiet(qa_root):
         _make_ok(qa_root, health.CARRIERS[carrier])
     report = health.probe(root=qa_root, as_of=date.fromisoformat(DAY))
     assert report["green"] is True
-    assert report["summary"] == {"ok": 7, "held": 0, "missing": 0, "total": 7}
+    assert report["summary"] == {"ok": len(health.CARRIERS), "held": 0, "missing": 0, "total": len(health.CARRIERS)}
     decision = health.maybe_alert(report)
     assert decision["alerted"] is False
     assert decision["state"] == "green-quiet"
@@ -119,7 +119,7 @@ def test_one_missing_alerts_in_plain_english(qa_root):
 def test_all_missing_alert_lists_every_carrier(qa_root):
     report = health.probe(root=qa_root, as_of=date.fromisoformat(DAY))
     assert report["green"] is False
-    assert report["summary"]["missing"] == 7
+    assert report["summary"]["missing"] == len(health.CARRIERS)
     message = health.render_alert(report)
     for name in ("Guard", "Progressive", "GEICO", "Travelers", "NatGen",
                  "Utica First", "Farmers of Salem"):
@@ -172,7 +172,7 @@ def test_missing_qa_root_is_all_missing(tmp_path):
     report = health.probe(root=tmp_path / "does-not-exist",
                           as_of=date.fromisoformat(DAY))
     assert report["green"] is False
-    assert report["summary"]["missing"] == 7
+    assert report["summary"]["missing"] == len(health.CARRIERS)
 
 
 def test_carrier_subset(qa_root):
@@ -219,4 +219,4 @@ def test_recovery_message(qa_root):
     report = health.probe(root=qa_root, as_of=date.fromisoformat(DAY))
     text = health.render_recovery(report)
     assert DAY in text
-    assert "7 carrier(s) OK" in text
+    assert f"{len(health.CARRIERS)} carrier(s) OK" in text

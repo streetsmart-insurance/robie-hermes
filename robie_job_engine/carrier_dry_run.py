@@ -64,6 +64,7 @@ class CarrierSpec:
 
 CARRIER_ORDER = (
     "progressive",
+    "progressive_bop",
     "guard",
     "geico",
     "travelers",
@@ -79,6 +80,14 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".progressive_pending_cancellation",
         browser_cls_name="PlaywrightFaoCancellationBrowser",
         ledger_cls_name="FaoCancellationLedger",
+        select_fn_name="select_fao_page",
+    ),
+    "progressive_bop": CarrierSpec(
+        name="progressive_bop",
+        display="Progressive BOP",
+        module_name=".progressive_bop",
+        browser_cls_name="PlaywrightFaoBopBrowser",
+        ledger_cls_name="LocalNocLedger",
         select_fn_name="select_fao_page",
     ),
     "guard": CarrierSpec(

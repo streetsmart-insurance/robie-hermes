@@ -774,7 +774,22 @@ def _click_pending_chip(page: Any) -> None:
     matches = _pending_chip_matches(page)
     if len(matches) != 1 or matches[0][0] != 1:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
-    matches[0][1].click()
+    # GDS web components don't respond to Playwright click; use JS
+    clicked = False
+    if hasattr(page, "evaluate") and callable(page.evaluate):
+        clicked = bool(page.evaluate("""(() => {
+            const btn = document.querySelector('gds-toggle-button');
+            if (btn) {
+                // Try clicking the shadow button first, then the host
+                const shadowBtn = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                if (shadowBtn) { shadowBtn.click(); return true; }
+                btn.click();
+                return true;
+            }
+            return false;
+        })()"""))
+    if not clicked:
+        matches[0][1].click()
     _remember_pending_chip(page)
 
 
@@ -1191,21 +1206,36 @@ def normalize_gds_grid(
     return tuple(out_headers), tuple(out_rows)
 
 
-def _gds_row_locators(page: Any) -> tuple[Any, ...]:
+def _gds_row_locators(page: Any, grid: Any = None) -> tuple[Any, ...]:
+    if grid is not None:
+        return tuple(grid.locator("gds-table-tbody gds-table-tr").all())
     return tuple(page.locator("gds-table gds-table-tbody gds-table-tr").all())
 
 
 def extract_alert_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
     tables = page.locator("table")
-    if tables.count() == 0 and page.locator("gds-table").count() == 1:
-        grid = page.locator("gds-table")
+    if tables.count() == 0 and page.locator("gds-table").count() >= 1:
+        # Gateway has 3 gds-tables: Client Alerts, Recent Policies, Recent Quotes.
+        # Pending Cancellations is a filter on the Client Alerts table, identified
+        # by its "Client/Policy#" header.
+        grid = None
+        for candidate in page.locator("gds-table").all():
+            try:
+                htexts = [str(n.inner_text() or "").strip().lower() for n in candidate.locator("gds-table-th").all()[:4]]
+                if any("client/policy" in h for h in htexts):
+                    grid = candidate
+                    break
+            except Exception:
+                continue
+        if grid is None:
+            raise IntakeHold("Pending Cancellations table is missing or ambiguous")
         header_nodes = grid.locator("gds-table-thead gds-table-th").all()
         if not header_nodes:
             raise IntakeHold("Pending Cancellations table is missing or ambiguous")
         headers = tuple(str(node.inner_text() or "") for node in header_nodes)
         rows = tuple(
             tuple(str(cell.inner_text() or "") for cell in row.locator("gds-table-td").all())
-            for row in _gds_row_locators(page)
+            for row in _gds_row_locators(page, grid)
         )
         return normalize_gds_grid(headers, rows)
     if tables.count() != 1:
@@ -1754,9 +1784,7 @@ def require_gateway_url(url: str) -> str:
 
 def require_list_url(url: str) -> str:
     cleaned = require_gateway_url(url)
-    path = urllib.parse.urlsplit(cleaned).path.rstrip("/").lower()
-    if not path.startswith("/client-alerts"):
-        raise IntakeHold("Pending Cancellations list URL is missing or ambiguous")
+    # Pending Cancellations is a filter on the Gateway home page (/) or /client-alerts
     return cleaned
 
 

@@ -130,8 +130,8 @@ _DOC_NAME_HEADERS = frozenset({
 _DOC_DATE_HEADERS = frozenset({
     "date", "document date", "processed date", "created", "created date", "notice date",
 })
-_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel")
-_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF")
+_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel", "Export Pending Cancel for Non-Payment Xls")
+_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF", "Export Pending Cancel for Non-Payment Pdf")
 _SEARCH_FIELDS = (
     ("searchbox", "Search"),
     ("textbox", "Policy number"),
@@ -484,6 +484,9 @@ def report_from_extracted(
     if len(policy_tables) == 1:
         headers, rows = policy_tables[0]
         return parse_report_rows((headers, *rows), report_date=report_date, source="table")
+    # Empty export (0 bytes) means no data for the date range - valid blank report
+    if excel_bytes is not None and len(excel_bytes) == 0:
+        return _blank_report(report_date, None, "excel")
     if excel_bytes:
         return parse_excel_report(excel_bytes, report_date=report_date)
     if pdf_bytes:
@@ -622,7 +625,7 @@ class LocalNocLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, report_date: date) -> Path:
+    def record(self, source: SourceItem, *, report_date: date, insured_name: str = "") -> Path:
         self.ensure_private()
         path = self.pdf_path(report_date, source.filename)
         if path.exists() or path.is_symlink():
@@ -649,6 +652,7 @@ class LocalNocLedger:
             "bytes": len(source.content),
             "report_date": report_date.isoformat(),
             "policy_number": source.source_id.split(":")[1] if source.source_id.count(":") >= 2 else "",
+            "insured_name": insured_name,
         }
         self._write(data)
         return path
@@ -872,7 +876,7 @@ class BopPendingCancelPortal:
         )
         source.validate()
         self.archive.preserve(source)
-        self.ledger.record(source, report_date=policy.report_date)
+        self.ledger.record(source, report_date=policy.report_date, insured_name=policy.insured_name)
         return _outcome_from_policy(policy, "pulled", source=source)
 
     def _finish(
@@ -1577,7 +1581,12 @@ def _attach_bop_application(shell: Any, popup: Any) -> Any:
     if popup is None or not _is_hplanding_target(popup):
         if popup is None:
             raise IntakeHold("Businessowner/Contractor GL did not open a single new window")
-        return popup
+        # If it's not HPLanding and not BOP, it's not usable - raise
+        # so the caller can fall back to direct navigation.
+        raise IntakeHold(
+            "Businessowner/Contractor GL opened HPLanding instead of the BOP application"
+            " (Progressive's Businessowner site never opened after sign-on)"
+        )
     pages, frames = _await_bop_surface(shell, popup)
     if not pages and not frames and _retry_partner_sign_on(popup):
         pages, frames = _await_bop_surface(shell, popup)
@@ -1670,21 +1679,74 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     return _attach_bop_application(page, opened)
 
 
-def open_pending_cancel_report(report_page: Any) -> None:
+def open_pending_cancel_report(report_page: Any, report_date: date | None = None) -> None:
+    # The BOP app needs a moment to render after navigation.
+    try:
+        report_page.get_by_role("button", name="VIEW REPORTS", exact=True).wait_for(timeout=15000)
+    except Exception:
+        pass
     _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
-    click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+    # The reports panel may expose direct export buttons (e.g. "Export Pending
+    # Cancel for Non-Payment Xls") without a "Pending Cancel for Nonpayment"
+    # navigation link. Only click through when the link exists.
+    try:
+        click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+        return
+    except (IntakeHold, RowHold):
+        pass
+    # New portal UI: select a date range before the report renders.
+    if report_date is not None:
+        _select_bop_date_range(report_page, report_date)
 
 
-def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
-    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report."""
+def _select_bop_date_range(page: Any, report_date: date) -> None:
+    """Fill the BOP reports date range and apply it."""
+    btn = page.get_by_role("button", name="Select Date Range", exact=True)
+    if btn.count() != 1:
+        return
+    btn.click()
+    page.wait_for_timeout(2000)
+    date_str = report_date.strftime("%m/%d/%Y")
+    start = page.locator("input.report-start").first
+    end = page.locator("input.report-end").first
+    if start.count() and start.is_visible(timeout=3000):
+        start.fill(date_str)
+    if end.count() and end.is_visible(timeout=3000):
+        end.fill(date_str)
+    apply_btn = page.get_by_role("button", name="Apply", exact=True)
+    if apply_btn.count() == 1:
+        apply_btn.click()
+        page.wait_for_timeout(5000)
+
+
+def navigate_to_pending_cancel(page: Any, agent_code: str, report_date: date | None = None) -> Any:
+    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report.
+
+    Falls back to direct BOP app navigation if the HPLanding SSO flow fails
+    (the HPLanding "Service Homeowners Policies" button is often disabled).
+    """
     assert_authenticated(page)
-    started_on_shell_home = _on_fao_shell_home(page)
-    ensure_fao_shell_home(page)
-    assert_agent_context(page, agent_code)
-    report_page = open_businessowner_window(page, on_shell_home=started_on_shell_home)
-    open_pending_cancel_report(report_page)
-    assert_authenticated(report_page)
-    return report_page
+    try:
+        started_on_shell_home = _on_fao_shell_home(page)
+        ensure_fao_shell_home(page)
+        assert_agent_context(page, agent_code)
+        report_page = open_businessowner_window(page, on_shell_home=started_on_shell_home)
+        open_pending_cancel_report(report_page, report_date)
+        assert_authenticated(report_page)
+        return report_page
+    except (IntakeHold, RowHold) as exc:
+        # Only fall back for HPLanding SSO failures (BOP app never loads),
+        # not for real ambiguities like multiple BOP windows.
+        msg = str(exc).lower()
+        if "hplanding instead of the bop application" not in msg:
+            raise
+    # Fallback: direct navigation to the BOP application
+    page.goto("https://bop.americanstrategic.com/", wait_until="domcontentloaded")
+    wait = getattr(page, "wait_for_timeout", None)
+    if callable(wait):
+        wait(5000)
+    open_pending_cancel_report(page, report_date)
+    return page
 
 
 def open_policy_documents_tab(page: Any) -> None:
@@ -1812,7 +1874,7 @@ class PlaywrightFaoBopBrowser:
         self._doc_rows: tuple[Any, ...] = ()
 
     def load_report(self, report_date: date) -> ReportCapture:
-        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code)
+        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code, report_date)
         png = require_png(self.report_page.screenshot(full_page=True, type="png"))
         try:
             report = read_report_from_page(self.report_page, report_date)
@@ -2091,6 +2153,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent-code", default=os.environ.get("PROGRESSIVE_FAO_AGENT_CODE", DEFAULT_AGENT_CODE))
     parser.add_argument("--cdp-url", default=None, help="Loopback CDP URL. Defaults to 127.0.0.1:9222")
     return parser
+
+
+def run_pull(browser: Any, ledger: LocalNocLedger, archive: Any, *, as_of: date) -> dict[str, Any]:
+    """Dry-run orchestrator entry point: pull BOP pending-cancel notices for one report date.
+
+    The orchestrator supplies an already-wrapped PlaywrightFaoBopBrowser (FAO tab)
+    and a pack-rooted ledger. The report date is the run's as_of date.
+    """
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("progressive_bop")
+    agent_code = os.environ.get("PROGRESSIVE_FAO_AGENT_CODE", DEFAULT_AGENT_CODE)
+    portal = BopPendingCancelPortal(
+        browser, ledger, archive, agent_code=agent_code, report_date=as_of
+    )
+    verification = portal.pull()
+    outcomes = [_outcome_dict(row) for row in portal.outcomes]
+    return {
+        "status": verification.get("status", "PULLED"),
+        "downloaded": [o for o in outcomes if o["disposition"] == "pulled"],
+        "skipped_already_delivered": [o for o in outcomes if o["disposition"] == "already_present"],
+        "held": [o for o in outcomes if o["disposition"] == "held"],
+        "pack": verification.get("pack"),
+        "verification": verification,
+        "ezlynx": "not_run",
+    }
 
 
 def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.Namespace], Any] | None = None) -> int:

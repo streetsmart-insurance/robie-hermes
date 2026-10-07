@@ -46,6 +46,7 @@ def qa_root() -> Path:
 CARRIERS: dict[str, str] = {
     "guard": "guard",
     "progressive": "progressive",
+    "progressive_bop": "progressive-bop",
     "geico": "geico",
     "travelers": "travelers",
     "natgen": "natgen",
@@ -57,6 +58,7 @@ CARRIERS: dict[str, str] = {
 CARRIER_NAMES: dict[str, str] = {
     "guard": "Guard",
     "progressive": "Progressive (FAO)",
+    "progressive_bop": "Progressive BOP",
     "geico": "GEICO",
     "travelers": "Travelers",
     "natgen": "NatGen",
