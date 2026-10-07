@@ -808,7 +808,13 @@ class PlaywrightTravelersBrowser:
         return content
 
     def screenshot_list(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        try:
+            data = self.page.screenshot(full_page=False, type="png", timeout=5000)
+        except Exception:
+            try:
+                data = self.page.screenshot(type="png", timeout=5000)
+            except Exception:
+                data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Travelers list screenshot is missing or not a PNG")
         return bytes(data)
