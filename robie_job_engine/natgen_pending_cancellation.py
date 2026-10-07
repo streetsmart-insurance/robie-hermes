@@ -52,7 +52,7 @@ from .natgen_retrieval import (
 
 
 NATGEN_SOURCE_ACCOUNT = "natgenagency"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "natgen-noc-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"

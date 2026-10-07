@@ -73,7 +73,7 @@ from .progressive_retrieval import SCOPES
 
 
 BOP_SCOPE = "bop_pending_cancel_nonpayment"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 # expect_popup returns the HPLanding window as soon as it opens. The BOP
 # application at https://bop.americanstrategic.com/ shows up after that.

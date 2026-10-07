@@ -100,7 +100,7 @@ from .progressive_retrieval import ProgressiveRetrieval, require_bounded_scope
 
 
 FAO_SCOPE = "fao_communications"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 DATE_CONTROL_TIMEOUT_MS = 8000
 LEDGER_NAME = "fao-memo-ledger.json"

@@ -37,7 +37,7 @@ from .intake_core import IntakeHold, SourceArchive, SourceItem
 
 PROCESS = "geico"
 SCOPE = "pending_cancellation_noc"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "geico-noc-ledger.json"
 GATEWAY_HOST = "gateway2.geico.com"
