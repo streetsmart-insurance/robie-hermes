@@ -697,3 +697,69 @@ class NatGenReportFallbackTests(unittest.TestCase):
             ng.open_pending_cancellations(page)
         page.goto.assert_called_once()
         self.assertEqual(page.goto.call_args.args[0], ng.PENDING_REPORT_URL)
+
+
+class UticaExtGridTests(unittest.TestCase):
+    TXN_HEADERS = ["", "POLICY NUMBER", "TRANSACTION TYPE", "INSURED NAME", "EFFECTIVE", "PROCESSED", "AGENT",
+                   "BUSINESS INTRODUCER", "PRODUCER", "PREMIUM BEFORE", "CHANGE", "PREMIUM AFTER", "STATUS", "DOCUMENTS"]
+
+    def _row(self, policy, ttype, insured, eff):
+        return ["", policy, ttype, insured, eff, "10/08/2026", "Streetsmart", "Streetsmart", "", "", "$ 0.00",
+                "$ 0.00", "Processed", "Documents"]
+
+    def _grids(self):
+        return [
+            {"id": "blk_1", "headers": ["Pending Items", "Count"], "rows": []},
+            {"id": "blk_60532882500_1366748", "headers": self.TXN_HEADERS, "rows": [
+                self._row("ULC3001792810", "Pending Cancellation(NOC)", "THIESEN GROUP CORP", "11/13/2026"),
+                self._row("ART3000699220", "Intent to Non-Renew", "JITOW LLC", "12/27/2026"),
+                self._row("ART3000019221", "Pending Cancellation(NOC)", "ABSOLUTE LAWN SERVICES LLC", "10/23/2026"),
+                self._row("ART3001040460", "Renewal", "Mangas Stucco and Painting LLC", "12/12/2026"),
+            ]},
+        ]
+
+    def test_transaction_grid_is_found_and_parsed(self):
+        from robie_job_engine import utica_pending_cancellation as ut
+
+        grid_id, headers, rows = ut.find_ext_grid(self._grids(), ut._TXN_GRID_HEADERS, what="transactions")
+        self.assertEqual(grid_id, "blk_60532882500_1366748")
+        parsed = ut.parse_transactions_grid(headers, rows, list_url="u")
+        targets = [r.policy_number for r in parsed if ut.is_cancellation_transaction(r.transaction_type)]
+        self.assertEqual(targets, ["ULC3001792810", "ART3000699220", "ART3000019221"])
+        self.assertEqual(ut.transaction_row_index(headers, rows, parsed[2]), 2)
+
+    def test_live_document_grid_parses(self):
+        from robie_job_engine import utica_pending_cancellation as ut
+
+        grids = [{"id": "blk_60532946600_1293048",
+                  "headers": ["", "ID", "NAME", "CONTENT TYPE", "DESCRIPTION", "ADDED DATE", "SOURCE", "RENDERING STATUS"],
+                  "rows": [["", "505335313999", "NonPay Notice-Insured", "Document Package", "", "10/08/2026 02:23 AM",
+                            "UF Document Delivery", "Completed"],
+                           ["", "505335314099", "NonPay Notice-Agent", "Document Package", "", "10/08/2026 02:23 AM",
+                            "UF Document Delivery", "Completed"]]}]
+        _, headers, rows = ut.find_ext_grid(grids, ut._DOC_GRID_HEADERS, what="document")
+        docs = ut.parse_document_grid(headers, rows, policy_number="ART3000019221")
+        self.assertEqual([d.doc_id for d in docs], ["505335313999", "505335314099"])
+        self.assertTrue(all(ut.is_cancellation_document(d.name, d.description) for d in docs))
+
+    def test_unsafe_grid_id_holds(self):
+        from robie_job_engine import utica_pending_cancellation as ut
+
+        grids = self._grids()
+        grids[1]["id"] = "x'];alert(1)//"
+        with self.assertRaises(IntakeHold):
+            ut.find_ext_grid(grids, ut._TXN_GRID_HEADERS, what="transactions")
+
+    def test_open_transactions_uses_exit_from_document_list(self):
+        from robie_job_engine import utica_pending_cancellation as ut
+
+        page = mock.Mock()
+        page.url = "https://ufirstnow.uticafirst.com/oneshield/sso?osst=abc"
+        control = mock.Mock()
+        browser = ut.PlaywrightUticaCancellationBrowser(page)
+        with mock.patch.object(ut, "unique_control_ci", side_effect=[IntakeHold("missing"), control]), \
+                mock.patch.object(ut, "click_ext_exit", return_value=True) as exit_click, \
+                mock.patch.object(ut, "wait_for_text_ci", return_value=True):
+            browser.open_transactions()
+        exit_click.assert_called_once_with(page)
+        control.click.assert_called_once()

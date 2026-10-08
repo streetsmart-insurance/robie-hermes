@@ -58,6 +58,7 @@ SCOPE = "pending_cancellation"
 UTICA_HOST = "ufirstnow.uticafirst.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 15000
+FILTER_RADIO_ATTEMPTS = 6
 LEDGER_NAME = "utica-cancellation-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _PDF_MAGIC = b"%PDF"
@@ -87,6 +88,9 @@ _CANCELLATION_TRANSACTION_TYPES = frozenset({
     "rescind pending cancellation",
     "non-renewal",
     "prerenewal notice",
+    # Live 2026-10-08 (JITOW LLC ART3000699220): the non-renewal notice
+    # transaction is labelled "Intent to Non-Renew".
+    "intent to non-renew",
 })
 # Document names that mark a notice worth pulling. The DOCUMENT LIST is
 # already scoped to a cancellation transaction, so this is a guard against
@@ -440,6 +444,138 @@ def _read_text(node: Any) -> str:
     return str(getattr(node, "text", "") or "")
 
 
+# UFirst Now is ExtJS: each grid row is its own <table> (live 2026-10-08:
+# 29 tables on the transaction list), headers are .x-column-header divs and
+# cells are .x-grid-cell. Read visible grids as {id, headers, rows}.
+_EXT_GRIDS_JS = """() => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  return Array.from(document.querySelectorAll('.x-grid')).filter(vis).map(g => ({
+    id: g.id || '',
+    headers: Array.from(g.querySelectorAll('.x-column-header')).filter(vis)
+      .map(h => ((h.querySelector('.x-column-header-text') || h).innerText || '').trim()),
+    rows: Array.from(g.querySelectorAll('.x-grid-item')).filter(vis)
+      .map(r => Array.from(r.querySelectorAll('.x-grid-cell')).map(c => (c.innerText || '').trim()))
+  }));
+}"""
+_EXT_GRID_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def find_ext_grid(
+    grids: Any, aliases: dict[str, set[str]], *, what: str
+) -> tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """The one ExtJS grid whose headers carry every field in ``aliases``."""
+    found = []
+    for grid in grids or ():
+        if not isinstance(grid, dict):
+            continue
+        headers = tuple(_norm(str(h)) for h in grid.get("headers") or ())
+        try:
+            _match_headers(headers, aliases, what=what)
+        except IntakeHold:
+            continue
+        rows = tuple(tuple(_norm(str(c)) for c in row) for row in grid.get("rows") or ())
+        found.append((str(grid.get("id") or ""), headers, rows))
+    if len(found) != 1:
+        raise IntakeHold(f"Utica First {what} grid is missing or ambiguous (found {len(found)})")
+    grid_id = found[0][0]
+    if not _EXT_GRID_ID.fullmatch(grid_id):
+        raise IntakeHold(f"Utica First {what} grid is missing or ambiguous")
+    return found[0]
+
+
+_EXT_EXIT_JS = """() => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  const hits = Array.from(document.querySelectorAll('.x-btn-inner'))
+    .filter(e => vis(e) && (e.textContent || '').trim().toLowerCase() === 'exit');
+  if (hits.length !== 1) return false;
+  (hits[0].closest('.x-btn') || hits[0]).click();
+  return true;
+}"""
+
+
+def ext_click(control: Any) -> None:
+    """Click, falling back to a DOM click when an ExtJS mask intercepts.
+
+    Live 2026-10-08: an invisible x-mask (left by the "Personalized Filter
+    Names" window) sits over UFirst Now and swallows pointer clicks.
+    """
+    try:
+        control.click(timeout=8000)
+        return
+    except TypeError:
+        control.click()
+        return
+    except Exception:  # noqa: BLE001 - fall through to the DOM click
+        pass
+    target = control.first if hasattr(control, "first") else control
+    target.evaluate("e => (e.closest('.x-btn') || e).click()")
+
+
+_EXT_RADIO_LABEL_JS = """(label) => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  const hits = Array.from(document.querySelectorAll('label.x-form-cb-label'))
+    .filter(e => vis(e) && (e.textContent || '').trim().toLowerCase() === label.toLowerCase());
+  if (hits.length !== 1) return false;
+  const field = hits[0].closest('.x-form-type-radio') || hits[0].parentElement;
+  const input = field ? field.querySelector('input[type=radio]') : null;
+  (input || hits[0]).click();
+  return true;
+}"""
+
+
+def click_ext_radio_label(page: Any, label: str) -> bool:
+    """Click the one visible ExtJS radio whose label reads ``label``."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        return bool(evaluate(_EXT_RADIO_LABEL_JS, label))
+    except Exception:
+        return False
+
+
+def click_ext_exit(page: Any) -> bool:
+    """Click the one visible ExtJS "Exit" button (DOCUMENT LIST -> policy page)."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        clicked = bool(evaluate(_EXT_EXIT_JS))
+    except Exception:
+        return False
+    if clicked:
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(6000)
+    return clicked
+
+
+def transaction_row_index(
+    headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...], row: "TransactionRow"
+) -> int:
+    """Index of ``row`` in the live grid (policy + type + effective date)."""
+    idx = _match_headers(headers, _TXN_GRID_HEADERS, what="transactions")
+    hits = []
+    for i, cells in enumerate(rows):
+        if len(cells) < len(headers):
+            continue
+        try:
+            effective = parse_carrier_date(cells[idx["effective"]])
+        except IntakeHold:
+            continue
+        if (
+            _norm(cells[idx["policy_number"]]).upper() == row.policy_number
+            and _norm(cells[idx["transaction_type"]]).casefold() == row.transaction_type.casefold()
+            and effective == row.effective_date
+        ):
+            hits.append(i)
+    if len(hits) != 1:
+        raise IntakeHold(
+            f"Utica First transaction row {row.policy_number!r} is missing or ambiguous"
+        )
+    return hits[0]
+
+
 class PlaywrightUticaCancellationBrowser:
     """Drive one already-authenticated UFirst Now tab. Does not type credentials."""
 
@@ -459,10 +595,21 @@ class PlaywrightUticaCancellationBrowser:
         """
         page = self.page
         require_utica_url(str(getattr(page, "url", "") or ""))
-        unique_control_ci(
-            page, "tab", "Policy Transactions", carrier="Utica First",
-            text_fallback=True, first_visible_text=True,
-        ).click()
+        try:
+            control = unique_control_ci(
+                page, "tab", "Policy Transactions", carrier="Utica First",
+                text_fallback=True, first_visible_text=True,
+            )
+        except IntakeHold:
+            # Live 2026-10-08: a DOCUMENT LIST page has no top navigation;
+            # its Exit button leads back to a page that has it.
+            if not click_ext_exit(page):
+                raise
+            control = unique_control_ci(
+                page, "tab", "Policy Transactions", carrier="Utica First",
+                text_fallback=True, first_visible_text=True,
+            )
+        ext_click(control)
         if not wait_for_text_ci(page, "Transaction List", timeout_ms=15000):
             # The heading wording is not proven live; the hand patch on Test
             # waited a fixed 5 s. Settle briefly; the grid parse still holds
@@ -473,19 +620,55 @@ class PlaywrightUticaCancellationBrowser:
     def select_filter_all(self) -> None:
         """Select the "All" filter radio and apply it ("Filter List" live)."""
         page = self.page
-        unique_control_ci(page, "radio", "All", carrier="Utica First").check()
-        unique_control_ci(page, "button", "Filter List", carrier="Utica First").click()
+        radio = None
+        for attempt in range(FILTER_RADIO_ATTEMPTS):
+            # Live 2026-10-08: right after the Policy Transactions click the
+            # ExtJS list is re-rendering and the radio is briefly absent.
+            try:
+                radio = unique_control_ci(page, "radio", "All", carrier="Utica First")
+                break
+            except IntakeHold:
+                if click_ext_radio_label(page, "All"):
+                    break
+                if attempt == FILTER_RADIO_ATTEMPTS - 1:
+                    raise
+                waiter = getattr(page, "wait_for_timeout", None)
+                if not callable(waiter):
+                    raise
+                waiter(2000)
+        if radio is not None:
+            try:
+                radio.check(timeout=8000)
+            except TypeError:
+                radio.check()
+            except Exception:  # noqa: BLE001 - ExtJS mask over the page
+                ext_click(radio)
+        ext_click(unique_control_ci(page, "button", "Filter List", carrier="Utica First"))
         page.wait_for_selector("table", timeout=15000)
+
+    def _ext_grids(self) -> Any:
+        evaluate = getattr(self.page, "evaluate", None)
+        if not callable(evaluate):
+            return []
+        try:
+            return evaluate(_EXT_GRIDS_JS) or []
+        except Exception:
+            return []
 
     def load_transactions(self) -> tuple[TransactionRow, ...]:
         page = self.page
         tables = page.locator("table")
         table_count = int(tables.count())
         if table_count != 1:
-            raise IntakeHold(
-                "Utica First transactions table is missing or ambiguous "
-                f"(found {table_count} tables; the ExtJS grid parser is a follow-up)"
-            )
+            grids = self._ext_grids()
+            if not grids:
+                raise IntakeHold(
+                    "Utica First transactions table is missing or ambiguous "
+                    f"(found {table_count} tables and no ExtJS grid)"
+                )
+            _, headers, rows = find_ext_grid(grids, _TXN_GRID_HEADERS, what="transactions")
+            self._ext_mode = True
+            return parse_transactions_grid(headers, rows, list_url=self._list_url)
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -503,6 +686,51 @@ class PlaywrightUticaCancellationBrowser:
 
         Captures the DRAGON_TRANSACTION_ID the DocGenServlet PDF URL needs.
         """
+        page = self.page
+        if getattr(self, "_ext_mode", False):
+            self._open_documents_ext(row)
+        else:
+            self._open_documents_table(row)
+        if not wait_for_text_ci(page, "Document List", timeout_ms=15000):
+            # Heading wording unproven live; the DRAGON_TRANSACTION_ID read
+            # below holds if the document list never rendered.
+            page.wait_for_timeout(3000)
+        html = page.content() if callable(getattr(page, "content", None)) else ""
+        self._transaction_id = transaction_id_from_page(str(html))
+        # The DocGenServlet request's Referer must be the in-app page the
+        # document list was opened from, harvested fresh each run.
+        self._doclist_url = require_utica_url(str(getattr(page, "url", "") or ""))
+
+    def _open_documents_ext(self, row: TransactionRow) -> None:
+        """ExtJS grid: click the row's DOCUMENTS cell text.
+
+        Grid ids are regenerated on every visit, so the grid is re-read here.
+        The cell is a <span>Documents</span> action link, and an invisible
+        ExtJS mask can sit over the page (live 2026-10-08), so the click is
+        dispatched on the element itself.
+        """
+        grid_id, headers, rows = find_ext_grid(self._ext_grids(), _TXN_GRID_HEADERS, what="transactions")
+        index = transaction_row_index(headers, rows, row)
+        doc_col = _match_headers(headers, _TXN_GRID_HEADERS, what="transactions")["documents"]
+        cell = (
+            self.page.locator(f"#{grid_id} .x-grid-item").nth(index)
+            .locator(".x-grid-cell").nth(doc_col)
+        )
+        target = cell.get_by_text(re.compile(r"^\s*documents\s*$", re.IGNORECASE))
+        try:
+            if int(target.count()) != 1:
+                raise IntakeHold(
+                    f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
+                )
+            target.evaluate("e => e.click()")
+        except IntakeHold:
+            raise
+        except Exception:
+            raise IntakeHold(
+                f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
+            )
+
+    def _open_documents_table(self, row: TransactionRow) -> None:
         page = self.page
         grid_row = page.locator("tr", has_text=row.policy_number)
         try:
@@ -525,25 +753,20 @@ class PlaywrightUticaCancellationBrowser:
                 f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
             )
         link.first.click()
-        if not wait_for_text_ci(page, "Document List", timeout_ms=15000):
-            # Heading wording unproven live; the DRAGON_TRANSACTION_ID read
-            # below holds if the document list never rendered.
-            page.wait_for_timeout(3000)
-        html = page.content() if callable(getattr(page, "content", None)) else ""
-        self._transaction_id = transaction_id_from_page(str(html))
-        # The DocGenServlet request's Referer must be the in-app page the
-        # document list was opened from, harvested fresh each run.
-        self._doclist_url = require_utica_url(str(getattr(page, "url", "") or ""))
 
     def list_documents(self, policy_number: str) -> tuple[UticaDocument, ...]:
         page = self.page
         tables = page.locator("table")
         table_count = int(tables.count())
         if table_count != 1:
-            raise IntakeHold(
-                "Utica First document table is missing or ambiguous "
-                f"(found {table_count} tables; the ExtJS grid parser is a follow-up)"
-            )
+            grids = self._ext_grids()
+            if not grids:
+                raise IntakeHold(
+                    "Utica First document table is missing or ambiguous "
+                    f"(found {table_count} tables and no ExtJS grid)"
+                )
+            _, headers, rows = find_ext_grid(grids, _DOC_GRID_HEADERS, what="document")
+            return parse_document_grid(headers, rows, policy_number=policy_number)
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -784,6 +1007,7 @@ def run_pull(
                 reason=(
                     f"Utica First policy {row.policy_number} has no notice "
                     "document in its document list"
+                    + (": " + "; ".join(d.name for d in docs[:6]) if docs else "")
                 ),
             ))
             browser.return_to_transactions()
