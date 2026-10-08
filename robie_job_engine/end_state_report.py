@@ -338,6 +338,7 @@ def collect_context(
     )
     return {
         "ask": ask,
+        "display_ask": _display_ask(payload),
         "claim": claim,
         "end_state": end_state,
         "evidence": evidence,
@@ -551,7 +552,11 @@ def compose_report(job_id: str, context: dict[str, Any], decision: EndStateDecis
         return _warm_clarification_email(
             str(context.get("ask") or ""), raw_end_state
         )
-    summary = summary_sentence(context.get("ask") or "", context.get("end_state") or "", decision.verdict)
+    summary = summary_sentence(
+        context.get("display_ask") or context.get("ask") or "",
+        context.get("end_state") or "",
+        decision.verdict,
+    )
     end_state = plain_customer_text(context.get("end_state") or "Robie stopped without a clear ending.")
     jev_line = (
         f"Jev: {decision.display_verdict}, {int(decision.confidence)}% confidence. "
@@ -1020,6 +1025,26 @@ def _ask_text(payload: dict[str, Any]) -> str:
         if value:
             return _fragment(value)
     return ""
+
+
+def _display_ask(payload: dict[str, Any]) -> str:
+    """Short ask for the summary line only. Jev still sees the full ask.
+
+    An email job's request_text is "Subject: <subject>\n\n<body>", which
+    rendered as "You asked Robie to Subject: Re: ... Best Regards, ...".
+    Use the subject without Re:/Fwd: instead.
+    """
+    raw = str(payload.get("request_text") or "").strip()
+    match = re.match(r"(?is)^subject:\s*([^\n]*)", raw)
+    if not match:
+        return ""
+    subject = match.group(1).strip()
+    while True:
+        trimmed = re.sub(r"^(?:re|fwd?|fw)\s*:\s*", "", subject, flags=re.IGNORECASE)
+        if trimmed == subject:
+            break
+        subject = trimmed
+    return _fragment(f"handle {subject}") if subject else ""
 
 
 def _worker_claim(store: Any, job: dict[str, Any], worker_text: str) -> str:

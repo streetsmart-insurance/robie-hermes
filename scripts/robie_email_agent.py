@@ -606,7 +606,9 @@ def process_inbox():
     processed_ids = load_processed_ids()
 
     query = "is:unread is:inbox"
-    res = service.users().messages().list(userId="me", q=query, maxResults=10).execute()
+    # 25, not 10: skipped mail now stays unread for people to see, so the
+    # window must be wide enough that it never hides a real request.
+    res = service.users().messages().list(userId="me", q=query, maxResults=25).execute()
     messages = res.get("messages", [])
 
     if not messages:
@@ -662,10 +664,49 @@ def process_inbox():
 
         if not is_allowed_sender(sender):
             logger.info("Skipping email from unauthorized sender: %s", sender)
+            # Logged once, not every minute. The message stays unread.
+            processed_ids.add(msg_id)
+            save_processed_ids(processed_ids)
             continue
 
         payload = msg.get("payload", {})
         body = extract_body_text(payload) or msg.get("snippet", "")
+
+        # Carlo 2026-10-08: ignore reactions, reports and FYI forwards. Only a
+        # real request (or a reply Robie is waiting on) becomes a job. A skip
+        # is logged with its reason, left unread, and never answered.
+        from robie_job_engine.email_intake_filter import (
+            InboundEmail,
+            classify_inbound,
+            payload_attachment_names,
+            payload_mime_types,
+        )
+
+        inbound = InboundEmail(
+            gmail_message_id=msg_id,
+            thread_id=thread_id,
+            sender=sender,
+            subject=subject,
+            body=body,
+            headers=headers,
+            mime_types=payload_mime_types(payload),
+            attachment_names=payload_attachment_names(payload),
+        )
+        try:
+            intake = classify_inbound(
+                inbound, db_path=JOB_DB, ascend_sessions=load_ascend_sessions()
+            )
+        except Exception as exc:  # noqa: BLE001 - unsure means skip, never crash the scan
+            logger.warning("email intake SKIP reason=classifier_error msg=%s error=%s", msg_id, type(exc).__name__)
+            processed_ids.add(msg_id)
+            save_processed_ids(processed_ids)
+            continue
+        logger.info(intake.log_line(inbound))
+        if not intake.keep:
+            processed_ids.add(msg_id)
+            save_processed_ids(processed_ids)
+            continue
+
         attachments = download_attachments(service, msg_id, payload)
 
         logger.info("📩 Queuing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
@@ -678,6 +719,7 @@ def process_inbox():
             "thread_id": thread_id,
             "headers": headers,
             "text": f"Subject: {subject}\n\n{body}",
+            "intake": intake,
         })
 
     def _run_one(item):
@@ -688,6 +730,7 @@ def process_inbox():
                 attachment_names=tuple(name for name, _ in item["attachments"]),
                 thread_id=item["thread_id"],
                 sender=item["sender"],
+                intake=item["intake"].as_payload(),
                 run_agent_with_context=lambda prompt, job_id, db_path, item=item: run_email_job(
                     prompt, job_id, db_path, sender=item["sender"], subject=item["subject"],
                     body=item["body"], attachments=item["attachments"], thread_id=item["thread_id"]),
@@ -765,6 +808,21 @@ def process_inbox():
                     for addr in _re.split(r"[;,]", cc_raw)
                     if addr.strip() and "robie@" not in addr.lower()
                 ]
+                # 2026-10-08: CC only on a finished job. "Did not finish"
+                # goes to the person who asked, never to everyone cc'd.
+                from robie_job_engine.email_intake_filter import (
+                    job_status_for_message,
+                    reply_cc_for,
+                )
+
+                job_status = job_status_for_message(JOB_DB, msg_id)
+                kept_cc = reply_cc_for(job_status, reply_body, cc_list)
+                if cc_list and not kept_cc:
+                    logger.info(
+                        "Reply on thread %s goes to the requester only (job status %s)",
+                        thread_id, job_status or "unknown",
+                    )
+                cc_list = kept_cc
                 reply_msg = build_plain_email_message(
                     sender="Robie AI <robie@streetsmart.insurance>",
                     to=[sender],
