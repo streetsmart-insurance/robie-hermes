@@ -27,13 +27,16 @@ import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import urllib.parse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from time import monotonic
+from typing import Any, Callable, Iterator
 
 from .carrier_locators import unique_control_ci
 from .intake_core import IntakeHold, SourceArchive, SourceItem
@@ -52,9 +55,15 @@ CL_POLICY_HOST = "clpolicy.foragentsonly.com"
 # servicing app (policy-hub/<policy>/policy-and-coverages), not CL Express.
 POLICY_SERVICING_HOST = "policyservicing.apps.foragentsonly.com"
 POLICY_PAGE_HOSTS = (CL_POLICY_HOST, POLICY_SERVICING_HOST)
-POLICY_PAGE_WAIT_MS = 30000
-RETURN_TO_REPORT_MS = 30000
-STUCK_TAB_GOTO_MS = 45000
+POLICY_PAGE_WAIT_MS = 15000
+RETURN_TO_REPORT_MS = 15000
+STUCK_TAB_GOTO_MS = 20000
+# Hard caps. A Playwright timeout that is ignored still trips the alarm,
+# holds that policy, and the pull continues. The worker deadline is under
+# the 15-minute outer `timeout` so the summary is written before exit 124.
+PAGE_BUDGET_S = int(os.environ.get("ROBIE_FAO_PAGE_BUDGET_S", "45"))
+POLICY_BUDGET_S = int(os.environ.get("ROBIE_FAO_POLICY_BUDGET_S", "120"))
+WORKER_DEADLINE_S = int(os.environ.get("ROBIE_FAO_DEADLINE_S", "840"))
 REPORT_PATH = "/managepolicies/reports/policiesneedservice/policiespendingcancellation/"
 REPORT_URL = f"https://{FAO_HOST}{REPORT_PATH}"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
@@ -124,6 +133,105 @@ _RENEWAL_TERMS = frozenset({
     "renewal", "renew ", " renew", "renewal offer", "renewal reminder",
 })
 _LOGIN_PATHS = ("/login", "/logon", "/signin", "/auth")
+_STEP_LOG: Path | None = None
+_LATEST: dict[str, Any] = {}
+_BUDGETS: list[tuple[float, type[BaseException], str]] = []
+
+
+class FaoBudget(BaseException):
+    """A per-page or per-policy alarm. Not an Exception, so Playwright cannot swallow it."""
+
+
+class FaoDeadline(BaseException):
+    """The worker's own deadline. The summary is written and the pull stops."""
+
+
+def step_log(message: str) -> None:
+    """One line on stderr, flushed, and appended to the progress file.
+
+    Block-buffered stdout is empty after a kill. This line is flushed and
+    fsynced so a SIGKILL still leaves the last step on disk.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"{stamp} FAO {message}\n"
+    sys.stderr.write(line)
+    sys.stderr.flush()
+    path = _STEP_LOG
+    if path is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        pass
+
+
+def _arm_budget() -> None:
+    if not _BUDGETS:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        return
+    soonest = min(_BUDGETS, key=lambda item: item[0])
+    signal.setitimer(signal.ITIMER_REAL, max(0.01, soonest[0] - monotonic()))
+
+
+def _budget_handler(signum: int, frame: Any) -> None:
+    now = monotonic()
+    due = [item for item in _BUDGETS if item[0] <= now + 0.05]
+    moment, exc_type, message = min(due or _BUDGETS, key=lambda item: item[0])
+    raise exc_type(message)
+
+
+@contextmanager
+def time_budget(seconds: float, message: str, exc_type: type[BaseException] = FaoBudget) -> Iterator[None]:
+    """Interrupt the thread when ``seconds`` elapse, even if a CDP call ignores its timeout."""
+    if seconds <= 0:
+        raise exc_type(message)
+    deadline = monotonic() + seconds
+    _BUDGETS.append((deadline, exc_type, message))
+    previous = signal.signal(signal.SIGALRM, _budget_handler)
+    _arm_budget()
+    try:
+        yield
+    finally:
+        try:
+            _BUDGETS.remove((deadline, exc_type, message))
+        except ValueError:
+            pass
+        if _BUDGETS:
+            signal.signal(signal.SIGALRM, _budget_handler)
+            _arm_budget()
+        else:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+
+def _cap_page_timeouts(page: Any) -> None:
+    ms = PAGE_BUDGET_S * 1000
+    for name in ("set_default_timeout", "set_default_navigation_timeout"):
+        setter = getattr(page, name, None)
+        if not callable(setter):
+            continue
+        try:
+            setter(ms)
+        except Exception:
+            pass
+
+
+def _node_visible(node: Any) -> bool:
+    visible = getattr(node, "is_visible", None)
+    if not callable(visible):
+        return True
+    try:
+        return bool(visible(timeout=500))
+    except TypeError:
+        try:
+            return bool(visible())
+        except Exception:
+            return False
+    except Exception:
+        return False
 
 
 def _norm(text: str) -> str:
@@ -276,13 +384,12 @@ def documents_control(page: Any) -> Any | None:
         except Exception:
             count = 0
         visible = []
-        for index in range(count):
+        # Cap the scan. A personal-lines page can list dozens of "Documents"
+        # nodes; an unbounded is_visible() wait on each one is a multi-minute hang.
+        for index in range(min(count, 8)):
             node = locator.nth(index) if hasattr(locator, "nth") else locator
-            try:
-                if not hasattr(node, "is_visible") or node.is_visible():
-                    visible.append(node)
-            except Exception:
-                continue
+            if _node_visible(node):
+                visible.append(node)
         if len(visible) > 1:
             raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
         if visible:
@@ -311,11 +418,13 @@ def open_cl_documents(page: Any) -> None:
     Its accessible name is "Documents" (CSS upper-cases it), so match any
     casing, tab role first, then link role; exactly one visible control.
     """
-    control = documents_control(page)
-    if control is None:
-        raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
-    control.click()
-    _with_one_retry(lambda: _wait_for_policy_documents(page), what="CL Express documents list")
+    step_log("CL Express documents control")
+    with time_budget(PAGE_BUDGET_S, "Progressive CL Express documents page exceeded its time budget"):
+        control = documents_control(page)
+        if control is None:
+            raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
+        control.click()
+        _with_one_retry(lambda: _wait_for_policy_documents(page), what="CL Express documents list")
 
 
 def open_policy_servicing_documents(page: Any) -> None:
@@ -326,29 +435,32 @@ def open_policy_servicing_documents(page: Any) -> None:
     list wait is bounded and retried once. Anything else holds this policy
     with a specific reason.
     """
-    control = documents_control(page)
-    if control is None:
-        target = policy_hub_documents_url(str(getattr(page, "url", "") or ""))
-        if not target:
+    step_log("policyservicing documents")
+    with time_budget(PAGE_BUDGET_S, "Progressive policyservicing documents page exceeded its time budget"):
+        control = documents_control(page)
+        if control is None:
+            target = policy_hub_documents_url(str(getattr(page, "url", "") or ""))
+            if not target:
+                raise IntakeHold(
+                    "Progressive personal policy on policyservicing has no Documents control"
+                )
+            step_log(f"policyservicing documents route {target}")
+
+            def go() -> None:
+                page.goto(target, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
+
+            _with_one_retry(go, what="policyservicing documents route")
+            control = documents_control(page)
+        if control is not None:
+            control.click()
+        elif not str(getattr(page, "url", "") or "").rstrip("/").endswith("/documents"):
             raise IntakeHold(
                 "Progressive personal policy on policyservicing has no Documents control"
             )
-
-        def go() -> None:
-            page.goto(target, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
-
-        _with_one_retry(go, what="policyservicing documents route")
-        control = documents_control(page)
-    if control is not None:
-        control.click()
-    elif not str(getattr(page, "url", "") or "").rstrip("/").endswith("/documents"):
-        raise IntakeHold(
-            "Progressive personal policy on policyservicing has no Documents control"
+        _with_one_retry(
+            lambda: _wait_for_policy_documents(page),
+            what="policyservicing documents list",
         )
-    _with_one_retry(
-        lambda: _wait_for_policy_documents(page),
-        what="policyservicing documents list",
-    )
 
 
 def is_billing_document(document_name: str) -> bool:
@@ -580,57 +692,60 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
 
     def _on_page(new_page: Any) -> None:
         opened.append(new_page)
+        step_log("document opened a new tab")
+
+    def _close_opened() -> None:
+        for new_page in opened:
+            from .carrier_tabs import close_page
+
+            close_page(new_page)
 
     context = getattr(page, "context", None)
     if context is not None and hasattr(context, "on"):
         context.on("page", _on_page)
     try:
-        try:
-            with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
-                click_action()
-            download = download_info.value
-            path = download.path()
-            content = Path(str(path)).read_bytes()
-            if not _is_pdf(content):
-                raise IntakeHold("Progressive FAO document capture is not a PDF")
-            downloads.append(content)
-        except IntakeHold:
-            raise
-        except Exception as exc:
-            if "timeout" not in type(exc).__name__.lower() and "Timeout" not in str(exc):
-                raise IntakeHold("Progressive FAO document capture is missing or ambiguous") from exc
-        viewer_pdfs: list[bytes] = []
-        for new_page in opened:
-            wait = getattr(new_page, "wait_for_load_state", None)
-            if callable(wait):
-                try:
-                    wait("domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
-                except Exception:
-                    pass
-            url = str(getattr(new_page, "url", "") or "")
-            host = (urllib.parse.urlsplit(url).hostname or "").lower()
-            if host and not (host == FAO_HOST or host.endswith(".foragentsonly.com")):
-                continue
+        with time_budget(PAGE_BUDGET_S, "Progressive FAO document capture exceeded its time budget"):
+            step_log("document capture")
             try:
-                view = read_playwright_pdf_view(new_page)
-                viewer_pdfs.extend(view.pdfs)
+                with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
+                    click_action()
+                download = download_info.value
+                path = download.path()
+                content = Path(str(path)).read_bytes()
+                if not _is_pdf(content):
+                    raise IntakeHold("Progressive FAO document capture is not a PDF")
+                downloads.append(content)
             except IntakeHold:
                 raise
             except Exception as exc:
-                # Live 2026-10-08 (4a22f443): the PDFHandler GET timed out and
-                # crashed the whole carrier, leaving the viewer tab open.
-                raise IntakeHold(
-                    f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
-                ) from exc
-            finally:
-                closer = getattr(new_page, "close", None)
-                if callable(closer):
+                if "timeout" not in type(exc).__name__.lower() and "Timeout" not in str(exc):
+                    raise IntakeHold("Progressive FAO document capture is missing or ambiguous") from exc
+            viewer_pdfs: list[bytes] = []
+            for new_page in list(opened):
+                wait = getattr(new_page, "wait_for_load_state", None)
+                if callable(wait):
                     try:
-                        closer()
+                        wait("domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
                     except Exception:
                         pass
-        return DocumentCapture(tuple(downloads), tuple(viewer_pdfs))
+                url = str(getattr(new_page, "url", "") or "")
+                host = (urllib.parse.urlsplit(url).hostname or "").lower()
+                if host and not (host == FAO_HOST or host.endswith(".foragentsonly.com")):
+                    continue
+                try:
+                    view = read_playwright_pdf_view(new_page)
+                    viewer_pdfs.extend(view.pdfs)
+                except IntakeHold:
+                    raise
+                except Exception as exc:
+                    # Live 2026-10-08 (4a22f443): the PDFHandler GET timed out and
+                    # crashed the whole carrier, leaving the viewer tab open.
+                    raise IntakeHold(
+                        f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
+                    ) from exc
+            return DocumentCapture(tuple(downloads), tuple(viewer_pdfs))
     finally:
+        _close_opened()
         if context is not None and hasattr(context, "remove_listener"):
             try:
                 context.remove_listener("page", _on_page)
@@ -645,19 +760,23 @@ class PlaywrightFaoCancellationBrowser:
         self.page = page
         self.agent_code = require_agent_code(agent_code)
         self._list_url = ""
+        self._retire: list[Any] = []
+        self._pages_before: set[int] | None = None
 
     # -- navigation -----------------------------------------------------
     def load_report(self) -> None:
         """Open the Policies pending cancel or renewal report directly."""
+        step_log("load report")
+        _cap_page_timeouts(self.page)
         page = self.page
         current = require_fao_url(str(getattr(page, "url", "") or ""))
         if _is_policy_page_url(current):
             # A tab left on a policy page (CL Express / policy servicing)
             # goes back to the FAO report before the agent check.
-            page.goto(REPORT_URL, wait_until="domcontentloaded")
+            page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
             require_fao_url(str(getattr(page, "url", "") or ""))
         assert_agent_context(page, self.agent_code)
-        page.goto(REPORT_URL, wait_until="domcontentloaded")
+        page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
         require_fao_url(str(getattr(page, "url", "") or ""))
         # Wait for report tabs (tables may be hidden until a tab is selected)
         try:
@@ -715,15 +834,17 @@ class PlaywrightFaoCancellationBrowser:
 
     def open_policy_summary(self, policy_number: str) -> None:
         """Click the policy-number link ("View Policy Summary") -> CL Express."""
+        step_log(f"policy {policy_number} open summary")
         require_policy_number(policy_number)
-        link = _unique_control(self.page, "link", policy_number, exact=True)
-        link.click()
+        with time_budget(PAGE_BUDGET_S, f"Progressive FAO policy {policy_number} summary page exceeded its time budget"):
+            link = _unique_control(self.page, "link", policy_number, exact=True)
+            link.click()
 
-        def landed() -> None:
-            self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
-            require_fao_url(str(getattr(self.page, "url", "") or ""))
+            def landed() -> None:
+                self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
+                require_fao_url(str(getattr(self.page, "url", "") or ""))
 
-        _with_one_retry(landed, what=f"policy {policy_number}")
+            _with_one_retry(landed, what=f"policy {policy_number}")
 
     def open_documents_tab(self) -> None:
         """Open the policy's documents list (CL Express or policy servicing)."""
@@ -848,26 +969,49 @@ class PlaywrightFaoCancellationBrowser:
         if not callable(new_page):
             raise IntakeHold("Progressive FAO tab is stuck and no browser context is available")
         fresh = new_page()
+        if not hasattr(self, "_retire"):
+            self._retire = []
+        self._retire.append(old)
         try:
             fresh.goto(self._list_url or REPORT_URL, wait_until="domcontentloaded", timeout=STUCK_TAB_GOTO_MS)
             require_fao_url(str(getattr(fresh, "url", "") or ""))
         except Exception:
-            try:
-                fresh.close()
-            except Exception:  # noqa: BLE001
-                pass
+            from .carrier_tabs import close_page
+
+            close_page(fresh)
             raise
         self.page = fresh
-        try:
-            old.close(run_before_unload=False)
-        except Exception:  # noqa: BLE001 - a stuck tab may refuse; the fresh tab is in use
-            pass
+        from .carrier_tabs import close_page
+
+        close_page(old)
+
+    def finish_tabs(self) -> None:
+        """Close tabs this run opened, and any tab a stuck-policy swap retired.
+
+        The page the pull is still using stays open.
+        """
+        from .carrier_tabs import close_listed, close_new_pages, context_pages
+
+        close_listed(list(getattr(self, "_retire", []) or []), keep=self.page)
+        before = getattr(self, "_pages_before", None)
+        if before is None:
+            return
+        close_new_pages(self.page, before, keep=self.page)
+        # A swap that failed to close the old Manage Policies tab is in _retire.
+        # Also drop a second FAO tab that appeared in this context after the snapshot.
+        for page in context_pages(self.page):
+            if page is self.page or id(page) in before:
+                continue
+            close_listed([page])
 
     def return_to_report(self) -> None:
+        step_log("return to report")
+
         def go() -> None:
             self.page.goto(self._list_url, wait_until="domcontentloaded", timeout=RETURN_TO_REPORT_MS)
 
-        _with_one_retry(go, what="return to the pending-cancellation report")
+        with time_budget(PAGE_BUDGET_S, "Progressive FAO return to the report exceeded its time budget"):
+            _with_one_retry(go, what="return to the pending-cancellation report")
         # Wait for report tabs first (they render before the data tables),
         # then wait for a visible table with data rows.
         try:
@@ -1140,134 +1284,201 @@ def run_pull(
     if not isinstance(as_of, date):
         raise IntakeHold("Progressive FAO as-of date is missing or ambiguous")
 
+    global _STEP_LOG
     downloaded: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
     skipped: list[str] = []
     targeted: list[str] = []
     rows_payload: list[dict[str, Any]] = []
     uw_memos: list[dict[str, Any]] = []
+    all_rows: list[CancellationRow] = []
+    _STEP_LOG = Path(getattr(ledger, "root", ".")) / "fao-progress.log"
+    from .carrier_tabs import snapshot_ids
 
+    browser._pages_before = snapshot_ids(getattr(browser, "page", None))
+
+    def publish(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = {
+            "status": "PULLED",
+            "scope": SCOPE,
+            "process": PROCESS,
+            "as_of": as_of.isoformat(),
+            "found": len(all_rows),
+            "cancellation_count": len(all_rows),
+            "targeted": len(targeted),
+            "count": len(downloaded),
+            "downloaded": downloaded,
+            "uw_memos": uw_memos,
+            "uw_memo_count": len([item for item in uw_memos if item.get("outcome") == "PULLED"]),
+            "skipped_already_delivered": skipped,
+            "held": held,
+            "rows": rows_payload,
+            "ezlynx": "not_run",
+        }
+        if extra:
+            payload.update(extra)
+        _LATEST.clear()
+        _LATEST.update(payload)
+        step_log(f"summary found={payload['found']} downloaded={payload['count']} held={len(held)}")
+        return payload
+
+    try:
+        with time_budget(
+            WORKER_DEADLINE_S,
+            "Progressive FAO worker deadline reached before the pull finished",
+            FaoDeadline,
+        ):
+            return _pull_policies(
+                browser, ledger, archive, as_of=as_of,
+                downloaded=downloaded, held=held, skipped=skipped, targeted=targeted,
+                rows_payload=rows_payload, uw_memos=uw_memos, all_rows=all_rows, publish=publish,
+            )
+    except FaoDeadline as exc:
+        step_log(str(exc))
+        held.append({"outcome": "HELD", "reason": str(exc)})
+        return publish({"deadline": str(exc)})
+    finally:
+        finish = getattr(browser, "finish_tabs", None)
+        if callable(finish):
+            try:
+                finish()
+            except Exception:
+                pass
+
+
+def _pull_policies(
+    browser: Any,
+    ledger: Any,
+    archive: Any,
+    *,
+    as_of: date,
+    downloaded: list,
+    held: list,
+    skipped: list,
+    targeted: list,
+    rows_payload: list,
+    uw_memos: list,
+    all_rows: list,
+    publish: Callable[..., dict],
+) -> dict[str, Any]:
+    """Walk the report. A page or policy budget holds that policy and continues."""
+    step_log("load report")
     browser.load_report()
     png = browser.screenshot_report()
     ledger.save_screenshot(as_of, png)
-
-    all_rows: list[CancellationRow] = []
-    for tab_label, _ in _REPORT_TABS:
+    for tab_label, _reason_name in _REPORT_TABS:
+        step_log(f"report tab {tab_label}")
         browser.select_tab(tab_label)
-        all_rows.extend(browser.load_current_tab(tab_label))
-
+        rows = browser.load_current_tab(tab_label)
+        step_log(f"report tab {tab_label}: {len(rows)} rows")
+        all_rows.extend(rows)
+    step_log(f"found {len(all_rows)} policies")
+    publish()
     for row in all_rows:
-        # Ensure we're on the correct tab for this row's policy
+        step_log(f"policy {row.policy_number} start ({row.reason})")
+        publish()
         try:
-            if row.tab_label:
-                browser.select_tab(row.tab_label)
-            browser.open_policy_summary(row.policy_number)
-            browser.open_documents_tab()
-            docs = browser.list_documents(row.policy_number)
-        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
-            reason = str(exc) if isinstance(exc, IntakeHold) else (
+            with time_budget(
+                POLICY_BUDGET_S,
+                f"Progressive FAO policy {row.policy_number} exceeded its time budget",
+            ):
+                if row.tab_label:
+                    browser.select_tab(row.tab_label)
+                browser.open_policy_summary(row.policy_number)
+                browser.open_documents_tab()
+                docs = browser.list_documents(row.policy_number)
+                if row.reason == "UNDERWRITING":
+                    _pull_underwriting_memos(
+                        row, docs, browser, ledger, archive,
+                        as_of=as_of, held=held, uw_memos=uw_memos,
+                    )
+                targets = newest_cancellation_documents(docs)
+                if len(targets) != 1:
+                    held.append(_row_payload(
+                        row, outcome="HELD",
+                        reason=(
+                            f"Progressive FAO policy {row.policy_number} cancellation document "
+                            f"is missing or ambiguous (found {len(targets)})"
+                        ),
+                    ))
+                    step_log(f"policy {row.policy_number} held: document count {len(targets)}")
+                    _recover_report_tab(browser)
+                    continue
+                doc = targets[0]
+                try:
+                    if ledger.delivery_status(
+                        document_id=doc.document_id, filename=doc.filename, issued_on=doc.document_date
+                    ):
+                        skipped.append(doc.document_id)
+                        targeted.append(doc.document_id)
+                        rows_payload.append(_row_payload(row, outcome="ALREADY_DELIVERED", filename=doc.filename))
+                        step_log(f"policy {row.policy_number} already delivered")
+                        _recover_report_tab(browser)
+                        continue
+                except IntakeHold as exc:
+                    held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
+                    _recover_report_tab(browser)
+                    continue
+                step_log(f"policy {row.policy_number} capture {doc.document_name}")
+                try:
+                    capture = browser.capture_document(doc)
+                except FaoDeadline:
+                    raise
+                except (Exception, FaoBudget) as exc:
+                    held.append(_row_payload(row, outcome="HELD", reason=str(exc) if isinstance(exc, (IntakeHold, FaoBudget)) else (
+                        f"Progressive FAO document {doc.document_name!r} capture failed ({type(exc).__name__})"
+                    )))
+                    _recover_report_tab(browser)
+                    continue
+                pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
+                if len(pdfs) != 1:
+                    held.append(_row_payload(
+                        row, outcome="HELD",
+                        reason=f"Progressive FAO document {doc.document_name!r} capture is missing or ambiguous",
+                    ))
+                    _recover_report_tab(browser)
+                    continue
+                content = pdfs[0]
+                source = SourceItem(
+                    system=PROCESS,
+                    source_account=FAO_HOST,
+                    source_id=doc.document_id,
+                    source_url=f"{row.list_url}#policy={row.policy_number}",
+                    received_at=_received_at(as_of),
+                    filename=doc.filename,
+                    content=content,
+                )
+                source.validate()
+                saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
+                archive.preserve(source)
+                downloaded.append({
+                    "document_id": doc.document_id,
+                    "filename": doc.filename,
+                    "sha256": source.digest,
+                    "bytes": len(content),
+                    "policy_number": row.policy_number,
+                    "insured_name": row.insured_name,
+                    "cancel_date": row.cancel_date.isoformat(),
+                    "document_date": doc.document_date.isoformat(),
+                    "document_name": doc.document_name,
+                    "delivery": doc.delivery,
+                    "path": str(saved),
+                })
+                targeted.append(doc.document_id)
+                rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
+                step_log(f"policy {row.policy_number} pulled")
+                _recover_report_tab(browser)
+        except FaoDeadline:
+            raise
+        except (Exception, FaoBudget) as exc:
+            reason = str(exc) if isinstance(exc, (IntakeHold, FaoBudget)) else (
                 f"Progressive FAO policy {row.policy_number} page did not open ({type(exc).__name__})"
             )
             held.append(_row_payload(row, outcome="HELD", reason=reason))
+            step_log(f"policy {row.policy_number} held: {reason}")
             _recover_report_tab(browser)
             continue
-        if row.reason == "UNDERWRITING":
-            _pull_underwriting_memos(
-                row, docs, browser, ledger, archive,
-                as_of=as_of, held=held, uw_memos=uw_memos,
-            )
-        targets = newest_cancellation_documents(docs)
-        if len(targets) != 1:
-            held.append(_row_payload(
-                row, outcome="HELD",
-                reason=(
-                    f"Progressive FAO policy {row.policy_number} cancellation document "
-                    f"is missing or ambiguous (found {len(targets)})"
-                ),
-            ))
-            _recover_report_tab(browser)
-            continue
-        doc = targets[0]
-        try:
-            if ledger.delivery_status(
-                document_id=doc.document_id, filename=doc.filename, issued_on=doc.document_date
-            ):
-                skipped.append(doc.document_id)
-                targeted.append(doc.document_id)
-                rows_payload.append(_row_payload(row, outcome="ALREADY_DELIVERED", filename=doc.filename))
-                _recover_report_tab(browser)
-                continue
-        except IntakeHold as exc:
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            _recover_report_tab(browser)
-            continue
-        try:
-            capture = browser.capture_document(doc)
-        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc) if isinstance(exc, IntakeHold) else (
-                f"Progressive FAO document {doc.document_name!r} capture failed ({type(exc).__name__})"
-            )))
-            _recover_report_tab(browser)
-            continue
-        pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
-        if len(pdfs) != 1:
-            held.append(_row_payload(
-                row, outcome="HELD",
-                reason=f"Progressive FAO document {doc.document_name!r} capture is missing or ambiguous",
-            ))
-            _recover_report_tab(browser)
-            continue
-        content = pdfs[0]
-        source = SourceItem(
-            system=PROCESS,
-            source_account=FAO_HOST,
-            source_id=doc.document_id,
-            source_url=f"{row.list_url}#policy={row.policy_number}",
-            received_at=_received_at(as_of),
-            filename=doc.filename,
-            content=content,
-        )
-        source.validate()
-        try:
-            saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
-            archive.preserve(source)
-        except IntakeHold as exc:
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            _recover_report_tab(browser)
-            continue
-        downloaded.append({
-            "document_id": doc.document_id,
-            "filename": doc.filename,
-            "sha256": source.digest,
-            "bytes": len(content),
-            "policy_number": row.policy_number,
-            "insured_name": row.insured_name,
-            "cancel_date": row.cancel_date.isoformat(),
-            "document_date": doc.document_date.isoformat(),
-            "document_name": doc.document_name,
-            "delivery": doc.delivery,
-            "path": str(saved),
-        })
-        targeted.append(doc.document_id)
-        rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
-        _recover_report_tab(browser)
-
-    return {
-        "status": "PULLED",
-        "scope": SCOPE,
-        "process": PROCESS,
-        "as_of": as_of.isoformat(),
-        "cancellation_count": len(all_rows),
-        "targeted": len(targeted),
-        "count": len(downloaded),
-        "downloaded": downloaded,
-        "uw_memos": uw_memos,
-        "uw_memo_count": len([m for m in uw_memos if m.get("outcome") == "PULLED"]),
-        "skipped_already_delivered": skipped,
-        "held": held,
-        "rows": rows_payload,
-        "ezlynx": "not_run",
-    }
+    return publish()
 
 
 def _recover_report_tab(browser: Any) -> None:
@@ -1275,13 +1486,13 @@ def _recover_report_tab(browser: Any) -> None:
     try:
         browser.return_to_report()
         return
-    except Exception:  # noqa: BLE001
+    except (Exception, FaoBudget):  # noqa: BLE001
         pass
     replace = getattr(browser, "replace_stuck_tab", None)
     if callable(replace):
         try:
             replace()
-        except Exception:  # noqa: BLE001 - the next policy holds on its own
+        except (Exception, FaoBudget):  # noqa: BLE001 - the next policy holds on its own
             pass
 
 
@@ -1385,17 +1596,36 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[Any], Any]
     output_root = qa_pack_dir(Path(args.output_root), as_of)
     ledger = FaoCancellationLedger(output_root)
     archive = SourceArchive(output_root / "sources")
-    if browser_factory is not None:
-        browser = browser_factory(args)
-        receipt = run_pull(browser, ledger, archive, as_of=as_of)
-    else:
-        browser, close = connect_cdp_browser(args.cdp_url, agent_code=args.agent_code)
-        try:
+    def _on_stop(signum: int, frame: Any) -> None:
+        step_log("stop signal; writing summary")
+        payload = dict(_LATEST) or {
+            "status": "STOPPED",
+            "found": 0,
+            "downloaded": [],
+            "held": [],
+            "count": 0,
+            "ezlynx": "not_run",
+        }
+        payload["reason"] = payload.get("reason") or "stopped by the outer timeout"
+        sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        sys.stdout.flush()
+        os._exit(124)
+
+    previous_stop = signal.signal(signal.SIGTERM, _on_stop)
+    try:
+        if browser_factory is not None:
+            browser = browser_factory(args)
             receipt = run_pull(browser, ledger, archive, as_of=as_of)
-        finally:
-            close()
-    print(json.dumps(receipt, indent=2, sort_keys=True))
-    return 0
+        else:
+            browser, close = connect_cdp_browser(args.cdp_url, agent_code=args.agent_code)
+            try:
+                receipt = run_pull(browser, ledger, archive, as_of=as_of)
+            finally:
+                close()
+        print(json.dumps(receipt, indent=2, sort_keys=True), flush=True)
+        return 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_stop)
 
 
 if __name__ == "__main__":

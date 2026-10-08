@@ -496,5 +496,186 @@ class DailySignInTests(unittest.TestCase):
             self.assertEqual(__import__("os").environ[daily.KILL_SWITCH_ENV], "0")
 
 
+class FaoBudgetAndLogTests(unittest.TestCase):
+    def test_step_log_flushes_stderr_and_the_progress_file(self):
+        import io
+        import tempfile
+        from pathlib import Path
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        buffer = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            fao._STEP_LOG = Path(tmp) / "fao-progress.log"
+            try:
+                with mock.patch.object(fao.sys, "stderr", buffer):
+                    fao.step_log("policy 871490213 start")
+                text = (Path(tmp) / "fao-progress.log").read_text(encoding="utf-8")
+            finally:
+                fao._STEP_LOG = None
+        self.assertIn("policy 871490213 start", text)
+        self.assertIn("policy 871490213 start", buffer.getvalue())
+
+    def test_page_budget_interrupts_a_blocked_call(self):
+        import time
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        with self.assertRaises(fao.FaoBudget):
+            with fao.time_budget(0.05, "policyservicing documents page exceeded its time budget"):
+                time.sleep(2)
+
+    def test_worker_deadline_is_not_an_exception_playwright_can_swallow(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        self.assertTrue(issubclass(fao.FaoDeadline, BaseException))
+        self.assertFalse(issubclass(fao.FaoDeadline, Exception))
+        self.assertFalse(issubclass(fao.FaoBudget, Exception))
+
+
+class FarmersHomeTests(unittest.TestCase):
+    def setUp(self):
+        _reset_attempts()
+
+    def test_signed_in_home_is_not_sent_to_the_login_form(self):
+        from robie_job_engine import farmersofsalem_login as login
+
+        class Hidden:
+            def is_visible(self):
+                return False
+
+        class PasswordField:
+            def count(self):
+                return 2
+
+            def nth(self, index):
+                return Hidden()
+
+        page = SimpleNamespace(
+            url="https://www.farmersofsalem.com/agent_home.aspx",
+            body="Welcome back",
+            gotos=[],
+        )
+        page.title = lambda: "Farmers Of Salem :: Agent Home"
+        page.locator = lambda sel: PasswordField() if "password" in sel.lower() or "Password" in sel else _Zero()
+        page.get_by_role = lambda role, name=None: _Zero()
+        page.goto = lambda url, **k: page.gotos.append(url)
+        self.assertTrue(login.is_signed_in(page))
+        finys = SimpleNamespace(url="https://fos.finys.com/")
+        with mock.patch.object(login, "_require_test_host"), mock.patch.object(login, "_get_secret") as secret:
+            returned = login.login_farmers(page, open_portal=lambda _page: finys)
+        secret.assert_not_called()
+        self.assertEqual(page.gotos, [])
+        self.assertIs(returned, finys)
+
+    def test_hidden_duplicate_inputs_are_not_an_ambiguous_form(self):
+        from robie_job_engine import farmersofsalem_login as login
+
+        class Field:
+            def __init__(self, visible, kind):
+                self.visible = visible
+                self.kind = kind
+
+            def is_visible(self):
+                return self.visible
+
+            def fill(self, value):
+                self.filled = value
+
+        hidden_user, visible_user = Field(False, "user"), Field(True, "user")
+        hidden_pass, visible_pass = Field(False, "password"), Field(True, "password")
+
+        class Loc:
+            def __init__(self, nodes):
+                self.nodes = nodes
+
+            def count(self):
+                return len(self.nodes)
+
+            def nth(self, index):
+                return self.nodes[index]
+
+        page = SimpleNamespace(
+            url="https://farmersofsalem.com/agent_login.aspx",
+            body="User Name\nPassword\nLogin",
+            clicks=0,
+            password_on=True,
+        )
+        page.title = lambda: "Login"
+        page.goto = lambda url, **k: None
+        page.wait_for_timeout = lambda _ms: None
+        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+
+        def locator(sel):
+            if sel == "body":
+                return SimpleNamespace(inner_text=lambda: page.body)
+            if "UserName" in sel or "username" in sel:
+                return Loc([hidden_user, visible_user])
+            if "Password" in sel or sel == "input[type='password']":
+                return Loc([hidden_pass, visible_pass])
+            return _Zero()
+
+        page.locator = locator
+        with mock.patch.object(login, "_require_test_host"):
+            with self.assertRaises(IntakeHold):
+                # Password is submitted once; the home never appears, so the attempt holds.
+                login.login_farmers(page, credentials=lambda: ("user", "pw-value"), open_portal=lambda p: p)
+        self.assertEqual(getattr(visible_user, "filled", None), "user")
+        self.assertEqual(getattr(visible_pass, "filled", None), "pw-value")
+        self.assertFalse(hasattr(hidden_user, "filled"))
+        self.assertEqual(page.clicks, 1)
+
+
+class TabHygieneTests(unittest.TestCase):
+    def test_new_tabs_close_and_the_kept_page_stays(self):
+        from robie_job_engine.carrier_tabs import close_new_pages, snapshot_ids
+
+        class Page:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+                self.context = None
+
+            def close(self):
+                self.closed = True
+
+        context = SimpleNamespace(pages=[])
+        first = Page("https://ufirstnow.uticafirst.com/")
+        first.context = context
+        context.pages.append(first)
+        before = snapshot_ids(first)
+        second = Page("https://ufirstnow.uticafirst.com/extra")
+        second.context = context
+        context.pages.append(second)
+        closed = close_new_pages(first, before, keep=first)
+        self.assertEqual(closed, 1)
+        self.assertTrue(second.closed)
+        self.assertFalse(first.closed)
+
+    def test_bop_pull_closes_the_application_tab(self):
+        from robie_job_engine import progressive_bop as bop
+
+        class Page:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        shell = Page("https://www.foragentsonly.com/landingpages/managepolicies/")
+        bop_tab = Page("https://bop.americanstrategic.com/app")
+        context = SimpleNamespace(pages=[shell, bop_tab])
+        shell.context = context
+        bop_tab.context = context
+        browser = SimpleNamespace(shell=shell, report_page=bop_tab)
+        portal = bop.BopPendingCancelPortal.__new__(bop.BopPendingCancelPortal)
+        portal.browser = browser
+        portal._pages_before = {id(shell)}
+        portal.close_opened_tabs()
+        self.assertTrue(bop_tab.closed)
+        self.assertFalse(shell.closed)
+
+
 if __name__ == "__main__":
     unittest.main()

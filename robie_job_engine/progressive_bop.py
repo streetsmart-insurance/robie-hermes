@@ -801,6 +801,15 @@ class BopPendingCancelPortal:
         require_test()
         if BOP_SCOPE not in SCOPES:
             raise IntakeHold("An approved Progressive scope is required")
+        from .carrier_tabs import snapshot_ids
+
+        self._pages_before = snapshot_ids(getattr(self.browser, "shell", None))
+        try:
+            return self._pull_body()
+        finally:
+            self.close_opened_tabs()
+
+    def _pull_body(self) -> dict[str, Any]:
         capture = self.browser.load_report(self.report_date)
         png = require_png(getattr(capture, "png", None))
         shot = self.ledger.save_screenshot(self.report_date, png)
@@ -832,6 +841,20 @@ class BopPendingCancelPortal:
         if held:
             raise IntakeHold(held)
         return self.verification or {}
+
+    def close_opened_tabs(self) -> None:
+        """Close the BOP application tab this pull opened. The FAO shell stays."""
+        from .carrier_tabs import close_new_pages, close_page
+
+        shell = getattr(self.browser, "shell", None)
+        report = getattr(self.browser, "report_page", None)
+        if report is not None and report is not shell:
+            close_page(report)
+        if shell is not None:
+            close_stale_bop_tabs(shell)
+            before = getattr(self, "_pages_before", None)
+            if isinstance(before, set):
+                close_new_pages(shell, before, keep=shell)
 
     def _pull_policies(self, report: PendingCancelReport) -> list[PolicyOutcome]:
         outcomes: list[PolicyOutcome] = []
@@ -1463,7 +1486,7 @@ def _context_pages(*owners: Any) -> list[Any]:
             continue
         context = getattr(owner, "context", None)
         pages = getattr(context, "pages", None) if context is not None else None
-        if pages is None:
+        if not isinstance(pages, (list, tuple)):
             continue
         try:
             items = list(pages)

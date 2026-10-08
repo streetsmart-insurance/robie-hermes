@@ -1093,7 +1093,34 @@ def run_pull(
     skipped: list[str] = []
     targeted: list[str] = []
     rows_payload: list[dict[str, Any]] = []
+    from .carrier_tabs import snapshot_ids
 
+    pages_before = snapshot_ids(getattr(browser, "page", None))
+
+    try:
+        return _utica_pull_body(
+            browser, ledger, archive, as_of=as_of,
+            downloaded=downloaded, held=held, skipped=skipped,
+            targeted=targeted, rows_payload=rows_payload,
+        )
+    finally:
+        from .carrier_tabs import close_new_pages
+
+        close_new_pages(getattr(browser, "page", None), pages_before, keep=getattr(browser, "page", None))
+
+
+def _utica_pull_body(
+    browser: Any,
+    ledger: Any,
+    archive: Any,
+    *,
+    as_of: date,
+    downloaded: list,
+    held: list,
+    skipped: list,
+    targeted: list,
+    rows_payload: list,
+) -> dict[str, Any]:
     browser.open_transactions()
     browser.select_filter_all()
     png = browser.screenshot_transactions()
@@ -1241,9 +1268,19 @@ def ensure_utica_page(cdp_browser: Any) -> Any:
     contexts = list(getattr(cdp_browser, "contexts", None) or [])
     if not contexts:
         raise IntakeHold("Utica First auto-login needs an open browser context")
+    from .carrier_tabs import close_new_pages
+
+    before = set()
+    for context in contexts:
+        existing_pages = getattr(context, "pages", None)
+        if not isinstance(existing_pages, list):
+            continue
+        for existing in existing_pages:
+            before.add(id(existing))
     page = contexts[0].new_page()
     try:
         utica_login.login_utica(page)
+        close_new_pages(page, before, keep=page)
         return page
     except Exception:
         try:

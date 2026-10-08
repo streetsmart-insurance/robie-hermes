@@ -195,11 +195,11 @@ def parse_json_tail(stdout: str) -> dict[str, Any] | None:
 def carrier_command(name: str, *, day: date, root: Path, cdp_url: str, python: str) -> list[str]:
     out = str(root / "packs" / name)
     if name == "progressive_bop":
-        return [python, "-m", "robie_job_engine.progressive_bop", "--report-date", day.isoformat(),
+        return [python, "-u", "-m", "robie_job_engine.progressive_bop", "--report-date", day.isoformat(),
                 "--output-root", out, "--cdp-url", cdp_url]
     if name not in SPECS:
         raise ValueError(f"unknown carrier {name!r}")
-    return [python, "-m", "robie_job_engine.carrier_dry_run", "--carriers", name, "--as-of", day.isoformat(),
+    return [python, "-u", "-m", "robie_job_engine.carrier_dry_run", "--carriers", name, "--as-of", day.isoformat(),
             "--output-root", out, "--cdp-url", cdp_url]
 
 
@@ -255,19 +255,22 @@ def run_carrier(
     env = dict(os.environ)
     env[KILL_SWITCH_ENV] = "0"
     env["ROBIE_ENV"] = "TEST"
+    env["PYTHONUNBUFFERED"] = "1"
     env["ROBIE_BROWSER_CDP_URL"] = _require_local_cdp(cdp_url)
+    log_dir = root / "runs" / day.isoformat()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{name}.log"
     try:
         cmd = carrier_command(name, day=day, root=root, cdp_url=cdp_url, python=python)
         proc = runner(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        log_path.write_text((exc.stdout or "") + "\n--- stderr ---\n" + (exc.stderr or ""))
         return {"display": DISPLAY.get(name, name), "status": "FAILED", "downloaded": 0, "held": [],
                 "error": f"timed out after {timeout // 60} minutes"}
     except Exception as exc:  # noqa: BLE001 - one carrier never stops the run
         return {"display": DISPLAY.get(name, name), "status": "FAILED", "downloaded": 0, "held": [],
                 "error": f"{type(exc).__name__}: {exc}"[:300]}
-    log_dir = root / "runs" / day.isoformat()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / f"{name}.log").write_text((proc.stdout or "") + "\n--- stderr ---\n" + (proc.stderr or ""))
+    log_path.write_text((proc.stdout or "") + "\n--- stderr ---\n" + (proc.stderr or ""))
     return normalize_result(name, parse_json_tail(proc.stdout or ""), returncode=proc.returncode, stderr=proc.stderr or "")
 
 

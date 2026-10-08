@@ -28,12 +28,22 @@ OLDER_USER_SECRET = "farmers_of_salem_robie_username"
 OLDER_PASS_SECRET = "farmers_of_salem_robie_password"
 SETTLE_MS = 4000
 _PASSWORD_SUBMITTED = False
+# ASP.NET WebForms ids look like ctl00_Content_txtUserName. Hidden duplicates
+# of the same input are common; only a visible one counts.
 _USER_SELECTORS = (
+    "input[id$='txtUserName']",
+    "input[name$='txtUserName']",
+    "input[id*='UserName']",
     "input[name*='UserName']",
     "input[name*='username']",
-    "input[id*='UserName']",
     "input[type='email']",
     "input[type='text']",
+)
+_PASS_SELECTORS = (
+    "input[id$='txtPassword']",
+    "input[name$='txtPassword']",
+    "input[id*='Password']",
+    "input[type='password']",
 )
 _REJECT_TERMS = ("invalid", "incorrect", "does not match", "locked", "disabled", "unsuccessful", "rejected", "try again")
 
@@ -71,24 +81,99 @@ def _host(url: str) -> str:
     return (urlsplit(url or "").hostname or "").lower()
 
 
+def _title(page: Any) -> str:
+    title = getattr(page, "title", None)
+    if not callable(title):
+        return ""
+    try:
+        return str(title() or "")
+    except Exception:
+        return ""
+
+
+def _is_visible(node: Any) -> bool:
+    visible = getattr(node, "is_visible", None)
+    if not callable(visible):
+        return True
+    try:
+        return bool(visible())
+    except TypeError:
+        try:
+            return bool(visible(timeout=500))
+        except Exception:
+            return True
+    except Exception:
+        return False
+
+
+def _visible_matches(page: Any, selector: str) -> list[Any]:
+    locator = page.locator(selector)
+    count = _count(locator)
+    if count <= 0:
+        return []
+    matches = []
+    for index in range(count):
+        node = locator.nth(index) if hasattr(locator, "nth") else locator
+        if _is_visible(node):
+            matches.append(node)
+        if len(matches) > 1:
+            break
+    return matches
+
+
+def _visible_password(page: Any) -> bool:
+    for selector in _PASS_SELECTORS:
+        if _visible_matches(page, selector):
+            return True
+    return False
+
+
+def _signed_in_markers(page: Any) -> bool:
+    text = f"{_body(page)} {_title(page)}".lower()
+    if any(marker in text for marker in ("agent home", "fos portal", "logout", "log out", "sign out")):
+        return True
+    for name in ("FOS PORTAL", "Logout", "Log Out", "Sign Out"):
+        try:
+            locator = page.get_by_role("link", name=name)
+        except Exception:
+            continue
+        if _visible_matches_locator(locator):
+            return True
+    return False
+
+
+def _visible_matches_locator(locator: Any) -> bool:
+    count = _count(locator)
+    if count <= 0:
+        return False
+    for index in range(min(count, 4)):
+        node = locator.nth(index) if hasattr(locator, "nth") else locator
+        if _is_visible(node):
+            return True
+    return False
+
+
 def is_signed_in(page: Any) -> bool:
-    """True on the agent home or Finys, not on the login form."""
+    """True on the agent home or Finys, not on a visible login form.
+
+    A hidden password input (ASP.NET keeps those on the home page) is not a
+    login form. The home page is recognised from its title, its text, or a
+    FOS PORTAL / Logout link, and sign-in is skipped.
+    """
     url = str(getattr(page, "url", "") or "")
     host = _host(url)
     path = urlsplit(url).path.lower()
-    if "login" in path or "signin" in path:
-        return False
-    if host == FINYS_HOST:
+    if host == FINYS_HOST and "login" not in path:
         return True
     if PORTAL_HOST not in host:
         return False
-    try:
-        if _count(page.locator("input[type='password']")) > 0:
-            return False
-    except Exception:
+    if _signed_in_markers(page) and not _visible_password(page):
+        return True
+    if "login" in path or "signin" in path:
         return False
-    text = _body(page).lower()
-    return "agent home" in text or "fos portal" in text
+    if _visible_password(page):
+        return False
+    return _signed_in_markers(page)
 
 
 def _rejection_message(body: str) -> str:
@@ -109,13 +194,13 @@ def _rejected(page: Any) -> bool:
 
 
 def _first(page: Any, selectors: tuple[str, ...]) -> Any | None:
+    """The one visible match. Hidden WebForms duplicates are ignored."""
     for selector in selectors:
-        locator = page.locator(selector)
-        count = _count(locator)
-        if count == 1:
-            return locator.first if hasattr(locator, "first") else locator
-        if count > 1:
+        matches = _visible_matches(page, selector)
+        if len(matches) > 1:
             raise IntakeHold("Farmers of Salem sign-in form is ambiguous")
+        if len(matches) == 1:
+            return matches[0]
     return None
 
 
@@ -174,7 +259,7 @@ def login_farmers(
         if not user or not password:
             raise IntakeHold("Farmers of Salem credentials are not available")
         user_box = _first(page, _USER_SELECTORS)
-        password_box = _first(page, ("input[type='password']",))
+        password_box = _first(page, _PASS_SELECTORS)
         if user_box is None or password_box is None:
             raise IntakeHold("Farmers of Salem sign-in form did not show a username and password")
         _PASSWORD_SUBMITTED = True
