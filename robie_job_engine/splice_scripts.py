@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .bland_config import CALLBACK_NUMBER, VOICEMAIL_CALLBACK_NUMBER
+from .bland_config import CALLBACK_NUMBER
 
 WEBSITE = "www.streetsmart.insurance"
 
@@ -203,8 +203,7 @@ def render_voicemail(workflow: Workflow, *, first_name: str, agent: str) -> str:
         hello,
         f"This is a message on behalf of your agent, {agent} from StreetSmart Insurance.",
         workflow.body,
-        "To speak to one of our representatives now, please call "
-        f"{VOICEMAIL_CALLBACK_NUMBER}.",
+        f"To speak to one of our representatives now, please call {CALLBACK_NUMBER}.",
         f"You can also visit {WEBSITE} for more information.",
         "Thank you, we value your business!",
     ))

@@ -1,7 +1,8 @@
 """Jake's Oct 7 2026 go-live values, checked on the real Bland call port.
 
-Caller ID stays 732-298-6745. Voicemails ask for a call back to
-732-481-2520. On Test every dial goes to the Jake cell secret, never the
+Caller ID stays 732-298-6745. Every callback number, voicemails included,
+is the agency main line 732-462-8343 (Carlo, Oct 7 2026 10:34 PM). On Test
+every dial goes to the Jake cell secret, never the
 number passed in. No sockets.
 """
 from __future__ import annotations
@@ -14,7 +15,6 @@ from robie_job_engine.bland_config import (
     CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
     CALLER_ID,
-    VOICEMAIL_CALLBACK_NUMBER,
 )
 from robie_job_engine.robie_call_handler import _build_voicemail_message
 
@@ -45,22 +45,31 @@ class _Response:
 
 def test_values_are_pinned():
     assert CALLER_ID == "+17322986745"
-    assert VOICEMAIL_CALLBACK_NUMBER == "732-481-2520"
-    assert CALLBACK_NUMBER_SPOKEN == "7 3 2, 4 8 1, 2 5 2 0"
-    # The office number stays on live scripts and texts.
     assert CALLBACK_NUMBER == "732-462-8343"
+    assert CALLBACK_NUMBER_SPOKEN == "7 3 2, 4 6 2, 8 3 4 3"
 
 
-def test_splice_voicemail_uses_the_voicemail_callback():
+def test_no_other_callback_number_anywhere_in_the_call_code():
+    """Only the agency main line is ever given as a callback number."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    retired = ("732-481-2520", "7324812520", "4 8 1, 2 5 2 0")
+    for path in (root / "robie_job_engine").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for value in retired:
+            assert value not in text, f"{value} in {path.name}"
+
+
+def test_splice_voicemail_uses_the_agency_main_line():
     from robie_job_engine.splice_scripts import WORKFLOWS, render_voicemail
 
     workflow = next(iter(WORKFLOWS.values()))
     text = render_voicemail(workflow, first_name="Avery", agent="Pat Example")
-    assert "732-481-2520" in text
-    assert "732-462-8343" not in text
+    assert "732-462-8343" in text
 
 
-def test_test_box_posts_jake_cell_caller_id_and_voicemail_callback():
+def test_test_box_posts_jake_cell_caller_id_and_main_line_callback():
     posts: list[dict] = []
     reads = {"n": 0}
 
@@ -102,9 +111,8 @@ def test_test_box_posts_jake_cell_caller_id_and_voicemail_callback():
     assert posts[0]["voicemail_action"] == "hangup"
     assert "voicemail_message" not in posts[0]
     assert posts[1]["voicemail_action"] == "leave_message"
-    assert "7 3 2, 4 8 1, 2 5 2 0" in posts[1]["voicemail_message"]
-    assert "7 3 2, 4 8 1, 2 5 2 0" in voicemail
-    assert "4 6 2" not in voicemail
+    assert "7 3 2, 4 6 2, 8 3 4 3" in posts[1]["voicemail_message"]
+    assert "7 3 2, 4 6 2, 8 3 4 3" in voicemail
 
 
 def test_jake_cell_secret_stored_as_ten_digits_is_dialable():
