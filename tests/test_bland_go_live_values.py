@@ -105,3 +105,22 @@ def test_test_box_posts_jake_cell_caller_id_and_voicemail_callback():
     assert "7 3 2, 4 8 1, 2 5 2 0" in posts[1]["voicemail_message"]
     assert "7 3 2, 4 8 1, 2 5 2 0" in voicemail
     assert "4 6 2" not in voicemail
+
+
+def test_jake_cell_secret_stored_as_ten_digits_is_dialable():
+    """Oct 7 2026: on hermes-test-01 the secret holds 10 digits, no +1.
+    The old check refused it, so every Test dial failed closed."""
+    from robie_job_engine.bland_call_port import select_dial_target
+
+    for stored in ("5555550188", "+15555550188", "15555550188"):
+        dial, error = select_dial_target(
+            "+17325550142", env=TEST_ENV, hostname="hermes-test-01",
+            secret_reader=lambda _name, v=stored: v,
+        )
+        assert (dial, error) == ("+15555550188", None), stored
+    for bad in ("555-555-0188", "5555550188 x12", "55555501", "call me", ""):
+        dial, error = select_dial_target(
+            "+17325550142", env=TEST_ENV, hostname="hermes-test-01",
+            secret_reader=lambda _name, v=bad: v,
+        )
+        assert dial is None and "not E.164" in error, bad

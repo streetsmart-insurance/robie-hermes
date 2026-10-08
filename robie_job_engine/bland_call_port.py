@@ -88,7 +88,11 @@ def select_dial_target(
         raw = str(secret_reader(JAKE_CELL_SECRET) or "").strip()
     except Exception:
         return None, "test mode could not read the Jake cell secret; not dialing"
-    target = to_e164_us(raw) if raw.startswith("+") else None
+    # The secret is stored as ten digits (7326688161) on Test. That is
+    # unambiguous, so it is accepted alongside +1 E.164. Anything else
+    # (letters, extensions, other lengths) still refuses.
+    plain = raw.lstrip("+")
+    target = to_e164_us(raw) if plain.isdigit() and len(plain) in (10, 11) else None
     if not target:
         return None, "test mode Jake cell secret is not E.164; not dialing"
     logger.info("test mode: dialing the configured test cell ending %s", target[-4:])
