@@ -88,7 +88,7 @@ def select_dial_target(
         raw = str(secret_reader(JAKE_CELL_SECRET) or "").strip()
     except Exception:
         return None, "test mode could not read the Jake cell secret; not dialing"
-    # The secret is stored as ten digits (7326688161) on Test. That is
+    # The secret is stored as ten plain digits on Test. That is
     # unambiguous, so it is accepted alongside +1 E.164. Anything else
     # (letters, extensions, other lengths) still refuses.
     plain = raw.lstrip("+")
