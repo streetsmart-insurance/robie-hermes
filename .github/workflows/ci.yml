@@ -30,6 +30,10 @@ jobs:
         run: python -m pip install -r services/chat-http-bridge/requirements.txt "cryptography>=41,<46"
       - name: Test Google Chat bridge
         run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
+      - name: Test Zapier Bland webhook (Robie Call typed-number hard block)
+        run: |
+          python -m pip install "Flask>=3.0" "requests>=2.31"
+          cd services/zapier-bland-webhook && python -m pytest -q -p no:cacheprovider tests
       - name: Compile source
         run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine src tests
       - name: Test Chat approval cards

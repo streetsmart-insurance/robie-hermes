@@ -17,6 +17,7 @@ Every dispatch runs Jake's double-dial voicemail policy and writes back to
 EZLynx (note + MP3) per Carlo's standing rule.
 """
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from config import Config
@@ -53,6 +54,55 @@ def canonical_campaign_id(campaign_id: str) -> str:
     """Normalize a campaign_id via aliases to its canonical form."""
     cid = (campaign_id or "").strip().lower()
     return CAMPAIGN_ALIASES.get(cid, cid)
+
+
+# ---- Robie Call: typed number only (Carlo, Oct 7 2026) ---------------------
+# A Robie Call dials ONLY a phone number typed into the note text. It never
+# dials a number on file, and never a dry-run placeholder. When no number
+# (or more than one) is typed, nothing is dialed and Robie asks for the
+# number in plain English.
+_FORMATTED_PHONE = re.compile(
+    r"(?<![\d])(?:\+?1[\s.\-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.\-])\d{3}[\s.\-]\d{4}(?![\d])"
+)
+_CUE_THEN_BARE = re.compile(
+    r"(?:call\s+(?:at|on)?|phone|cell|mobile|tel|number|#)\s*:?\s*(?:\+?1)?(\d{10})(?![\d])",
+    re.IGNORECASE,
+)
+
+ASK_FOR_NUMBER_NOTE = (
+    "Robie did not call because no phone number was typed in this note. "
+    "A Robie Call only dials a number that is typed in, never the number on "
+    "file. Add a new note with the Robie Call label with the number to call."
+)
+ASK_FOR_ONE_NUMBER_NOTE = (
+    "Robie did not call because more than one phone number was typed in this "
+    "note, and Robie will not guess which one to call. Add a new note with "
+    "the Robie Call label with just the one number to call."
+)
+
+
+def typed_phones(note_body: str) -> List[str]:
+    """Distinct E.164 numbers typed in the note text, in order.
+
+    Only phone-shaped text counts: separated 3-3-4 digits (732-555-0142,
+    (732) 555-0142, 732.555.0142, +1 732 555 0142) or 10 bare digits right
+    after a cue like "call at" or "phone". A bare 10-digit run with no cue
+    (a policy or claim number) is never a phone.
+    """
+    text = str(note_body or "")
+    found: List[str] = []
+    candidates = [m.group(0) for m in _FORMATTED_PHONE.finditer(text)]
+    candidates += [m.group(1) for m in _CUE_THEN_BARE.finditer(text)]
+    for raw in candidates:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) != 10 or digits[0] in "01":
+            continue
+        e164 = "+1" + digits
+        if e164 not in found:
+            found.append(e164)
+    return found
 
 
 def route_campaign(campaign_id: str) -> str:
@@ -344,11 +394,33 @@ def dispatch(
         )
         result["context_errors"] = ctx["errors"]
         result["instruction_source"] = ctx["instruction_source"]
-        phones = [p for p in (ctx.get("phones") or []) if p]
-        if not phones and not dry:
-            result.update({"ok": False, "error": "no phone number on applicant"})
+        # HARD BLOCK (Carlo, Oct 7 2026): a Robie Call dials only a number
+        # typed in the note. Never ctx["phones"] (the numbers on file), never
+        # a placeholder, in live and dry runs alike.
+        phones = typed_phones(note_body)
+        result["phone_source"] = "typed in note"
+        if len(phones) != 1:
+            ask = ASK_FOR_NUMBER_NOTE if not phones else ASK_FOR_ONE_NUMBER_NOTE
+            result.update({
+                "ok": False,
+                "error": (
+                    "Robie Call not dialed: "
+                    + ("no phone number typed in the note" if not phones
+                       else "more than one phone number typed in the note")
+                    + "; a Robie Call never dials the number on file"
+                ),
+                "needs_typed_number": True,
+                "ask_note": ask,
+            })
+            target = ctx.get("trigger_discussion_id") or discussion_id
+            if not dry and target:
+                try:
+                    result["ask_note_result"] = ez.append_note(target, ask)
+                except Exception as exc:  # noqa: BLE001 - never raise
+                    result["ask_note_result"] = {"status": "error", "error": str(exc)[:200]}
+            else:
+                result["ask_note_result"] = {"skipped": "dry_run" if dry else "no discussion"}
             return result
-        phones = phones or ["+10000000000"]  # dry-run placeholder
         instruction = ctx["instruction"] or "(no specific instruction — proceeding on account context)"
         reason = _infer_reason_sentence(instruction, ctx["policies"])
         vm = voicemail_message(reason)

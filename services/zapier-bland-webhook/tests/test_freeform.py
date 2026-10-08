@@ -240,11 +240,13 @@ def test_dispatch_note_body_reaches_bland_task():
     bland = BlandClient()  # dry_run=True -> no network, no real call
     result = dispatch(
         "123", "robie-call", "Robie Call", "",
-        discussion_id="d1", note_body=NOTE_BODY,
+        discussion_id="d1", note_body=NOTE_BODY + " Call at 908-555-0199.",
         dry_run=True, ez=ez, bland=bland,
     )
     assert result["ok"] is True
     assert result["flow"] == "freeform"
+    # Robie Call dials only the typed number (Carlo, Oct 7 2026).
+    assert result["call_summary"]["attempts"][0]["payload"]["phone_number"] == "+19085550199"
     assert result["instruction_source"] == "webhook note_body"
     assert result["dry_run"] is True
     task = result["call_summary"]["attempts"][0]["payload"]["task"]
@@ -269,11 +271,12 @@ def test_dispatch_title_fallback_reaches_bland_task():
         discussion_id="d1", note_body="",  # no note text from the Zap
         dry_run=True, ez=ez, bland=bland,
     )
-    assert result["ok"] is True
+    # No note text means no typed number: a Robie Call never falls back to
+    # the number on file, so nothing is dialed (Carlo, Oct 7 2026).
+    assert result["ok"] is False
+    assert result["needs_typed_number"] is True
     assert result["instruction_source"] == "discussion d1 title"
-    task = result["call_summary"]["attempts"][0]["payload"]["task"]
-    assert "Call about renewal" in task
-    assert "fallback" in task.lower()
+    assert "call_summary" not in result
     assert ez.by_id_calls == ["d1"]  # title lookup happened this time
 
 
