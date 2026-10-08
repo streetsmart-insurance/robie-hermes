@@ -37,7 +37,7 @@ from .intake_core import IntakeHold, SourceArchive, SourceItem
 
 PROCESS = "geico"
 SCOPE = "pending_cancellation_noc"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "geico-noc-ledger.json"
 GATEWAY_HOST = "gateway2.geico.com"
@@ -140,6 +140,238 @@ class NoticePath:
     kind: str
     notice_name: str = ""
     issued_on: date | None = None
+    document_id: str = ""
+
+
+# GEICO serves cancellation notice PDFs from edgeextended.geico.com with a
+# documentId query param (observed live 2026-10-05:
+# eaf9b197-7471-3c36-2f23-3ed54027b6d6). The UUID is the durable document
+# identity for the ledger.
+#
+# Live 2026-10-05 correction: the notice link's href is literally "#" — the
+# Angular app (edgeextended.geico.com) fetches the document ID via XHR into
+# JavaScript runtime state, so there is NO UUID in the markup. Clicking the
+# link opens the consolidated document viewer:
+#   /documents/consolidated-document-viewer?documentId={uuid}&token={session}&visitAppId=E01&convToken=
+# The viewer URL itself returns an HTML shell (Angular + PDF.js), NOT raw PDF
+# bytes. The PDF loads client-side via XHR; the PDF.js iframe has
+# src="about:blank". The worker clicks the link, reads the viewer URL for the
+# documentId, and captures the PDF bytes from the viewer's XHR via Playwright
+# network interception. Fallback: the viewer's Download button via frames.
+CONSOLIDATED_VIEWER_PATH = "/documents/consolidated-document-viewer"
+_DOCUMENT_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_DOWNLOAD_BUTTON_NAME = re.compile(r"download", re.IGNORECASE)
+
+
+def is_consolidated_viewer_url(url: str) -> bool:
+    """True if the URL is GEICO's consolidated document viewer."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (host == "geico.com" or host.endswith(".geico.com")):
+        return False
+    return parsed.path.rstrip("/").lower().endswith(CONSOLIDATED_VIEWER_PATH)
+
+
+def extract_viewer_document_id(url: str) -> str:
+    """Extract the document UUID from a consolidated-viewer URL.
+
+    Fail-closed: not a viewer URL, or missing/ambiguous documentId, raises
+    IntakeHold.
+    """
+    if not is_consolidated_viewer_url(url):
+        raise IntakeHold("NOC viewer URL is missing or ambiguous")
+    return extract_document_id(url)
+
+
+def extract_document_id(url: str) -> str:
+    """Extract the document UUID from a GEICO document URL.
+
+    Fail-closed: missing or ambiguous documentId raises IntakeHold.
+    """
+    raw = str(url or "")
+    try:
+        query = urllib.parse.urlsplit(raw).query
+    except Exception as exc:
+        raise IntakeHold("NOC document URL is missing or ambiguous") from exc
+    values = urllib.parse.parse_qs(query).get("documentId", [])
+    ids = [v for v in values if _DOCUMENT_ID_RE.fullmatch(v.strip())]
+    if len(ids) != 1:
+        raise IntakeHold("NOC document ID is missing or ambiguous")
+    return ids[0].lower()
+
+
+def _pdf_response_handler(captured: list[bytes]) -> Callable[[Any], None]:
+    """Build a Playwright response listener that captures PDF XHR bodies.
+
+    Only responses with a PDF content-type or a PDF-looking URL are kept,
+    and only if the body starts with %PDF. Everything else (including the
+    viewer's HTML shell) is ignored. The caller decides what to do with zero
+    or multiple captures.
+    """
+    def on_response(response: Any) -> None:
+        try:
+            url = str(getattr(response, "url", "") or "")
+            headers = getattr(response, "headers", None)
+            content_type = ""
+            if isinstance(headers, dict):
+                content_type = str(headers.get("content-type", "") or "").lower()
+            if "application/pdf" not in content_type and not _url_looks_like_pdf(url):
+                return
+            body_fn = getattr(response, "body", None)
+            if not callable(body_fn):
+                return
+            body = body_fn()
+            if isinstance(body, (bytes, bytearray)) and _is_pdf(body):
+                captured.append(bytes(body))
+        except Exception:
+            pass
+    return on_response
+
+
+def _find_viewer_page(page: Any, opened: list[Any]) -> Any:
+    """Return the consolidated-viewer page: a new tab or the current tab.
+
+    Fail-closed if no viewer URL is found.
+    """
+    for item in opened:
+        if is_consolidated_viewer_url(str(getattr(item, "url", "") or "")):
+            return item
+    if is_consolidated_viewer_url(str(getattr(page, "url", "") or "")):
+        return page
+    raise IntakeHold("NOC viewer did not open")
+
+
+def _settle_viewer_pages(page: Any, opened: list[Any], timeout_ms: int) -> None:
+    """Wait for viewer pages to load so their PDF XHR can complete."""
+    for target in (page, *opened):
+        wait = getattr(target, "wait_for_load_state", None)
+        if callable(wait):
+            try:
+                wait("domcontentloaded", timeout=timeout_ms)
+            except Exception:
+                pass
+    # Give the PDF.js XHR a moment to complete after DOM load.
+    sleeper = getattr(page, "wait_for_timeout", None)
+    if callable(sleeper):
+        try:
+            sleeper(min(3000, timeout_ms))
+        except Exception:
+            pass
+
+
+def _click_viewer_download(viewer: Any, timeout_ms: int) -> bytes | None:
+    """Click the viewer's Download button via frame traversal.
+
+    Live 2026-10-05: the button was inside an iframe that browser automation
+    could not operate. Playwright's frame API may reach it. Returns PDF bytes,
+    or None if the button is not found/operable (the caller holds on None).
+    """
+    frames: list[Any] = [viewer]
+    get_frames = getattr(viewer, "frames", None)
+    if callable(get_frames):
+        try:
+            frames.extend(get_frames())
+        except Exception:
+            pass
+    elif isinstance(get_frames, (list, tuple)):
+        # Real Playwright exposes page.frames as a property (list).
+        frames.extend(get_frames)
+    for frame in frames:
+        get_by_role = getattr(frame, "get_by_role", None)
+        if not callable(get_by_role):
+            continue
+        try:
+            button = get_by_role("button", name=_DOWNLOAD_BUTTON_NAME)
+        except Exception:
+            continue
+        if _locator_count(button) != 1:
+            continue
+        expect = getattr(viewer, "expect_download", None)
+        if not callable(expect):
+            return None
+        try:
+            with expect(timeout=timeout_ms) as download_info:
+                button.click(timeout=timeout_ms)
+            blob = _download_bytes(download_info.value)
+        except Exception:
+            continue
+        if _is_pdf(blob):
+            return bytes(blob)
+        # A non-PDF download is not the notice; keep looking.
+    return None
+
+
+def fetch_notice_pdf_via_viewer(
+    page: Any,
+    *,
+    timeout_ms: int = DOWNLOAD_TIMEOUT_MS,
+) -> tuple[str, bytes]:
+    """Click the notice link, capture the viewer URL's documentId, intercept the PDF XHR.
+
+    Live 2026-10-05: the notice link href is "#" (Angular fetches the document
+    ID via XHR). Clicking opens the consolidated document viewer with
+    documentId in the URL. The viewer URL itself returns HTML (Angular +
+    PDF.js), not PDF bytes; the PDF loads client-side via XHR. This function
+    captures those XHR bytes via Playwright network interception. If
+    interception yields nothing, it falls back to the viewer's Download button
+    via frame traversal. Fail-closed at every step.
+
+    Returns (document_id, pdf_bytes).
+    """
+    notice = _notice_match(page)
+    if not isinstance(notice, tuple):
+        raise IntakeHold("NOC PDF capture is missing or ambiguous")
+    _, locator = notice
+
+    context = page.context
+    captured: list[bytes] = []
+    opened: list[Any] = []
+    on_response = _pdf_response_handler(captured)
+
+    def on_page(new_page: Any) -> None:
+        opened.append(new_page)
+
+    context.on("response", on_response)
+    context.on("page", on_page)
+    try:
+        click = getattr(locator, "click", None)
+        if not callable(click):
+            raise IntakeHold("NOC PDF capture is missing or ambiguous")
+        try:
+            click(timeout=timeout_ms)
+        except Exception as exc:
+            raise IntakeHold("NOC notice link did not open") from exc
+
+        _settle_viewer_pages(page, opened, timeout_ms)
+
+        viewer = _find_viewer_page(page, opened)
+        document_id = extract_viewer_document_id(str(getattr(viewer, "url", "") or ""))
+
+        if len(captured) == 1:
+            return document_id, captured[0]
+        if len(captured) > 1:
+            raise IntakeHold("NOC PDF capture is missing or ambiguous")
+
+        downloaded = _click_viewer_download(viewer, timeout_ms)
+        if downloaded is not None:
+            return document_id, downloaded
+        raise IntakeHold("NOC PDF capture is missing or ambiguous")
+    finally:
+        remover = getattr(context, "remove_listener", None)
+        if callable(remover):
+            for event, handler in (("response", on_response), ("page", on_page)):
+                try:
+                    remover(event, handler)
+                except Exception:
+                    pass
+        for item in opened:
+            _close_gateway_page(item)
 
 
 @dataclass(frozen=True)
@@ -187,11 +419,17 @@ def noc_filename(policy_number: str) -> str:
     return f"{policy} NOC Geico.pdf"
 
 
-def noc_document_id(policy_number: str, due_on: date) -> str:
+def noc_document_id(policy_number: str, due_on: date, document_id: str | None = None) -> str:
     policy = str(policy_number or "").strip()
     if not _POLICY_NUMBER.fullmatch(policy):
         raise IntakeHold("NOC policy number is missing or ambiguous")
-    return f"geico-noc:{policy}:{due_on.isoformat()}"
+    base = f"geico-noc:{policy}:{due_on.isoformat()}"
+    doc = str(document_id or "").strip().lower()
+    if doc:
+        if not _DOCUMENT_ID_RE.fullmatch(doc):
+            raise IntakeHold("NOC document ID is missing or ambiguous")
+        return f"{base}:doc-{doc}"
+    return base
 
 
 def parse_due_date(value: str) -> date:
@@ -408,6 +646,10 @@ _PENDING_CHIP_NAME = re.compile(
     r"^pending cancellations(?:\s*\(\s*\d+\s*\))?$",
     re.IGNORECASE,
 )
+_UNDERWRITING_CHIP_NAME = re.compile(
+    r"^underwriting(?:\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
 _ALL_ALERTS_CHIP_NAME = re.compile(
     r"^all alerts(?:\s*\(\s*\d+\s*\))?$",
     re.IGNORECASE,
@@ -474,6 +716,7 @@ def _chip_toggle(locator: Any) -> str:
 
 
 _PENDING_TOGGLE_TEXT = re.compile(r"^\s*Pending Cancellations", re.IGNORECASE)
+_UNDERWRITING_TOGGLE_TEXT = re.compile(r"^\s*Underwriting", re.IGNORECASE)
 
 
 def _pending_chip_matches(page: Any) -> list[tuple[int, Any]]:
@@ -531,7 +774,22 @@ def _click_pending_chip(page: Any) -> None:
     matches = _pending_chip_matches(page)
     if len(matches) != 1 or matches[0][0] != 1:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
-    matches[0][1].click()
+    # GDS web components don't respond to Playwright click; use JS
+    clicked = False
+    if hasattr(page, "evaluate") and callable(page.evaluate):
+        clicked = bool(page.evaluate("""(() => {
+            const btn = document.querySelector('gds-toggle-button');
+            if (btn) {
+                // Try clicking the shadow button first, then the host
+                const shadowBtn = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
+                if (shadowBtn) { shadowBtn.click(); return true; }
+                btn.click();
+                return true;
+            }
+            return false;
+        })()"""))
+    if not clicked:
+        matches[0][1].click()
     _remember_pending_chip(page)
 
 
@@ -596,28 +854,30 @@ def _named_control_state(page: Any, name: str, roles: tuple[str, ...]) -> str:
 
 
 def ensure_pending_view(page: Any) -> None:
-    """Select Pending Cancellations. Filter chips do not need Client Alerts."""
+    """Select Pending Cancellations. Filter chips do not need Client Alerts.
+
+    The live /client-alerts page exposes the Pending Cancellations filter as
+    a toggle button whose accessible name carries a count suffix, e.g.
+    "Pending Cancellations (2)". _pending_chip_view/_click_pending_chip match
+    that suffix via regex. There is no exact "Client Alerts" link/button and
+    no exact "Pending Cancellations" control, so the old Client Alerts
+    fallback (which could only raise IntakeHold) is removed.
+    """
     assert_authenticated(page)
     if not _is_gateway_app_url(str(getattr(page, "url", "") or "")):
         raise IntakeHold("Expected exactly one Geico Gateway tab")
     if pending_view_selected(page):
         return
+    # The filter chips render via JavaScript after DOM ready. Wait for the
+    # Pending Cancellations chip before concluding it is absent.
+    try:
+        page.get_by_role("button", name=_PENDING_TOGGLE_TEXT).wait_for(timeout=20000)
+    except Exception:
+        pass
     chip = _pending_chip_view(page)
-    if chip in {"ambiguous", "error"}:
+    if chip in {"ambiguous", "error", "absent"}:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
-    if chip in {"unselected", "bare"}:
-        _click_pending_chip(page)
-        if not pending_view_selected(page):
-            raise IntakeHold("Pending Cancellations view did not become selected")
-        return
-    alerts = _named_control_state(page, "Client Alerts", ("link", "button"))
-    if alerts == "one":
-        click_named(page, "Client Alerts", roles=("link", "button"))
-        if pending_view_selected(page):
-            return
-    elif alerts in {"ambiguous", "error"}:
-        click_named(page, "Client Alerts", roles=("link", "button"))
-    click_named(page, "Pending Cancellations", roles=("option", "button", "link", "tab"))
+    _click_pending_chip(page)
     if not pending_view_selected(page):
         raise IntakeHold("Pending Cancellations view did not become selected")
 
@@ -715,7 +975,13 @@ def notice_issued_on(text: str) -> date | None:
 
 
 def open_billing_notices(page: Any) -> NoticePath:
-    """Policy tab -> Documents -> Billing tab -> the one Cancellation Notice."""
+    """Policy tab -> Documents -> Billing tab -> the one Cancellation Notice.
+
+    Live 2026-10-05: the notice link href is "#" (Angular). The document UUID
+    is not in the markup; it is captured from the viewer URL after the link
+    is clicked during download_notice(). The durable ledger key is resolved
+    after the fetch.
+    """
     _settle(page, 6000)
     assert_authenticated(page)
     documents = page.locator(_DOCUMENTS_BOX)
@@ -738,6 +1004,10 @@ def open_billing_notices(page: Any) -> NoticePath:
         text = str(item.first.inner_text() or "") if _locator_count(item) >= 1 else ""
     except Exception:
         text = ""
+    # Live 2026-10-05: the notice link href is "#" (Angular). The document UUID
+    # is not in the markup; it is captured from the viewer URL after the link
+    # is clicked during download_notice(). Leave document_id empty here — the
+    # durable key is resolved after the fetch.
     return NoticePath("noc", notice[0], issued_on=notice_issued_on(text))
 
 
@@ -745,51 +1015,6 @@ def notice_is_stale(issued_on: date | None, due_on: date) -> bool:
     if issued_on is None:
         return False
     return (due_on - issued_on).days > NOTICE_MAX_AGE_DAYS
-
-
-def capture_viewer_notice(page: Any, *, timeout_ms: int = POLICY_TAB_TIMEOUT_MS) -> bytes:
-    """Click the notice; the viewer loads the PDF from edgeextended's view-document.
-
-    The page shows it through a blob it revokes, so the PDF response itself is
-    kept (Geico host, application/pdf) and must be exactly one document.
-    """
-    notice = _notice_match(page)
-    if not isinstance(notice, tuple):
-        raise IntakeHold("NOC PDF capture is missing or ambiguous")
-    seen: list[Any] = []
-
-    def on_response(response: Any) -> None:
-        try:
-            ctype = str(response.headers.get("content-type", "")).casefold()
-            if "application/pdf" in ctype and _allowed_pdf_url(str(response.url)):
-                seen.append(response)
-        except Exception:
-            pass
-
-    page.on("response", on_response)
-    try:
-        notice[1].click()
-        waited = 0
-        while not seen and waited < timeout_ms:
-            page.wait_for_timeout(500)
-            waited += 500
-        page.wait_for_timeout(1000)
-    finally:
-        try:
-            page.remove_listener("response", on_response)
-        except Exception:
-            pass
-    blobs = []
-    for response in seen:
-        try:
-            body = bytes(response.body())
-        except Exception:
-            continue
-        if _is_pdf(body):
-            blobs.append(body)
-    if len({hashlib.sha256(blob).digest() for blob in blobs}) != 1:
-        raise IntakeHold("NOC PDF capture is missing or ambiguous")
-    return blobs[0]
 
 
 ALERT_LIST_WAIT_MS = 20000
@@ -891,19 +1116,18 @@ class PlaywrightGeicoNocBrowser:
         self.policy_page = popup
         return open_billing_notices(popup)
 
-    def download_notice(self, policy_number: str) -> bytes:
+    def download_notice(self, policy_number: str) -> tuple[str, bytes]:
+        """Click the notice link, capture the viewer URL's documentId, intercept the PDF XHR.
+
+        Returns (document_id, pdf_bytes). The viewer URL returns HTML, not
+        PDF; bytes come from network interception of the viewer's XHR, with
+        the viewer's Download button as fallback. Fail-closed on any
+        ambiguity.
+        """
         if not _POLICY_NUMBER.fullmatch(str(policy_number or "").strip()):
             raise IntakeHold("NOC policy number is missing or ambiguous")
-        if self.policy_page is not None:
-            return capture_viewer_notice(self.policy_page)
-        notice = _notice_match(self.page)
-        if not isinstance(notice, tuple):
-            raise IntakeHold("NOC PDF capture is missing or ambiguous")
-
-        def open_notice() -> None:
-            notice[1].click()
-
-        return pdf_bytes_from_observation(collect_notice_observation(self.page, open_notice))
+        page = self.policy_page if self.policy_page is not None else self.page
+        return fetch_notice_pdf_via_viewer(page)
 
     def return_to_pending_list(self) -> None:
         popup, self.policy_page = self.policy_page, None
@@ -982,21 +1206,36 @@ def normalize_gds_grid(
     return tuple(out_headers), tuple(out_rows)
 
 
-def _gds_row_locators(page: Any) -> tuple[Any, ...]:
+def _gds_row_locators(page: Any, grid: Any = None) -> tuple[Any, ...]:
+    if grid is not None:
+        return tuple(grid.locator("gds-table-tbody gds-table-tr").all())
     return tuple(page.locator("gds-table gds-table-tbody gds-table-tr").all())
 
 
 def extract_alert_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
     tables = page.locator("table")
-    if tables.count() == 0 and page.locator("gds-table").count() == 1:
-        grid = page.locator("gds-table")
+    if tables.count() == 0 and page.locator("gds-table").count() >= 1:
+        # Gateway has 3 gds-tables: Client Alerts, Recent Policies, Recent Quotes.
+        # Pending Cancellations is a filter on the Client Alerts table, identified
+        # by its "Client/Policy#" header.
+        grid = None
+        for candidate in page.locator("gds-table").all():
+            try:
+                htexts = [str(n.inner_text() or "").strip().lower() for n in candidate.locator("gds-table-th").all()[:4]]
+                if any("client/policy" in h for h in htexts):
+                    grid = candidate
+                    break
+            except Exception:
+                continue
+        if grid is None:
+            raise IntakeHold("Pending Cancellations table is missing or ambiguous")
         header_nodes = grid.locator("gds-table-thead gds-table-th").all()
         if not header_nodes:
             raise IntakeHold("Pending Cancellations table is missing or ambiguous")
         headers = tuple(str(node.inner_text() or "") for node in header_nodes)
         rows = tuple(
             tuple(str(cell.inner_text() or "") for cell in row.locator("gds-table-td").all())
-            for row in _gds_row_locators(page)
+            for row in _gds_row_locators(page, grid)
         )
         return normalize_gds_grid(headers, rows)
     if tables.count() != 1:
@@ -1050,7 +1289,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, due_on: date, policy_number: str) -> Path:
+    def record(self, source: SourceItem, *, due_on: date, policy_number: str, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("NOC filename is missing or ambiguous")
@@ -1075,6 +1314,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "due_date": due_on.isoformat(),
@@ -1173,6 +1413,63 @@ class LocalDeliveryLedger:
                 pass
             raise
         os.chmod(path, 0o600)
+
+
+def _ledger_id_for_filename(ledger: LocalDeliveryLedger, filename: str) -> str:
+    """Find the ledger document ID for a filename (any key format)."""
+    try:
+        items = ledger._load()["items"]
+    except Exception:
+        return ""
+    target = str(filename or "")
+    for doc_id, entry in items.items():
+        if isinstance(entry, dict) and str(entry.get("filename") or "") == target:
+            return str(doc_id)
+    return ""
+
+
+def _ledger_filename_verified(ledger: LocalDeliveryLedger, filename: str) -> bool:
+    """Check if the ledger has a verified entry for a filename (any document ID).
+
+    Used during the policy-based pre-download check to handle the key
+    migration to UUID-based ledger keys. Returns True if a ledger entry
+    exists for the filename AND the file content matches the recorded hash.
+    """
+    try:
+        items = ledger._load()["items"]
+    except Exception:
+        return False
+    target = str(filename or "")
+    path = ledger.root / target
+    if not path.is_file() or path.is_symlink():
+        return False
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    for entry in items.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("filename") or "") == target and entry.get("sha256") == digest:
+            return True
+    return False
+
+
+def _ledger_has_filename(ledger: LocalDeliveryLedger, filename: str) -> bool:
+    """Check if the ledger has any entry for a filename (any document ID).
+
+    Used to distinguish key-migration (UUID-based entries exist) from true
+    conflicts (no entry at all) during the policy-based pre-download check.
+    """
+    try:
+        items = ledger._load()["items"]
+    except Exception:
+        return False
+    target = str(filename or "")
+    for entry in items.values():
+        if isinstance(entry, dict) and str(entry.get("filename") or "") == target:
+            return True
+    return False
 
 
 def run_pull(
@@ -1280,11 +1577,24 @@ def run_pull(
         try:
             already = ledger.delivery_status(document_id=alert.document_id, filename=alert.filename)
         except IntakeHold as exc:
-            remember(alert, _row_payload(alert, outcome="HELD", reason=str(exc)))
-            fail(str(exc))
+            # Policy-based key may not match UUID-based ledger entries from
+            # the direct-fetch path. If the ledger has an entry for this
+            # filename (any document ID) and the file content matches, treat
+            # as already delivered without inspecting.
+            already = _ledger_filename_verified(ledger, alert.filename)
+            if not already:
+                # No verifiable entry: true conflict, fail fast.
+                remember(alert, _row_payload(alert, outcome="HELD", reason=str(exc)))
+                fail(str(exc))
         if already:
             targeted.append(alert)
-            skipped.append(alert.document_id)
+            # For filename-verified skips, find the actual ledger document ID.
+            skip_id = alert.document_id
+            if skip_id not in ledger._load().get("items", {}):
+                found = _ledger_id_for_filename(ledger, alert.filename)
+                if found:
+                    skip_id = found
+            skipped.append(skip_id)
             remember(alert, _row_payload(alert, outcome="ALREADY_DELIVERED", filename=alert.filename))
             continue
         path = browser.inspect_notice_path(alert.policy_number)
@@ -1320,14 +1630,40 @@ def run_pull(
             held.append(row)
             remember(alert, row)
             fail(reason)
-        content = browser.download_notice(alert.policy_number)
+        # Durable ledger key uses the GEICO document UUID when available.
+        # The pre-download check above used the policy-based key; re-check
+        # with the durable key to avoid re-downloading a UUID-keyed entry.
+        durable_id = alert.document_id
+        if path.document_id:
+            try:
+                durable_id = noc_document_id(alert.policy_number, alert.due_on, path.document_id)
+            except IntakeHold:
+                durable_id = alert.document_id
+            try:
+                if ledger.delivery_status(document_id=durable_id, filename=alert.filename):
+                    targeted.append(alert)
+                    skipped.append(durable_id)
+                    remember(alert, _row_payload(alert, outcome="ALREADY_DELIVERED", filename=alert.filename))
+                    back()
+                    continue
+            except IntakeHold as exc:
+                remember(alert, _row_payload(alert, outcome="HELD", reason=str(exc)))
+                fail(str(exc))
+        document_uuid, content = browser.download_notice(alert.policy_number)
         if not _is_pdf(content):
             remember(alert, _row_payload(alert, outcome="HELD", reason="NOC download is not a PDF"))
             fail("NOC download is not a PDF")
+        # Prefer the UUID from the direct fetch; fall back to the inspected one.
+        fetch_durable_id = durable_id
+        if document_uuid:
+            try:
+                fetch_durable_id = noc_document_id(alert.policy_number, alert.due_on, document_uuid)
+            except IntakeHold:
+                pass
         source = SourceItem(
             system=PROCESS,
             source_account=GATEWAY_HOST,
-            source_id=alert.document_id,
+            source_id=fetch_durable_id,
             source_url=f"{alert.source_url}#policy={alert.policy_number}",
             received_at=_received_at(as_of),
             filename=alert.filename,
@@ -1335,7 +1671,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number)
+            saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number, insured_name=alert.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             row = _row_payload(alert, outcome="HELD", reason=str(exc))
@@ -1343,7 +1679,7 @@ def run_pull(
             remember(alert, row)
             fail(str(exc))
         item = {
-            "document_id": alert.document_id,
+            "document_id": fetch_durable_id,
             "filename": alert.filename,
             "sha256": source.digest,
             "bytes": len(content),
@@ -1357,7 +1693,9 @@ def run_pull(
         remember(alert, _row_payload(alert, outcome="PULLED", filename=alert.filename))
         back()
         targeted.append(alert)
-    targeted_ids = {alert.document_id for alert in targeted}
+    # Parity uses durable ledger keys: UUID-based for downloads, and the
+    # skipped IDs (verified to exist in the ledger during the pull).
+    targeted_ids = {item["document_id"] for item in downloaded} | set(skipped)
     verified = ledger.verified_ids(targeted_ids)
     try:
         evidence = require_noc_pdf_parity(targeted_ids=targeted_ids, verified_ids=verified)
@@ -1446,9 +1784,7 @@ def require_gateway_url(url: str) -> str:
 
 def require_list_url(url: str) -> str:
     cleaned = require_gateway_url(url)
-    path = urllib.parse.urlsplit(cleaned).path.rstrip("/").lower()
-    if not path.startswith("/client-alerts"):
-        raise IntakeHold("Pending Cancellations list URL is missing or ambiguous")
+    # Pending Cancellations is a filter on the Gateway home page (/) or /client-alerts
     return cleaned
 
 

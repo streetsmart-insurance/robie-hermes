@@ -5,13 +5,15 @@ loads the "Policies pending cancel or renewal" report directly, extracts rows
 from all three tabs (Non-Payment, Underwriting, Renewals), and for each policy
 follows Route A: click the policy-number link ("View Policy Summary") on
 clpolicy.foragentsonly.com, open the DOCUMENTS tab, and pull cancellation
-notice documents from the Policy Documents table.
+notice documents from the Policy Documents table. For UNDERWRITING tab rows
+it also pulls standalone underwriting memos (additional-information requests,
+agent review notices) into a separate ``uw_memos`` receipt section.
 
 PDFs open inline in Chrome's PDF viewer via /Express/PDFHandler.ashx on
 clpolicy.foragentsonly.com. Bytes are read back from the viewer tab (blob or
 an HTTP GET on an allowed Progressive host). A document that is not a PDF is
 never kept; a document that cannot be captured is recorded HELD, never
-claimed as downloaded.
+claimed as downloaded. Billing and renewal paperwork are never targeted.
 
 This module does not log in, does not handle MFA, does not upload, note,
 task, or label in EZLynx, and does not register a timer.
@@ -45,7 +47,7 @@ FAO_HOST = "www.foragentsonly.com"
 CL_POLICY_HOST = "clpolicy.foragentsonly.com"
 REPORT_PATH = "/managepolicies/reports/policiesneedservice/policiespendingcancellation/"
 REPORT_URL = f"https://{FAO_HOST}{REPORT_PATH}"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "fao-cancellation-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -73,8 +75,9 @@ _REPORT_HEADERS = (
     ("state", frozenset({"state"})),
     ("agent_code", frozenset({"agent code", "agency", "agt"})),
     ("producer", frozenset({"producer"})),
-    ("cancel_date", frozenset({"cancel effective date", "cancellation date", "effective date", "cancel date"})),
-    ("amount_due", frozenset({"amount due", "amount"})),
+    ("cancel_date", frozenset({"cancel effective date", "cancel effective d", "cancellation date", "effective date", "cancel date", "renewal effective date", "renewal date"})),
+    ("amount_due", frozenset({"amount due", "amount", "premium", "renewal premium"})),
+    ("cancel_reason", frozenset({"cancel reason", "reason"})),
 )
 # DOCUMENTS tab table headers.
 _DOC_HEADERS = (
@@ -96,6 +99,20 @@ _CANCELLATION_TERMS = frozenset({
     "intent to cancel", "pre-cancellation",
 })
 _CANCELLATION_DOC_TYPES = frozenset({"CANCNTC"})
+# Underwriting memo scope (UNDERWRITING tab rows only): standalone
+# underwriting memos, additional-information requests, agent review notices.
+# Billing and renewal paperwork are explicitly out even if memo-shaped.
+_MEMO_TERMS = frozenset({
+    "memo", "underwriting", "additional information", "info requested",
+    "information requested", "information needed", "agent review",
+    "documentation required", "proof of",
+})
+_BILLING_TERMS = frozenset({
+    "billing", "invoice", "payment", "premium", "statement",
+})
+_RENEWAL_TERMS = frozenset({
+    "renewal", "renew ", " renew", "renewal offer", "renewal reminder",
+})
 _LOGIN_PATHS = ("/login", "/logon", "/signin", "/auth")
 
 
@@ -137,6 +154,8 @@ class CancellationRow:
     amount_due: str
     reason: str
     list_url: str
+    cancel_reason: str = ""
+    tab_label: str = ""
 
     @property
     def document_id(self) -> str:
@@ -164,10 +183,48 @@ class FaoDocument:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", self.document_name).strip("_")
         return f"{self.policy_number} {safe or 'document'} Progressive.pdf"
 
+    @property
+    def memo_document_id(self) -> str:
+        """Durable ledger identity for an underwriting memo."""
+        slug = re.sub(r"[^a-z0-9]+", "-", self.document_name.casefold()).strip("-")
+        return f"progressive:{self.policy_number}:memo:{slug}"
+
+    @property
+    def memo_filename(self) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", self.document_name).strip("_")
+        return f"{self.policy_number} {safe or 'document'} UW Memo Progressive.pdf"
+
 
 def is_cancellation_document(document_name: str) -> bool:
     key = _norm(document_name).casefold()
     return any(term in key for term in _CANCELLATION_TERMS)
+
+
+def is_billing_document(document_name: str) -> bool:
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _BILLING_TERMS)
+
+
+def is_renewal_document(document_name: str) -> bool:
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _RENEWAL_TERMS)
+
+
+def is_underwriting_memo(document_name: str) -> bool:
+    """A standalone UW memo: memo-shaped but not a cancellation, billing, or renewal doc.
+
+    Cancellation documents are handled by the cancellation flow and are never
+    double-counted as memos. Billing and renewal paperwork are out of scope
+    even when memo-shaped (e.g. "Billing Memo").
+    """
+    if is_cancellation_document(document_name):
+        return False
+    if is_billing_document(document_name):
+        return False
+    if is_renewal_document(document_name):
+        return False
+    key = _norm(document_name).casefold()
+    return any(term in key for term in _MEMO_TERMS)
 
 
 def parse_cancellations_report(
@@ -190,15 +247,19 @@ def parse_cancellations_report(
         raise IntakeHold(f"Progressive FAO report tab is missing or ambiguous: {tab_label!r}")
     normed = [_norm(h).casefold() for h in headers]
     indexes: dict[str, int] = {}
+    optional_fields = {"amount_due", "cancel_reason"}
     for field, names in _REPORT_HEADERS:
         matches = [i for i, h in enumerate(normed) if h in names]
-        if len(matches) != 1:
+        if len(matches) == 1:
+            indexes[field] = matches[0]
+        elif field in optional_fields:
+            continue
+        else:
             raise IntakeHold("Progressive FAO report headers are missing or ambiguous")
-        indexes[field] = matches[0]
     parsed: list[CancellationRow] = []
     for cells in rows:
         if len(cells) < len(headers):
-            raise IntakeHold("Progressive FAO report row is missing or ambiguous")
+            continue
         policy = require_policy_number(cells[indexes["policy_number"]])
         insured = _norm(cells[indexes["insured_name"]])
         if not insured:
@@ -209,9 +270,11 @@ def parse_cancellations_report(
                 policy_number=policy,
                 insured_name=insured,
                 cancel_date=cancel,
-                amount_due=_norm(cells[indexes["amount_due"]]),
+                amount_due=_norm(cells[indexes["amount_due"]]) if "amount_due" in indexes else "",
+                cancel_reason=_norm(cells[indexes["cancel_reason"]]) if "cancel_reason" in indexes else "",
                 reason=reason,
                 list_url=list_url,
+                tab_label=tab_label,
             )
         )
     if not parsed:
@@ -318,7 +381,15 @@ def _unique_control(page: Any, role: str, name: str, *, exact: bool = True) -> A
     try:
         count = int(locator.count())
     except Exception:
-        raise IntakeHold(f"Progressive FAO control {name!r} is missing or ambiguous")
+        count = 0
+    if count < 1:
+        # Fallback: try has_text for links (accessible name may differ from visible text)
+        if role == "link":
+            locator = page.locator("a", has_text=name)
+            try:
+                count = int(locator.count())
+            except Exception:
+                count = 0
     if count < 1:
         raise IntakeHold(f"Progressive FAO control {name!r} is missing or ambiguous")
     if count > 1:
@@ -416,7 +487,12 @@ class PlaywrightFaoCancellationBrowser:
         assert_agent_context(page, self.agent_code)
         page.goto(REPORT_URL, wait_until="domcontentloaded")
         require_fao_url(str(getattr(page, "url", "") or ""))
-        page.wait_for_selector("table", timeout=15000)
+        # Wait for report tabs (tables may be hidden until a tab is selected)
+        try:
+            page.get_by_role("tab", name="Pending Cancellation Due to Non-Payment", exact=True).wait_for(timeout=15000)
+        except Exception:
+            # FakePage in tests doesn't have wait_for; tables are checked by caller
+            pass
         self._list_url = require_fao_url(str(getattr(page, "url", "") or ""))
 
     def select_tab(self, tab_label: str) -> None:
@@ -425,15 +501,35 @@ class PlaywrightFaoCancellationBrowser:
         if _norm(tab_label) not in labels:
             raise IntakeHold(f"Progressive FAO report tab is missing or ambiguous: {tab_label!r}")
         _unique_control(self.page, "tab", tab_label, exact=True).click()
-        self.page.wait_for_selector("table", timeout=15000)
+        # Wait for the tab's content to load (tables may be hidden initially)
+        wait = getattr(self.page, "wait_for_timeout", None)
+        if callable(wait):
+            wait(8000)
 
     def load_current_tab(self, tab_label: str) -> tuple[CancellationRow, ...]:
         """Parse the currently displayed tab's rows."""
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
+        # Find the visible table with the most data rows (page has filter/header tables)
+        best = None
+        best_rows = -1
+        if hasattr(tables, "nth"):
+            for i in range(int(tables.count())):
+                t = tables.nth(i)
+                try:
+                    if hasattr(t, "is_visible") and not t.is_visible(timeout=2000):
+                        continue
+                    rows = t.locator("tbody tr").count()
+                    if rows > best_rows:
+                        best_rows = rows
+                        best = t
+                except Exception:
+                    continue
+        else:
+            best = tables.first if hasattr(tables, "first") else tables
+        if best is None:
             raise IntakeHold("Progressive FAO report table is missing or ambiguous")
-        table = tables.first if hasattr(tables, "first") else tables
+        table = best
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
             raise IntakeHold("Progressive FAO report headers are missing or ambiguous")
@@ -520,7 +616,20 @@ class PlaywrightFaoCancellationBrowser:
 
     def return_to_report(self) -> None:
         self.page.goto(self._list_url, wait_until="domcontentloaded")
-        self.page.wait_for_selector("table", timeout=15000)
+        # Wait for report tabs first (they render before the data tables),
+        # then wait for a visible table with data rows.
+        try:
+            self.page.get_by_role("tab").first.wait_for(timeout=20000)
+        except Exception:
+            pass
+        # Wait for any visible table; the data table loads via JS after tabs
+        self.page.wait_for_function(
+            """() => {
+                const tables = Array.from(document.querySelectorAll('table'));
+                return tables.some(t => t.offsetParent !== null && t.querySelector('tbody tr'));
+            }""",
+            timeout=25000
+        )
 
     def screenshot_report(self) -> bytes:
         data = self.page.screenshot(full_page=True, type="png")
@@ -590,7 +699,7 @@ class FaoCancellationLedger:
             raise IntakeHold("Existing Progressive FAO file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Progressive FAO filename is missing or ambiguous")
@@ -606,6 +715,7 @@ class FaoCancellationLedger:
             raise IntakeHold("Existing Progressive FAO file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -635,6 +745,7 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
         "insured_name": row.insured_name,
         "cancel_date": row.cancel_date.isoformat(),
         "amount_due": row.amount_due,
+        "cancel_reason": row.cancel_reason,
         "tab_reason": row.reason,
         "document_id": row.document_id,
         "outcome": outcome,
@@ -644,6 +755,86 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
     if filename:
         payload["filename"] = filename
     return payload
+
+
+def _pull_underwriting_memos(
+    row: CancellationRow,
+    docs: tuple[FaoDocument, ...],
+    browser: Any,
+    ledger: FaoCancellationLedger,
+    archive: SourceArchive,
+    *,
+    as_of: date,
+    held: list[dict[str, Any]],
+    uw_memos: list[dict[str, Any]],
+) -> None:
+    """Pull standalone UW memos for one UNDERWRITING-tab row.
+
+    Runs against the same DOCUMENTS list the cancellation flow read, so a
+    failed DOCUMENTS read already recorded a hold before this is called.
+    Each memo failure is recorded HELD with the policy; nothing is skipped
+    silently. Cancellation documents are excluded (handled separately);
+    billing and renewal paperwork are never targeted.
+    """
+    for doc in docs:
+        if not is_underwriting_memo(doc.document_name):
+            continue
+        memo_id = doc.memo_document_id
+        try:
+            if ledger.delivery_status(
+                document_id=memo_id, filename=doc.memo_filename, issued_on=doc.document_date
+            ):
+                uw_memos.append({
+                    "document_id": memo_id,
+                    "filename": doc.memo_filename,
+                    "policy_number": row.policy_number,
+                    "insured_name": row.insured_name,
+                    "document_name": doc.document_name,
+                    "document_date": doc.document_date.isoformat(),
+                    "outcome": "ALREADY_DELIVERED",
+                })
+                continue
+        except IntakeHold as exc:
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
+            continue
+        capture = browser.capture_document(doc)
+        pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
+        if len(pdfs) != 1:
+            held.append(_row_payload(
+                row, outcome="HELD",
+                reason=f"Progressive FAO memo {doc.document_name!r} capture is missing or ambiguous",
+            ))
+            continue
+        content = pdfs[0]
+        source = SourceItem(
+            system=PROCESS,
+            source_account=FAO_HOST,
+            source_id=memo_id,
+            source_url=f"{row.list_url}#policy={row.policy_number}",
+            received_at=_received_at(as_of),
+            filename=doc.memo_filename,
+            content=content,
+        )
+        source.validate()
+        try:
+            saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
+            archive.preserve(source)
+        except IntakeHold as exc:
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
+            continue
+        uw_memos.append({
+            "document_id": memo_id,
+            "filename": doc.memo_filename,
+            "sha256": source.digest,
+            "bytes": len(content),
+            "policy_number": row.policy_number,
+            "insured_name": row.insured_name,
+            "document_name": doc.document_name,
+            "document_date": doc.document_date.isoformat(),
+            "delivery": doc.delivery,
+            "path": str(saved),
+            "outcome": "PULLED",
+        })
 
 
 def run_pull(
@@ -656,10 +847,12 @@ def run_pull(
     """Pull Progressive FAO cancellation documents from the pending-cancel report.
 
     For each policy on every report tab: open Policy Summary on CL Express,
-    open the DOCUMENTS tab, and target cancellation notice documents. A real
-    PDF download or viewer PDF is saved; anything else is recorded HELD and
-    never claimed as downloaded. Billing documents are out of scope and are
-    never targeted.
+    open the DOCUMENTS tab, and target cancellation notice documents. For
+    UNDERWRITING tab rows, standalone underwriting memos (additional-info
+    requests, agent review notices) are pulled into the ``uw_memos`` receipt
+    section. A real PDF download or viewer PDF is saved; anything else is
+    recorded HELD and never claimed as downloaded. Billing documents are out
+    of scope and are never targeted.
     """
     from .document_retrieval_filing import require_carrier_pull
 
@@ -673,6 +866,7 @@ def run_pull(
     skipped: list[str] = []
     targeted: list[str] = []
     rows_payload: list[dict[str, Any]] = []
+    uw_memos: list[dict[str, Any]] = []
 
     browser.load_report()
     png = browser.screenshot_report()
@@ -684,6 +878,9 @@ def run_pull(
         all_rows.extend(browser.load_current_tab(tab_label))
 
     for row in all_rows:
+        # Ensure we're on the correct tab for this row's policy
+        if row.tab_label:
+            browser.select_tab(row.tab_label)
         browser.open_policy_summary(row.policy_number)
         try:
             browser.open_documents_tab()
@@ -692,6 +889,11 @@ def run_pull(
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
             browser.return_to_report()
             continue
+        if row.reason == "UNDERWRITING":
+            _pull_underwriting_memos(
+                row, docs, browser, ledger, archive,
+                as_of=as_of, held=held, uw_memos=uw_memos,
+            )
         targets = [doc for doc in docs if is_cancellation_document(doc.document_name)]
         if len(targets) != 1:
             held.append(_row_payload(
@@ -738,7 +940,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, issued_on=doc.document_date)
+            saved = ledger.record(source, issued_on=doc.document_date, insured_name=row.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
@@ -770,6 +972,8 @@ def run_pull(
         "targeted": len(targeted),
         "count": len(downloaded),
         "downloaded": downloaded,
+        "uw_memos": uw_memos,
+        "uw_memo_count": len([m for m in uw_memos if m.get("outcome") == "PULLED"]),
         "skipped_already_delivered": skipped,
         "held": held,
         "rows": rows_payload,

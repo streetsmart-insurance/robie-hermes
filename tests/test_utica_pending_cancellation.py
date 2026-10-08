@@ -15,7 +15,9 @@ from robie_job_engine.utica_pending_cancellation import (
     UticaDeliveryLedger,
     UticaDocument,
     TransactionRow,
+    _is_csrf_rejection,
     docgen_pdf_url,
+    docgen_request_headers,
     is_cancellation_document,
     is_cancellation_transaction,
     parse_carrier_date,
@@ -322,6 +324,168 @@ class DuplicateNameTests(unittest.TestCase):
         self.assertNotEqual(docs[0].document_id, docs[1].document_id)
         self.assertEqual(docs[0].document_id, "utica:ART3000926870:111")
         self.assertEqual(docs[1].document_id, "utica:ART3000926870:222")
+
+
+class DocGenRequestHeadersTests(unittest.TestCase):
+    """The CSRF filter demands Referer/Origin on the DocGenServlet request."""
+
+    DOCLIST_URL = "https://ufirstnow.uticafirst.com/oneshield/documentList?osst=LIVE"
+
+    def test_headers_carry_referer_and_origin(self):
+        headers = docgen_request_headers(referer_url=self.DOCLIST_URL)
+        self.assertEqual(headers["Referer"], self.DOCLIST_URL)
+        self.assertEqual(headers["Origin"], "https://ufirstnow.uticafirst.com")
+
+    def test_headers_reject_non_utica_referer(self):
+        with self.assertRaises(IntakeHold):
+            docgen_request_headers(referer_url="https://evil.example.com/app")
+
+    def test_headers_reject_missing_referer(self):
+        with self.assertRaises(IntakeHold):
+            docgen_request_headers(referer_url="")
+        with self.assertRaises(IntakeHold):
+            docgen_request_headers(referer_url="   ")
+
+    def test_csrf_rejection_page_detected(self):
+        html = (
+            b"<html><body><h1>Error</h1>"
+            b"<p>Try using the application menu for navigation.</p></body></html>"
+        )
+        self.assertTrue(_is_csrf_rejection(html))
+
+    def test_real_pdf_is_never_a_csrf_rejection(self):
+        # Even a PDF containing similar text is a PDF, never a rejection.
+        pdf = b"%PDF-1.7\nTry using the application menu\n%%EOF"
+        self.assertFalse(_is_csrf_rejection(pdf))
+
+    def test_generic_error_page_is_not_csrf(self):
+        self.assertFalse(_is_csrf_rejection(b"<html><body>500 boom</body></html>"))
+        self.assertFalse(_is_csrf_rejection(b""))
+
+
+class _FakeApiResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def body(self):
+        return self._body
+
+
+class _FakeApiRequest:
+    """Mirrors Playwright's APIRequestContext.get(url, timeout=, headers=)."""
+
+    def __init__(self, body):
+        self._body = body
+        self.calls = []
+
+    def get(self, url, timeout=None, headers=None):
+        self.calls.append({"url": url, "timeout": timeout, "headers": dict(headers or {})})
+        return _FakeApiResponse(self._body)
+
+
+class _FakeDocPage:
+    """Minimal page double for the real download_document code path."""
+
+    def __init__(self, url, request):
+        self.url = url
+        self.context = _FakeApiContext(request)
+
+
+class _FakeApiContext:
+    def __init__(self, request):
+        self.request = request
+
+
+def _make_real_browser(*, page_url, body, doclist_url, transaction_id):
+    request = _FakeApiRequest(body)
+    browser = PlaywrightUticaCancellationBrowser(_FakeDocPage(page_url, request))
+    browser._transaction_id = transaction_id
+    browser._doclist_url = doclist_url
+    return browser, request
+
+
+def _notice_doc():
+    return parse_document_grid(DOC_HEADERS, DOC_ROWS, policy_number="ART3000926870")[0]
+
+
+class DownloadDocumentHeadersTests(unittest.TestCase):
+    """The real download_document sends headers and fails closed on CSRF."""
+
+    PAGE_URL = (
+        "https://ufirstnow.uticafirst.com/oneshield/documentList"
+        "?USER_SESSION_GUID=SESSION9&DRAGON_TRANSACTION_ID=1246149193"
+    )
+    DOCLIST_URL = "https://ufirstnow.uticafirst.com/oneshield/documentList?osst=LIVE9"
+
+    def test_download_sends_referer_origin_headers(self):
+        browser, request = _make_real_browser(
+            page_url=self.PAGE_URL, body=_FAKE_PDF,
+            doclist_url=self.DOCLIST_URL, transaction_id="1246149193",
+        )
+        content = browser.download_document(_notice_doc())
+        self.assertTrue(content.startswith(b"%PDF"))
+        self.assertEqual(len(request.calls), 1)
+        call = request.calls[0]
+        self.assertIn("DocGenServlet", call["url"])
+        self.assertIn("docId=504387230999", call["url"])
+        self.assertIn("USER_SESSION_GUID=SESSION9", call["url"])
+        self.assertEqual(call["headers"]["Referer"], self.DOCLIST_URL)
+        self.assertEqual(call["headers"]["Origin"], "https://ufirstnow.uticafirst.com")
+
+    def test_per_session_transaction_id_used(self):
+        # The txn id harvested from the live page flows into the URL;
+        # nothing is hardcoded.
+        browser, request = _make_real_browser(
+            page_url=self.PAGE_URL, body=_FAKE_PDF,
+            doclist_url=self.DOCLIST_URL, transaction_id="9876543210",
+        )
+        browser.download_document(_notice_doc())
+        self.assertIn("DRAGON_TRANSACTION_ID=9876543210", request.calls[0]["url"])
+
+    def test_csrf_rejection_page_holds_with_clear_reason(self):
+        html = (
+            b"<html><body>Error: Try using the application menu "
+            b"for navigation.</body></html>"
+        )
+        browser, request = _make_real_browser(
+            page_url=self.PAGE_URL, body=html,
+            doclist_url=self.DOCLIST_URL, transaction_id="1246149193",
+        )
+        with self.assertRaises(IntakeHold) as ctx:
+            browser.download_document(_notice_doc())
+        self.assertIn("CSRF", str(ctx.exception))
+
+    def test_non_pdf_non_csrf_holds(self):
+        browser, _ = _make_real_browser(
+            page_url=self.PAGE_URL, body=b"<html><body>500 boom</body></html>",
+            doclist_url=self.DOCLIST_URL, transaction_id="1246149193",
+        )
+        with self.assertRaises(IntakeHold) as ctx:
+            browser.download_document(_notice_doc())
+        self.assertIn("not a PDF", str(ctx.exception))
+
+    def test_missing_referer_holds(self):
+        browser, _ = _make_real_browser(
+            page_url=self.PAGE_URL, body=_FAKE_PDF,
+            doclist_url="", transaction_id="1246149193",
+        )
+        browser._list_url = ""
+        with self.assertRaises(IntakeHold):
+            browser.download_document(_notice_doc())
+
+    def test_doclist_url_reset_between_transactions(self):
+        browser, _ = _make_real_browser(
+            page_url=self.PAGE_URL, body=_FAKE_PDF,
+            doclist_url=self.DOCLIST_URL, transaction_id="1246149193",
+        )
+        # return_to_transactions clears the per-document bindings; emulate
+        # that reset and prove the next download fails closed instead of
+        # reusing a stale referer.
+        browser._transaction_id = ""
+        browser._doclist_url = ""
+        browser._list_url = ""
+        with self.assertRaises(IntakeHold):
+            browser.download_document(_notice_doc())
 
 
 if __name__ == "__main__":

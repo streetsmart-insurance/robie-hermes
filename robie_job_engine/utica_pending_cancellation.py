@@ -21,6 +21,12 @@ EZLynx, and does not register a timer.
 UNVERIFIED (live-run needed): the USER_SESSION_GUID extraction prefers the
 ``USER_SESSION_GUID`` query param and falls back to the SPA's ``osst``
 token; whether they are interchangeable is proven only by a live download.
+
+UNVERIFIED (live-run needed): the PDF fetch uses the browser context's
+authenticated request with the Referer/Origin headers the portal's CSRF
+filter demands (direct navigation to the DocGenServlet URL is rejected by
+the filter). The headers path is unit-tested only; a live download is still
+needed to prove the headers satisfy the filter.
 """
 from __future__ import annotations
 
@@ -175,6 +181,47 @@ def docgen_pdf_url(*, doc_id: str, session_guid: str, transaction_id: str) -> st
         "DRAGON_TRANSACTION_ID": transaction_id,
     })
     return f"https://{UTICA_HOST}/oneshield/DocGenServlet?{params}"
+
+
+def docgen_request_headers(*, referer_url: str) -> dict[str, str]:
+    """Headers the portal's CSRF filter demands on the DocGenServlet request.
+
+    Direct navigation to the DocGenServlet URL is rejected ("Try using the
+    application menu for navigation"); the same URL works from the in-app
+    viewer because that request carries Referer/Origin. The referer must be
+    the in-app page the document list was opened from, harvested from the
+    live page URL each run, never hardcoded.
+    """
+    referer = _norm(referer_url)
+    if not referer:
+        raise IntakeHold("Utica First PDF request is missing or ambiguous")
+    parsed = urllib.parse.urlsplit(referer)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != UTICA_HOST:
+        raise IntakeHold("Utica First PDF request is missing or ambiguous")
+    return {
+        "Referer": referer,
+        "Origin": f"https://{UTICA_HOST}",
+    }
+
+
+_CSRF_REJECTION_MARKERS = (
+    "try using the application menu",
+)
+
+
+def _is_csrf_rejection(content: bytes) -> bool:
+    """Detect the portal CSRF filter's rejection page.
+
+    A real PDF is never a rejection, even if it contains similar text.
+    """
+    if _is_pdf(content):
+        return False
+    try:
+        text = bytes(content or b"").decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    lowered = text.casefold()
+    return any(marker in lowered for marker in _CSRF_REJECTION_MARKERS)
 
 
 def transaction_id_from_page(html: str) -> str:
@@ -368,6 +415,7 @@ class PlaywrightUticaCancellationBrowser:
     def __init__(self, page: Any):
         self.page = page
         self._list_url = ""
+        self._doclist_url = ""
         self._transaction_id = ""
 
     # -- navigation -----------------------------------------------------
@@ -437,6 +485,9 @@ class PlaywrightUticaCancellationBrowser:
         page.wait_for_selector("text=POLICY | TRANSACTION | DOCUMENT LIST", timeout=15000)
         html = page.content() if callable(getattr(page, "content", None)) else ""
         self._transaction_id = transaction_id_from_page(str(html))
+        # The DocGenServlet request's Referer must be the in-app page the
+        # document list was opened from, harvested fresh each run.
+        self._doclist_url = require_utica_url(str(getattr(page, "url", "") or ""))
 
     def list_documents(self, policy_number: str) -> tuple[UticaDocument, ...]:
         page = self.page
@@ -459,7 +510,15 @@ class PlaywrightUticaCancellationBrowser:
         """Fetch the notice PDF via the portal's own DocGenServlet URL.
 
         Uses the browser context's session (cookies) so the SSO token rides
-        along. A non-PDF response raises IntakeHold and is never kept.
+        along, WITH the Referer/Origin headers the portal's CSRF filter
+        demands. Direct navigation to the URL is rejected by the filter, and
+        the in-app viewer's Download button is unreachable from automation,
+        so this authenticated request with headers is the download path.
+
+        Doc IDs, the DRAGON_TRANSACTION_ID, the session GUID, and the
+        Referer are all harvested from the live document list each run;
+        nothing is hardcoded. A CSRF rejection page or any other non-PDF
+        response raises IntakeHold and is never kept.
         """
         page = self.page
         url = docgen_pdf_url(
@@ -467,16 +526,22 @@ class PlaywrightUticaCancellationBrowser:
             session_guid=session_guid_from_url(str(getattr(page, "url", "") or "")),
             transaction_id=self._transaction_id,
         )
+        headers = docgen_request_headers(referer_url=self._doclist_url or self._list_url)
         request = getattr(getattr(page, "context", None), "request", None)
         getter = getattr(request, "get", None)
         if not callable(getter):
             raise IntakeHold("Utica First PDF request is missing or ambiguous")
         try:
-            response = getter(url, timeout=DOWNLOAD_TIMEOUT_MS)
+            response = getter(url, timeout=DOWNLOAD_TIMEOUT_MS, headers=headers)
             body = response.body() if callable(getattr(response, "body", None)) else b""
         except Exception as exc:
             raise IntakeHold(f"Utica First PDF download failed: {type(exc).__name__}")
         content = bytes(body or b"")
+        if _is_csrf_rejection(content):
+            raise IntakeHold(
+                "Utica First PDF request was rejected by the portal CSRF filter "
+                f"for document {doc.name!r}; the bytes are not kept"
+            )
         if not _is_pdf(content):
             raise IntakeHold(
                 f"Utica First document {doc.name!r} download is not a PDF"
@@ -486,6 +551,7 @@ class PlaywrightUticaCancellationBrowser:
     def return_to_transactions(self) -> None:
         # The SPA keeps one URL; go back through the tab rather than history.
         self._transaction_id = ""
+        self._doclist_url = ""
         self.open_transactions()
         self.select_filter_all()
 
@@ -557,7 +623,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Utica First filename is missing or ambiguous")
@@ -573,6 +639,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -704,7 +771,7 @@ def run_pull(
             )
             source.validate()
             try:
-                saved = ledger.record(source, issued_on=doc.added_date)
+                saved = ledger.record(source, issued_on=doc.added_date, insured_name=row.insured_name)
                 archive.preserve(source)
             except IntakeHold as exc:
                 held.append(_row_payload(row, outcome="HELD", reason=str(exc)))

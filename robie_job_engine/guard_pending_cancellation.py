@@ -400,7 +400,16 @@ class PlaywrightGuardBrowser:
         page = self.page
         require_guard_url(str(getattr(page, "url", "") or ""))
         _unique_control(page, "link", "Book of Business").click()
-        _unique_control(page, "tab", "Cancellations").click()
+        # Blazor/MudBlazor tabs don't respond to Playwright's click(); use JS click
+        if hasattr(page, "evaluate") and callable(page.evaluate):
+            page.evaluate("""(() => {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+                const cancel = tabs.find(t => t.textContent.includes('Cancellations'));
+                if (cancel) { cancel.click(); return true; }
+                return false;
+            })()""")
+        else:
+            _unique_control(page, "tab", "Cancellations").click()
         page.wait_for_selector("table", timeout=15000)
         self._list_url = require_guard_url(str(getattr(page, "url", "") or ""))
 
@@ -424,22 +433,43 @@ class PlaywrightGuardBrowser:
     def open_policy(self, policy_number: str) -> None:
         """Click the policy link on the Cancellations grid -> Policy Center."""
         require_policy_number(policy_number)
-        link = _unique_control(self.page, "link", policy_number, exact=True)
-        link.click()
+        # Blazor UI: use JS click instead of Playwright click
+        if hasattr(self.page, "evaluate") and callable(self.page.evaluate):
+            self.page.evaluate(f"""(() => {{
+                const links = Array.from(document.querySelectorAll('a'));
+                const link = links.find(a => a.textContent.trim() === '{policy_number}');
+                if (link) {{ link.click(); return true; }}
+                return false;
+            }})()""")
+        else:
+            link = _unique_control(self.page, "link", policy_number, exact=True)
+            link.click()
         self.page.wait_for_selector("text=Policy Center", timeout=15000)
 
     def open_printable_documents(self) -> None:
         """Related Functions (or Quick Functions) -> "printable documents"."""
         page = self.page
-        for role in ("link", "button"):
-            try:
-                control = _unique_control(page, role, "printable documents", exact=False)
-            except IntakeHold:
-                continue
-            control.click()
-            page.wait_for_selector("text=Policy Documents", timeout=15000)
-            return
-        raise IntakeHold("Guard printable documents control is missing or ambiguous")
+        # Blazor UI: use JS click instead of Playwright click
+        clicked = False
+        if hasattr(page, "evaluate") and callable(page.evaluate):
+            clicked = bool(page.evaluate("""(() => {
+                const els = Array.from(document.querySelectorAll('a, button'));
+                const el = els.find(e => e.textContent.toLowerCase().includes('printable documents'));
+                if (el) { el.click(); return true; }
+                return false;
+            })()"""))
+        if not clicked:
+            for role in ("link", "button"):
+                try:
+                    control = _unique_control(page, role, "printable documents", exact=False)
+                    control.click()
+                    clicked = True
+                    break
+                except IntakeHold:
+                    continue
+        if not clicked:
+            raise IntakeHold("Guard printable documents control is missing or ambiguous")
+        page.wait_for_selector("text=Policy Documents", timeout=15000)
 
     def list_documents(self, policy_number: str) -> tuple[GuardDocument, ...]:
         """Parse the Policy Documents / Miscellaneous Documents groups.
@@ -502,9 +532,11 @@ class PlaywrightGuardBrowser:
             next_title = _DOC_GROUPS[idx + 1] if idx + 1 < len(_DOC_GROUPS) else None
 
             # Walk following siblings in document order, stopping at next section.
-            # Use XPath to get all following siblings (elements and text).
-            # We'll iterate and check each one's text content.
-            siblings = section_elem.locator('xpath=following-sibling::*')
+            # The <b> title is inside a <div>; the document links are in the
+            # parent div's following sibling divs. Use JS to get parent's siblings.
+            siblings = page.locator(
+                f'xpath=//*[text()[normalize-space(.)="{title}"]]/parent::*/following-sibling::*'
+            )
             try:
                 sib_count = int(siblings.count())
             except Exception:
@@ -758,7 +790,7 @@ class GuardDeliveryLedger:
             raise IntakeHold("Existing Guard file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Guard filename is missing or ambiguous")
@@ -774,6 +806,7 @@ class GuardDeliveryLedger:
             raise IntakeHold("Existing Guard file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -918,7 +951,7 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, issued_on=doc.issued)
+            saved = ledger.record(source, issued_on=doc.issued, insured_name=row.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
