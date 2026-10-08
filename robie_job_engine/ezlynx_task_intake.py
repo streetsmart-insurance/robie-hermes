@@ -342,12 +342,12 @@ def select_intake_work(
 
 
 _HOLD_TOO_OLD = (
-    "Roby here — I did not place a call. This task is older than the "
-    "calling window, so a person needs to decide what to do with it."
+    "Roby here — I did not place a call. This request is too old for an "
+    "automated call, so a person needs to decide what to do with it."
 )
 _HOLD_UNPARSEABLE = (
-    "Roby here — I did not place a call. The Created Date could not be "
-    "read, so a person needs to decide what to do with it."
+    "Roby here — I did not place a call. I could not tell when this "
+    "request was made, so a person needs to decide what to do with it."
 )
 
 
@@ -650,7 +650,7 @@ def _build_worker_and_engine(store: JobStore, *, allow_calls: bool = True):
         from .bland_prod_wiring import build_call_dependencies
         from .call_opt_in import CallOptInStore
         from .call_opt_out import CallOptOutStore
-        from .call_pickup import CallDedupeStore
+        from .call_pickup import CallDedupeStore, DailyCallCapStore
 
         phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
         store_dir = os.path.dirname(store.path)
@@ -660,6 +660,7 @@ def _build_worker_and_engine(store: JobStore, *, allow_calls: bool = True):
             opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
             opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
             call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+            daily_cap=DailyCallCapStore(os.path.join(store_dir, "call_daily_cap.sqlite")),
         )
     else:
         # Recovery of work that already took an effect never places or queues a call:
@@ -1061,6 +1062,35 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
                 len(already),
             )
 
+    # Labeled notes (Carlo's rule, Oct 7 2026). The first run with note
+    # pickup records a timestamp; a labeled note created before it is
+    # baseline and never dialed, so turning this on cannot call yesterday's
+    # labels.
+    label_rows = [t for t in tasks if (getattr(t, "source", "task") or "task") == "label"]
+    if label_rows:
+        from .ezlynx_task_jobs import remember_note_label_pickup
+
+        label_at = remember_note_label_pickup(store, now=_intake_now().isoformat())
+        older = []
+        for task in label_rows:
+            created = (
+                str(getattr(task, "created_at", "") or "")
+                or str(getattr(task, "created_at_et", "") or "")
+                or str(getattr(task, "created_date", "") or "")
+            )
+            if splice_task_predates_enablement(created, label_at):
+                older.append(task.task_id)
+        if older:
+            seen.baseline(older, report_digest=report.digest)
+            logger.warning(
+                "Baselined %s labeled note(s) created before note pickup was "
+                "turned on; dialed none.", len(older),
+            )
+    logger.info(
+        "Labeled notes in this report: %s (Robie AI tasks: %s)",
+        len(label_rows), len(tasks) - len(label_rows),
+    )
+
     new_ids, dropped = seen.observe(
         [task.task_id for task in tasks], report_digest=report.digest,
     )
@@ -1240,7 +1270,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     phone_lookup, bland_client, transfer_lookup, call_dry_run = build_call_dependencies()
     from .call_opt_in import CallOptInStore
     from .call_opt_out import CallOptOutStore
-    from .call_pickup import CallDedupeStore
+    from .call_pickup import CallDedupeStore, DailyCallCapStore
 
     store_dir = os.path.dirname(store.path)
     worker = TaskAssignmentWorker(
@@ -1254,6 +1284,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
         opt_out_store=CallOptOutStore(os.path.join(store_dir, "call_opt_outs.sqlite")),
         opt_in_store=CallOptInStore(os.path.join(store_dir, "call_opt_ins.sqlite")),
         call_dedupe=CallDedupeStore(os.path.join(store_dir, "call_dedupe.sqlite")),
+        daily_cap=DailyCallCapStore(os.path.join(store_dir, "call_daily_cap.sqlite")),
     )
     verifier = TaskIntakeVerifier(
         discussion_client=discussion_client, task_reassigner=reassigner, store=store,

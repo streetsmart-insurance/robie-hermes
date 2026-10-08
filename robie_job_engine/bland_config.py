@@ -13,8 +13,11 @@ Jake's requirements (email 2026-10-02):
 4. Test call: approved
 
 Carlo's corrections:
-- Callback number: 732-462-8343 (not Jake's 732-481-2520)
 - Recording: OFF (per PR #715 design requirement)
+
+Callback number (Carlo, Oct 7 2026 10:34 PM): the agency main line
+732-462-8343 everywhere a callback number is spoken or written, including
+voicemails. Caller ID stays +17322986745.
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ from typing import Optional
 # Jake's approved voice
 KAREN_VOICE_ID = "29158307-9893-4149-8a75-bc9ce313d64e"
 
-# Carlo's corrected callback number (overrides Jake's 732-481-2520)
+# The agency main line: the only callback number, on live scripts, texts
+# and voicemails (Carlo, Oct 7 2026).
 CALLBACK_NUMBER = "732-462-8343"
 CALLBACK_NUMBER_SPOKEN = "7 3 2, 4 6 2, 8 3 4 3"
 

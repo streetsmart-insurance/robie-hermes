@@ -119,6 +119,31 @@ def remember_splice_workflows(store: Any, *, enabled: bool, now: str) -> str:
     return now
 
 
+def remember_note_label_pickup(store: Any, *, now: str) -> str:
+    """When labeled-note pickup first ran on this database.
+
+    Recorded once and never moved. Labeled notes created before it are
+    baseline (never dialed).
+    """
+    with store.connect() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS note_label_pickup (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled_at TEXT NOT NULL
+            )"""
+        )
+        row = conn.execute(
+            "SELECT enabled_at FROM note_label_pickup WHERE id=1"
+        ).fetchone()
+        if row is not None:
+            return str(row["enabled_at"] or "")
+        conn.execute(
+            "INSERT INTO note_label_pickup (id, enabled_at) VALUES (1, ?)",
+            (now,),
+        )
+    return now
+
+
 def remember_live_mode(store: Any, *, live: bool, now: str) -> str:
     """Return when live mode was first enabled. Record it on the first live run."""
     with store.connect() as conn:
@@ -183,6 +208,7 @@ def job_payload_for_task(
         "assigned_producer": task.assigned_producer,
         "csr": task.csr,
         "activity_labels": task.activity_labels,
+        "source": getattr(task, "source", "task") or "task",
         "created_at": task.created_at,
         "created_at_et": task.created_at_et,
         "workflow": _workflow_id(task),

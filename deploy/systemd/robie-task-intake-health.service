@@ -18,6 +18,11 @@ Environment=ROBIE_TASK_INTAKE_CHECK_EFFECTIVE_ENV=1
 EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
 EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
 EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+# Chat alert space and identity (ROBIE_CHAT_SA_KEY_FILE,
+# ROBIE_CHAT_APP_CLIENT_EMAIL). Without these every alert failed with
+# ChatAppIdentityError on Oct 6 2026; Prod had them only as a hand drop-in.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-4359-health.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-svc-chat-key.env
 ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.task_intake_health
 NoNewPrivileges=true
 PrivateTmp=true

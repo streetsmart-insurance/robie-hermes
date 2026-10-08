@@ -54,6 +54,11 @@ class AssignedTask:
     activity_labels: str = ""  # Activity Labels (Robie Call / workflow labels)
     created_at: str = ""       # Created Date, naive America/Chicago
     created_at_et: str = ""    # Created Date converted to America/New_York
+    # "task": a task assigned to Robie AI (the original path).
+    # "label": a row that carries a Robie call label but is not assigned to
+    # Robie AI, usually a plain EZLynx note (Carlo's rule, Oct 7 2026:
+    # staff just add the label). These rows are never reassigned.
+    source: str = "task"
 
 
 class TaskReportParseError(ValueError):
@@ -80,6 +85,50 @@ REQUIRED_HEADERS = [
 
 # The assignee name as it appears in EZLynx.
 ROBIE_ASSIGNEE = "Robie AI"
+# Robie's own notes are never a request, even if a label shows on them.
+ROBIE_NOTE_AUTHOR = "Robie AI"
+NOTE_LABEL_PICKUP_ENV = "ROBIE_NOTE_LABEL_PICKUP"
+SOURCE_TASK = "task"
+SOURCE_LABEL = "label"
+
+
+def note_label_pickup_enabled(env=None) -> bool:
+    """Labeled notes are picked up unless ROBIE_NOTE_LABEL_PICKUP=0."""
+    import os
+
+    source = os.environ if env is None else env
+    return str(source.get(NOTE_LABEL_PICKUP_ENV) or "").strip() != "0"
+
+
+def label_row_id(discussion_id: str, created_at: str) -> str:
+    """Stable numeric id for a labeled row that has no Task ID.
+
+    "9" + Discussion ID + Created Date digits (to the second). Real EZLynx
+    task ids are 8 digits, so this cannot collide with one, and it stays
+    numeric so every existing id check still applies. Empty when either
+    part is missing (the row is then skipped: Robie cannot write back).
+    """
+    disc = "".join(ch for ch in str(discussion_id or "") if ch.isdigit())
+    stamp = "".join(ch for ch in str(created_at or "")[:19] if ch.isdigit())
+    if not disc or len(stamp) < 12:
+        return ""
+    return f"9{disc}{stamp}"
+
+
+def _call_label_key(labels: str) -> str:
+    """Which call label this row carries, or "" when none.
+
+    Uses the same exact-label rules as the intake (call_pickup), so a
+    label that would not dial is not picked up either.
+    """
+    from .call_pickup import classify_call_request
+
+    decision = classify_call_request(labels or "", "")
+    if decision.action == "freeform":
+        return "robie-call"
+    if decision.action == "workflow":
+        return decision.workflow_id or "workflow"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -94,7 +143,9 @@ def parse_task_report(csv_content: str) -> list[AssignedTask]:
     return parse_task_report_detail(csv_content).tasks
 
 
-def parse_task_report_detail(csv_content: str) -> TaskReportParse:
+def parse_task_report_detail(
+    csv_content: str, *, include_labeled_notes: bool | None = None,
+) -> TaskReportParse:
     """Parse a task report CSV into AssignedTask records.
 
     Filters to tasks assigned to Robie AI (the report contains all
@@ -105,9 +156,19 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
     when no tasks are assigned to Robie AI — that is a healthy,
     quiet outcome.
 
+    Labeled rows (Carlo's rule, Oct 7 2026): a row that is NOT assigned to
+    Robie AI but carries a Robie call label in Activity Labels (usually a
+    plain note) is kept too, with source="label". Its id is the real Task
+    ID when the row has one, otherwise label_row_id(). Robie's own notes
+    are skipped. One row per applicant, discussion and label is kept (the
+    newest, since the report is newest first). Turn this off with
+    ROBIE_NOTE_LABEL_PICKUP=0.
+
     Created Date is America/Chicago and is stored again as Eastern.
     Exactly 500 data rows logs a truncation warning.
     """
+    if include_labeled_notes is None:
+        include_labeled_notes = note_label_pickup_enabled()
     if not csv_content or not csv_content.strip():
         raise TaskReportParseError("Empty CSV content")
 
@@ -124,6 +185,9 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
     tasks: list[AssignedTask] = []
     row_count = 0
     newest_et: datetime | None = None
+    label_seen: set[tuple[str, str, str]] = set()
+    robie_task_ids: set[str] = set()
+    robie_discussions: set[tuple[str, str]] = set()
     for line_no, row in enumerate(reader, start=2):
         row_count += 1
         # Fail-closed on ragged rows
@@ -141,6 +205,10 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
 
         assigned_to = (row.get("Task Assigned To") or "").strip()
         if assigned_to != ROBIE_ASSIGNEE:
+            if include_labeled_notes:
+                labeled = _labeled_row(row, label_seen)
+                if labeled is not None:
+                    tasks.append(labeled)
             continue
 
         task_id = (row.get("Task ID") or "").strip()
@@ -149,6 +217,11 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
                 f"Row {line_no} assigned to Robie AI has no Task ID"
             )
 
+        robie_task_ids.add(task_id)
+        robie_discussions.add((
+            (row.get("Applicant ID") or "").strip(),
+            (row.get("Discussion ID") or "").strip(),
+        ))
         created_at = (row.get("Created Date") or "").strip()
         created_date = (row.get("Task Created Date") or "").strip()
         created_et = report_created_et(created_at or created_date)
@@ -175,6 +248,25 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
             created_at_et=created_et.isoformat() if created_et else "",
         ))
 
+    # A labeled row whose Task ID is also a Robie AI task row is that
+    # task, handled by the original path. Keep one. A labeled note on the
+    # same client discussion as a Robie AI task in this report is left to
+    # that task too: the call dedupe keys on note text, so both paths could
+    # otherwise dial the same client the same day.
+    kept: list[AssignedTask] = []
+    for task in tasks:
+        if task.source == SOURCE_LABEL and (
+            task.task_id in robie_task_ids
+            or (task.applicant_id, task.discussion_id) in robie_discussions
+        ):
+            logger.info(
+                "labeled row %s left to the Robie AI task on discussion %s",
+                task.task_id, task.discussion_id,
+            )
+            continue
+        kept.append(task)
+    tasks = kept
+
     if row_count == REPORT_ROW_CAP:
         logger.warning(
             "task report has exactly %s rows, newest first; older rows may "
@@ -186,4 +278,63 @@ def parse_task_report_detail(csv_content: str) -> TaskReportParse:
         tasks=tasks,
         row_count=row_count,
         newest_created_et=newest_et.isoformat() if newest_et else "",
+    )
+
+
+def _labeled_row(
+    row: dict, seen: set[tuple[str, str, str]],
+) -> AssignedTask | None:
+    """A labeled row not assigned to Robie AI, or None to skip it."""
+    labels = (row.get("Activity Labels") or "").strip()
+    if not labels:
+        return None
+    label = _call_label_key(labels)
+    if not label:
+        return None
+    author = (row.get("Note Created by") or "").strip()
+    if author.casefold() == ROBIE_NOTE_AUTHOR.casefold():
+        return None
+    applicant_id = (row.get("Applicant ID") or "").strip()
+    discussion_id = (row.get("Discussion ID") or "").strip()
+    if not applicant_id or not discussion_id:
+        logger.warning(
+            "labeled row skipped: no applicant or discussion id (label %s)", label,
+        )
+        return None
+    created_at = (row.get("Created Date") or "").strip()
+    created_date = (row.get("Task Created Date") or "").strip()
+    real_task_id = (row.get("Task ID") or "").strip()
+    row_id = real_task_id if real_task_id.isdigit() else label_row_id(
+        discussion_id, created_at or created_date,
+    )
+    if not row_id:
+        logger.warning(
+            "labeled row skipped: no usable Created Date (discussion %s)", discussion_id,
+        )
+        return None
+    key = (applicant_id, discussion_id, label)
+    if key in seen:
+        return None
+    seen.add(key)
+    created_et = report_created_et(created_at or created_date)
+    return AssignedTask(
+        task_id=row_id,
+        title=(row.get("Activity Type") or "").strip(),
+        description=(row.get("Note") or "").strip(),
+        applicant_id=applicant_id,
+        applicant_name=(row.get("Account Name") or "").strip(),
+        assigned_to="",
+        due_date=(row.get("Task Due Date") or "").strip(),
+        priority=(row.get("Task Priority") or "").strip(),
+        created_date=created_date or created_at,
+        status=(row.get("Task Status") or "").strip(),
+        discussion_id=discussion_id,
+        last_modified=(row.get("Task Last Modified Date") or "").strip() or created_at,
+        created_by=(row.get("Note Created by") or row.get("Task Created By") or "").strip(),
+        assigned_producer=(row.get("Assigned Producer") or "").strip(),
+        csr=(row.get("CSR") or "").strip(),
+        activity_labels=labels,
+        created_at=created_at,
+        created_at_et=created_et.isoformat() if created_et else "",
+        source=SOURCE_LABEL,
     )

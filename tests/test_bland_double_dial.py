@@ -425,7 +425,7 @@ def test_attempt_payloads_voicemail_behavior_and_script_content():
     script = meta["voicemail_script"]
     assert "Eva" in script and "AI assistant" in script
     assert "Jake" in script and "StreetSmart Insurance" in script
-    assert "732-481-2520" in script
+    assert "732-462-8343" in script
     assert meta["agent_identity"].startswith("Eva, an AI assistant")
 
 
