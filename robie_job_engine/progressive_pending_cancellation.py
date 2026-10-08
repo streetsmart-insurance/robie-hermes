@@ -193,7 +193,19 @@ class FaoDocument:
 
     @property
     def memo_document_id(self) -> str:
-        """Durable ledger identity for an underwriting memo."""
+        """Durable ledger identity for an underwriting memo.
+
+        The memo date is part of the key: a policy can carry two memos with
+        the same name on different dates (live 2026-10-08, 879176249 and
+        879177962), and without the date the second one collided with the
+        first in the ledger.
+        """
+        slug = re.sub(r"[^a-z0-9]+", "-", self.document_name.casefold()).strip("-")
+        return f"progressive:{self.policy_number}:memo:{self.document_date.isoformat()}:{slug}"
+
+    @property
+    def legacy_memo_document_id(self) -> str:
+        """Pre-2026-10-08 memo key (no date); read only, for old ledgers."""
         slug = re.sub(r"[^a-z0-9]+", "-", self.document_name.casefold()).strip("-")
         return f"progressive:{self.policy_number}:memo:{slug}"
 
@@ -843,11 +855,26 @@ class FaoCancellationLedger:
             raise IntakeHold("Progressive FAO filename is missing or ambiguous")
         return folder / safe
 
-    def delivery_status(self, *, document_id: str, filename: str, issued_on: date) -> bool:
-        """True when this exact document was already delivered."""
+    def delivery_status(
+        self, *, document_id: str, filename: str, issued_on: date, legacy_id: str | None = None,
+    ) -> bool:
+        """True when this exact document was already delivered.
+
+        ``legacy_id`` is an older key for the same document; it only counts
+        when its entry names this exact file and issued date.
+        """
         self.ensure_private()
         path = self.pdf_path(issued_on, filename)
-        entry = self._load()["items"].get(document_id)
+        items = self._load()["items"]
+        entry = items.get(document_id)
+        if entry is None and legacy_id:
+            legacy = items.get(legacy_id)
+            if (
+                isinstance(legacy, dict)
+                and legacy.get("filename") == filename
+                and legacy.get("issued_date") == issued_on.isoformat()
+            ):
+                entry = legacy
         exists = path.exists()
         if entry is None and not exists:
             return False
@@ -946,7 +973,8 @@ def _pull_underwriting_memos(
         memo_id = doc.memo_document_id
         try:
             if ledger.delivery_status(
-                document_id=memo_id, filename=doc.memo_filename, issued_on=doc.document_date
+                document_id=memo_id, filename=doc.memo_filename, issued_on=doc.document_date,
+                legacy_id=doc.legacy_memo_document_id,
             ):
                 uw_memos.append({
                     "document_id": memo_id,

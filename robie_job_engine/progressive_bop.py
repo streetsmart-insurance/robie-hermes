@@ -2197,6 +2197,12 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
         opened.append(new_page)
 
     context.on("page", on_page)
+    seen_requests: list[Any] = []
+
+    def on_request(request: Any) -> None:
+        seen_requests.append(request)
+
+    context.on("request", on_request)
     downloads: list[bytes] = []
     clicked = False
     try:
@@ -2205,15 +2211,27 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
             open_document()
             clicked = True
 
+        download = None
         try:
             with page.expect_download(timeout=timeout_ms) as download_info:
                 wrapped()
-            downloads.append(_download_bytes(download_info.value))
+            download = download_info.value
         except (IntakeHold, RowHold):
             raise
         except Exception as exc:
             if not clicked or not _is_download_timeout(exc):
                 raise IntakeHold("Notice of Non Payment capture is missing or ambiguous") from exc
+        if download is not None:
+            try:
+                blob = _download_bytes(download)
+            except Exception:
+                blob = b""
+            if not blob:
+                # Sandboxed carrier Chrome (PrivateTmp): the download lands in
+                # Chrome's private /tmp and reads back empty here. Fetch the
+                # same request again inside this browser session.
+                blob = _refetch_download(page, str(getattr(download, "url", "") or ""), seen_requests)
+            downloads.append(blob)
         for item in opened:
             wait = getattr(item, "wait_for_load_state", None)
             if not callable(wait):
@@ -2231,10 +2249,11 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
     finally:
         remover = getattr(context, "remove_listener", None)
         if callable(remover):
-            try:
-                remover("page", on_page)
-            except Exception:
-                pass
+            for event, handler in (("page", on_page), ("request", on_request)):
+                try:
+                    remover(event, handler)
+                except Exception:
+                    pass
         for item in opened:
             if not _is_own_tab(item):
                 continue
@@ -2458,6 +2477,41 @@ def _http_get(page: Any, url: str) -> bytes:
     if not isinstance(body, (bytes, bytearray)):
         raise IntakeHold("Notice of Non Payment capture is missing or ambiguous")
     return bytes(body)
+
+
+def _refetch_download(page: Any, url: str, seen_requests: list[Any]) -> bytes:
+    """Re-issue the request behind a download in the same browser context.
+
+    Only https Progressive/FAO/BOP URLs; GET as is, POST only for a
+    url-encoded form body seen on that exact URL. Returns b"" unless the
+    reply is a PDF.
+    """
+    if not url or not _allowed_pdf_url(url):
+        return b""
+    matches = [req for req in seen_requests if str(getattr(req, "url", "") or "") == url]
+    request = matches[-1] if matches else None
+    method = str(getattr(request, "method", "GET") or "GET").upper()
+    client = page.context.request
+    try:
+        if method == "GET":
+            response = client.get(url, timeout=DOWNLOAD_TIMEOUT_MS)
+        elif method == "POST":
+            body = getattr(request, "post_data", None)
+            headers = getattr(request, "headers", None) or {}
+            content_type = str(headers.get("content-type") or "") if isinstance(headers, dict) else ""
+            if not body or "application/x-www-form-urlencoded" not in content_type.lower():
+                return b""
+            response = client.post(url, data=body, headers={"content-type": content_type}, timeout=DOWNLOAD_TIMEOUT_MS)
+        else:
+            return b""
+    except Exception:
+        return b""
+    if getattr(response, "ok", True) is False:
+        return b""
+    blob = response.body()
+    if not isinstance(blob, (bytes, bytearray)) or not _is_pdf(bytes(blob)):
+        return b""
+    return bytes(blob)
 
 
 def _download_bytes(download: Any) -> bytes:

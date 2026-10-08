@@ -1,0 +1,31 @@
+[Unit]
+Description=ROBIE Test-only daily carrier document pull (dry run; EZLynx filing off; Drive QA upload)
+After=network-online.target robie-carrier-browser-test.service
+Wants=network-online.target robie-carrier-browser-test.service
+[Service]
+Type=oneshot
+User=streetsmart-hermes-test
+Group=streetsmart-hermes-test
+UMask=0077
+# Runs from its own staged release, never Test's current link:
+#   /var/lib/robie-carrier-pull-test/release -> releases/<sha>/robie-hermes-<sha>
+WorkingDirectory=/var/lib/robie-carrier-pull-test/release
+Environment=PYTHONPATH=/var/lib/robie-carrier-pull-test/release
+Environment=ROBIE_ENV=TEST
+Environment=ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9223
+Environment=HOME=/opt/streetsmart-hermes-test
+# ROBIE_GOOGLE_TOKEN_FILE: the Test Drive token (Drive upload only).
+EnvironmentFile=-/etc/streetsmart-hermes-test/robie-recording.env
+EnvironmentFile=-/etc/streetsmart-hermes-test/robie-carrier-pull.env
+# No --notify: posting the summary to the ROBIE health Chat needs approval and
+# ROBIE_HEALTH_CHAT_SPACE; the summary is written to runs/<date>/summary.txt.
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull-test --upload-drive
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/robie-carrier-pull-test /opt/streetsmart-hermes-test/.hermes
+TimeoutStartSec=4h
+[Install]
+WantedBy=multi-user.target
