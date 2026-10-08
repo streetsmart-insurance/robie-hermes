@@ -1,0 +1,4 @@
+FROM gcr.io/distroless/python3-debian12
+WORKDIR /app
+COPY scripts/outcome_health_check.py /app/
+ENTRYPOINT ["python3", "outcome_health_check.py"]
