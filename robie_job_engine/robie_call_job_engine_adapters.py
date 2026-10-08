@@ -133,6 +133,7 @@ def build_robie_call_ports(
     opt_out_store: Any = None,
     opt_in_store: Any = None,
     call_dedupe: Any = None,
+    daily_cap: Any = None,
 ) -> Any:
     """Build RobieCallPorts with real Job Engine checkpoint/status adapters.
 
@@ -156,4 +157,5 @@ def build_robie_call_ports(
         opt_out_store=opt_out_store,
         opt_in_store=opt_in_store,
         call_dedupe=call_dedupe,
+        daily_cap=daily_cap,
     )

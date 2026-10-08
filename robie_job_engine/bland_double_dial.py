@@ -51,6 +51,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from .bland_config import CALLBACK_NUMBER
+
 POLICY_VERSION = "double-dial-v1"
 PINNED_CALLER_ID = "+17322986745"
 
@@ -423,7 +425,8 @@ AGENT_NAME = "Eva"
 AGENT_IDENTITY = (
     "Eva, an AI assistant calling on behalf of Jake from StreetSmart Insurance"
 )
-CALLBACK_NUMBER_SPOKEN = "732-481-2520"
+# The agency main line is the only callback number (Carlo, Oct 7 2026).
+CALLBACK_NUMBER_SPOKEN = CALLBACK_NUMBER
 PACE_GUIDANCE = (
     "Speak slowly and evenly. Every response is one or two sentences. "
     "Never rush; pause between turns."

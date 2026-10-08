@@ -418,6 +418,7 @@ class TaskAssignmentWorker:
         opt_out_store: Any | None = None,
         opt_in_store: Any | None = None,
         call_dedupe: Any | None = None,
+        daily_cap: Any | None = None,
     ):
         self.client = discussion_client
         self.reassigner = task_reassigner
@@ -434,6 +435,7 @@ class TaskAssignmentWorker:
         self.opt_out_store = opt_out_store
         self.opt_in_store = opt_in_store
         self.call_dedupe = call_dedupe
+        self.daily_cap = daily_cap
         self._lease: _Lease | None = None
         self._last_note_kind = LEGACY_NOTE_KIND
 
@@ -896,10 +898,14 @@ class TaskAssignmentWorker:
             "queued_at": payload.get("queued_at") or "",
             "live_enabled_at": payload.get("live_enabled_at") or "",
             "splice_enabled_at": payload.get("splice_enabled_at") or "",
+            # "label": a labeled note, not a task assigned to Robie AI.
+            # There is no task to hand back, so it is never reassigned.
+            "Source": getattr(task, "source", "task") or "task",
         }
+        label_only = (getattr(task, "source", "task") or "task") == "label"
         reassign_port = (
             _WorkerReassignPortAdapter(self.reassigner, task)
-            if self.reassigner is not None else None
+            if self.reassigner is not None and not label_only else None
         )
         ports = build_robie_call_ports(
             store,
@@ -911,6 +917,7 @@ class TaskAssignmentWorker:
             opt_out_store=self.opt_out_store,
             opt_in_store=self.opt_in_store,
             call_dedupe=self.call_dedupe,
+            daily_cap=self.daily_cap,
         )
         config = rch.RobieCallConfig(
             dry_run=self.call_dry_run,
@@ -1243,6 +1250,7 @@ def _task_from_payload(payload: dict[str, Any]) -> AssignedTask:
         activity_labels=str(payload.get("activity_labels") or ""),
         created_at=str(payload.get("created_at") or ""),
         created_at_et=str(payload.get("created_at_et") or ""),
+        source=str(payload.get("source") or "task"),
     )
 
 

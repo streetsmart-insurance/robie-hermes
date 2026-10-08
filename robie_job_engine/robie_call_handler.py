@@ -359,6 +359,7 @@ class RobieCallPorts:
     opt_out_store: Optional[Any] = None  # press 6 stops later automated calls
     opt_in_store: Optional[Any] = None  # marketing workflows require a recorded opt-in
     call_dedupe: Optional[Any] = None  # one automated call per note per day
+    daily_cap: Optional[Any] = None  # call_pickup.DailyCallCapStore
 
 
 @dataclass
@@ -463,6 +464,26 @@ def _pick(task: Dict[str, Any], logical: str) -> str:
         if key in task and task[key] not in (None, ""):
             return str(task[key]).strip()
     return ""
+
+
+def _is_label_request(task: Dict[str, Any]) -> bool:
+    """True for a labeled note (not a task assigned to Robie AI)."""
+    return str(task.get("Source") or task.get("source") or "").strip() == "label"
+
+
+def _request_word(task: Dict[str, Any]) -> str:
+    return "note" if _is_label_request(task) else "task"
+
+
+def _redo_hint(task: Dict[str, Any], *, lower: bool = False) -> str:
+    """Plain-English 'how to ask again' for this kind of request."""
+    labels = _pick(task, "activity_labels") or "Robie"
+    label = labels.split(",")[0].strip() or "Robie"
+    if _is_label_request(task):
+        text = f"Add a new note with the {label} label"
+    else:
+        text = f"Make a new {label} task"
+    return (text[0].lower() + text[1:]) if lower else text
 
 
 def is_call_task(task: Dict[str, Any]) -> bool:
@@ -1943,7 +1964,16 @@ def _handle_call_task(
     # ---- 3. Instruction (needed by recovery + ambiguity paths) ---------------
     instruction = _extract_instruction(task)
     if not instruction:
-        return fail("task has no usable instruction text; failing closed")
+        from .call_pickup import classify_call_request as _classify
+        from .splice_scripts import get_workflow as _get_workflow
+
+        _early = _classify(_pick(task, "activity_labels"), "")
+        _wf = _get_workflow(_early.workflow_id) if _early.action == "workflow" else None
+        if _wf is not None:
+            # A scripted label needs no typed words; the label is the request.
+            instruction = _wf.title
+        else:
+            return fail("task has no usable instruction text; failing closed")
 
     # ---- 3b. Content dedup (before ambiguity: identical re-tasks) -----------
     # Same applicant + same instruction as two different tasks (sloppy
@@ -2155,16 +2185,14 @@ def _handle_call_task(
     # Robie Call dials only a number typed in the task. It never uses the
     # phone on file. No usable typed number files one short note and does
     # not dial.
-    # Robie Lead Follow Up uses a typed number first, then the phone on file.
-    # Policy, claim, and quote numbers are not phones. A bare digit run
-    # that could be either is a question, not a dial, except on a Splice
-    # label, which does not read the note for a number.
-    if workflow is not None and workflow.id in SPLICE_WORKFLOW_IDS:
-        phone_policy = "on_file_only"
-    elif decision.action == "freeform":
+    # Carlo's rule (Oct 7 2026, 9:05 PM): staff just add the label and
+    # Robie uses the phone on the client's account. Robie Lead Follow Up
+    # and every Splice label therefore dial ONLY the number on file and
+    # ignore digits typed in the note. Robie Call is the one exception.
+    if decision.action == "freeform":
         phone_policy = "typed_only"
     else:
-        phone_policy = "typed_then_file"
+        phone_policy = "on_file_only"
     explicit_phone = None
     phone_text_ambiguous = False
     if phone_policy != "on_file_only":
@@ -2173,12 +2201,12 @@ def _handle_call_task(
         log.warning("ambiguous number in task %s; asking instead of dialing",
                     task_id)
         if phone_policy == "typed_only":
-            # Intake will not open this task again once it has a job.
-            # The note has to ask for a new task.
+            # Intake will not open this request again once it has a job.
+            # The note has to ask for a new one.
             clar_note = (
-                "Robie did not call because it couldn't tell which number "
-                "to dial. Make a new Robie Call task and write 'call at' "
-                "or 'phone' before the number."
+                "Robie did not call because it could not tell which number "
+                f"to dial. {_redo_hint(task)} and write 'call at' or 'phone' "
+                "before the number."
             )
         else:
             clar_note = (
@@ -2207,7 +2235,9 @@ def _handle_call_task(
                     task_id)
         clar_note = (
             "Robie did not call because no phone number was typed in this "
-            "task. Make a new Robie Call task with the number to call."
+            f"{_request_word(task)}. A Robie Call only dials a number that is "
+            f"typed in, never the number on file. {_redo_hint(task)} with "
+            "the number to call."
         )
         wb = _writeback_once(
             ports, task_id, "clarification_missing_number",
@@ -2272,8 +2302,23 @@ def _handle_call_task(
             clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
     if not phone:
+        log.warning("no phone on file for applicant %s; asking instead of dialing",
+                    applicant_id)
+        clar_note = (
+            "Robie did not call because there is no phone number on this "
+            "client's account. Add a phone number to the account, then "
+            f"{_redo_hint(task, lower=True)}."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_no_phone_on_file",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
         return fail(
-            f"no dialable phone found for applicant {applicant_id}; failing closed"
+            f"no dialable phone found for applicant {applicant_id}; asked for "
+            "a number, not dialed",
+            writeback=wb,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
         )
     log.info("resolved phone for applicant %s", applicant_id)
 
@@ -2540,6 +2585,38 @@ def _handle_call_task(
                 "called_party": called_party or applicant_name or None,
                 "on_behalf_of_producer": producer_name,
                 "workflow": workflow.id if workflow is not None else None}
+
+    # ---- 5c. Daily hard cap (Jake, Oct 7 2026: 5 calls on day one) -------
+    # Counted per America/New_York day before anything is dialed. Dry runs
+    # count in their own bucket so a rehearsal never uses up live calls.
+    from .call_pickup import daily_call_cap
+
+    cap = daily_call_cap()
+    cap_store = getattr(ports, "daily_cap", None)
+    if cap is not None and cap_store is not None:
+        cap_day = calling_day(_calling_now(config))
+        bucket = f"dry:{cap_day}" if config.dry_run else cap_day
+        used = cap_store.count(bucket)
+        if used >= cap:
+            log.warning("daily call cap reached (%s of %s); not dialing task %s",
+                        used, cap, task_id)
+            cap_note = (
+                "Robie did not call because today's limit of "
+                f"{cap} automated calls was already reached. "
+                f"{_redo_hint(task)} on the next business day and Robie will "
+                "call then."
+            )
+            wb = _writeback_once(
+                ports, task_id, "daily_cap_reached",
+                applicant_id, cap_note, title_hint=None)
+            _mark_processed(task_id)
+            _mark_content_processed(applicant_id, instruction)
+            return fail(
+                f"daily call cap reached ({used} of {cap}); not dialed",
+                writeback=wb,
+                daily_cap_reached=True,
+            )
+        cap_store.record(bucket)
 
     # ---- 6a. Durable call intent (BEFORE the dial) --------------------------
     # Save the intent to dial BEFORE the Bland POST. If the POST times out,
