@@ -236,6 +236,7 @@ def run_guarded_email_task(
     attachment_names: tuple[str, ...] = (),
     thread_id: str = "",
     sender: str = "",
+    intake: dict[str, Any] | None = None,
 ) -> str:
     """Run once and require independent destination evidence before completion."""
     request_text = prompt
@@ -312,6 +313,10 @@ def run_guarded_email_task(
         }
         if str(thread_id or "").strip():
             payload["gmail_thread_id"] = str(thread_id).strip()
+        if intake:
+            # Why the watcher kept this email, its dedupe fingerprint and
+            # Message-ID (see email_intake_filter).
+            payload["email_intake"] = dict(intake)
         job = store.create_job(
             "hermes.email_task",
             payload,

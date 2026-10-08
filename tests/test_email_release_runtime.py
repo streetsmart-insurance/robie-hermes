@@ -130,7 +130,7 @@ class EmailProcessBoundaryTests(TestCase):
         body=f'Verify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}'
         service=Mock(); api=service.users.return_value.messages.return_value
         api.list.return_value.execute.return_value={'messages':[{'id':'m1'}]}
-        api.get.return_value.execute.return_value={'id':'m1','threadId':'thread','payload':{'headers':[{'name':'from','value':'sender@example.test'},{'name':'subject','value':'Task'}]}}
+        api.get.return_value.execute.return_value={'id':'m1','threadId':'thread','payload':{'headers':[{'name':'from','value':'sender@example.test'},{'name':'to','value':'robie@streetsmart.insurance'},{'name':'subject','value':'Task'}]}}
         with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db'); calls=[]
             def execute(prompt,job_id,db_path,**kwargs):
@@ -142,7 +142,7 @@ class EmailProcessBoundaryTests(TestCase):
                 return f'Policy {BOND_POLICY} exists.'
             ns={'get_gmail_service':lambda:service,'load_processed_ids':lambda:set(),'save_processed_ids':Mock(),
                 'extract_sender_email':lambda v:v,'is_allowed_sender':lambda v:True,'is_self_sender':lambda v:False,'should_skip_send':lambda *a:(False,'test'),'extract_body_text':lambda p:body,
-                'download_attachments':lambda *a:[],'logger':Mock(),'JOB_DB':db,'run_guarded_email_task':run_guarded_email_task,
+                'download_attachments':lambda *a:[],'load_ascend_sessions':lambda:{},'logger':Mock(),'JOB_DB':db,'run_guarded_email_task':run_guarded_email_task,
                 'run_agent_task':Mock(side_effect=AssertionError('use context')),'run_email_job':execute,
                 'EmailTaskPending':email_guard.EmailTaskPending,'MIMEText':MIMEText,'base64':base64}
             exec(compile(ast.Module(body=[function],type_ignores=[]),'intake','exec'),ns)
