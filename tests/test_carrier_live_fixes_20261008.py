@@ -1303,3 +1303,41 @@ class BopStaleTabTests(unittest.TestCase):
         page = mock.Mock()
         page.locator.return_value.count.return_value = 0
         bop._raise_if_bop_session_expired(page)
+
+
+class FinysSameTabPdfTests(unittest.TestCase):
+    """Live 2026-10-08 4a22f443: the download icon navigated the same tab to GetFile/<x>.pdf?ft=..."""
+
+    GETFILE = "https://fos.finys.com/FileManager/FileManager/GetFile/1053143_copy.pdf?ft=abc%3d"
+
+    def _page(self, url):
+        page = mock.Mock()
+        page.url = url
+        resp = mock.Mock()
+        resp.body.return_value = PDF
+        page.context = SimpleNamespace(pages=[page], request=mock.Mock(get=mock.Mock(return_value=resp)))
+        return page
+
+    def test_pdf_url_with_query_string_is_recognised(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        self.assertTrue(fos._is_pdf_url(self.GETFILE))
+        self.assertFalse(fos._is_pdf_url("https://fos.finys.com/"))
+
+    def test_playwright_timeout_falls_back_to_same_tab_pdf(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = self._page(self.GETFILE)
+        page.expect_download.side_effect = type("TimeoutError", (Exception,), {})("Timeout 8000ms")
+        self.assertEqual(fos.download_view_pdf(page, mock.Mock()), PDF)
+        page.context.request.get.assert_called_once()
+        page.close.assert_not_called()
+
+    def test_same_tab_off_finys_is_not_fetched(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = self._page("https://evil.example/x.pdf")
+        page.expect_download.side_effect = type("TimeoutError", (Exception,), {})("t")
+        with self.assertRaisesRegex(IntakeHold, "did not produce a PDF"):
+            fos.download_view_pdf(page, mock.Mock())
+        page.context.request.get.assert_not_called()

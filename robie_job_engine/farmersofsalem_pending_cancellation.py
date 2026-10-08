@@ -609,22 +609,38 @@ def select_target_document(documents: tuple[FoSDocument, ...]) -> FoSDocument | 
     return candidates[0]
 
 
+def _is_pdf_url(url: str) -> bool:
+    """A PDF address, query string ignored.
+
+    Live 2026-10-08: the Finys download icon navigates the same tab to
+    /FileManager/FileManager/GetFile/<name>.pdf?ft=<token>.
+    """
+    lowered = str(url or "").lower()
+    if lowered.startswith("blob:"):
+        return True
+    path = urllib.parse.urlsplit(lowered).path
+    return path.endswith(".pdf")
+
+
 def _read_viewer_tab_pdf(page: Any) -> bytes | None:
-    """Read PDF bytes when View opened the Chrome viewer in a new tab."""
+    """Read PDF bytes when View opened the Chrome viewer (new tab or this tab)."""
     try:
         context = page.context
         pages = list(context.pages)
     except Exception:
         return None
     me = page
+    if me not in pages:
+        pages.append(me)
+    # Other tabs first; this tab last (it is navigated back by the caller).
+    pages.sort(key=lambda tab: tab is me)
     for tab in pages:
-        if tab is me:
-            continue
         url = str(getattr(tab, "url", "") or "")
         if not url:
             continue
-        lowered = url.lower()
-        if lowered.endswith(".pdf") or lowered.startswith("blob:"):
+        if tab is me and not url.lower().startswith(f"https://{FINYS_HOST}/"):
+            continue
+        if _is_pdf_url(url):
             try:
                 response = context.request.get(url, timeout=DOWNLOAD_TIMEOUT_MS)
             except Exception:
@@ -634,10 +650,11 @@ def _read_viewer_tab_pdf(page: Any) -> bytes | None:
             except Exception:
                 continue
             if _is_pdf(body):
-                try:
-                    tab.close()
-                except Exception:
-                    pass
+                if tab is not me:
+                    try:
+                        tab.close()
+                    except Exception:
+                        pass
                 return body
     return None
 
@@ -647,13 +664,15 @@ def download_view_pdf(page: Any, view: Any) -> bytes:
     try:
         with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
             view.click()
-    except TimeoutError:
+    except Exception as exc:
+        # Playwright's TimeoutError is not the builtin one; any "no download"
+        # outcome falls through to the viewer (new tab or same-tab PDF).
+        if type(exc).__name__ != "TimeoutError" and not isinstance(exc, TimeoutError):
+            raise IntakeHold("Document View did not produce a PDF") from exc
         pdf = _read_viewer_tab_pdf(page)
         if pdf is None:
             raise IntakeHold("Document View did not produce a PDF") from None
         return pdf
-    except Exception as exc:
-        raise IntakeHold("Document View did not produce a PDF") from exc
     download = download_info.value
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "view.pdf"
@@ -749,6 +768,9 @@ class FinysFoSBrowser:
         else:
             _control(self.page, "link", "My Open Tasks").click()
         require_finys_url(str(getattr(self.page, "url", "") or ""))
+        # The task grid renders a few seconds after the landing loads
+        # (live 2026-10-08); wait for it before re-reading.
+        _wait_for(lambda: _has_pending_grid(self.page))
         # The list must still be readable after navigation.
         extract_pending_items(self.page)
 
