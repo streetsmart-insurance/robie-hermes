@@ -87,6 +87,7 @@ _HEADER_FIELDS = (
 )
 # Live Pending Cancellations report (AgencyActivityReports.aspx?r=5).
 PENDING_TABLE_CSS = "#ctl00_MainContent_gvPendingCancellations"
+PENDING_REPORT_URL = "https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5"
 # Live Policy Summary history grid. Its header is the first row, not a thead.
 HISTORY_TABLE_CSS = "#ctl00_MainContent_PolicyHistoryControl2_dgPolicyHistory"
 # The live report has no process-date column. It is read as a snapshot: a row
@@ -687,6 +688,19 @@ def open_pending_cancellations(page: Any) -> None:
     if clicked_pending or _already_on_pending_report(page):
         assert_authenticated(page)
         return
+    # Live 2026-10-08: a tab left on ErrorPage.aspx has none of the dashboard
+    # navigation. Open the report at its own address (the same address the
+    # list is restored from) before holding.
+    goto = getattr(page, "goto", None)
+    if callable(goto):
+        try:
+            goto(PENDING_REPORT_URL, wait_until="domcontentloaded", timeout=POLICY_SUMMARY_WAIT_MS)
+            page.wait_for_selector(PENDING_TABLE_CSS, timeout=POLICY_SUMMARY_WAIT_MS)
+        except Exception:  # noqa: BLE001 - the hold below is the outcome
+            pass
+        if _already_on_pending_report(page):
+            assert_authenticated(page)
+            return
     raise IntakeHold("Pending Cancellations report was not found")
 
 

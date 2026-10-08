@@ -73,7 +73,8 @@ from .progressive_retrieval import SCOPES
 
 
 BOP_SCOPE = "bop_pending_cancel_nonpayment"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+BOP_APP_URL = "https://bop.americanstrategic.com/"
 DOWNLOAD_TIMEOUT_MS = 8000
 # expect_popup returns the HPLanding window as soon as it opens. The BOP
 # application at https://bop.americanstrategic.com/ shows up after that.
@@ -130,8 +131,8 @@ _DOC_NAME_HEADERS = frozenset({
 _DOC_DATE_HEADERS = frozenset({
     "date", "document date", "processed date", "created", "created date", "notice date",
 })
-_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel")
-_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF")
+_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel", "Export Pending Cancel for Non-Payment Xls")
+_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF", "Export Pending Cancel for Non-Payment Pdf")
 _SEARCH_FIELDS = (
     ("searchbox", "Search"),
     ("textbox", "Policy number"),
@@ -585,6 +586,7 @@ class LocalNocLedger:
 
     def ensure_private(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.root, 0o700)
         if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
 
@@ -594,6 +596,7 @@ class LocalNocLedger:
         if folder.is_symlink():
             raise IntakeHold("BOP output directory must be private (0700)")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(folder, 0o700)
         if not folder.is_dir() or folder.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
         return folder
@@ -620,7 +623,7 @@ class LocalNocLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, report_date: date) -> Path:
+    def record(self, source: SourceItem, *, report_date: date, insured_name: str = "") -> Path:
         self.ensure_private()
         path = self.pdf_path(report_date, source.filename)
         if path.exists() or path.is_symlink():
@@ -647,6 +650,7 @@ class LocalNocLedger:
             "bytes": len(source.content),
             "report_date": report_date.isoformat(),
             "policy_number": source.source_id.split(":")[1] if source.source_id.count(":") >= 2 else "",
+            "insured_name": insured_name,
         }
         self._write(data)
         return path
@@ -870,7 +874,7 @@ class BopPendingCancelPortal:
         )
         source.validate()
         self.archive.preserve(source)
-        self.ledger.record(source, report_date=policy.report_date)
+        self.ledger.record(source, report_date=policy.report_date, insured_name=policy.insured_name)
         return _outcome_from_policy(policy, "pulled", source=source)
 
     def _finish(
@@ -1668,19 +1672,79 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     return _attach_bop_application(page, opened)
 
 
-def open_pending_cancel_report(report_page: Any) -> None:
+def open_pending_cancel_report(report_page: Any, report_date: date | None = None) -> None:
+    # The BOP app needs a moment to render after navigation.
+    try:
+        report_page.get_by_role("button", name="VIEW REPORTS", exact=True).wait_for(timeout=15000)
+    except Exception:
+        pass
     _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
-    click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+    # The reports panel may expose direct export buttons (e.g. "Export Pending
+    # Cancel for Non-Payment Xls") without a "Pending Cancel for Nonpayment"
+    # navigation link. Only click through when the link exists.
+    try:
+        click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+        return
+    except (IntakeHold, RowHold):
+        pass
+    # New portal UI: select a date range before the report renders.
+    if report_date is not None:
+        _select_bop_date_range(report_page, report_date)
 
 
-def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
-    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report."""
+def _select_bop_date_range(page: Any, report_date: date) -> None:
+    """Fill the BOP reports date range and apply it."""
+    btn = page.get_by_role("button", name="Select Date Range", exact=True)
+    if btn.count() != 1:
+        return
+    btn.click()
+    page.wait_for_timeout(2000)
+    date_str = report_date.strftime("%m/%d/%Y")
+    start = page.locator("input.report-start").first
+    end = page.locator("input.report-end").first
+    if start.count() and start.is_visible(timeout=3000):
+        start.fill(date_str)
+    if end.count() and end.is_visible(timeout=3000):
+        end.fill(date_str)
+    apply_btn = page.get_by_role("button", name="Apply", exact=True)
+    if apply_btn.count() == 1:
+        apply_btn.click()
+        page.wait_for_timeout(5000)
+
+
+def navigate_to_pending_cancel(page: Any, agent_code: str, report_date: date | None = None) -> Any:
+    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report.
+
+    Falls back to direct BOP app navigation if the HPLanding SSO flow fails
+    (the HPLanding "Service Homeowners Policies" button is often disabled).
+    """
     assert_authenticated(page)
     started_on_shell_home = _on_fao_shell_home(page)
     ensure_fao_shell_home(page)
     assert_agent_context(page, agent_code)
     report_page = open_businessowner_window(page, on_shell_home=started_on_shell_home)
-    open_pending_cancel_report(report_page)
+    try:
+        open_pending_cancel_report(report_page, report_date)
+    except (IntakeHold, RowHold) as exc:
+        # Only an HPLanding window without the BOP app falls back to opening
+        # the BOP application directly; any other hold stands.
+        if not _is_hplanding_target(report_page):
+            raise
+        goto = getattr(page, "goto", None)
+        if not callable(goto):
+            raise
+        goto(BOP_APP_URL, wait_until="domcontentloaded")
+        wait = getattr(page, "wait_for_timeout", None)
+        if callable(wait):
+            wait(5000)
+        try:
+            open_pending_cancel_report(page, report_date)
+        except (IntakeHold, RowHold):
+            raise IntakeHold(
+                "HPLanding opened without the BOP application, and opening "
+                "bop.americanstrategic.com directly showed no View Reports either"
+            ) from exc
+        report_page = page
     assert_authenticated(report_page)
     return report_page
 
@@ -1810,7 +1874,7 @@ class PlaywrightFaoBopBrowser:
         self._doc_rows: tuple[Any, ...] = ()
 
     def load_report(self, report_date: date) -> ReportCapture:
-        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code)
+        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code, report_date)
         png = require_png(self.report_page.screenshot(full_page=True, type="png"))
         try:
             report = read_report_from_page(self.report_page, report_date)

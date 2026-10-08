@@ -462,3 +462,238 @@ class NatGenErrorPageTests(unittest.TestCase):
             with self.assertRaises(IntakeHold):
                 browser.capture_noc("d")
         browser._restore_list.assert_called_once()
+
+
+class ProgressiveFaoLiveTests(unittest.TestCase):
+    """Live 2026-10-08: CL Express documents markup and the new policy servicing site."""
+
+    def test_cl_express_headerless_name_column_parses(self):
+        from datetime import date
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        docs = fao.parse_policy_documents(
+            ("", "Date", "Delivery"),
+            (
+                ("E-mail", "9/28/2026", "EMAIL"),
+                ("Cancel Notice", "9/28/2026", "USPS"),
+                ("", "", ""),
+                ("Cancel Notice", "8/24/2026", "USPS"),
+                ("Final Cancel", "7/20/2026", "USPS"),
+            ),
+            policy_number="970498127",
+        )
+        self.assertEqual([d.document_name for d in docs], ["E-mail", "Cancel Notice", "Cancel Notice", "Final Cancel"])
+        self.assertEqual([d.row_index for d in docs], [0, 1, 3, 4])
+        newest = fao.newest_cancellation_documents(docs)
+        self.assertEqual(len(newest), 1)
+        self.assertEqual((newest[0].document_name, newest[0].document_date), ("Cancel Notice", date(2026, 9, 28)))
+
+    def test_two_cancel_docs_on_newest_date_stay_ambiguous(self):
+        from datetime import date
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        docs = [
+            fao.FaoDocument("1", "Cancel Notice", date(2026, 9, 28), "USPS", 0),
+            fao.FaoDocument("1", "Notice of Cancellation", date(2026, 9, 28), "USPS", 1),
+            fao.FaoDocument("1", "Cancel Notice", date(2026, 8, 1), "USPS", 2),
+        ]
+        self.assertEqual(len(fao.newest_cancellation_documents(docs)), 2)
+
+    def test_policy_servicing_host_is_accepted_and_recognised(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
+        self.assertTrue(fao._is_policy_page_url(url))
+        self.assertEqual(fao.require_fao_url(url), url)
+        self.assertFalse(fao._is_policy_page_url("https://www.foragentsonly.com/managepolicies/"))
+
+    def test_cl_documents_header_link_is_used_when_no_tab(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        link = mock.Mock()
+        link.is_visible.return_value = True
+        tab_loc = mock.Mock()
+        tab_loc.count.return_value = 0
+        link_loc = mock.Mock()
+        link_loc.count.return_value = 1
+        link_loc.nth.return_value = link
+        page = mock.Mock()
+        page.get_by_role.side_effect = lambda role, name=None: tab_loc if role == "tab" else link_loc
+        fao.open_cl_documents(page)
+        link.click.assert_called_once()
+        pattern = page.get_by_role.call_args_list[-1].kwargs["name"]
+        self.assertTrue(pattern.match("Documents") and pattern.match("DOCUMENTS"))
+
+    def test_policy_page_timeout_holds_one_policy_not_the_carrier(self):
+        import os
+        import tempfile
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = (
+            SimpleNamespace(policy_number="871490213", tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u"),
+            SimpleNamespace(policy_number="970498127", tab_label="", reason="NON-PAYMENT", insured_name="B",
+                            cancel_date=None, list_url="u"),
+        )
+        browser = mock.Mock()
+        browser.screenshot_report.return_value = b"\x89PNG\r\n\x1a\n"
+        browser.load_current_tab.side_effect = [rows, (), ()]
+        browser.open_policy_summary.side_effect = [type("TimeoutError", (Exception,), {})("x"), None]
+        browser.list_documents.side_effect = IntakeHold("Progressive FAO document list is empty")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            receipt = fao.run_pull(browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                                   as_of=__import__("datetime").date(2026, 10, 8))
+        self.assertEqual(receipt["status"], "PULLED")
+        self.assertEqual([h["policy"] for h in receipt["held"]], ["871490213", "970498127"])
+        self.assertIn("did not open", receipt["held"][0]["reason"])
+
+
+class FarmersOfSalemFinysGridTests(unittest.TestCase):
+    def test_live_headers_map(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        headers = ("Details", "", "Loss #", "Policy/Quote", "Insured Name", "Notes", "Department", "Type",
+                   "Due Days", "Due On", "Created By")
+        idx = fos._header_indexes(headers, fos._PENDING_FIELDS)
+        self.assertEqual((idx["policy_number"], idx["insured_name"], idx["item_type"], idx["due_date"]), (3, 4, 7, 9))
+
+    def test_split_kendo_grid_keeps_only_cancellation_rows(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        def cell(text):
+            return SimpleNamespace(inner_text=lambda: text)
+
+        def row(*texts):
+            cells = [cell(t) for t in texts]
+            return SimpleNamespace(locator=lambda sel: SimpleNamespace(all=lambda: cells))
+
+        live = [
+            row("View Detail", "", "", "HONJ017732", "Noreen VanSalisbury", "n", "Agent", "Cancellation", "7", "10/15/2026", "System Generated"),
+            row("View Detail", "", "", "QCD0039860", "Faisal Panjwani", "n", "Agent", "Referral", "-7", "10/1/2026", "M"),
+            row("View Detail", "", "", "HONJM06241", "Chawki Azar", "n", "Agent", "Reinstatement", "-9", "9/29/2026", "M"),
+            row("View Detail", "", "", "CDNJ001979", "Khalid Chaudhry", "n", "Agent", "Cancellation", "-10", "9/28/2026", "System Generated"),
+        ]
+        header_names = ["Details", "", "Loss #", "Policy/Quote", "Insured Name", "Notes", "Department", "Type", "Due Days", "Due On", "Created By"]
+        heads = [cell(h) for h in header_names]
+
+        class Body:
+            def locator(self, sel):
+                if sel == "tbody tr":
+                    return SimpleNamespace(all=lambda: list(live))
+                if sel.startswith("xpath="):
+                    return SimpleNamespace(count=lambda: 0)
+                return SimpleNamespace(all=lambda: [], first=SimpleNamespace(locator=lambda s: SimpleNamespace(all=lambda: [])))
+
+        class Header:
+            def locator(self, sel):
+                if sel == "thead th":
+                    return SimpleNamespace(all=lambda: heads)
+                if sel.startswith("xpath=ancestor::div"):
+                    return SimpleNamespace(count=lambda: 1, first=Body())
+                return SimpleNamespace(all=lambda: [], first=SimpleNamespace(locator=lambda s: SimpleNamespace(all=lambda: [])))
+
+        class Empty:
+            def locator(self, sel):
+                if sel.startswith("xpath="):
+                    return SimpleNamespace(count=lambda: 0)
+                return SimpleNamespace(all=lambda: [], first=SimpleNamespace(locator=lambda s: SimpleNamespace(all=lambda: [])))
+
+        page = SimpleNamespace(url="https://fos.finys.com/", locator=lambda sel: SimpleNamespace(all=lambda: [Header(), Empty(), Body()]))
+        items = fos.extract_pending_items(page)
+        self.assertEqual([i.policy_number for i in items], ["HONJ017732", "CDNJ001979"])
+        self.assertEqual(items[0].insured_name, "Noreen VanSalisbury")
+
+
+class ProgressiveBopFromReconciledTests(unittest.TestCase):
+    """BOP fixes carried over from feat/carrier-reconciled (live BOP app 2026-10-07/08)."""
+
+    def test_new_report_export_button_names(self):
+        from robie_job_engine import progressive_bop as bop
+
+        self.assertIn("Export Pending Cancel for Non-Payment Xls", bop._EXCEL_EXPORTS)
+        self.assertIn("Export Pending Cancel for Non-Payment Pdf", bop._PDF_EXPORTS)
+
+    def test_default_cdp_is_the_carrier_browser_not_ezlynx(self):
+        from robie_job_engine import progressive_bop as bop
+
+        self.assertEqual(bop.DEFAULT_CDP_URL, "http://127.0.0.1:9223")
+
+    def test_empty_export_is_not_treated_as_a_blank_report(self):
+        from datetime import date
+
+        from robie_job_engine import progressive_bop as bop
+
+        with self.assertRaises(IntakeHold):
+            bop.report_from_extracted(tables=[], page_text="", excel_bytes=b"", pdf_bytes=None,
+                                      report_date=date(2026, 10, 8))
+
+    def test_hplanding_without_bop_falls_back_to_direct_bop_app(self):
+        from robie_job_engine import progressive_bop as bop
+
+        shell = mock.Mock()
+        hplanding = mock.Mock()
+        calls = []
+
+        def open_report(page, report_date=None):
+            calls.append(page)
+            if page is hplanding:
+                raise IntakeHold("Progressive control 'View Reports' is missing or ambiguous")
+
+        with mock.patch.object(bop, "assert_authenticated"), \
+                mock.patch.object(bop, "_on_fao_shell_home", return_value=True), \
+                mock.patch.object(bop, "ensure_fao_shell_home"), \
+                mock.patch.object(bop, "assert_agent_context"), \
+                mock.patch.object(bop, "open_businessowner_window", return_value=hplanding), \
+                mock.patch.object(bop, "_is_hplanding_target", side_effect=lambda p: p is hplanding), \
+                mock.patch.object(bop, "open_pending_cancel_report", side_effect=open_report):
+            page = bop.navigate_to_pending_cancel(shell, "12345")
+        self.assertIs(page, shell)
+        shell.goto.assert_called_once_with(bop.BOP_APP_URL, wait_until="domcontentloaded")
+        self.assertEqual(calls, [hplanding, shell])
+
+
+class GuardNewestNoticeTests(unittest.TestCase):
+    def _doc(self, desc, issued, group="Policy Documents"):
+        from datetime import date
+
+        m, d, y = (int(x) for x in issued.split("/"))
+        return guard.GuardDocument(group=group, description=desc, form="F", issued=date(y, m, d),
+                                   policy_number="JMWC776835", href="/x", scribe_item_id=f"~{desc[:3]}{d}~")
+
+    def test_history_resolves_to_newest_notice(self):
+        docs = [
+            self._doc("Cancellation - 09/08/2026 - 09/08/2026", "09/08/2026"),
+            self._doc("Notice of Cancellation - 08/17/2026 - 08/17/2026", "08/17/2026"),
+            self._doc("Notice of Cancellation - 05/18/2026 - 05/18/2026", "05/18/2026"),
+            self._doc("Cancellation - 10/01/2026", "10/01/2026", group="Billing Documents"),
+        ]
+        newest = guard.newest_cancellation_documents(docs)
+        self.assertEqual([d.description for d in newest], ["Cancellation - 09/08/2026 - 09/08/2026"])
+
+    def test_two_on_the_newest_date_stay_ambiguous(self):
+        docs = [self._doc("Cancellation - 08/03/2026", "08/03/2026"), self._doc("Cancellation - 08/03/2026", "08/03/2026"),
+                self._doc("Notice of Cancellation", "07/16/2026")]
+        self.assertEqual(len(guard.newest_cancellation_documents(docs)), 2)
+
+
+class NatGenReportFallbackTests(unittest.TestCase):
+    def test_error_page_tab_opens_report_by_address(self):
+        from robie_job_engine import natgen_pending_cancellation as ng
+
+        page = mock.Mock()
+        page.url = "https://natgenagency.com/ErrorPage.aspx?eid=1"
+        state = {"on": False}
+        page.goto.side_effect = lambda *a, **k: state.update(on=True)
+        with mock.patch.object(ng, "assert_authenticated"), \
+                mock.patch.object(ng, "_named_state", return_value="none"), \
+                mock.patch.object(ng, "_already_on_pending_report", side_effect=lambda p: state["on"]):
+            ng.open_pending_cancellations(page)
+        page.goto.assert_called_once()
+        self.assertEqual(page.goto.call_args.args[0], ng.PENDING_REPORT_URL)

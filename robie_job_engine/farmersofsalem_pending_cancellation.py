@@ -89,11 +89,18 @@ _NOTICE_PRIORITY = {key: index for index, (key, _, _) in enumerate(_NOTICE_TYPES
 
 # Header aliases for the "My Open Tasks - pending items" table.
 _PENDING_FIELDS = (
-    ("policy_number", frozenset({"policy number", "policy #", "policy", "policynumber"})),
+    # Live Finys 2026-10-08 (MyOpenTasks_DiaryGrid): Details | | Loss # |
+    # Policy/Quote | Insured Name | Notes | Department | Type | Due Days |
+    # Due On | Created By.
+    ("policy_number", frozenset({"policy number", "policy #", "policy", "policynumber", "policy/quote", "policy / quote"})),
     ("insured_name", frozenset({"insured", "insured name", "named insured", "name"})),
     ("product", frozenset({"product", "line", "lob", "policy type"})),
-    ("due_date", frozenset({"due date", "due", "cancel date", "cancellation date", "effective date"})),
+    ("due_date", frozenset({"due date", "due", "due on", "cancel date", "cancellation date", "effective date"})),
+    ("item_type", frozenset({"type", "task type", "item type"})),
 )
+# Open-task types that are cancellation notices. Referral, Reinstatement and
+# other diary items on the same grid are not pulled.
+_CANCELLATION_TASK_TYPES = ("cancellation", "cancel", "non-pay", "nonpay", "non pay")
 # Header aliases for the Document Summary table.
 _DOC_FIELDS = (
     ("description", frozenset({"description", "document", "document description", "type", "form", "title"})),
@@ -276,6 +283,36 @@ def _table_body_rows(table: Any) -> list[Any]:
     return list(rows)
 
 
+def _kendo_body_table(header_table: Any) -> Any | None:
+    """Kendo grids split headers and rows into two tables (live Finys 2026-10-08):
+    .k-grid-header table holds the <th> cells, .k-grid-content table the rows.
+    Return the body table of the same grid, or None when not split."""
+    try:
+        body = header_table.locator(
+            "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' k-grid-header ')]"
+            "/following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' k-grid-content ')][1]//table"
+        )
+        count = int(body.count())
+    except Exception:
+        return None
+    if count != 1:
+        return None
+    return body.first if hasattr(body, "first") else body
+
+
+class _SplitGrid:
+    """Header cells from one table, data rows from its Kendo body table."""
+
+    def __init__(self, header_table: Any, body_table: Any):
+        self.header_table = header_table
+        self.body_table = body_table
+
+    def locator(self, selector: str) -> Any:
+        if selector == "thead th":
+            return self.header_table.locator(selector)
+        return self.body_table.locator(selector)
+
+
 def _find_table_by_headers(page: Any, fields: tuple[tuple[str, frozenset[str]], ...], *, required: tuple[str, ...]) -> tuple[Any, dict[str, int]]:
     try:
         tables = page.locator("table").all()
@@ -286,10 +323,16 @@ def _find_table_by_headers(page: Any, fields: tuple[tuple[str, frozenset[str]], 
         headers = _table_headers(table)
         indexes = _header_indexes(headers, fields)
         if all(key in indexes for key in required):
-            candidates.append((table, indexes))
+            body = _kendo_body_table(table)
+            candidates.append((_SplitGrid(table, body) if body is not None else table, indexes))
     if len(candidates) != 1:
         raise IntakeHold("Finys table is missing or ambiguous")
     return candidates[0]
+
+
+def is_cancellation_task_type(value: Any) -> bool:
+    text = _norm(value).casefold()
+    return any(term in text for term in _CANCELLATION_TASK_TYPES)
 
 
 def _cell_text(row: Any, index: int) -> str:
@@ -329,6 +372,8 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
     )
     items: list[PendingItem] = []
     for row in _table_body_rows(table):
+        if "item_type" in indexes and not is_cancellation_task_type(_cell_text(row, indexes["item_type"])):
+            continue  # Referral / Reinstatement / other diary items
         policy = parse_policy_number(_cell_text(row, indexes["policy_number"]))
         due_on = parse_carrier_date(_cell_text(row, indexes["due_date"]))
         insured = _cell_text(row, indexes["insured_name"]) if "insured_name" in indexes else ""

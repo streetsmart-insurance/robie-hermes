@@ -737,8 +737,10 @@ class PullTests(unittest.TestCase):
 
     def test_ambiguous_cancellation_documents_hold_policy(self):
         rows = (
+            # Same newest date: still ambiguous (older notices are history and
+            # are skipped by newest_cancellation_documents).
             ("Cancellation", "GUARD-CXL", "09/21/2026"),
-            ("Cancellation Notice", "GUARD-CXL2", "09/20/2026"),
+            ("Cancellation Notice", "GUARD-CXL2", "09/21/2026"),
         )
         page = FakeGuardPage(doc_rows=rows)
         receipt = self._run(page)

@@ -996,6 +996,24 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
     return payload
 
 
+def newest_cancellation_documents(docs: Any) -> list[GuardDocument]:
+    """Cancellation documents in Policy Documents on the newest issued date.
+
+    Live 2026-10-08: Guard lists each policy's whole notice history
+    (e.g. Cancellation 09/08, Notice of Cancellation 08/17 and 05/18). The
+    current notice is the newest; two on that same newest date stay
+    ambiguous and hold.
+    """
+    cancels = [
+        doc for doc in docs
+        if doc.group.casefold() == "policy documents" and is_cancellation_document(doc.description)
+    ]
+    if not cancels:
+        return []
+    newest = max(doc.issued for doc in cancels)
+    return [doc for doc in cancels if doc.issued == newest]
+
+
 def run_pull(
     browser: PlaywrightGuardBrowser,
     ledger: GuardDeliveryLedger,
@@ -1049,10 +1067,7 @@ def run_pull(
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
             browser.return_to_cancellations()
             continue
-        targets = [
-            doc for doc in docs
-            if doc.group.casefold() == "policy documents" and is_cancellation_document(doc.description)
-        ]
+        targets = newest_cancellation_documents(docs)
         if len(targets) != 1:
             # Name the candidates so the next live run shows exactly which
             # documents collided (doc disambiguation is a follow-up).

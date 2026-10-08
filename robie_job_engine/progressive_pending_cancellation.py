@@ -46,6 +46,11 @@ PROCESS = "fao"
 SCOPE = "pending_cancellation"
 FAO_HOST = "www.foragentsonly.com"
 CL_POLICY_HOST = "clpolicy.foragentsonly.com"
+# Live 2026-10-08: personal-lines policy links now open the new policy
+# servicing app (policy-hub/<policy>/policy-and-coverages), not CL Express.
+POLICY_SERVICING_HOST = "policyservicing.apps.foragentsonly.com"
+POLICY_PAGE_HOSTS = (CL_POLICY_HOST, POLICY_SERVICING_HOST)
+POLICY_PAGE_WAIT_MS = 30000
 REPORT_PATH = "/managepolicies/reports/policiesneedservice/policiespendingcancellation/"
 REPORT_URL = f"https://{FAO_HOST}{REPORT_PATH}"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
@@ -201,6 +206,66 @@ def is_cancellation_document(document_name: str) -> bool:
     return any(term in key for term in _CANCELLATION_TERMS)
 
 
+def newest_cancellation_documents(docs: tuple["FaoDocument", ...] | list["FaoDocument"]) -> list["FaoDocument"]:
+    """Cancellation documents on the newest date that has one.
+
+    CL Express lists the whole policy history (live 2026-10-08: Cancel Notice
+    9/28, 8/24, 7/20, ...). The pending notice is the newest one; two
+    cancellation documents on that same newest date stay ambiguous.
+    """
+    cancels = [doc for doc in docs if is_cancellation_document(doc.document_name)]
+    if not cancels:
+        return []
+    newest = max(doc.document_date for doc in cancels)
+    return [doc for doc in cancels if doc.document_date == newest]
+
+
+def _is_policy_page_url(url: Any) -> bool:
+    host = (urllib.parse.urlsplit(str(url or "")).hostname or "").lower()
+    return host in POLICY_PAGE_HOSTS
+
+
+def open_cl_documents(page: Any) -> None:
+    """CL Express: the DOCUMENTS header item is an <a>, not a tab (live 2026-10-08).
+
+    Its accessible name is "Documents" (CSS upper-cases it), so match any
+    casing, tab role first, then link role; exactly one visible control.
+    """
+    pattern = re.compile(r"^\s*documents\s*$", re.IGNORECASE)
+    control = None
+    for role in ("tab", "link"):
+        locator = page.get_by_role(role, name=pattern)
+        try:
+            count = int(locator.count())
+        except Exception:
+            count = 0
+        visible = []
+        for i in range(count):
+            node = locator.nth(i) if hasattr(locator, "nth") else locator
+            try:
+                if not hasattr(node, "is_visible") or node.is_visible():
+                    visible.append(node)
+            except Exception:
+                continue
+        if len(visible) > 1:
+            raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
+        if visible:
+            control = visible[0]
+            break
+    if control is None:
+        raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
+    control.click()
+    page.wait_for_selector("text=Policy Documents", timeout=20000)
+
+
+def open_policy_servicing_documents(page: Any) -> None:
+    """Policy servicing app: the documents list is not wired yet; hold the policy."""
+    raise IntakeHold(
+        "Progressive personal policy opens on the new policy servicing site; "
+        "its documents page is not wired yet"
+    )
+
+
 def is_billing_document(document_name: str) -> bool:
     key = _norm(document_name).casefold()
     return any(term in key for term in _BILLING_TERMS)
@@ -299,11 +364,17 @@ def parse_policy_documents(
     indexes: dict[str, int] = {}
     for field, names in _DOC_HEADERS:
         matches = [i for i, h in enumerate(normed) if h in names]
+        if not matches and field == "name":
+            # Live CL Express 2026-10-08: the name column has no header text
+            # ("" | Date | Delivery) and holds the document button.
+            matches = [i for i, h in enumerate(normed) if not h]
         if len(matches) != 1:
             raise IntakeHold("Progressive FAO document list headers are missing or ambiguous")
         indexes[field] = matches[0]
     docs: list[FaoDocument] = []
     for row_index, cells in enumerate(rows):
+        if not any(_norm(cell) for cell in cells):
+            continue  # spacer rows between documents
         if len(cells) < len(headers):
             raise IntakeHold("Progressive FAO document row is missing or ambiguous")
         name = _norm(cells[indexes["name"]])
@@ -367,7 +438,7 @@ def require_fao_url(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or parsed.username or parsed.password:
         raise IntakeHold("Progressive FAO URL is missing or ambiguous")
-    if host != FAO_HOST and host != CL_POLICY_HOST:
+    if host != FAO_HOST and host not in POLICY_PAGE_HOSTS:
         raise IntakeHold("Progressive FAO URL is missing or ambiguous")
     path = parsed.path.lower()
     if any(login in path for login in _LOGIN_PATHS):
@@ -547,14 +618,16 @@ class PlaywrightFaoCancellationBrowser:
         require_policy_number(policy_number)
         link = _unique_control(self.page, "link", policy_number, exact=True)
         link.click()
-        self.page.wait_for_url(f"**://{CL_POLICY_HOST}/**", timeout=15000)
+        self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
         require_fao_url(str(getattr(self.page, "url", "") or ""))
 
     def open_documents_tab(self) -> None:
-        """On the CL Express policy page, open the DOCUMENTS tab."""
-        # Exact first, then any casing ("Documents"): portal casing drifts.
-        unique_control_ci(self.page, "tab", "DOCUMENTS", carrier="Progressive").click()
-        self.page.wait_for_selector("text=Policy Documents", timeout=15000)
+        """Open the policy's documents list (CL Express or policy servicing)."""
+        host = (urllib.parse.urlsplit(str(getattr(self.page, "url", "") or "")).hostname or "").lower()
+        if host == POLICY_SERVICING_HOST:
+            open_policy_servicing_documents(self.page)
+            return
+        open_cl_documents(self.page)
 
     def list_documents(self, policy_number: str) -> tuple[FaoDocument, ...]:
         """Parse the Policy Documents table on the DOCUMENTS tab.
@@ -562,21 +635,57 @@ class PlaywrightFaoCancellationBrowser:
         Live columns: (icon) | Date | Delivery | Document name. The document
         name is a button that opens the PDF in the viewer.
         """
-        page = self.page
-        tables = page.locator("table")
-        if int(tables.count()) < 1:
-            raise IntakeHold("Progressive FAO document table is missing or ambiguous")
-        table = tables.first if hasattr(tables, "first") else tables
-        header_nodes = table.locator("thead th").all()
-        if not header_nodes:
-            raise IntakeHold("Progressive FAO document headers are missing or ambiguous")
-        headers = tuple(_norm(_read_text(node)) for node in header_nodes)
-        row_nodes = table.locator("tbody tr").all()
+        table, headers, row_nodes = self._document_table()
         rows = tuple(
             tuple(_norm(_read_text(cell)) for cell in row.locator("td").all())
             for row in row_nodes
         )
         return parse_policy_documents(headers, rows, policy_number=policy_number)
+
+    def _document_table(self) -> tuple[Any, tuple[str, ...], list[Any]]:
+        """The documents table, its headers, and its data rows.
+
+        Older markup: <thead><th>...</th></thead><tbody>rows</tbody>.
+        Live CL Express 2026-10-08: no thead; the first <tr> holds <th>
+        cells ("" | Date | Delivery) and the data rows follow it.
+        """
+        page = self.page
+        tables = page.locator("table")
+        if int(tables.count()) < 1:
+            raise IntakeHold("Progressive FAO document table is missing or ambiguous")
+        table = tables.first if hasattr(tables, "first") else tables
+        if hasattr(tables, "nth") and int(tables.count()) > 1:
+            found = []
+            for i in range(int(tables.count())):
+                candidate = tables.nth(i)
+                try:
+                    if hasattr(candidate, "is_visible") and not candidate.is_visible():
+                        continue
+                    texts = [_norm(_read_text(n)).casefold() for n in candidate.locator("th").all()]
+                except Exception:
+                    continue
+                if "date" in texts and "delivery" in texts:
+                    found.append(candidate)
+            if len(found) != 1:
+                raise IntakeHold("Progressive FAO document table is missing or ambiguous")
+            table = found[0]
+        header_nodes = table.locator("thead th").all()
+        if header_nodes:
+            self._doc_row_selector = "tbody tr"
+            self._doc_table = table
+            headers = tuple(_norm(_read_text(node)) for node in header_nodes)
+            return table, headers, table.locator("tbody tr").all()
+        all_rows = table.locator("tr").all()
+        if not all_rows:
+            raise IntakeHold("Progressive FAO document headers are missing or ambiguous")
+        header_cells = all_rows[0].locator("th").all()
+        if not header_cells:
+            raise IntakeHold("Progressive FAO document headers are missing or ambiguous")
+        headers = tuple(_norm(_read_text(node)) for node in header_cells)
+        self._doc_row_selector = "tr"
+        self._doc_row_offset = 1
+        self._doc_table = table
+        return table, headers, all_rows[1:]
 
     def document_button(self, doc: FaoDocument) -> Any:
         """The clickable control for one document row, located by row index.
@@ -584,8 +693,10 @@ class PlaywrightFaoCancellationBrowser:
         Rows are selected by index (not by name) so duplicate document names
         on the same policy stay unambiguous.
         """
-        table = self.page.locator("table").first
-        row = table.locator("tbody tr").nth(doc.row_index)
+        table = getattr(self, "_doc_table", None) or self.page.locator("table").first
+        selector = getattr(self, "_doc_row_selector", "tbody tr")
+        offset = getattr(self, "_doc_row_offset", 0) if selector == "tr" else 0
+        row = table.locator(selector).nth(doc.row_index + offset)
         try:
             if int(row.count()) != 1:
                 raise IntakeHold(
@@ -883,22 +994,28 @@ def run_pull(
 
     for row in all_rows:
         # Ensure we're on the correct tab for this row's policy
-        if row.tab_label:
-            browser.select_tab(row.tab_label)
-        browser.open_policy_summary(row.policy_number)
         try:
+            if row.tab_label:
+                browser.select_tab(row.tab_label)
+            browser.open_policy_summary(row.policy_number)
             browser.open_documents_tab()
             docs = browser.list_documents(row.policy_number)
-        except IntakeHold as exc:
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_report()
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Progressive FAO policy {row.policy_number} page did not open ({type(exc).__name__})"
+            )
+            held.append(_row_payload(row, outcome="HELD", reason=reason))
+            try:
+                browser.return_to_report()
+            except Exception:  # noqa: BLE001
+                pass
             continue
         if row.reason == "UNDERWRITING":
             _pull_underwriting_memos(
                 row, docs, browser, ledger, archive,
                 as_of=as_of, held=held, uw_memos=uw_memos,
             )
-        targets = [doc for doc in docs if is_cancellation_document(doc.document_name)]
+        targets = newest_cancellation_documents(docs)
         if len(targets) != 1:
             held.append(_row_payload(
                 row, outcome="HELD",
