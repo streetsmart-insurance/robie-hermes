@@ -384,6 +384,29 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
     return tuple(items)
 
 
+# Live 2026-10-08 (f53568f6): the Finys landing has no accessible-named search
+# textbox. The Policy Quick Search widget has a Quote row (Button1) and a
+# Policy Number row (policyText, then Button2), read on hermes-test-01.
+FINYS_POLICY_SEARCH_INPUT = "#Landing_PolicyQuickSearchWidget_policyText"
+FINYS_POLICY_SEARCH_BUTTON = "#Landing_PolicyQuickSearchWidget_Button2"
+
+
+def _count(locator: Any) -> int:
+    try:
+        return int(locator.count())
+    except Exception:
+        return -1
+
+
+def _quick_search_widget(page: Any) -> tuple[Any, Any] | None:
+    """The Policy Number box and its own Search button, exactly one of each."""
+    box = page.locator(FINYS_POLICY_SEARCH_INPUT)
+    button = page.locator(FINYS_POLICY_SEARCH_BUTTON)
+    if _count(box) == 1 and _count(button) == 1:
+        return box, button
+    return None
+
+
 def _find_search_box(page: Any) -> Any:
     for name in ("Policy Search", "Search Policy", "Search"):
         locator = page.get_by_role("textbox", name=name, exact=False)
@@ -416,17 +439,21 @@ def search_policy(page: Any, policy_number: str) -> None:
     Raises IntakeHold unless the resulting Policy Summary names the policy.
     """
     policy = parse_policy_number(policy_number)
-    search = _find_search_box(page)
+    widget = _quick_search_widget(page)
+    search = widget[0] if widget else _find_search_box(page)
     try:
         search.fill(policy)
     except Exception as exc:
         raise IntakeHold("Finys policy search box is missing or ambiguous") from exc
     try:
-        button = page.get_by_role("button", name="Search", exact=False)
-        if int(button.count()) == 1:
-            button.click()
+        if widget:
+            widget[1].click()
         else:
-            search.press("Enter")
+            button = page.get_by_role("button", name="Search", exact=False)
+            if int(button.count()) == 1:
+                button.click()
+            else:
+                search.press("Enter")
     except IntakeHold:
         raise
     except Exception as exc:
@@ -803,9 +830,15 @@ def run_pull(
 
     for item in items:
         browser.return_to_pending_items()
-        browser.open_policy(item.policy_number)
-        browser.open_document_summary()
-        documents = browser.list_documents()
+        try:
+            browser.open_policy(item.policy_number)
+            browser.open_document_summary()
+            documents = browser.list_documents()
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            held.append(_held_row(item, str(exc) if isinstance(exc, IntakeHold) else (
+                f"Finys policy {item.policy_number} did not open ({type(exc).__name__})"
+            )))
+            continue
         target = select_target_document(documents)
         if target is None or target.doc_date is None or target.notice_key is None:
             held.append(_held_row(item, "no dated Intent to Cancel / cancellation / underwriting / billing document on Document Summary"))

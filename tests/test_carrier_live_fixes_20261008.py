@@ -944,3 +944,125 @@ class GuardReloginTests(unittest.TestCase):
         self.assertEqual(browser.relogins, 1)
         self.assertEqual(receipt["held"], [])
         self.assertEqual(receipt["count"], len(LIVE_POLICIES))
+
+
+class BopFaoHomeWaitTests(unittest.TestCase):
+    """Live 2026-10-08 f53568f6: BOP held "FAO Home did not open" after the FAO pull."""
+
+    def test_waits_for_the_landing_url_after_the_home_click(self):
+        from robie_job_engine import progressive_bop as bop
+
+        report = "https://www.foragentsonly.com/managepolicies/reports/policiesneedservice/policiespendingcancellation/"
+        landing = "https://www.foragentsonly.com/landingpages/managepolicies/"
+        page = SimpleNamespace(url=report)
+        seen = []
+
+        def wait_for_url(predicate, timeout):
+            seen.append(timeout)
+            self.assertFalse(predicate(report))
+            self.assertTrue(predicate(landing))
+            page.url = landing
+
+        page.wait_for_url = wait_for_url
+        bop._wait_for_fao_shell_home(page)
+        self.assertEqual(seen, [bop.FAO_HOME_WAIT_MS])
+        self.assertEqual(page.url, landing)
+
+    def test_wait_timeout_is_swallowed_so_the_caller_holds(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = SimpleNamespace(url="https://www.foragentsonly.com/managepolicies/reports/x/")
+        page.wait_for_url = mock.Mock(side_effect=type("TimeoutError", (Exception,), {})("t"))
+        bop._wait_for_fao_shell_home(page)
+        self.assertFalse(bop._on_fao_shell_home(page))
+
+    def test_already_home_does_not_wait(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = SimpleNamespace(url="https://www.foragentsonly.com/", wait_for_url=mock.Mock())
+        bop._wait_for_fao_shell_home(page)
+        page.wait_for_url.assert_not_called()
+
+
+class FinysQuickSearchTests(unittest.TestCase):
+    """Live 2026-10-08 f53568f6: "Finys policy search box is missing or ambiguous"."""
+
+    class _Loc:
+        def __init__(self, page, sel, n=1):
+            self.page, self.sel, self.n = page, sel, n
+
+        def count(self):
+            return self.n
+
+        def fill(self, value):
+            self.page.events.append(("fill", self.sel, value))
+
+        def click(self):
+            self.page.events.append(("click", self.sel))
+
+    def _page(self, widget=True):
+        test = self
+
+        class Page:
+            url = "https://fos.finys.com/"
+
+            def __init__(self):
+                self.events = []
+
+            def locator(self, sel):
+                return test._Loc(self, sel, 1 if widget else 0)
+
+            def get_by_role(self, role, name=None, exact=False):
+                return test._Loc(self, f"{role}:{name}", 0)
+
+        return Page()
+
+    def test_policy_number_row_and_its_own_search_button(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = self._page()
+        with mock.patch.object(fos, "_wait_for", return_value=True):
+            fos.search_policy(page, "SCNJM07385")
+        self.assertEqual(page.events, [
+            ("fill", fos.FINYS_POLICY_SEARCH_INPUT, "SCNJM07385"),
+            ("click", fos.FINYS_POLICY_SEARCH_BUTTON),
+        ])
+        self.assertTrue(fos.FINYS_POLICY_SEARCH_BUTTON.endswith("Button2"))
+
+    def test_no_widget_and_no_named_box_still_holds(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        with self.assertRaisesRegex(IntakeHold, "search box is missing"):
+            fos.search_policy(self._page(widget=False), "SCNJM07385")
+
+    def test_one_policy_search_failure_holds_that_policy_only(self):
+        import os
+        import tempfile
+
+        from test_farmersofsalem_pending_cancellation import (
+            AS_OF, HODJ, HONJ, PENDING_ROWS, FakeFinysPage, _docs_for, pdf_bytes,
+        )
+
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+        from robie_job_engine.intake_core import SourceArchive
+
+        page = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:2],
+            docs_by_policy={HONJ: _docs_for(HONJ, pdf_bytes(b"a")), HODJ: _docs_for(HODJ, pdf_bytes(b"b"))},
+        )
+        browser = fos.FinysFoSBrowser(page)
+        real_open = browser.open_policy
+
+        def open_policy(policy):
+            if policy == HONJ:
+                raise IntakeHold(f"Policy Summary for {policy} is missing or ambiguous")
+            return real_open(policy)
+
+        browser.open_policy = open_policy
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fos, "_NAV_TIMEOUT_MS", 300):
+            out = Path(tmp) / "pull"
+            receipt = fos.run_pull(browser, fos.LocalDeliveryLedger(out), SourceArchive(out / "sources"), as_of=AS_OF)
+        self.assertEqual(receipt["count"], 1)
+        self.assertEqual([h["policy_number"] for h in receipt["held"]], [HONJ])
+        self.assertIn("Policy Summary", receipt["held"][0]["reason"])

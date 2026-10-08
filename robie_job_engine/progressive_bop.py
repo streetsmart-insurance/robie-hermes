@@ -1213,6 +1213,32 @@ def _expand_main_navigation_once(page: Any, *, css_count: int, role_count: int) 
         ) from exc
 
 
+FAO_HOME_WAIT_MS = 20000
+
+
+def _wait_for_fao_shell_home(page: Any) -> None:
+    """Give the Manage Policies Home navigation time to commit.
+
+    Live 2026-10-08 (f53568f6): BOP ran right after the FAO pull, which left
+    the shell on the pending-cancellation report. The header click navigated,
+    but the URL was read before the landing committed, so BOP held with
+    "FAO Home did not open". Wait (bounded) for the exact landing URL; a
+    near-miss URL still holds below.
+    """
+    if _on_fao_shell_home(page):
+        return
+    waiter = getattr(page, "wait_for_url", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(
+            lambda url: _FAO_SHELL_HOME_URL.fullmatch(_safe_page_url(str(url or ""))) is not None,
+            timeout=FAO_HOME_WAIT_MS,
+        )
+    except Exception:  # noqa: BLE001 - the caller holds with the scrubbed URL
+        pass
+
+
 def ensure_fao_shell_home(page: Any) -> None:
     """Land on FAO Home / Manage Policies Home before the agent-context assert.
 
@@ -1256,6 +1282,7 @@ def ensure_fao_shell_home(page: Any) -> None:
             role_count=_locator_count(_role_locator(page, MANAGE_POLICIES_NAME, exact=False)),
             detail="Home control click did not complete; FAO Home was not opened",
         ) from exc
+    _wait_for_fao_shell_home(page)
     if not _on_fao_shell_home(page):
         raise _home_hold(
             page,
