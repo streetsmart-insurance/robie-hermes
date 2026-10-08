@@ -214,6 +214,19 @@ def test_ascend_to_prefix_is_dropped_from_the_name():
     )
 
 
+def test_digest_line_drops_a_stored_to_prefix():
+    line = digest.item_line(
+        {
+            "insured_name": "To: Barschy, LLC DBA Margo's",
+            "notice_type": "payment_confirmation",
+            "amount_cents": 8140,
+            "policy_numbers": ["AHVDL-X"],
+            "reason": digest.POLICY_OUTCOME_NOT_IN_EZLYNX,
+        }
+    )
+    assert line.startswith("Barschy, LLC DBA Margo's, payment, $81.40, policy AHVDL-X.")
+
+
 # ---------------------------------------------------------------- item 6
 
 

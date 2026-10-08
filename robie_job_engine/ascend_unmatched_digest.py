@@ -771,7 +771,9 @@ def _policy_phrase(numbers: list[str]) -> str:
 
 def item_line(item: dict[str, Any]) -> str:
     """One plain sentence. No field names and no code labels."""
-    name = str(item.get("insured_name") or "").strip() or "An insured"
+    from .ascend_api_notice_source import _strip_to_prefix
+
+    name = _strip_to_prefix(str(item.get("insured_name") or "")) or "An insured"
     parts = [name, notice_words(str(item.get("notice_type") or ""))]
     money = cents_to_money(item.get("amount_cents"))
     if money:
