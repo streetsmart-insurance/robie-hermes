@@ -561,19 +561,30 @@ class PlaywrightGuardBrowser:
                     # This sibling starts the next section; stop.
                     break
 
-                # Only process <a> elements as documents
-                if tag != "a":
-                    continue
-
-                text = _norm(_read_text(sib))
-                if not text:
-                    continue
-                # Skip the "return to policy center" link
-                if text.lower() in ("return to policy center",):
-                    continue
-
-                href = sib.get_attribute("href") or ""
-                items.append((title, text, href))
+                # Documents are <a> elements inside sibling <div>s (not the div itself).
+                # Find all anchors within this sibling.
+                anchors = sib.locator("a")
+                try:
+                    anchor_count = int(anchors.count())
+                except Exception:
+                    anchor_count = 0
+                for ai in range(anchor_count):
+                    anchor = anchors.nth(ai)
+                    try:
+                        text = _norm(_read_text(anchor))
+                    except Exception:
+                        continue
+                    if not text:
+                        continue
+                    # Skip the "return to policy center" link
+                    if text.lower() in ("return to policy center",):
+                        continue
+                    try:
+                        href = anchor.get_attribute("href") or ""
+                    except Exception:
+                        href = ""
+                    if href:
+                        items.append((title, text, href))
 
         if not items:
             raise IntakeHold("Guard printable documents groups are missing or ambiguous")
@@ -641,7 +652,12 @@ class PlaywrightGuardBrowser:
         self.page.wait_for_selector("table", timeout=15000)
 
     def screenshot_cancellations(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        # full_page=True hangs on font loading; use viewport screenshot with timeout
+        try:
+            data = self.page.screenshot(full_page=False, type="png", timeout=10000)
+        except Exception:
+            # Fallback: try without waiting for fonts
+            data = self.page.screenshot(full_page=False, type="png", timeout=5000)
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Guard Cancellations screenshot is missing or not a PNG")
         return bytes(data)

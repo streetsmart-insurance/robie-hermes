@@ -476,7 +476,9 @@ def parse_alert_grid(grid: AlertGrid) -> tuple[AlertRow, ...]:
             continue
         status = _norm(cells[indexes["status"]])
         if status.casefold() != "high":
-            raise IntakeHold("Pending Cancellations list includes a non-High alert")
+            # Skip non-High alerts (e.g. Medium/Low) instead of holding the run.
+            # Only High-priority pending cancellations are processed.
+            continue
         policy = _norm(cells[indexes["policy_number"]])
         insured = _norm(cells[indexes["insured_name"]])
         if not _POLICY_NUMBER.fullmatch(policy):
@@ -1068,10 +1070,14 @@ class PlaywrightGeicoNocBrowser:
         return grid
 
     def screenshot_pending_cancellations(self) -> bytes:
-        """Full-page PNG of Pending Cancellations while that view is selected."""
+        """Viewport PNG of Pending Cancellations while that view is selected."""
         if not self._on_list():
             raise IntakeHold("Pending Cancellations screenshot is missing or not a PNG")
-        data = self.page.screenshot(full_page=True, type="png")
+        # full_page=True hangs on font loading; use viewport with timeout
+        try:
+            data = self.page.screenshot(full_page=False, type="png", timeout=10000)
+        except Exception:
+            data = self.page.screenshot(full_page=False, type="png", timeout=5000)
         return require_png(data)
 
     def inspect_notice_path(self, policy_number: str) -> NoticePath:
@@ -1156,6 +1162,16 @@ class PlaywrightGeicoNocBrowser:
                 return False
             if not pending_view_selected(self.page):
                 return False
+            # Gateway has 3 gds-tables; check for Client Alerts table by header
+            # instead of requiring exactly 1 table total.
+            for candidate in self.page.locator("gds-table").all():
+                try:
+                    htexts = [str(n.inner_text() or "").strip().lower() for n in candidate.locator("gds-table-th").all()[:4]]
+                    if any("client/policy" in h for h in htexts):
+                        return True
+                except Exception:
+                    continue
+            # Fallback to legacy single-table check
             return _alerts_table_count(self.page) == 1
         except IntakeHold:
             return False

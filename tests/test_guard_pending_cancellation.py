@@ -445,7 +445,7 @@ class FakeGuardPage:
     def wait_for_selector(self, selector, timeout=None):
         return None
 
-    def screenshot(self, full_page=True, type="png"):
+    def screenshot(self, full_page=True, type="png", timeout=None):
         return LIST_PNG
 
     def goto(self, url, wait_until=None):

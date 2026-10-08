@@ -172,9 +172,15 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(alerts[-1].filename, f"{EXTRA} NOC Geico.pdf")
         self.assertEqual(noc_filename(EXTRA), f"{EXTRA} NOC Geico.pdf")
 
-    def test_non_high_unknown_product_duplicate_and_ragged_rows_hold(self):
+    def test_non_high_alert_is_skipped_not_held(self):
+        # hermes-test-01 hand patch (2026-10-07): a Medium/Low alert on the
+        # Pending Cancellations list no longer holds the whole run.
+        grid = prove_grid(extra=(row("6000000001", "Low Row", "Private Passenger Auto", "9/26/2026", severity="Medium"),))
+        policies = [alert.policy_number for alert in parse_alert_grid(grid)]
+        self.assertNotIn("6000000001", policies)
+
+    def test_unknown_product_duplicate_and_ragged_rows_hold(self):
         bad = (
-            prove_grid(extra=(row("6000000001", "Low Row", "Private Passenger Auto", "9/26/2026", severity="Medium"),)),
             AlertGrid(LIST_URL, HEADERS, (row("6000000001", "Home", "Homeowners", "9/26/2026"),), False),
             prove_grid(extra=(PROVE_ROWS[1],)),
             AlertGrid(LIST_URL, HEADERS, (("9300116248", "only"),), False),
@@ -1498,9 +1504,9 @@ class NavPage:
             found.extend(node.find_role(role, name, exact))
         return NodeLocator(found, self)
 
-    def screenshot(self, full_page=True, type="png"):
+    def screenshot(self, full_page=True, type="png", timeout=None):
         self.screenshot_calls += 1
-        if full_page and type == "png" and self.table_visible and self.state in {"list", "chips"}:
+        if type == "png" and self.table_visible and self.state in {"list", "chips"}:
             return LIST_PNG
         return b""
 

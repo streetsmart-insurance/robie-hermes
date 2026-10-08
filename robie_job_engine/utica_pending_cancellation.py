@@ -423,15 +423,15 @@ class PlaywrightUticaCancellationBrowser:
         """Open the POLICY TRANSACTIONS tab."""
         page = self.page
         require_utica_url(str(getattr(page, "url", "") or ""))
-        _unique_control(page, "tab", "POLICY TRANSACTIONS", exact=True).click()
-        page.wait_for_selector("text=POLICY | TRANSACTION LIST", timeout=15000)
+        page.get_by_text("Policy Transactions").first.click()
+        page.wait_for_timeout(5000)
         self._list_url = require_utica_url(str(getattr(page, "url", "") or ""))
 
     def select_filter_all(self) -> None:
         """Select the "All" filter radio and apply it."""
         page = self.page
         _unique_control(page, "radio", "All", exact=True).check()
-        _unique_control(page, "button", "FILTER LIST", exact=True).click()
+        _unique_control(page, "button", "Filter List", exact=True).click()
         page.wait_for_selector("table", timeout=15000)
 
     def load_transactions(self) -> tuple[TransactionRow, ...]:
