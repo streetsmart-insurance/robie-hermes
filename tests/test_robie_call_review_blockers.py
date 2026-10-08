@@ -763,3 +763,161 @@ def test_payload_uses_assigner_transfer_number():
     assert payload["transfer_phone_number"] == "+15559876543"
     fallback = rch.bland_payload_spec("+18007764737", "task", "hi", "bye", 1)
     assert "transfer_phone_number" not in fallback
+
+
+# ---------------------------------------------------------------------------
+# Callback / voicemail numbers and StreetSmart numbers are never dialed
+# (task 63558413, Oct 8 2026: Robie dialed Jake's office line, the number in
+# the task's "If voicemail" line).
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+JAKE_TASK_63558413_TEXT = (
+    "[REDACTED]\n"
+    "Calling: Jake Ferrara (client)\n"
+    "Reason: Confirm the mailing address on file for the auto renewal.\n"
+    "Goal: Confirm the address or get the new one.\n"
+    "If voicemail: Ask him to call 732-481-2520."
+)
+
+
+def _jake_task(description: str, task_id: str = "63558413") -> Dict[str, Any]:
+    return make_task(**{
+        "task_id": task_id,
+        "Task Description": description,
+        "Applicant ID": "25486692",
+        "Applicant Name": "Jake N Ferrara",
+        "Task Created By": "Jake Ferrara",
+        "Assigned Producer": "Jazmin Molina",
+        "Activity Labels": "Robie Call",
+    })
+
+
+def test_jake_task_63558413_asks_for_a_number_and_does_not_dial(clean_state):
+    bland = FakeBland()
+    looked: List[str] = []
+
+    class CountingPhone(FakePhone):
+        def get_phone(self, applicant_id: str) -> Optional[str]:
+            looked.append(applicant_id)
+            return "+17326688161"
+
+    ports = make_ports(bland=bland, phone=CountingPhone())
+    assert rch._phone_directive(JAKE_TASK_63558413_TEXT) == (None, False)
+    result = rch.handle_robie_call_task(
+        _jake_task(JAKE_TASK_63558413_TEXT), make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert looked == []  # never the number on file either
+    assert "no phone number typed" in (result.get("error") or "")
+    assert result.get("clarification_note_filed") is True
+    assert "Make a new Robie Call task with the number to call." in clean_state.body
+    assert "2520" not in str(ports.job_checkpoint.data)
+
+
+def test_call_jake_at_his_cell_dials_his_cell(clean_state):
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    text = "Call Jake at 732-668-8161 about the mailing address on his renewal."
+    assert rch._extract_explicit_phone(text) == "+17326688161"
+    result = rch.handle_robie_call_task(
+        _jake_task(text, task_id="T-8161"), make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-8161")]["phone"] == "+17326688161"
+
+
+@pytest.mark.parametrize("text", [
+    "Confirm the address. If voicemail: Ask him to call 732-555-0142.",
+    "Confirm the address. If voicemail, ask her to call 732-555-0142.",
+    "Confirm the address. If you get voicemail ask them to call 732-555-0142.",
+    "Confirm the address. If no answer, leave a message to call 732-555-0142.",
+    "Confirm the address. Call back number 732-555-0142.",
+    "Confirm the address. Callback: 732-555-0142",
+    "Confirm the address. Call-back at 732-555-0142",
+    "Confirm the address. Ask him to call 732-555-0142.",
+    "Confirm the address. Tell them to call us at 732-555-0142.",
+    "Confirm the address. Leave a message with 732-555-0142 as the number.",
+    "Confirm the address. If voicemail ask him to call 7325550142",
+])
+def test_callback_wording_number_is_never_the_dial_target(text):
+    assert rch._phone_directive(text) == (None, False)
+    assert rch._extract_explicit_phone(text) is None
+    assert rch._phones_in_text(text) == []
+
+
+def test_dial_number_before_a_voicemail_line_still_dials():
+    text = ("Call Jake at 732-668-8161 about the renewal.\n"
+            "If voicemail: ask him to call 732-555-0142.")
+    assert rch._extract_explicit_phone(text) == "+17326688161"
+    # The callback number is not a mismatch with the dialed number.
+    assert rch._instruction_phone_mismatch(text, "+17326688161") is None
+
+
+def test_voicemail_wording_in_an_earlier_sentence_does_not_block_a_later_number():
+    text = ("If voicemail, leave a message. "
+            "Call Jake at 732-668-8161 about the renewal.")
+    assert rch._extract_explicit_phone(text) == "+17326688161"
+
+
+def _staff_dids() -> List[str]:
+    path = (Path(rch.__file__).resolve().parent / "staff_direct_dials.json")
+    staff = _json.loads(path.read_text(encoding="utf-8"))["staff"]
+    return sorted({row["did"] for row in staff.values() if row.get("did")})
+
+
+def test_staff_directory_is_not_empty():
+    assert "+17324812520" in _staff_dids()  # Jake's office line
+    assert len(_staff_dids()) >= 10
+
+
+@pytest.mark.parametrize("did", _staff_dids())
+def test_every_staff_direct_dial_is_refused(did):
+    digits = did[-10:]
+    formatted = f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+    assert rch._extract_explicit_phone(
+        f"Call the client at {formatted} about the renewal.") is None
+    assert rch._extract_explicit_phone(
+        f"Call the client, phone {digits}, about the renewal.") is None
+
+
+@pytest.mark.parametrize("text", [
+    "Call the client at 732-462-8343 about the renewal.",
+    "Call the client at (732) 462-8343 about the renewal.",
+    "Call the client at 1-732-462-8343 about the renewal.",
+    "Call the client, phone 7324628343, about the renewal.",
+])
+def test_main_line_is_refused(text):
+    assert rch._phone_directive(text) == (None, False)
+
+
+def test_streetsmart_number_only_task_asks_and_does_not_dial(clean_state):
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        _jake_task("Call Jake at 732-481-2520 about the renewal.",
+                   task_id="T-2520"),
+        make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert "Make a new Robie Call task with the number to call." in clean_state.body
+
+
+def test_unreadable_staff_directory_refuses_every_number(monkeypatch):
+    from robie_job_engine import ringcentral_transfer_lookup as rtl
+
+    def boom(*_a, **_k):
+        raise ValueError("staff directory is missing a staff object")
+
+    monkeypatch.setattr(rtl, "load_staff_directory", boom)
+    rch._reset_module_state_for_tests()
+    try:
+        assert rch._extract_explicit_phone(
+            "Call Jake at 732-668-8161 about the renewal.") is None
+    finally:
+        monkeypatch.undo()
+        rch._reset_module_state_for_tests()
+    assert rch._extract_explicit_phone(
+        "Call Jake at 732-668-8161 about the renewal.") == "+17326688161"

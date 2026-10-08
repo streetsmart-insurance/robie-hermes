@@ -409,6 +409,9 @@ def _reset_module_state_for_tests() -> None:
     """Test seam only: clear idempotency + circuit state."""
     global _processed_tasks, _processed_content
     global _bland_failures, _bland_circuit_open_until
+    global _STREETSMART_NUMBERS, _STREETSMART_NUMBERS_LOADED
+    _STREETSMART_NUMBERS = None
+    _STREETSMART_NUMBERS_LOADED = False
     with _state_lock:
         _processed_tasks = {}
         _processed_content = {}
@@ -633,6 +636,82 @@ _NAMED_CALLEE_RE = re.compile(
 )
 
 
+# Wording that introduces a number the CLIENT should call, not the number
+# Robie should dial: "If voicemail: Ask him to call <office line>." A number
+# after this wording in the same line or sentence is never dialed (task
+# 63558413, Oct 8 2026: Robie dialed Jake's office line from the voicemail
+# line of his own test task).
+_CALLBACK_CONTEXT_RE = re.compile(
+    r"(?i)(?:"
+    r"\bif\s+(?:you\s+(?:get|reach|hit)\s+)?(?:(?:a|the|his|her|their)\s+)?"
+    r"(?:voice\s*-?\s*mail|vm|no\s+answer|no\s+one\s+answers)\b"
+    r"|\bcall\s*-?\s*backs?\b"
+    r"|\bcallbacks?\b"
+    r"|\b(?:ask|tell|have)\s+(?:him|her|them|the\s+client|the\s+customer|"
+    r"the\s+insured)\s+(?:to\s+)?(?:call|ring|phone|reach)\b"
+    r"|\bleave\s+(?:(?:a|the)\s+)?(?:message|msg|voice\s*-?\s*mail|vm)\b"
+    r")"
+)
+# Where a clause starts: a new line, or the end of a sentence.
+_CLAUSE_BREAK_RE = re.compile(r"\n|[.!?;](?=\s|$)")
+
+# The agency main line. Robie never dials a StreetSmart number.
+STREETSMART_MAIN_LINE = CALLBACK_NUMBER
+_STREETSMART_NUMBERS: Optional[frozenset] = None
+_STREETSMART_NUMBERS_LOADED = False
+
+
+def _last10(raw: Any) -> str:
+    return "".join(c for c in str(raw or "") if c.isdigit())[-10:]
+
+
+def _streetsmart_numbers() -> Optional[frozenset]:
+    """Last-10-digit StreetSmart numbers: every staff DID, the main line, and
+    the outbound caller ID. None when the staff directory cannot be read."""
+    global _STREETSMART_NUMBERS, _STREETSMART_NUMBERS_LOADED
+    if _STREETSMART_NUMBERS_LOADED:
+        return _STREETSMART_NUMBERS
+    numbers = {_last10(STREETSMART_MAIN_LINE), _last10(CALLER_ID)}
+    try:
+        from .ringcentral_transfer_lookup import load_staff_directory
+
+        for row in load_staff_directory().values():
+            did = _last10(row.get("did"))
+            if len(did) == 10:
+                numbers.add(did)
+        _STREETSMART_NUMBERS = frozenset(n for n in numbers if len(n) == 10)
+    except Exception as exc:  # noqa: BLE001 — fail closed below
+        logger.error("staff phone directory unreadable; refusing every typed "
+                     "number: %s", exc)
+        _STREETSMART_NUMBERS = None
+    _STREETSMART_NUMBERS_LOADED = True
+    return _STREETSMART_NUMBERS
+
+
+def _is_streetsmart_number(raw: Any) -> bool:
+    """True for a StreetSmart number. Fails closed: an unreadable staff
+    directory treats every number as StreetSmart, so nothing is dialed."""
+    numbers = _streetsmart_numbers()
+    if numbers is None:
+        return True
+    return _last10(raw) in numbers
+
+
+def _in_callback_context(text: str, start: int) -> bool:
+    """True when callback/voicemail wording comes before ``start`` in the
+    same line or sentence."""
+    before = text[:start]
+    breaks = list(_CLAUSE_BREAK_RE.finditer(before))
+    clause = before[breaks[-1].end():] if breaks else before
+    return bool(_CALLBACK_CONTEXT_RE.search(clause))
+
+
+def _never_dial(text: str, start: int, raw: str) -> bool:
+    """A number Robie must not dial: a callback/voicemail number, or any
+    StreetSmart number."""
+    return _in_callback_context(text, start) or _is_streetsmart_number(raw)
+
+
 def _phones_in_text(text: str) -> List[str]:
     """Digit runs that are clearly phones, not policy/claim/quote numbers."""
     return ["".join(c for c in raw if c.isdigit())
@@ -681,6 +760,8 @@ def _clear_phone_texts(text: str) -> List[str]:
             continue
         if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
             continue
+        if _never_dial(text, match.start(), match.group(0)):
+            continue
         found.append(match.group(0))
     for match in _BARE_DIGIT_RUN_RE.finditer(text or ""):
         if _overlaps(match.start(), match.end(), spans):
@@ -692,6 +773,8 @@ def _clear_phone_texts(text: str) -> List[str]:
         digits = match.group(0)
         if _is_known_policy_shape(digits):
             continue
+        if _never_dial(text, match.start(), digits):
+            continue
         if _PHONE_WORDING_RE.search(_context_before(text, match.start())):
             found.append(digits)
     return found
@@ -702,6 +785,10 @@ def _phone_directive(instruction: str) -> tuple:
 
     Digits are a phone only when the request clearly gives one: phone,
     cell, number, or "call at" wording, or a phone-formatted number.
+    A number after callback or voicemail wording ("if voicemail", "call
+    back", "ask him to call", "leave a message") is the client's callback
+    number, not a dial target, and is skipped. A StreetSmart number (staff
+    direct dials, main line, caller ID) is never dialed.
     Digits after policy/pol/claim/quote are never a phone. A known policy
     shape is never a phone. A bare 10-digit run with none of those signals
     is ambiguous — the caller must ask, not dial.
@@ -719,6 +806,8 @@ def _phone_directive(instruction: str) -> tuple:
             continue
         digits = match.group(0)
         if _is_known_policy_shape(digits):
+            continue
+        if _never_dial(text, match.start(), digits):
             continue
         # Bare 10-digit (or leading-1) run, no phone wording: could be
         # a policy number. Ask. Do not dial it.
@@ -2233,6 +2322,9 @@ def _handle_call_task(
     if phone_policy == "typed_only" and not explicit_phone:
         log.warning("task %s has no typed phone number; asking instead of dialing",
                     task_id)
+        if _PHONE_LIKE_RE.search(instruction or ""):
+            log.info("task %s: typed number(s) skipped as a callback/voicemail "
+                     "or StreetSmart number", task_id)
         clar_note = (
             "Robie did not call because no phone number was typed in this "
             f"{_request_word(task)}. A Robie Call only dials a number that is "
