@@ -964,3 +964,278 @@ def test_unreadable_staff_directory_refuses_every_number(monkeypatch):
         rch._reset_module_state_for_tests()
     assert rch._extract_explicit_phone(
         "Call Jake at 732-668-8161 about the renewal.") == "+17326688161"
+
+
+# ---------------------------------------------------------------------------
+# Outcome classification: a recording / phone menu / hold message is not
+# successful (call d25f46d6, Oct 8 2026). Cap, dedupe and retry choices.
+# ---------------------------------------------------------------------------
+
+# Exact transcript shape from Bland for d25f46d6 (role: text lines).
+D25F46D6_TRANSCRIPT = [
+    "assistant: Hi, this is an AI assistant calling on behalf -",
+    "user: Please hold while I try to connect you.",
+    "assistant: Thank you.",
+    "user: Hi. Jimmy here. Life insurance is one of the most cost "
+    "effective ways to protect the people who depend on you financially... "
+    "Please continue to stay on the line. We will be with you shortly.",
+    "agent-action: Ended call",
+    "assistant: Goodbye.",
+]
+D25F46D6_SUMMARY = (
+    "brief automated introduction to a life insurance service "
+    "... ended without further interaction"
+)
+# Jake's exact task 63558413 text (first line is the cell; last line is the
+# voicemail callback). The real task that dialed 481-2520 had the cell on
+# the first line with no "call at" wording; after #814 the callback is
+# skipped, and the bare first-line run is still ambiguous without a label.
+JAKE_TASK_63558413_WITH_CELL = (
+    "7326688161\n"
+    "Calling: Jake Ferrara (client)\n"
+    "Reason: Confirm the mailing address on file for the auto renewal.\n"
+    "Goal: Confirm the address or get the new one.\n"
+    "If voicemail: Ask him to call 732-481-2520."
+)
+
+
+def test_d25f46d6_recording_is_not_successful(clean_state):
+    """The Oct 8 call: completed, answered_by unknown, only a recording."""
+    bland = FakeBland(statuses={
+        "call-1": {
+            "status": "completed",
+            "answered_by": "unknown",
+            "duration_s": 0.67,
+            "transcript": D25F46D6_TRANSCRIPT,
+            "summary": D25F46D6_SUMMARY,
+        },
+    })
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is False
+    assert result["outcome_verified"] is True
+    assert result["outcome_successful"] is False
+    assert result.get("contact") == "recording"
+    assert result["reassigned"] is False
+    assert "Nobody was reached" in clean_state.body
+    assert "hold message" in clean_state.body
+    assert "This task is left open" in clean_state.body
+    assert "They answered" not in clean_state.body
+    # Cap / dedupe / retry: the dial already went out, so the task is
+    # marked processed (no auto-retry) and a daily-cap slot is already
+    # used by the dial path (cap.record runs before place_call). No safe
+    # auto-retry path exists for a recording answer.
+    assert rch._already_processed("T-100") is True
+
+
+def test_phone_menu_is_not_successful(clean_state):
+    bland = FakeBland(statuses={
+        "call-1": {
+            "status": "completed",
+            "answered_by": "unknown",
+            "duration_s": 1.2,
+            "concatenated_transcript": (
+                "assistant: Hi, this is an AI assistant.\n"
+                "user: Thank you for calling. Press 1 for English. "
+                "Press 2 for Spanish. For the main menu, press 0."
+            ),
+        },
+    })
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is False
+    assert result.get("contact") == "recording"
+    assert "phone menu" in clean_state.body
+
+
+def test_live_person_after_hold_is_successful(clean_state):
+    bland = FakeBland(statuses={
+        "call-1": {
+            "status": "completed",
+            "answered_by": "unknown",
+            "duration_s": 2.0,
+            "transcript": [
+                "assistant: Hi, this is an AI assistant.",
+                "user: Please hold while I try to connect you.",
+                "user: Hello? This is Jake speaking.",
+            ],
+        },
+    })
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is True
+    assert result.get("contact") == "person"
+    assert "They answered and I talked to them." in clean_state.body
+
+
+def test_recording_counts_toward_daily_cap_and_is_not_retried(
+        clean_state, tmp_path, monkeypatch):
+    """A dial that reaches only a recording still used a daily-cap slot
+    (the cap is counted before the dial, so a rehearsal or a robocall
+    answer cannot dodge it) and is never auto-retried: the task is marked
+    processed, and the durable checkpoint keeps the call id so even a
+    fresh process reconciles instead of dialing again."""
+    from robie_job_engine.call_pickup import DailyCallCapStore, calling_day
+
+    monkeypatch.setenv("ROBIE_CALL_DAILY_CAP", "5")
+    cap = DailyCallCapStore(tmp_path / "cap.sqlite3")
+    bland = FakeBland(statuses={
+        "call-1": {
+            "status": "completed",
+            "answered_by": "unknown",
+            "duration_s": 0.67,
+            "transcript": D25F46D6_TRANSCRIPT,
+            "summary": D25F46D6_SUMMARY,
+        },
+    })
+    ports = make_ports(bland=bland)
+    ports.daily_cap = cap
+    result = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert result["ok"] is False
+    assert result.get("contact") == "recording"
+    assert cap.count(calling_day(IN_WINDOW)) == 1
+    assert bland.dials == 1
+    checkpoint = ports.job_checkpoint.data[rch._checkpoint_key("T-100")]
+    assert checkpoint["bland_call_ids"] == ["call-1"]
+    assert checkpoint["completed_at"] is None
+
+    # Same process, next intake pass: duplicate guard, no dial.
+    again = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert again.get("duplicate_suppressed") is True
+    assert bland.dials == 1
+
+    # Fresh process (in-memory guards gone): the checkpoint reconciles the
+    # known call id with Bland and still does not dial.
+    rch._reset_module_state_for_tests()
+    recovered = rch.handle_robie_call_task(make_task(), make_config(), ports)
+    assert bland.dials == 1
+    assert recovered.get("recovered_from_checkpoint") is True
+    assert recovered["ok"] is False
+    assert cap.count(calling_day(IN_WINDOW)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Multiple typed numbers: first line or labeled wins; otherwise ask (#811).
+# ---------------------------------------------------------------------------
+
+def test_jake_exact_text_first_line_bare_asks(clean_state):
+    """Jake's exact task: bare cell on line 1, callback on last line.
+    After #814 the callback is skipped. The bare first-line run still
+    needs 'call at' / 'phone' / 'cell' wording, so we ask."""
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    assert rch._phone_directive(JAKE_TASK_63558413_WITH_CELL) == (None, True)
+    result = rch.handle_robie_call_task(
+        _jake_task(JAKE_TASK_63558413_WITH_CELL, task_id="T-jake-bare"),
+        make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert "could not tell which number to dial" in clean_state.body
+    assert "write 'call at' or 'phone' before the number" in clean_state.body
+    assert "2520" not in str(ports.job_checkpoint.data)
+    assert "8161" not in str(ports.job_checkpoint.data)
+
+
+def test_jake_text_with_labeled_cell_dials_the_cell_not_the_callback(clean_state):
+    """Same task with the cell labeled: the cell is dialed, never 481-2520."""
+    text = JAKE_TASK_63558413_WITH_CELL.replace(
+        "7326688161\n", "Cell: 7326688161\n", 1)
+    assert rch._typed_phone_choice(text)[0] == "+17326688161"
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        _jake_task(text, task_id="T-jake-cell"), make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-jake-cell")]["phone"] == "+17326688161"
+
+
+def test_first_line_number_wins_over_later_unlabeled(clean_state):
+    text = (
+        "Call Mary at 908-555-0199 about the renewal.\n"
+        "Her husband 732-555-0142"
+    )
+    phone, why, how = rch._typed_phone_choice(text)
+    assert phone == "+19085550199"
+    assert why is None
+    assert how == "first_line"
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        make_task(**{"task_id": "T-first", "Task Description": text}),
+        make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-first")]["phone"] == "+19085550199"
+    assert "more than one phone number" in clean_state.body
+    assert "first line" in clean_state.body
+
+
+def test_labeled_number_wins_when_first_line_has_none(clean_state):
+    text = (
+        "Call Mary about the renewal.\n"
+        "Cell 908-555-0199\n"
+        "Spouse 732-555-0142"
+    )
+    phone, why, how = rch._typed_phone_choice(text)
+    assert phone == "+19085550199"
+    assert how == "labeled"
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        make_task(**{"task_id": "T-lab", "Task Description": text}),
+        make_config(), ports)
+    assert result["ok"] is True
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-lab")]["phone"] == "+19085550199"
+
+
+def test_two_candidates_with_no_winner_asks_and_does_not_dial(clean_state):
+    text = "Call 908-555-0199 or 732-555-0142 about the renewal."
+    phone, why, how = rch._typed_phone_choice(text)
+    assert phone is None
+    assert why == rch.MULTIPLE_NUMBERS
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        make_task(**{"task_id": "T-two", "Task Description": text}),
+        make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+    assert result.get("multiple_numbers") is True
+    assert "more than one phone number" in clean_state.body
+    assert "will not guess" in clean_state.body
+
+
+def test_first_line_and_later_labeled_asks(clean_state):
+    """Two clear winners (first line AND a later labeled number): ask."""
+    text = (
+        "Call Mary at 908-555-0199 about the renewal.\n"
+        "Office: 732-555-0142"
+    )
+    phone, why, how = rch._typed_phone_choice(text)
+    assert phone is None
+    assert why == rch.MULTIPLE_NUMBERS
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    result = rch.handle_robie_call_task(
+        make_task(**{"task_id": "T-tie", "Task Description": text}),
+        make_config(), ports)
+    assert result["ok"] is False
+    assert bland.dials == 0
+
+
+def test_814_callback_exclusion_still_holds():
+    """#814: Jake's voicemail-callback-only task still asks, never dials."""
+    assert rch._phone_directive(JAKE_TASK_63558413_TEXT) == (None, False)
+    assert rch._extract_explicit_phone(JAKE_TASK_63558413_TEXT) is None
+
+
+def test_814_dial_before_voicemail_line_still_dials():
+    text = ("Call Jake at 732-668-8161 about the renewal.\n"
+            "If voicemail: ask him to call 732-555-0142.")
+    phone, why, how = rch._typed_phone_choice(text)
+    assert phone == "+17326688161"
+    assert why is None
