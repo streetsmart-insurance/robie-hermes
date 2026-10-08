@@ -836,3 +836,111 @@ class SecondLiveRoundTests(unittest.TestCase):
                                      SourceArchive(out / "sources"), as_of=AS_OF)
         self.assertEqual(receipt["count"], len(LIVE_POLICIES) - 1)
         self.assertIn("did not load", receipt["held"][0]["hold_reason"])
+
+
+class GuardReloginTests(unittest.TestCase):
+    """Live 2026-10-08 f53568f6: Guard bounced to /auth after 3 policies; 21 held."""
+
+    LIST = "https://gigezrate.guard.com/portal/book-of-business"
+
+    def _browser(self, url):
+        browser = guard.PlaywrightGuardBrowser.__new__(guard.PlaywrightGuardBrowser)
+        browser.page = mock.Mock()
+        browser.page.url = url
+        browser._list_url = self.LIST
+        browser._relogins = 0
+        browser.load_cancellations = mock.Mock(return_value=())
+        return browser
+
+    def test_signed_in_page_does_not_relogin(self):
+        browser = self._browser(self.LIST)
+        with mock.patch.object(guard_login, "login_guard") as login:
+            self.assertFalse(browser.relogin_if_signed_out())
+        login.assert_not_called()
+
+    def test_auth_redirect_relogs_in_and_reselects_cancellations(self):
+        import os
+
+        browser = self._browser("https://gigezrate.guard.com/auth/")
+        with mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(guard, "require_hermes_test_host"), \
+                mock.patch.object(guard_login, "login_guard") as login:
+            self.assertTrue(browser.relogin_if_signed_out())
+        login.assert_called_once_with(browser.page)
+        browser.page.goto.assert_called_once_with(self.LIST, wait_until="domcontentloaded")
+        browser.load_cancellations.assert_called_once()
+
+    def test_relogin_is_capped(self):
+        browser = self._browser("https://gigezrate.guard.com/auth/")
+        browser._relogins = guard.GUARD_RELOGIN_LIMIT
+        with mock.patch.object(guard_login, "login_guard") as login:
+            with self.assertRaises(IntakeHold) as ctx:
+                browser.relogin_if_signed_out()
+        login.assert_not_called()
+        self.assertIn("expired again", str(ctx.exception))
+
+    def test_relogin_refuses_non_test_host_before_secrets(self):
+        browser = self._browser("https://gigezrate.guard.com/auth/")
+        with mock.patch.object(guard, "require_hermes_test_host",
+                               side_effect=IntakeHold("not hermes-test-01")), \
+                mock.patch.object(guard, "refuse_production_host"), \
+                mock.patch.object(guard_login, "login_guard") as login:
+            with self.assertRaises(IntakeHold):
+                browser.relogin_if_signed_out()
+        login.assert_not_called()
+
+    def test_return_to_cancellations_relogs_in_when_bounced(self):
+        browser = self._browser(self.LIST)
+
+        def goto(url, **_):
+            browser.page.url = "https://gigezrate.guard.com/auth/"
+
+        browser.page.goto.side_effect = goto
+        with mock.patch.object(guard, "require_hermes_test_host"), \
+                mock.patch.object(guard, "refuse_production_host"), \
+                mock.patch.object(guard_login, "login_guard") as login:
+            login.side_effect = lambda page: setattr(page, "url", self.LIST)
+            browser.return_to_cancellations()
+        login.assert_called_once()
+        self.assertEqual(browser.page.goto.call_count, 2)
+        browser.load_cancellations.assert_called_once()
+
+    def test_run_pull_retries_policy_after_session_expiry(self):
+        import os
+        import tempfile
+
+        from test_guard_pending_cancellation import AS_OF, LIVE_POLICIES, FakeGuardPage
+
+        from robie_job_engine.intake_core import SourceArchive
+
+        second = LIVE_POLICIES[1][0]
+
+        class Browser(guard.PlaywrightGuardBrowser):
+            expired_once = False
+            relogins = 0
+
+            def open_policy(self, policy_number):
+                if policy_number == second and not self.expired_once:
+                    self.expired_once = True
+                    self.page.url = "https://gigezrate.guard.com/auth/"
+                    raise type("Error", (Exception,), {})("navigation interrupted")
+                return super().open_policy(policy_number)
+
+            def relogin_if_signed_out(self):
+                if not self.on_sign_in_page():
+                    return False
+                self.relogins += 1
+                self.page.url = self._list_url
+                return True
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}):
+            out = Path(tmp)
+            page = FakeGuardPage()
+            home = page.url
+            browser = Browser(page)
+            browser._list_url = home
+            receipt = guard.run_pull(browser, guard.GuardDeliveryLedger(out),
+                                     SourceArchive(out / "sources"), as_of=AS_OF)
+        self.assertEqual(browser.relogins, 1)
+        self.assertEqual(receipt["held"], [])
+        self.assertEqual(receipt["count"], len(LIVE_POLICIES))

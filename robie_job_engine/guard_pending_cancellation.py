@@ -43,6 +43,7 @@ GUARD_HOST = "gigezrate.guard.com"
 GUARD_PUBLIC_HOST = "guard.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 CANCELLATIONS_TAB_ATTEMPTS = 3
+GUARD_RELOGIN_LIMIT = 2
 CANCELLATIONS_TAB_SETTLE_MS = 2500
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "guard-cancellation-ledger.json"
@@ -396,6 +397,46 @@ class PlaywrightGuardBrowser:
     def __init__(self, page: Any):
         self.page = page
         self._list_url = ""
+        self._relogins = 0
+
+    # -- session ----------------------------------------------------------
+    def on_sign_in_page(self) -> bool:
+        """True when Guard bounced the tab to its /auth sign-in screen."""
+        parts = urllib.parse.urlsplit(str(getattr(self.page, "url", "") or ""))
+        path = (parts.path or "").lower()
+        return (parts.hostname or "").lower() == GUARD_HOST and (
+            path.startswith("/auth") or "login" in path
+        )
+
+    def relogin_if_signed_out(self) -> bool:
+        """Sign back in (Test host only) when the session expired mid-run.
+
+        Live 2026-10-08 (f53568f6): after 3 policies Guard redirected the tab
+        to /auth; every later policy held as "did not open" or "missing from
+        the Cancellations grid". Re-login via ``guard_login`` (secrets from
+        Secret Manager, never logged), reload the list and re-select the
+        Cancellations tab. Capped at GUARD_RELOGIN_LIMIT per run so a
+        persistent sign-out holds instead of looping.
+        """
+        if not self.on_sign_in_page():
+            return False
+        if self._relogins >= GUARD_RELOGIN_LIMIT:
+            raise IntakeHold(
+                f"Guard session expired again after {GUARD_RELOGIN_LIMIT} re-logins this run"
+            )
+        refuse_production_host()
+        require_hermes_test_host()
+        from . import guard_login
+
+        self._relogins += 1
+        guard_login.login_guard(self.page)
+        if self._list_url:
+            self.page.goto(self._list_url, wait_until="domcontentloaded")
+            self.page.wait_for_selector("table", timeout=15000)
+            self.load_cancellations()
+        else:
+            self.open_cancellations()
+        return True
 
     # -- navigation -----------------------------------------------------
     def open_cancellations(self) -> None:
@@ -712,6 +753,8 @@ class PlaywrightGuardBrowser:
         left the next policy's link off the page (live 2026-10-08).
         """
         self.page.goto(self._list_url, wait_until="domcontentloaded")
+        if self.relogin_if_signed_out():
+            return
         self.page.wait_for_selector("table", timeout=15000)
         self.load_cancellations()
 
@@ -1014,6 +1057,21 @@ def newest_cancellation_documents(docs: Any) -> list[GuardDocument]:
     return [doc for doc in cancels if doc.issued == newest]
 
 
+def _relogin_if_signed_out(browser: Any) -> bool:
+    relogin = getattr(browser, "relogin_if_signed_out", None)
+    return bool(relogin()) if callable(relogin) else False
+
+
+def _open_policy_with_relogin(browser: Any, policy_number: str) -> None:
+    """Open one policy; if the session expired, sign back in and retry once."""
+    try:
+        browser.open_policy(policy_number)
+    except Exception:
+        if not _relogin_if_signed_out(browser):
+            raise
+        browser.open_policy(policy_number)
+
+
 def _return_to_list_quietly(browser: Any) -> None:
     """Best-effort return to the Cancellations list between policies.
 
@@ -1061,7 +1119,8 @@ def run_pull(
 
     for row in rows:
         try:
-            browser.open_policy(row.policy_number)
+            _relogin_if_signed_out(browser)
+            _open_policy_with_relogin(browser, row.policy_number)
         except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
             reason = str(exc) if isinstance(exc, IntakeHold) else (
                 f"Guard Policy Center for {row.policy_number} did not open ({type(exc).__name__})"
