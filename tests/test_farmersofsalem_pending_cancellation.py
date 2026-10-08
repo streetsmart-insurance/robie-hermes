@@ -401,6 +401,27 @@ def _docs_for(policy, token):
     ]
 
 
+class _PagingFinysPage(FakeFinysPage):
+    """Two-argument evaluate: page size, then Next until the last page."""
+
+    def __init__(self):
+        super().__init__(pending_rows=PENDING_ROWS[:2])
+        self.pages = (PENDING_ROWS[:2], PENDING_ROWS[2:4], PENDING_ROWS[4:])
+        self.index = 0
+        self.page_size = None
+        self.pending_rows = self.pages[0]
+
+    def evaluate(self, script, *args):
+        if "pageSize" in str(script):
+            self.page_size = args[0] if args else None
+            return "pageSize"
+        if self.index + 1 < len(self.pages):
+            self.index += 1
+            self.pending_rows = self.pages[self.index]
+            return "clicked"
+        return "disabled"
+
+
 def _browser(policy=HONJ, token=b"notice"):
     page = FakeFinysPage(docs_by_policy={policy: _docs_for(policy, pdf_bytes(token))})
     return FinysFoSBrowser(page), page
@@ -537,6 +558,80 @@ class NavigationTests(unittest.TestCase):
         portal.url = "https://example.com/"
         with self.assertRaisesRegex(IntakeHold, "portal tab is missing or ambiguous"):
             open_finys_from_portal(portal)
+
+    def test_agent_portal_url_opens_in_a_new_tab(self):
+        portal = FakePortalPage()
+        opened = FakeFinysPage(url="about:blank")
+        opened.gotos = []
+
+        def goto(url, **kwargs):
+            opened.gotos.append(url)
+            opened.url = "https://fos.finys.com/"
+
+        opened.goto = goto
+        portal.context.new_page = lambda: opened
+        finys = open_finys_from_portal(portal)
+        self.assertIs(finys, opened)
+        self.assertEqual(opened.gotos, [fos.AGENT_PORTAL_URL])
+        self.assertIsNone(portal._popup_value)
+
+    def test_signed_in_finys_tab_is_reused(self):
+        portal = FakePortalPage()
+        existing = FakeFinysPage()
+        portal.context.pages.append(existing)
+
+        def new_page():
+            raise AssertionError("new tab")
+
+        portal.context.new_page = new_page
+        self.assertIs(open_finys_from_portal(portal), existing)
+
+    def test_hidden_portal_link_expands_the_navbar_then_clicks(self):
+        portal = FakePortalPage()
+        clicks = []
+
+        class Control:
+            def __init__(self, name):
+                self.name = name
+
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            def click(self, **kwargs):
+                clicks.append(self.name)
+                if self.name == "link":
+                    portal.on_click(portal._link)
+
+        def locator(selector):
+            if selector == fos.NAVBAR_TOGGLER:
+                return Control("toggler")
+            if selector == fos.PORTAL_LINK_HREF:
+                return Control("link")
+            return FakeLocator([], portal)
+
+        portal.locator = locator
+        portal.context.new_page = lambda: (_ for _ in ()).throw(RuntimeError("no tab"))
+        finys = open_finys_from_portal(portal)
+        self.assertEqual(clicks, ["toggler", "link"])
+        self.assertEqual(finys.url, FINYS_TASKS_URL)
+
+    def test_open_tasks_grid_pages_past_the_first_ten(self):
+        page = _PagingFinysPage()
+        items = fos.read_all_pending_items(page)
+        self.assertEqual(page.page_size, fos.KENDO_PAGE_SIZE)
+        self.assertEqual([item.policy_number for item in items], [row[0] for row in PENDING_ROWS])
+
+    def test_open_tasks_paging_stops_at_the_time_budget(self):
+        page = _PagingFinysPage()
+        clock = iter((0, 0, 1000))
+        with patch.object(fos, "monotonic", lambda: next(clock)):
+            items = fos.read_all_pending_items(page)
+        self.assertEqual(len(items), 2)
+        self.assertTrue(any("time budget" in hold["reason"] for hold in page.fos_row_holds))
 
     def test_finys_url_guard(self):
         page = FakeFinysPage()

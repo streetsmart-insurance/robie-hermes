@@ -55,9 +55,13 @@ CL_POLICY_HOST = "clpolicy.foragentsonly.com"
 # servicing app (policy-hub/<policy>/policy-and-coverages), not CL Express.
 POLICY_SERVICING_HOST = "policyservicing.apps.foragentsonly.com"
 POLICY_PAGE_HOSTS = (CL_POLICY_HOST, POLICY_SERVICING_HOST)
-POLICY_PAGE_WAIT_MS = 15000
+# Live 2026-10-08: the policy link stays on the same tab and the redirect
+# alone takes about 14 s. The click must not wait for that navigation.
+POLICY_PAGE_WAIT_MS = 35000
+CLICK_TIMEOUT_MS = 15000
 RETURN_TO_REPORT_MS = 15000
-STUCK_TAB_GOTO_MS = 20000
+STUCK_TAB_GOTO_MS = 30000
+CL_DOCUMENTS_CSS = "div.FAOLinks a.mainItemLink"
 # Hard caps. A Playwright timeout that is ignored still trips the alarm,
 # holds that policy, and the pull continues. The worker deadline is under
 # the 15-minute outer `timeout` so the summary is written before exit 124.
@@ -146,6 +150,10 @@ class FaoDeadline(BaseException):
     """The worker's own deadline. The summary is written and the pull stops."""
 
 
+class FaoReconnectFailed(BaseException):
+    """A new CDP connection could not be opened after a timeout. The pull stops."""
+
+
 def step_log(message: str) -> None:
     """One line on stderr, flushed, and appended to the progress file.
 
@@ -212,18 +220,33 @@ def time_budget(seconds: float, message: str, exc_type: type[BaseException] = Fa
         signal.signal(signal.SIGALRM, previous)
 
 
-def _click(locator: Any, timeout: int = POLICY_PAGE_WAIT_MS) -> None:
+def _click(locator: Any, timeout: int = CLICK_TIMEOUT_MS, *, no_wait_after: bool = False) -> None:
+    """Click without waiting for the navigation the click starts.
+
+    Live policy open stays on the same tab and spends about 9 s in the
+    redirect. ``no_wait_after`` lets the URL wait own that time.
+    """
+    kwargs: dict[str, Any] = {"timeout": timeout}
+    if no_wait_after:
+        kwargs["no_wait_after"] = True
     try:
-        locator.click(timeout=timeout)
+        locator.click(**kwargs)
     except TypeError:
         locator.click()
+
+
+def _log_caught_timeout(exc: BaseException, where: str) -> None:
+    step_log(f"caught timeout during {where}: {type(exc).__name__}: {str(exc)[:180]}")
 
 
 def _needs_fresh_tab(exc: BaseException) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     return any(
         token in text
-        for token in ("timeout", "time budget", "has been closed", "target closed", "target page")
+        for token in (
+            "timeout", "timed out", "time budget",
+            "has been closed", "target closed", "target page",
+        )
     )
 
 
@@ -388,7 +411,9 @@ def _with_one_retry(action: Callable[[], Any], *, what: str) -> Any:
             raise
         except Exception as exc:
             error = exc
-            timed_out = "timeout" in type(exc).__name__.lower()
+            timed_out = "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
+            if timed_out:
+                _log_caught_timeout(exc, what)
             if attempt == 2 or not timed_out:
                 break
     name = type(error).__name__ if error is not None else "Error"
@@ -414,6 +439,23 @@ def documents_control(page: Any) -> Any | None:
             raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
         if visible:
             return visible[0]
+    # Live CL Express: div.FAOLinks a.mainItemLink, text DOCUMENTS. The id
+    # ext-element-NN changes every render, so it is not part of the selector.
+    try:
+        links = page.locator(CL_DOCUMENTS_CSS)
+        count = int(links.count())
+    except Exception:
+        count = 0
+    matched = []
+    for index in range(min(count, 8)):
+        node = links.nth(index) if hasattr(links, "nth") else links
+        text = _norm(_read_text(node)).casefold()
+        if text == "documents" and _node_visible(node):
+            matched.append(node)
+    if len(matched) == 1:
+        return matched[0]
+    if len(matched) > 1:
+        raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
     return None
 
 
@@ -443,7 +485,7 @@ def open_cl_documents(page: Any) -> None:
         control = documents_control(page)
         if control is None:
             raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
-        control.click()
+        _click(control, no_wait_after=True)
         _with_one_retry(lambda: _wait_for_policy_documents(page), what="CL Express documents list")
 
 
@@ -472,7 +514,7 @@ def open_policy_servicing_documents(page: Any) -> None:
             _with_one_retry(go, what="policyservicing documents route")
             control = documents_control(page)
         if control is not None:
-            control.click()
+            _click(control, no_wait_after=True)
         elif not str(getattr(page, "url", "") or "").rstrip("/").endswith("/documents"):
             raise IntakeHold(
                 "Progressive personal policy on policyservicing has no Documents control"
@@ -801,9 +843,10 @@ class PlaywrightFaoCancellationBrowser:
         # Wait for report tabs (tables may be hidden until a tab is selected)
         try:
             page.get_by_role("tab", name="Pending Cancellation Due to Non-Payment", exact=True).wait_for(timeout=15000)
-        except Exception:
-            # FakePage in tests doesn't have wait_for; tables are checked by caller
-            pass
+        except Exception as exc:
+            # FakePage in tests doesn't have wait_for; tables are checked by caller.
+            if "timeout" in type(exc).__name__.lower():
+                _log_caught_timeout(exc, "report tab")
         self._list_url = require_fao_url(str(getattr(page, "url", "") or ""))
 
     def select_tab(self, tab_label: str) -> None:
@@ -857,7 +900,8 @@ class PlaywrightFaoCancellationBrowser:
         step_log(f"policy {policy_number} open summary")
         require_policy_number(policy_number)
         link = _unique_control(self.page, "link", policy_number, exact=True)
-        _click(link)
+        _click(link, no_wait_after=True)
+        step_log(f"policy {policy_number} click returned; waiting for the policy page")
 
         def landed() -> None:
             self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
@@ -866,9 +910,9 @@ class PlaywrightFaoCancellationBrowser:
         try:
             landed()
         except Exception as exc:
+            _log_caught_timeout(exc, f"policy {policy_number} summary")
             if not _needs_fresh_tab(exc):
                 raise
-            step_log(f"policy {policy_number} summary timed out; not retrying on this page")
             raise IntakeHold(
                 f"Progressive FAO policy {policy_number} summary page timed out"
             ) from exc
@@ -1001,9 +1045,11 @@ class PlaywrightFaoCancellationBrowser:
             self._retire = []
         self._retire.append(old)
         try:
+            step_log(f"fresh report tab goto timeout {STUCK_TAB_GOTO_MS}ms")
             fresh.goto(self._list_url or REPORT_URL, wait_until="domcontentloaded", timeout=STUCK_TAB_GOTO_MS)
             require_fao_url(str(getattr(fresh, "url", "") or ""))
-        except Exception:
+        except Exception as exc:
+            _log_caught_timeout(exc, "fresh report tab")
             from .carrier_tabs import close_page
 
             close_page(fresh)
@@ -1012,6 +1058,48 @@ class PlaywrightFaoCancellationBrowser:
         from .carrier_tabs import close_page
 
         close_page(old)
+
+    def reconnect_after_timeout(self) -> None:
+        """Open a new CDP connection and load the report on it.
+
+        The connection that was inside the timed-out call is not used again.
+        A failed reconnect stops the pull as PARTIAL.
+        """
+        url = (os.environ.get("ROBIE_BROWSER_CDP_URL") or getattr(self, "cdp_url", "") or "").strip()
+        step_log("reconnect over CDP after timeout")
+        if not url:
+            step_log("no CDP url; opening a fresh report tab on the current connection")
+            self.replace_stuck_tab()
+            return
+        from playwright.sync_api import sync_playwright
+
+        playwright = None
+        try:
+            playwright = sync_playwright().start()
+            connected = playwright.chromium.connect_over_cdp(url)
+            contexts = list(getattr(connected, "contexts", []) or [])
+            if not contexts:
+                raise IntakeHold("reconnect found no browser context")
+            fresh = contexts[0].new_page()
+            step_log(f"fresh report tab goto timeout {STUCK_TAB_GOTO_MS}ms")
+            fresh.goto(self._list_url or REPORT_URL, wait_until="domcontentloaded", timeout=STUCK_TAB_GOTO_MS)
+            require_fao_url(str(getattr(fresh, "url", "") or ""))
+        except Exception as exc:
+            _log_caught_timeout(exc, "CDP reconnect")
+            if playwright is not None:
+                try:
+                    playwright.stop()
+                except Exception:
+                    pass
+            raise FaoReconnectFailed(
+                f"Progressive FAO reconnect over CDP failed ({type(exc).__name__})"
+            ) from exc
+        if not hasattr(self, "_retire"):
+            self._retire = []
+        self._retire.append(self.page)
+        self.page = fresh
+        self._reconnect_playwright = playwright
+        step_log("reconnected over CDP and opened the report")
 
     def finish_tabs(self) -> None:
         """Close tabs this run opened, and any tab a stuck-policy swap retired.
@@ -1039,8 +1127,9 @@ class PlaywrightFaoCancellationBrowser:
         # then wait for a visible table with data rows.
         try:
             self.page.get_by_role("tab").first.wait_for(timeout=20000)
-        except Exception:
-            pass
+        except Exception as exc:
+            if "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower():
+                _log_caught_timeout(exc, "return to report tabs")
 
         def tables_ready() -> None:
             self.page.wait_for_function(
@@ -1358,9 +1447,12 @@ def run_pull(
                 rows_payload=rows_payload, uw_memos=uw_memos, all_rows=all_rows,
                 progress=progress, publish=publish,
             )
-    except FaoDeadline as exc:
+    except (FaoDeadline, FaoReconnectFailed) as exc:
         left = max(0, len(all_rows) - progress["done"])
-        reason = f"Progressive FAO worker deadline reached; {left} policies left unprocessed"
+        if isinstance(exc, FaoReconnectFailed):
+            reason = f"Progressive FAO reconnect over CDP failed; {left} policies left unprocessed"
+        else:
+            reason = f"Progressive FAO worker deadline reached; {left} policies left unprocessed"
         step_log(reason)
         return publish({"status": "PARTIAL", "reason": reason, "unprocessed": left, "deadline": str(exc)})
     finally:
@@ -1509,38 +1601,61 @@ def _pull_policies(
             )
             held.append(_row_payload(row, outcome="HELD", reason=reason))
             step_log(f"policy {row.policy_number} held: {reason}")
-            _recover_report_tab(browser, exc)
             progress["done"] += 1
+            _recover_report_tab(browser, exc)
             continue
     return publish()
+
+
+def _abandon_timed_out_page(browser: Any) -> None:
+    """Leave the connection that was inside the timed-out call.
+
+    A CDP url gets a new ``connect_over_cdp``. Without one, a fresh tab is
+    opened on the current context, and that goto has its own timeout.
+    ``FaoReconnectFailed`` is not caught here.
+    """
+    step_log("timed-out page will not be reused")
+    url = (os.environ.get("ROBIE_BROWSER_CDP_URL") or "").strip()
+    reconnect = getattr(type(browser), "reconnect_after_timeout", None)
+    if url and callable(reconnect):
+        browser.reconnect_after_timeout()
+        return
+    replace = getattr(browser, "replace_stuck_tab", None)
+    step_log("opening a fresh report tab on the current connection")
+    if not callable(replace):
+        return
+    try:
+        replace()
+    except (Exception, FaoBudget) as err:  # noqa: BLE001
+        _log_caught_timeout(err, "fresh report tab")
 
 
 def _recover_report_tab(browser: Any, exc: BaseException | None = None) -> None:
     """Back to the report. A timed-out page is not used again.
 
     Opening the report on that page is what sat for 12 minutes after the
-    summary-page timeout (the page or context was already closed). A fresh
-    tab in the same context loads the report URL instead.
+    summary-page timeout (the page or context was already closed).
     """
-    replace = getattr(browser, "replace_stuck_tab", None)
     if exc is not None and _needs_fresh_tab(exc):
-        step_log("timed-out page will not be reused; opening a fresh report tab")
-        if callable(replace):
-            try:
-                replace()
-            except (Exception, FaoBudget):  # noqa: BLE001
-                step_log("fresh report tab did not open")
+        _log_caught_timeout(exc, "policy step")
+        _abandon_timed_out_page(browser)
         return
     try:
         browser.return_to_report()
         return
     except (Exception, FaoBudget) as err:  # noqa: BLE001
-        step_log(f"return to report failed ({type(err).__name__}); opening a fresh report tab")
-    if callable(replace):
-        try:
-            replace()
-        except (Exception, FaoBudget):  # noqa: BLE001
-            step_log("fresh report tab did not open")
+        _log_caught_timeout(err, "return to report")
+        step_log(f"return to report failed ({type(err).__name__})")
+        if _needs_fresh_tab(err):
+            _abandon_timed_out_page(browser)
+            return
+    replace = getattr(browser, "replace_stuck_tab", None)
+    if not callable(replace):
+        return
+    try:
+        replace()
+    except (Exception, FaoBudget) as err:  # noqa: BLE001
+        _log_caught_timeout(err, "fresh report tab")
 
 
 def _fao_family_host(url: str) -> bool:

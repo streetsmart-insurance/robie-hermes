@@ -6,9 +6,11 @@ Playbook (verified live 2026-10-02 from Nicole's training):
   Agent Home". ``farmersofsalem_login`` does that once, from
   ``farmers_of_salem_username`` / ``farmers_of_salem_password`` (the newer
   pair; ``farmers_of_salem_robie_*`` is not read).
-* Click the "FOS PORTAL" link (agent_portal.aspx). It opens a new tab with
-  the Finys policy admin system at https://fos.finys.com/ ("THE FINYS
-  SUITE").
+* Open https://www.farmersofsalem.com/agent/agent_portal.aspx in a
+  worker-owned tab. It lands on the Finys policy admin system at
+  https://fos.finys.com/ ("THE FINYS SUITE"). A signed-in Finys tab is
+  reused. The navbar toggler plus the FOS PORTAL link is the fallback
+  when that navigation is not available.
 * The Finys landing page shows "My Open Tasks - pending items" (sidebar:
   "My Pending Cancellation Items") with policy number, insured, product,
   and due date.
@@ -23,8 +25,9 @@ Notice, cancellation notices, underwriting memos, billing memos.
 A missing or non-unique control raises IntakeHold. This module does not
 upload, note, task, or label in EZLynx, and does not register a timer.
 ``ensure_finys_page`` signs in when Finys is not already open.
-``open_finys_from_portal`` takes the farmersofsalem.com tab and expects
-exactly one new fos.finys.com tab.
+``open_finys_from_portal`` reuses a signed-in fos.finys.com tab, or
+opens the agent portal URL in a new tab. The navbar toggler plus the
+portal link is the fallback.
 """
 from __future__ import annotations
 
@@ -52,7 +55,17 @@ CARRIER = "farmersofsalem"
 PROCESS = "farmersofsalem-pending-cancellation"
 PORTAL_HOST = "farmersofsalem.com"
 FINYS_HOST = "fos.finys.com"
+# Live 2026-10-08: the FOS PORTAL anchor is in the collapsed navbar when
+# the Test window is under 992 px. Navigating here lands on fos.finys.com.
+AGENT_PORTAL_URL = "https://www.farmersofsalem.com/agent/agent_portal.aspx"
+PORTAL_LINK_HREF = 'a[href="agent_portal.aspx"]'
+NAVBAR_TOGGLER = "nav div.navbar-toggler"
 FOS_PORTAL_LINK = "FOS PORTAL"
+DIARY_GRID_ID = "MyOpenTasks_DiaryGrid"
+KENDO_PAGE_SIZE = 100
+# 771 open tasks at 100 per page is eight pages. Stop rather than read forever.
+GRID_PAGE_BUDGET_S = 90
+PORTAL_GOTO_MS = 15000
 LEDGER_NAME = "farmersofsalem-noc-ledger.json"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 8000
@@ -480,6 +493,165 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
     return tuple(items)
 
 
+def _fos_log(message: str) -> None:
+    sys.stderr.write(f"FoS {message}\n")
+    sys.stderr.flush()
+
+
+# pageSize(100) on the live Kendo widget, then the pager sizes <select>.
+_KENDO_PAGE_SIZE_JS = """
+(wanted) => {
+  const root = document.querySelector('#MyOpenTasks_DiaryGrid');
+  const jq = window.jQuery || window.$;
+  if (root && jq) {
+    const grid = jq(root).data('kendoGrid');
+    if (grid && grid.dataSource && typeof grid.dataSource.pageSize === 'function') {
+      if (grid.dataSource.pageSize() !== wanted) grid.dataSource.pageSize(wanted);
+      return 'pageSize';
+    }
+  }
+  const select = (root || document).querySelector('.k-pager-sizes select');
+  if (!select || !select.options || !select.options.length) return 'unchanged';
+  let best = select.options[0];
+  for (const option of select.options) {
+    const value = parseInt(option.value, 10);
+    const bestValue = parseInt(best.value, 10);
+    if (!Number.isNaN(value) && (Number.isNaN(bestValue) || value > bestValue)) best = option;
+  }
+  if (String(select.value) !== String(best.value)) {
+    select.value = best.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return 'dropdown';
+}
+"""
+
+# Click the enabled Kendo next control. 'disabled' / 'absent' ends the walk.
+_KENDO_NEXT_JS = """
+() => {
+  const root = document.querySelector('#MyOpenTasks_DiaryGrid') || document;
+  const next = root.querySelector(
+    '.k-pager-next, a[title="Go to the next page"], button[title="Go to the next page"]'
+  );
+  if (!next) return 'absent';
+  const disabled = next.classList.contains('k-disabled')
+    || next.classList.contains('k-state-disabled')
+    || next.getAttribute('aria-disabled') === 'true'
+    || next.hasAttribute('disabled');
+  if (disabled) return 'disabled';
+  next.click();
+  return 'clicked';
+}
+"""
+
+
+def _wait_for_grid_idle(page: Any) -> None:
+    waiter = getattr(page, "wait_for_function", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(
+            """() => {
+              const grid = document.querySelector('#MyOpenTasks_DiaryGrid');
+              if (!grid) return true;
+              return !grid.querySelector('.k-loading-mask');
+            }""",
+            timeout=8000,
+        )
+    except Exception:
+        pass
+
+
+def _merge_page_holds(page: Any, holds: list[dict[str, str]], seen: set[tuple[str, str, str]]) -> None:
+    current = getattr(page, "fos_row_holds", None)
+    if not isinstance(current, list):
+        return
+    for hold in current:
+        if not isinstance(hold, dict):
+            continue
+        key = (str(hold.get("policy_number") or ""), str(hold.get("due_date") or ""), str(hold.get("reason") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        holds.append(hold)
+
+
+def _page_evaluate(page: Any) -> Callable[..., Any] | None:
+    """A real page script runner. A mock attribute is not one."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return None
+    if type(evaluate).__module__.startswith("unittest.mock"):
+        return None
+    return evaluate
+
+
+def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
+    """Read the open-tasks grid, including pages after the first ten rows.
+
+    A page without ``evaluate`` (the fixture) is the visible page only.
+    Live Finys shows ``1 - 10 of 771``. The page size is set to 100, then
+    Next is clicked until it is disabled or the time budget is spent.
+    """
+    evaluate = _page_evaluate(page)
+    if evaluate is None:
+        return extract_pending_items(page)
+    deadline = monotonic() + GRID_PAGE_BUDGET_S
+    _fos_log(f"open tasks grid page size {KENDO_PAGE_SIZE}")
+    try:
+        evaluate(_KENDO_PAGE_SIZE_JS, KENDO_PAGE_SIZE)
+    except Exception as exc:
+        _fos_log(f"page size was not changed ({type(exc).__name__})")
+    _wait_for_grid_idle(page)
+    items: list[PendingItem] = []
+    holds: list[dict[str, str]] = []
+    seen_items: set[tuple[str, str]] = set()
+    seen_holds: set[tuple[str, str, str]] = set()
+    stopped = False
+    page_index = 0
+    while True:
+        if monotonic() >= deadline:
+            stopped = True
+            break
+        page_index += 1
+        for item in extract_pending_items(page):
+            key = (item.policy_number, item.due_on.isoformat())
+            if key in seen_items:
+                continue
+            seen_items.add(key)
+            items.append(item)
+        _merge_page_holds(page, holds, seen_holds)
+        try:
+            state = evaluate(_KENDO_NEXT_JS)
+        except Exception as exc:
+            _fos_log(f"next page was not clicked ({type(exc).__name__})")
+            break
+        if state != "clicked":
+            break
+        _fos_log(f"open tasks grid page {page_index + 1}")
+        _wait_for_grid_idle(page)
+        if monotonic() >= deadline:
+            stopped = True
+            break
+    if stopped:
+        holds.append({
+            "policy_number": "",
+            "insured_name": "",
+            "product": "",
+            "due_date": "",
+            "reason": (
+                "Farmers of Salem open-tasks paging hit its time budget; "
+                "later pages were not read."
+            ),
+        })
+        _fos_log("open tasks paging stopped at the time budget")
+    try:
+        page.fos_row_holds = holds
+    except Exception:
+        pass
+    return tuple(items)
+
+
 # Live 2026-10-08 (f53568f6): the Finys landing has no accessible-named search
 # textbox. The Policy Quick Search widget has a Quote row (Button1) and a
 # Policy Number row (policyText, then Button2), read on hermes-test-01.
@@ -772,18 +944,115 @@ def download_view_pdf(page: Any, view: Any) -> bytes:
     return content
 
 
-def open_finys_from_portal(portal_page: Any) -> Any:
-    """Click FOS PORTAL on the farmersofsalem.com tab; return the new Finys tab.
+def _context_page_list(portal_page: Any) -> list[Any]:
+    context = getattr(portal_page, "context", None)
+    pages = getattr(context, "pages", None)
+    if not isinstance(pages, list):
+        return []
+    return list(pages)
 
-    Raises IntakeHold unless exactly one new tab opens on fos.finys.com.
-    """
-    host = (urllib.parse.urlsplit(str(getattr(portal_page, "url", "") or "")).hostname or "").lower()
-    if PORTAL_HOST not in host:
-        raise IntakeHold("Farmers of Salem portal tab is missing or ambiguous")
-    link = _control(portal_page, "link", FOS_PORTAL_LINK)
+
+def _signed_in_finys_tabs(portal_page: Any) -> list[Any]:
+    found = []
+    for page in _context_page_list(portal_page):
+        try:
+            require_finys_url(str(getattr(page, "url", "") or ""))
+        except IntakeHold:
+            continue
+        found.append(page)
+    return found
+
+
+def _close_quietly(page: Any) -> None:
+    closer = getattr(page, "close", None)
+    if not callable(closer):
+        return
     try:
-        with portal_page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup_info:
-            link.click()
+        closer()
+    except Exception:
+        pass
+
+
+def _goto_portal(page: Any) -> None:
+    try:
+        page.goto(AGENT_PORTAL_URL, wait_until="domcontentloaded", timeout=PORTAL_GOTO_MS)
+    except TypeError:
+        page.goto(AGENT_PORTAL_URL)
+
+
+def _wait_until_finys(page: Any) -> None:
+    url = str(getattr(page, "url", "") or "")
+    if FINYS_HOST in url:
+        return
+    waiter = getattr(page, "wait_for_url", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(lambda current: FINYS_HOST in str(current or ""), timeout=PORTAL_GOTO_MS)
+    except TypeError:
+        waiter(f"**{FINYS_HOST}**", timeout=PORTAL_GOTO_MS)
+
+
+def _open_portal_in_new_tab(portal_page: Any) -> Any | None:
+    """Navigate a new tab to the agent portal. None when that path is unavailable."""
+    context = getattr(portal_page, "context", None)
+    new_page = getattr(context, "new_page", None) if context is not None else None
+    if not callable(new_page):
+        return None
+    fresh = None
+    try:
+        fresh = new_page()
+        _fos_log(f"open agent portal {AGENT_PORTAL_URL}")
+        _goto_portal(fresh)
+        _wait_until_finys(fresh)
+        require_finys_url(str(getattr(fresh, "url", "") or ""))
+    except Exception as exc:
+        _fos_log(f"agent portal navigation did not reach Finys ({type(exc).__name__})")
+        if fresh is not None:
+            _close_quietly(fresh)
+        return None
+    return fresh
+
+
+def _click_control(locator: Any) -> None:
+    try:
+        locator.click(timeout=5000)
+    except TypeError:
+        locator.click()
+
+
+def _portal_link(page: Any) -> Any:
+    """The one agent_portal.aspx anchor, including one Bootstrap has hidden."""
+    try:
+        links = page.locator(PORTAL_LINK_HREF)
+        count = int(links.count())
+    except Exception:
+        count = 0
+    if count > 1:
+        raise IntakeHold("FOS PORTAL link is missing or ambiguous")
+    if count == 1:
+        return links.first if hasattr(links, "first") else links
+    return _control(page, "link", FOS_PORTAL_LINK)
+
+
+def _open_portal_by_click(portal_page: Any) -> Any:
+    """Expand the collapsed navbar, then click the portal link."""
+    try:
+        toggler = portal_page.locator(NAVBAR_TOGGLER)
+        count = int(toggler.count())
+    except Exception:
+        count = 0
+    if count >= 1:
+        target = toggler.first if hasattr(toggler, "first") else toggler
+        try:
+            _fos_log("expand navbar toggler")
+            _click_control(target)
+        except Exception:
+            pass
+    link = _portal_link(portal_page)
+    try:
+        with portal_page.expect_popup(timeout=PORTAL_GOTO_MS) as popup_info:
+            _click_control(link)
         finys_page = popup_info.value
     except Exception as exc:
         raise IntakeHold("FOS PORTAL did not open the Finys tab") from exc
@@ -791,6 +1060,26 @@ def open_finys_from_portal(portal_page: Any) -> Any:
         raise IntakeHold("FOS PORTAL did not open the Finys tab")
     require_finys_url(str(getattr(finys_page, "url", "") or ""))
     return finys_page
+
+
+def open_finys_from_portal(portal_page: Any) -> Any:
+    """Return a signed-in Finys tab from the farmersofsalem.com session.
+
+    An existing fos.finys.com tab is reused. Otherwise a new tab opens
+    ``agent/agent_portal.aspx``. The navbar toggler plus the portal link
+    is the fallback when that navigation cannot be started.
+    """
+    host = (urllib.parse.urlsplit(str(getattr(portal_page, "url", "") or "")).hostname or "").lower()
+    if PORTAL_HOST not in host and FINYS_HOST not in host:
+        raise IntakeHold("Farmers of Salem portal tab is missing or ambiguous")
+    existing = _signed_in_finys_tabs(portal_page)
+    if existing:
+        _fos_log("reuse signed-in Finys tab")
+        return existing[0]
+    opened = _open_portal_in_new_tab(portal_page)
+    if opened is not None:
+        return opened
+    return _open_portal_by_click(portal_page)
 
 # --- Browser page object ----------------------------------------------------
 
@@ -805,7 +1094,7 @@ class FinysFoSBrowser:
     def load_pending_items(self) -> tuple[PendingItem, ...]:
         require_finys_url(str(getattr(self.page, "url", "") or ""))
         try:
-            items = extract_pending_items(self.page)
+            items = read_all_pending_items(self.page)
         except IntakeHold:
             # Live 2026-10-08: the tab was left on a Policy Summary (same
             # https://fos.finys.com/ URL), so the task grid was absent. Close
@@ -814,7 +1103,7 @@ class FinysFoSBrowser:
             self.page.goto(FINYS_LANDING_URL, wait_until="domcontentloaded")
             if not _wait_for(lambda: _has_pending_grid(self.page)):
                 raise
-            items = extract_pending_items(self.page)
+            items = read_all_pending_items(self.page)
         holds = getattr(self.page, "fos_row_holds", None)
         self.row_holds = list(holds) if isinstance(holds, list) else []
         try:

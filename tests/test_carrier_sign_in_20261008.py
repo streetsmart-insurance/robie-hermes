@@ -606,6 +606,90 @@ class FaoBudgetAndLogTests(unittest.TestCase):
         self.assertEqual(receipt["unprocessed"], 3)
         self.assertIn("3 policies left unprocessed", receipt["reason"])
 
+    def test_policy_click_does_not_wait_for_the_redirect(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        seen = []
+
+        class Link:
+            def click(self, **kwargs):
+                seen.append(kwargs)
+
+        fao._click(Link(), no_wait_after=True)
+        self.assertEqual(seen, [{"timeout": fao.CLICK_TIMEOUT_MS, "no_wait_after": True}])
+        self.assertGreaterEqual(fao.POLICY_PAGE_WAIT_MS, 30000)
+
+    def test_documents_control_matches_the_fao_link_text(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        node = mock.Mock()
+        node.is_visible.return_value = True
+        node.inner_text.return_value = "DOCUMENTS"
+        empty = mock.Mock()
+        empty.count.return_value = 0
+        links = mock.Mock()
+        links.count.return_value = 1
+        links.nth.return_value = node
+        page = mock.Mock()
+        page.get_by_role.return_value = empty
+        page.locator.side_effect = lambda sel: links if sel == fao.CL_DOCUMENTS_CSS else empty
+        self.assertIs(fao.documents_control(page), node)
+        self.assertNotIn("ext-element", fao.CL_DOCUMENTS_CSS)
+
+    def test_cdp_reconnect_failure_is_partial_with_the_remaining_count(self):
+        import os
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = tuple(
+            SimpleNamespace(policy_number=n, tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in ("970498127", "871490213")
+        )
+
+        class Browser:
+            def screenshot_report(self):
+                return b"\x89PNG\r\n\x1a\n"
+
+            def load_report(self):
+                return None
+
+            def select_tab(self, _label):
+                return None
+
+            def load_current_tab(self, _label):
+                if not hasattr(self, "_loaded"):
+                    self._loaded = True
+                    return rows
+                return ()
+
+            def open_policy_summary(self, _policy_number):
+                raise TimeoutError("summary page timed out")
+
+            def reconnect_after_timeout(self):
+                raise fao.FaoReconnectFailed("cdp down")
+
+            def finish_tabs(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"ROBIE_ENV": "TEST", "ROBIE_BROWSER_CDP_URL": "http://127.0.0.1:9223"},
+        ), mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            receipt = fao.run_pull(
+                Browser(), fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                as_of=date(2026, 10, 8),
+            )
+        self.assertEqual(receipt["status"], "PARTIAL")
+        self.assertEqual(receipt["unprocessed"], 1)
+        self.assertIn("reconnect", receipt["reason"])
+        self.assertIn("1 policies left unprocessed", receipt["reason"])
+
 
 class UticaTabTests(unittest.TestCase):
     def test_extra_oneshield_sso_tabs_are_closed_and_one_is_reused(self):
