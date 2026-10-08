@@ -949,7 +949,8 @@ def test_signed_notice_note_is_plain_and_idempotent():
     assert driver.category_title(driver.CATEGORY_PAYMENTS) == "Ascend - Payments"
     assert driver.category_for(triage.LATE_PAYMENT) == driver.CATEGORY_PAYMENTS
     assert driver.category_for(triage.RETURN_PREMIUM) == driver.CATEGORY_RETURN_PREMIUM
-    assert driver.category_for(triage.NEW_PROGRAM) == ""
+    assert driver.category_for(triage.NEW_PROGRAM) == driver.CATEGORY_PAYMENTS
+    assert driver.category_for(triage.UNKNOWN) == ""
 
 
 def test_non_category_titles_do_not_receive_the_note(no_zap_fire):

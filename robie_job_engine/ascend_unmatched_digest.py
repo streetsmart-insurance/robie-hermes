@@ -1,7 +1,9 @@
 """Daily plain-English list of Ascend notices that matched no single EZLynx client.
 
 The 15-minute poll upserts each unmatched notice into the API store. This
-module turns the open rows into one weekday email to hello@streetsmart.insurance.
+module turns the open rows into one weekday email to hello@streetsmart.insurance
+(the live installer can name another address, e.g. accounting@).
+Unmatched email-only notices from the email driver's review file are on it too.
 Dry-run is the default: the email is printed to the journal unless
 ``ASCEND_UNMATCHED_DIGEST_LIVE=1``. An empty list sends nothing.
 
@@ -156,7 +158,7 @@ _NOTICE_WORDS = {
     "return_premium": "return premium",
     "refund": "refund",
     "agency_remittance": "agency remittance",
-    "new_program": "new program",
+    "new_program": "new finance agreement",
     "processing_payment": "processing payment",
     "underwriting": "underwriting",
 }
@@ -169,6 +171,8 @@ _INTRO = (
 _UNMATCHED_ASK = (
     "Update the policy number in Ascend or EZLynx so they match, and Robie will file it."
 )
+_NO_NUMBER_ASK = "Add the policy number to the program in Ascend, and Robie will file it."
+_PLURAL_NOT_IN_EZLYNX = "Those policy numbers are not in EZLynx."
 _TYPO_CHECK = "Check whether the policy number is a typo in Ascend or EZLynx."
 _FIX_LINE_CHECKED = (
     "Fix the policy number in Ascend or EZLynx and it drops off this list "
@@ -693,6 +697,11 @@ def recheck_open_unmatched(
         if str(row.get("reason") or "") == CATCHUP_REVIEW:
             still_open.append(row)
             continue
+        # The email driver re-reads its own mail and files it once it
+        # matches. The digest does not mark an email row ready to file.
+        if is_email_row(row):
+            still_open.append(row)
+            continue
         if stopped or (deadline is not None and ticks() >= deadline):
             stopped = True
             still_open.append(row)
@@ -792,11 +801,16 @@ def item_line(item: dict[str, Any]) -> str:
         else:
             waiting = _READY_WHEN_NOTES_ABSENT
         return ", ".join(parts) + ". " + waiting
+    reason_key = str(item.get("reason") or "")
     reason = _REASON_WORDS.get(
-        str(item.get("reason") or ""),
+        reason_key,
         "Robie could not match this notice to one client.",
     )
-    sentence = ", ".join(parts) + ". " + reason + " " + _UNMATCHED_ASK
+    numbers = [n for n in list(item.get("policy_numbers") or []) if str(n or "").strip()]
+    if reason_key == POLICY_OUTCOME_NOT_IN_EZLYNX and len(numbers) > 1:
+        reason = _PLURAL_NOT_IN_EZLYNX
+    ask = _NO_NUMBER_ASK if reason_key == POLICY_OUTCOME_NO_NUMBER else _UNMATCHED_ASK
+    sentence = ", ".join(parts) + ". " + reason + " " + ask
     client = str(item.get("suggestion_client") or "").strip()
     policy = str(item.get("suggestion_policy") or "").strip()
     if client and policy:
@@ -897,7 +911,50 @@ def digest_store_paths() -> list[Path]:
     for extra in (live_db_path(), dry_run_db_path()):
         if extra not in paths and extra.is_file():
             paths.append(extra)
+    email_review = _email_review_path()
+    if email_review is not None and email_review not in paths and email_review.is_file():
+        paths.append(email_review)
     return paths
+
+
+EMAIL_REVIEW_DEFAULT = Path("/var/lib/robie-ascend-notice-driver/email-unmatched.db")
+
+
+def _email_review_path() -> Path | None:
+    """The email driver's review file. Same env names as the driver."""
+    from .ascend_notice_driver import EMAIL_REVIEW_DB_ENV, email_review_db_path
+
+    if str(os.environ.get(EMAIL_REVIEW_DB_ENV) or "").strip():
+        return email_review_db_path()
+    found = email_review_db_path()
+    return found if found is not None else EMAIL_REVIEW_DEFAULT
+
+
+def is_email_row(row: dict[str, Any]) -> bool:
+    from .ascend_notice_driver import EMAIL_REVIEW_KEY_PREFIX
+
+    return str(row.get("event_key") or "").startswith(EMAIL_REVIEW_KEY_PREFIX)
+
+
+def drop_email_duplicates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One line per Ascend event. The API row wins over the same email.
+
+    The API poll and the email driver can both list one event. They have
+    different keys, so the email row is dropped when an open API row has
+    the same program and notice type.
+    """
+    api_pairs = {
+        (str(row.get("program_id") or "").strip().lower(), str(row.get("notice_type") or ""))
+        for row in rows
+        if not is_email_row(row)
+    }
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        pair = (str(row.get("program_id") or "").strip().lower(), str(row.get("notice_type") or ""))
+        if is_email_row(row) and pair[0] and pair in api_pairs:
+            continue
+        kept.append(row)
+    return kept
 
 
 def open_digest_stores() -> list[EventKeyStore]:
@@ -925,7 +982,8 @@ def collect_open(stores: list[EventKeyStore]) -> list[dict[str, Any]]:
                 continue
             elif str(row.get("last_seen") or "") >= str(current.get("last_seen") or ""):
                 by_key[key] = row
-    return [row for row in by_key.values() if not str(row.get("resolved_at") or "").strip()]
+    open_rows = [row for row in by_key.values() if not str(row.get("resolved_at") or "").strip()]
+    return drop_email_duplicates(open_rows)
 
 
 def best_policy_index(
@@ -1602,7 +1660,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
     parser = argparse.ArgumentParser(
         description=(
-            "Email hello@ the open unmatched Ascend notices. "
+            "Email the open unmatched Ascend notices (hello@ unless ASCEND_UNMATCHED_DIGEST_TO). "
             "Dry-run unless ASCEND_UNMATCHED_DIGEST_LIVE=1."
         )
     )

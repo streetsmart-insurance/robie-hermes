@@ -15,8 +15,8 @@ Actionable families:
 - reinstatement        -- reinstatement approved. Note only.
 - return_premium       -- "Return premium received"
 - underwriting         -- underwriting request, counteroffer, document request
-- new_program          -- new premium-finance program created. No category
-                          discussion; the driver sends it to human review.
+- new_program          -- new premium finance agreement (a financed program
+                          the client checked out). Note on Ascend - Payments.
 
 Informational mail (refund to the customer, potential policies, programs
 ready, sign-in, MSA, agency remittance, and Ascend product/marketing mail
@@ -350,7 +350,7 @@ _NOTICE_HEADINGS = {
     LATE_PAYMENT: "LATE PAYMENT",
     INTENT_TO_CANCEL: "INTENT TO CANCEL",
     RETURN_PREMIUM: "RETURN PREMIUM",
-    NEW_PROGRAM: "NEW PROGRAM",
+    NEW_PROGRAM: "NEW FINANCE AGREEMENT",
     PROCESSING_PAYMENT: "PROCESSING PAYMENT",
     PAYMENT_CONFIRMATION: "PAYMENT CONFIRMATION",
     DISPUTED_CHARGE: "DISPUTED CHARGE",
@@ -505,10 +505,18 @@ def _notice_detail(
             statement = "Ascend received a return premium to apply to the loan."
         return _with_policy(policy_phrase, statement)
     if notice_type == NEW_PROGRAM:
-        return _with_policy(
-            policy_phrase,
-            "Ascend opened a new premium finance program.",
-        )
+        renewal = re.search(r"\brenewal finance agreement\b", text, re.IGNORECASE)
+        kind = "renewal finance agreement" if renewal else "finance agreement"
+        plan = re.search(r"(?im)^Plan:\s*(.+?)\.?\s*$", body or "")
+        premium = _money_matching(body, r"Premium of\s+\$\s?([\d,]+\.\d{2})")
+        statement = f"The client signed a new {kind} with Ascend"
+        if plan:
+            statement += f": {plan.group(1).strip()}."
+        elif premium:
+            statement += f" for {premium} of premium."
+        else:
+            statement += "."
+        return _with_policy(policy_phrase, statement)
     if notice_type == PAYMENT_CONFIRMATION:
         amount = _money_matching(body, r"payment of\s+\$\s?([\d,]+\.\d{2})")
         if amount is None:
@@ -677,11 +685,11 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
         }
     if notice_type == NEW_PROGRAM:
         return {
-            "ezlynx_workflow": "record",
-            "ezlynx_label": "email received",
+            "ezlynx_workflow": "Ascend - Payments",
+            "ezlynx_label": None,
+            "zapier_task": False,
             "instruction": (
-                "File the new-program notice on the policy workflow and verify "
-                "the program details match the bound policy."
+                "File a note on the Ascend - Payments discussion. No task."
             ),
         }
     if notice_type == DISPUTED_CHARGE:

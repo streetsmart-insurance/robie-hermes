@@ -149,8 +149,14 @@ API_OWNED_EMAIL_TYPES = frozenset(
         triage.PAID_OFF,
         triage.PAYMENT_CONFIRMATION,
         triage.DISPUTED_CHARGE,
+        triage.NEW_PROGRAM,
     }
 )
+
+# A new premium finance agreement: the client checked out (or bought) a
+# financed program. One note per program, whichever time Ascend has first.
+NEW_AGREEMENT_ANCHOR = "agreement"
+_FINANCED_OPTION_RE = re.compile(r"financ", re.IGNORECASE)
 
 _CANCELLED_PROGRAM = frozenset({"cancelled", "canceled"})
 _CANCELED_LOAN = frozenset({"cancelled", "canceled"})
@@ -375,10 +381,18 @@ def _us_date(value: Any) -> str:
     return parsed.strftime("%m/%d/%Y")
 
 
+_TO_PREFIX_RE = re.compile(r"^\s*to\s*:\s*", re.IGNORECASE)
+
+
+def _strip_to_prefix(name: str) -> str:
+    """Drop a leading ``To:`` some Ascend business names carry."""
+    return _TO_PREFIX_RE.sub("", name).strip()
+
+
 def insured_name_of(program: dict[str, Any] | None, fallback: str = "") -> str:
     record = program if isinstance(program, dict) else {}
     insured = record.get("insured") if isinstance(record.get("insured"), dict) else {}
-    business = str(insured.get("business_name") or "").strip()
+    business = _strip_to_prefix(str(insured.get("business_name") or "").strip())
     if business:
         return business
     person = " ".join(
@@ -1685,6 +1699,33 @@ def _program_policy_map(conn: sqlite3.Connection) -> dict[str, list[str]]:
     return found
 
 
+def stored_program_policy_numbers(program_id: str) -> list[str]:
+    """Policy numbers the API poll saved for one Ascend program. Read only.
+
+    The poll reads each program's billables and keeps the carrier policy
+    numbers in ``program_policies``. An email notice that names no policy
+    can use them. The live store is read first, then the dry-run store.
+    A missing or unreadable file is an empty list. Nothing is created.
+    """
+    key = str(program_id or "").strip().lower()
+    if not key:
+        return []
+    for path in (live_db_path(), dry_run_db_path()):
+        try:
+            conn = _connect_readonly_store(path)
+        except ApiNoticeStoreUnreadable:
+            continue
+        if conn is None:
+            continue
+        try:
+            numbers = _program_policy_map(conn).get(key) or []
+        finally:
+            conn.close()
+        if numbers:
+            return list(numbers)
+    return []
+
+
 def _readonly_payment_failed_context(
     path: Path,
 ) -> tuple[list[dict[str, str]], dict[str, list[str]], dict[str, tuple[str, str]]]:
@@ -2431,6 +2472,7 @@ def _program_notices(
                 ],
             )
         )
+    found.extend(_new_agreement_notices(program, loans))
     loan_canceled = any(_status(loan) in _CANCELED_LOAN for loan in loans)
     if status in _CANCELLED_PROGRAM and loan_canceled:
         anchor = _episode_anchor(
@@ -2477,6 +2519,80 @@ def _program_notices(
                     persist=True,
                 )
     return [item for item in found if item is not None]
+
+
+def is_financed_program(program: dict[str, Any]) -> bool:
+    """True when the client chose a financed plan (not pay in full)."""
+    option = str(program.get("selected_payment_option_type") or "").strip()
+    return bool(_FINANCED_OPTION_RE.search(option))
+
+
+def agreement_time(program: dict[str, Any]) -> str:
+    """When the client bought the program, else when they checked out."""
+    for key in ("purchased_at", "checkedout_at"):
+        value = str(program.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _plan_words(loan: dict[str, Any] | None) -> str:
+    """``$9,000.00 financed, $1,000.00 down, 10 payments of $930.00``."""
+    if not isinstance(loan, dict):
+        return ""
+    parts: list[str] = []
+    financed = cents_to_money(loan.get("amount_financed_cents"))
+    if financed:
+        parts.append(f"{financed} financed")
+    down = cents_to_money(loan.get("downpayment_cents"))
+    if down:
+        parts.append(f"{down} down")
+    count = loan.get("number_of_payments")
+    payment = cents_to_money(loan.get("term_payment_cents"))
+    try:
+        count_int = int(count) if count not in (None, "") else 0
+    except (TypeError, ValueError):
+        count_int = 0
+    if count_int > 0 and payment:
+        parts.append(f"{count_int} payments of {payment}")
+    return ", ".join(parts)
+
+
+def _new_agreement_notices(
+    program: dict[str, Any], loans: list[dict[str, Any]]
+) -> list[ApiNotice]:
+    """One NEW_PROGRAM notice for a financed program the client checked out.
+
+    Pay-in-full programs are not finance agreements and are skipped. The
+    event key does not carry the time, so a checkout and the later purchase
+    are one note. The poll window still drops an old purchase.
+    """
+    program_id = _record_id(program)
+    when = agreement_time(program)
+    if not program_id or not when or not is_financed_program(program):
+        return []
+    loan = next(
+        (row for row in loans if _status(row) not in _CANCELED_LOAN),
+        loans[0] if loans else None,
+    )
+    renewal = bool(str(program.get("renews_id") or "").strip())
+    kind = "renewal finance agreement" if renewal else "finance agreement"
+    lines = [f"New premium {kind} in Ascend."]
+    premium = cents_to_money(program.get("premium_cents"))
+    if premium:
+        lines.append(f"Premium of {premium}.")
+    plan = _plan_words(loan)
+    if plan:
+        lines.append(f"Plan: {plan}.")
+    insured = insured_name_of(program)
+    return _status_notice(
+        event_type=triage.NEW_PROGRAM,
+        program=program,
+        anchor=NEW_AGREEMENT_ANCHOR,
+        occurred_at=when,
+        subject=f"New {kind} for {insured}",
+        lines=lines,
+    )
 
 
 def _status_notice(
