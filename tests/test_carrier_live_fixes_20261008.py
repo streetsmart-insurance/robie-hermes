@@ -1341,3 +1341,60 @@ class FinysSameTabPdfTests(unittest.TestCase):
         with self.assertRaisesRegex(IntakeHold, "did not produce a PDF"):
             fos.download_view_pdf(page, mock.Mock())
         page.context.request.get.assert_not_called()
+
+
+class FaoViewerTimeoutTests(unittest.TestCase):
+    """Live 2026-10-08 4a22f443: PDFHandler GET timed out -> whole carrier FAILED, viewer tab left open."""
+
+    def test_viewer_timeout_holds_and_closes_the_viewer_tab(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        viewer = mock.Mock(url="https://clpolicy.foragentsonly.com/Express/PDFHandler.ashx?x=1")
+        listeners = {}
+        context = SimpleNamespace(on=lambda ev, fn: listeners.setdefault(ev, fn), remove_listener=lambda ev, fn: None)
+        page = mock.Mock()
+        page.context = context
+
+        def click():
+            listeners["page"](viewer)
+
+        cm = mock.MagicMock()
+        cm.__enter__.side_effect = lambda: (click(), None)[1]
+        cm.__exit__.side_effect = lambda *a: (_ for _ in ()).throw(type("TimeoutError", (Exception,), {})("Timeout"))
+        page.expect_download.return_value = cm
+        with mock.patch.object(fao, "read_playwright_pdf_view",
+                               side_effect=type("TimeoutError", (Exception,), {})("APIRequestContext.get: Timeout 8000ms")):
+            with self.assertRaisesRegex(IntakeHold, "PDF viewer did not return the PDF"):
+                fao.collect_document_capture(page, lambda: None)
+        viewer.close.assert_called_once()
+
+    def test_capture_failure_holds_one_policy_and_the_pull_goes_on(self):
+        import os
+        import tempfile
+        from datetime import date
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = tuple(
+            SimpleNamespace(policy_number=n, tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in ("875934744", "970498127")
+        )
+        doc = SimpleNamespace(document_id="d", filename="f.pdf", document_date=date(2026, 10, 6),
+                              document_name="Cancel Notice")
+        browser = mock.Mock()
+        browser.screenshot_report.return_value = b"\x89PNG\r\n\x1a\n"
+        browser.load_current_tab.side_effect = [rows, (), ()]
+        browser.list_documents.return_value = (doc,)
+        browser.capture_document.side_effect = type("TimeoutError", (Exception,), {})("APIRequestContext.get")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fao, "newest_cancellation_documents", return_value=[doc]), \
+                mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch.object(fao.FaoCancellationLedger, "delivery_status", return_value=False), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            receipt = fao.run_pull(browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                                   as_of=date(2026, 10, 8))
+        self.assertEqual([h["policy"] for h in receipt["held"]], ["875934744", "970498127"])
+        self.assertIn("capture failed (TimeoutError)", receipt["held"][0]["reason"])

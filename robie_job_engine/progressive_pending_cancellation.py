@@ -528,14 +528,24 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
             host = (urllib.parse.urlsplit(url).hostname or "").lower()
             if host and not (host == FAO_HOST or host.endswith(".foragentsonly.com")):
                 continue
-            view = read_playwright_pdf_view(new_page)
-            viewer_pdfs.extend(view.pdfs)
-            closer = getattr(new_page, "close", None)
-            if callable(closer):
-                try:
-                    closer()
-                except Exception:
-                    pass
+            try:
+                view = read_playwright_pdf_view(new_page)
+                viewer_pdfs.extend(view.pdfs)
+            except IntakeHold:
+                raise
+            except Exception as exc:
+                # Live 2026-10-08 (4a22f443): the PDFHandler GET timed out and
+                # crashed the whole carrier, leaving the viewer tab open.
+                raise IntakeHold(
+                    f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
+                ) from exc
+            finally:
+                closer = getattr(new_page, "close", None)
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
         return DocumentCapture(tuple(downloads), tuple(viewer_pdfs))
     finally:
         if context is not None and hasattr(context, "remove_listener"):
@@ -951,7 +961,13 @@ def _pull_underwriting_memos(
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
             continue
-        capture = browser.capture_document(doc)
+        try:
+            capture = browser.capture_document(doc)
+        except Exception as exc:  # noqa: BLE001 - one memo holds, the pull goes on
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc) if isinstance(exc, IntakeHold) else (
+                f"Progressive FAO memo {doc.document_name!r} capture failed ({type(exc).__name__})"
+            )))
+            continue
         pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
         if len(pdfs) != 1:
             held.append(_row_payload(
@@ -1060,7 +1076,7 @@ def run_pull(
                     f"is missing or ambiguous (found {len(targets)})"
                 ),
             ))
-            browser.return_to_report()
+            _recover_report_tab(browser)
             continue
         doc = targets[0]
         try:
@@ -1070,20 +1086,27 @@ def run_pull(
                 skipped.append(doc.document_id)
                 targeted.append(doc.document_id)
                 rows_payload.append(_row_payload(row, outcome="ALREADY_DELIVERED", filename=doc.filename))
-                browser.return_to_report()
+                _recover_report_tab(browser)
                 continue
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_report()
+            _recover_report_tab(browser)
             continue
-        capture = browser.capture_document(doc)
+        try:
+            capture = browser.capture_document(doc)
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            held.append(_row_payload(row, outcome="HELD", reason=str(exc) if isinstance(exc, IntakeHold) else (
+                f"Progressive FAO document {doc.document_name!r} capture failed ({type(exc).__name__})"
+            )))
+            _recover_report_tab(browser)
+            continue
         pdfs = list(capture.downloads) + list(capture.viewer_pdfs)
         if len(pdfs) != 1:
             held.append(_row_payload(
                 row, outcome="HELD",
                 reason=f"Progressive FAO document {doc.document_name!r} capture is missing or ambiguous",
             ))
-            browser.return_to_report()
+            _recover_report_tab(browser)
             continue
         content = pdfs[0]
         source = SourceItem(
@@ -1101,7 +1124,7 @@ def run_pull(
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_report()
+            _recover_report_tab(browser)
             continue
         downloaded.append({
             "document_id": doc.document_id,
@@ -1118,7 +1141,7 @@ def run_pull(
         })
         targeted.append(doc.document_id)
         rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
-        browser.return_to_report()
+        _recover_report_tab(browser)
 
     return {
         "status": "PULLED",
