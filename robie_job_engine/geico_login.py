@@ -16,6 +16,7 @@ from .intake_core import IntakeHold
 
 
 GATEWAY_HOME = "https://gateway2.geico.com/"
+CLIENT_ALERTS = "https://gateway2.geico.com/client-alerts"
 GATEWAY_HOST = "gateway2.geico.com"
 B2C_HOST_FRAGMENT = "b2clogin"
 PRODUCER_SECRET = "geico-gateway-producer"
@@ -66,14 +67,21 @@ def _body(page: Any, n: int = 400) -> str:
         return ""
 
 
+_EXPIRED_RE = re.compile(r"session expired|session has ended", re.IGNORECASE)
+
+
+def is_session_expired(page: Any) -> bool:
+    return bool(_EXPIRED_RE.search(_body(page, 400)))
+
+
 def is_signed_in(page: Any) -> bool:
     host = _host(getattr(page, "url", "") or "")
     if B2C_HOST_FRAGMENT in host:
         return False
     if host != GATEWAY_HOST:
         return False
-    text = _body(page, 300).lower()
-    if "sign in" in text or "password" in text:
+    text = _body(page, 400).lower()
+    if "sign in" in text or "password" in text or _EXPIRED_RE.search(text):
         return False
     try:
         if page.locator("input[type='password']").count():
@@ -129,7 +137,21 @@ def login_geico(
     page.goto(GATEWAY_HOME, wait_until="domcontentloaded", timeout=60_000)
     sleep(6)
     if is_signed_in(page):
+        page.goto(CLIENT_ALERTS, wait_until="domcontentloaded", timeout=60_000)
+        sleep(6)
         return page
+    if is_session_expired(page):
+        # "Session expired ... Click here to log back in": follow the link to
+        # the sign-in form instead of typing into the expired page.
+        try:
+            page.get_by_text(re.compile(r"click here", re.I)).first.click(timeout=8000)
+        except Exception as exc:
+            raise IntakeHold("GEICO Gateway session expired and the log-back-in link was not found") from exc
+        sleep(8)
+        if is_signed_in(page):
+            page.goto(CLIENT_ALERTS, wait_until="domcontentloaded", timeout=60_000)
+            sleep(6)
+            return page
     user, password = (credentials or geico_credentials)()
     if not user or not password:
         raise IntakeHold("GEICO Gateway credentials are not available from secrets")
@@ -149,7 +171,7 @@ def login_geico(
     if not _click_first(page, ("button#next", "button[type='submit']", "button:has-text('Sign in')")):
         pwd.press("Enter")
     sleep(12)
-    page.goto(GATEWAY_HOME, wait_until="domcontentloaded", timeout=60_000)
+    page.goto(CLIENT_ALERTS, wait_until="domcontentloaded", timeout=60_000)
     sleep(6)
     if not is_signed_in(page):
         raise IntakeHold("GEICO Gateway sign-in did not leave a signed-in session")

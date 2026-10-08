@@ -674,6 +674,26 @@ def assert_authenticated(page: Any) -> None:
         raise IntakeHold("Geico Gateway session is not authenticated")
     if page.locator("input[type='password']").count() != 0:
         raise IntakeHold("Geico Gateway session is not authenticated")
+    if _session_expired_page(page):
+        # Live 2026-10-08: an expired Gateway session stays on gateway2 and
+        # shows "Session expired ... your GEICO session has ended".
+        raise IntakeHold("Geico Gateway session is not authenticated")
+
+
+_SESSION_EXPIRED_RE = re.compile(r"session expired|session has ended", re.IGNORECASE)
+
+
+def _session_expired_page(page: Any) -> bool:
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        text = evaluate(
+            "() => { const t = document.body && document.body.innerText; return t ? t.slice(0, 400) : ''; }"
+        )
+    except Exception:
+        return False
+    return isinstance(text, str) and bool(_SESSION_EXPIRED_RE.search(text))
 
 
 # Modern Gateway filter chip. The count badge is part of the accessible name.

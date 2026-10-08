@@ -546,3 +546,20 @@ class PlainSummaryTests(unittest.TestCase):
         self.assertIn("Progressive BOP: held. a carrier page did not look as expected", text)
         self.assertIn("not uploaded to Drive: Drive was not reachable", text)
         self.assertIn("1 held: Utica First policy X has no notice document", text)
+
+
+class GeicoSessionExpiredTests(unittest.TestCase):
+    def test_expired_gateway_page_is_not_signed_in_and_holds_the_pull(self):
+        from robie_job_engine import geico_login as gl
+        from robie_job_engine import geico_pending_cancellation_noc as geico
+        from robie_job_engine.intake_core import IntakeHold
+
+        page = mock.MagicMock()
+        page.url = "https://gateway2.geico.com/client-alerts"
+        page.evaluate.return_value = (
+            "Session expired\nFor the protection of your agency and customers, your GEICO session has ended."
+        )
+        page.locator.return_value.count.return_value = 0
+        self.assertFalse(gl.is_signed_in(page))
+        with self.assertRaises(IntakeHold):
+            geico.assert_authenticated(page)
