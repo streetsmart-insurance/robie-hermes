@@ -63,7 +63,7 @@ DEFAULT_OUTPUT_ROOT = Path(
 # Shared Drive "Robie Carrier Pull QA (Nicole)". Upload is not wired: the CLI
 # --upload-drive flag fails closed and does not call Google.
 DRIVE_QA_PARENT_ID = "1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2"
-DRIVE_QA_FOLDER_NAME = "Robie Carrier Pull QA (Nicole)/FarmersOfSalem"
+DRIVE_QA_FOLDER_NAME = "Robie Carrier Pull QA (Nicole)/Farmers of Salem"
 DRIVE_UPLOAD_UNAVAILABLE = (
     "Drive upload of the Farmers of Salem QA pack is not available; "
     "refusing to report the pack as uploaded"
@@ -558,7 +558,9 @@ class FinysFoSBrowser:
 
     def screenshot_pending_items(self) -> bytes:
         try:
-            data = bytes(self.page.screenshot(full_page=True, type="png"))
+            from .carrier_page_capture import capture_png
+
+            data = capture_png(self.page, full_page=True)
         except Exception as exc:
             raise IntakeHold("Pending items screenshot is missing or not a PNG") from exc
         if data[:8] != _PNG_MAGIC:

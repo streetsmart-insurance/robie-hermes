@@ -606,7 +606,9 @@ class PlaywrightUticaCancellationBrowser:
         self.select_filter_all()
 
     def screenshot_transactions(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        from .carrier_page_capture import capture_png
+
+        data = capture_png(self.page, full_page=True)
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Utica First transactions screenshot is missing or not a PNG")
         return bytes(data)

@@ -779,7 +779,9 @@ class PlaywrightNatGenNocBrowser:
             raise IntakeHold("Pending Cancellations list screenshot is missing or not a PNG")
         if self.page.locator(PENDING_TABLE_CSS).count() != 1 and self.page.locator("table").count() != 1:
             raise IntakeHold("Pending Cancellations list screenshot is missing or not a PNG")
-        data = self.page.screenshot(full_page=True, type="png")
+        from .carrier_page_capture import capture_png
+
+        data = capture_png(self.page, full_page=True)
         return require_png(data)
 
     def _live_history_grid(self) -> bool:

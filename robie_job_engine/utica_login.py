@@ -196,11 +196,33 @@ def is_logged_in(page: Any) -> bool:
 _is_logged_in = is_logged_in  # Ralph's original name
 
 
+def _on_okta_home(page: Any) -> bool:
+    """True on a signed-in Okta page that is not UFirst Now (e.g. /app/UserHome)."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(str(getattr(page, "url", "") or ""))
+    host = (parts.hostname or "").lower()
+    if host != OKTA_HOST:
+        return False
+    if _is_verification_page(page):
+        return False
+    try:
+        text = str(page.locator("body").inner_text() or "").lower()
+    except Exception:
+        text = ""
+    return "/app/userhome" in parts.path.lower() or "my apps" in text
+
+
 def _is_verification_page(page: Any) -> bool:
     """Check if we're on the Okta email verification page."""
     try:
         text = str(page.locator("body").inner_text() or "").lower()
-        return "verify with your email" in text or "verification code" in text
+        # Live 2026-10-08 the first MFA screen reads "Get a verification email"
+        # with a "Send me an email" button, before "Verify with your email".
+        return any(
+            marker in text
+            for marker in ("verify with your email", "verification code", "verification email", "send me an email")
+        )
     except Exception:
         return False
 
@@ -230,8 +252,32 @@ def _click_text(page: Any, pattern: re.Pattern[str]) -> bool:
     return False
 
 
+SEND_EMAIL_BUTTON = (
+    "input[type='submit'][value*='Send me an email' i], "
+    "button:has-text('Send me an email'), a.button:has-text('Send me an email')"
+)
+UFIRSTNOW_URL = f"https://{UTICA_HOST}/"
+
+
+def _click_send_button(page: Any) -> bool:
+    """Click the real "Send me an email" control (not the help text that quotes it)."""
+    try:
+        button = page.locator(SEND_EMAIL_BUTTON)
+        if button.count() == 1 and button.first.is_visible():
+            button.first.click()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _send_email_code(page: Any) -> None:
-    if _click_text(page, re.compile(r"send me an email", re.IGNORECASE)):
+    # Live 2026-10-08: get_by_text("send me an email") matched the paragraph
+    # 'by clicking on "Send me an email"' first, so the email was never sent.
+    if _click_send_button(page):
+        page.wait_for_timeout(5000)
+        return
+    if _click_text(page, re.compile(r"^\s*send me an email\s*$", re.IGNORECASE)):
         page.wait_for_timeout(5000)
         return
     try:
@@ -330,8 +376,13 @@ def login_utica(
         except Exception as exc:
             raise IntakeHold(f"Utica code entry failed: {type(exc).__name__}")
 
-    # Step 6: confirm
+    # Step 6: confirm. Live 2026-10-08 Okta can land on its own "My Apps"
+    # home (login.uticafirst.com/app/UserHome) instead of UFirst Now; opening
+    # UFirst Now then completes SAML SSO without another prompt.
     if not is_logged_in(page):
         page.wait_for_timeout(10000)  # SSO redirect can lag
+        if not is_logged_in(page) and _on_okta_home(page):
+            page.goto(UFIRSTNOW_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(15000)
         if not is_logged_in(page):
             raise IntakeHold("Utica login failed - not on UFirst Now portal after auth")

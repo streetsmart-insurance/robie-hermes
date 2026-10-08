@@ -634,7 +634,9 @@ class PlaywrightFaoCancellationBrowser:
         )
 
     def screenshot_report(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        from .carrier_page_capture import capture_png
+
+        data = capture_png(self.page, full_page=True)
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Progressive FAO report screenshot is missing or not a PNG")
         return bytes(data)

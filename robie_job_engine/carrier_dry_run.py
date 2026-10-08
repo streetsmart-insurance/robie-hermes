@@ -87,7 +87,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".guard_pending_cancellation",
         browser_cls_name="PlaywrightGuardBrowser",
         ledger_cls_name="GuardDeliveryLedger",
-        select_fn_name="select_guard_page",
+        select_fn_name="ensure_guard_page",
+        select_takes="browser",
     ),
     "geico": CarrierSpec(
         name="geico",

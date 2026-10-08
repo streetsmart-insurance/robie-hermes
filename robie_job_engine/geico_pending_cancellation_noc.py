@@ -751,6 +751,8 @@ def _chip_toggle(locator: Any) -> str:
 
 
 _PENDING_TOGGLE_TEXT = re.compile(r"^\s*Pending Cancellations", re.IGNORECASE)
+PENDING_SELECT_POLLS = 8
+PENDING_SELECT_POLL_MS = 750
 _UNDERWRITING_TOGGLE_TEXT = re.compile(r"^\s*Underwriting", re.IGNORECASE)
 
 
@@ -812,8 +814,14 @@ def _click_pending_chip(page: Any) -> None:
     # GDS web components don't respond to Playwright click; use JS
     clicked = False
     if hasattr(page, "evaluate") and callable(page.evaluate):
+        # Live 2026-10-08: the page has several gds-toggle-buttons (All Alerts,
+        # Underwriting, Pending Cancellations, ...). querySelector() took the
+        # FIRST one (All Alerts), so the pull parsed all 53 alerts. Pick the
+        # toggle whose text starts with "Pending Cancellations".
         clicked = bool(page.evaluate("""(() => {
-            const btn = document.querySelector('gds-toggle-button');
+            const btns = Array.from(document.querySelectorAll('gds-toggle-button'))
+                .filter(b => /^\\s*Pending Cancellations/i.test(b.textContent || ''));
+            const btn = btns.length === 1 ? btns[0] : null;
             if (btn) {
                 // Try clicking the shadow button first, then the host
                 const shadowBtn = btn.shadowRoot ? btn.shadowRoot.querySelector('button') : null;
@@ -849,7 +857,10 @@ def pending_view_selected(page: Any) -> bool:
     # "All Alerts (50)". That pending button is not selected just because
     # a table is visible. A click of the one pending button is the selection
     # when the control does not expose aria-pressed.
-    if _pending_chip_was_clicked(page) and chip in {"bare", "unselected", "selected"}:
+    # A chip that exposes aria-pressed="false" is NOT selected, even after a
+    # click (the click may have hit another toggle). Only a bare chip (no
+    # toggle attribute) falls back to "we clicked the one pending button".
+    if _pending_chip_was_clicked(page) and chip == "bare":
         return True
     if (
         chip == "bare"
@@ -913,8 +924,14 @@ def ensure_pending_view(page: Any) -> None:
     if chip in {"ambiguous", "error", "absent"}:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
     _click_pending_chip(page)
-    if not pending_view_selected(page):
-        raise IntakeHold("Pending Cancellations view did not become selected")
+    waiter = getattr(page, "wait_for_timeout", None)
+    for _ in range(PENDING_SELECT_POLLS):
+        if pending_view_selected(page):
+            return
+        if not callable(waiter):
+            break
+        waiter(PENDING_SELECT_POLL_MS)
+    raise IntakeHold("Pending Cancellations view did not become selected")
 
 
 def more_pages(page: Any) -> bool | None:
@@ -1108,6 +1125,9 @@ class PlaywrightGeicoNocBrowser:
             raise IntakeHold("Pending Cancellations screenshot is missing or not a PNG")
         # full_page=True hangs on font loading; use viewport with timeout
         try:
+            from .carrier_page_capture import bring_to_front
+
+            bring_to_front(self.page)
             data = self.page.screenshot(full_page=False, type="png", timeout=10000)
         except Exception:
             data = self.page.screenshot(full_page=False, type="png", timeout=5000)

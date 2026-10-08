@@ -42,6 +42,8 @@ SCOPE = "pending_cancellation"
 GUARD_HOST = "gigezrate.guard.com"
 GUARD_PUBLIC_HOST = "guard.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+CANCELLATIONS_TAB_ATTEMPTS = 3
+CANCELLATIONS_TAB_SETTLE_MS = 2500
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "guard-cancellation-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -169,7 +171,8 @@ def scribe_item_id_from_href(href: str) -> str:
     except Exception:
         return ""
     candidate = _norm(values[0]) if values else ""
-    return candidate if re.fullmatch(r"[A-Za-z0-9_-]+", candidate) else ""
+    # Live ids (2026-10-08) are wrapped in tildes: scribeItemId=~enrDdW..._pc_3d~
+    return candidate if re.fullmatch(r"~?[A-Za-z0-9_-]+~?", candidate) else ""
 
 
 def is_cancellation_document(description: str) -> bool:
@@ -414,6 +417,39 @@ class PlaywrightGuardBrowser:
         self._list_url = require_guard_url(str(getattr(page, "url", "") or ""))
 
     def load_cancellations(self) -> tuple[CancellationRow, ...]:
+        """Parse the Cancellations grid, re-clicking the tab when Blazor ignored it.
+
+        Live 2026-10-08: about half the time the first JS click leaves the
+        In Force grid showing (Inception/Expiration headers), which fails the
+        header check. Re-select the Cancellations tab and re-read, up to
+        CANCELLATIONS_TAB_ATTEMPTS times, before holding.
+        """
+        last: IntakeHold | None = None
+        for attempt in range(CANCELLATIONS_TAB_ATTEMPTS):
+            if attempt:
+                self._select_cancellations_tab()
+            try:
+                return self._read_cancellations_grid()
+            except IntakeHold as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _select_cancellations_tab(self) -> None:
+        page = self.page
+        evaluate = getattr(page, "evaluate", None)
+        if callable(evaluate):
+            evaluate("""(() => {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+                const cancel = tabs.find(t => t.textContent.includes('Cancellations'));
+                if (cancel) { cancel.click(); return true; }
+                return false;
+            })()""")
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(CANCELLATIONS_TAB_SETTLE_MS)
+
+    def _read_cancellations_grid(self) -> tuple[CancellationRow, ...]:
         page = self.page
         tables = page.locator("table")
         if int(tables.count()) != 1:
@@ -622,6 +658,14 @@ class PlaywrightGuardBrowser:
                     "Guard document link for "
                     f"scribeItemId {doc.scribe_item_id!r} is missing or ambiguous"
                 )
+            href = ""
+            try:
+                href = str(link.first.get_attribute("href") or "")
+            except Exception:
+                href = ""
+            fetched = fetch_document_via_session(page, href)
+            if fetched is not None:
+                return fetched
             return collect_document_observation(page, link.first.click)
         row = page.locator("tr", has_text=doc.description)
         try:
@@ -658,6 +702,9 @@ class PlaywrightGuardBrowser:
     def screenshot_cancellations(self) -> bytes:
         # full_page=True hangs on font loading; use viewport screenshot with timeout
         try:
+            from .carrier_page_capture import bring_to_front
+
+            bring_to_front(self.page)
             data = self.page.screenshot(full_page=False, type="png", timeout=10000)
         except Exception:
             # Fallback: try without waiting for fonts
@@ -690,8 +737,7 @@ def collect_document_observation(page: Any, click_action: Callable[[], None]) ->
             with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
                 click_action()
             download = download_info.value
-            path = download.path()
-            content = Path(str(path)).read_bytes()
+            content = _download_bytes(page, download)
         except Exception as exc:
             if type(exc).__name__ == "TimeoutError" or "timeout" in type(exc).__name__.lower():
                 content = b""
@@ -717,6 +763,74 @@ def collect_document_observation(page: Any, click_action: Callable[[], None]) ->
         # .eml quirk). Fail closed — do not claim a download.
         return DocumentOpenObservation((), (), True)
     return DocumentOpenObservation(tuple(downloads), tuple(viewer_pdfs), False)
+
+
+def _session_get(page: Any, url: str) -> bytes | None:
+    """GET ``url`` with the page's signed-in browser context. None if unavailable."""
+    request = getattr(getattr(page, "context", None), "request", None)
+    getter = getattr(request, "get", None)
+    if not callable(getter) or not url:
+        return None
+    referer = str(getattr(page, "url", "") or "")
+    try:
+        response = getter(url, headers={"Referer": referer} if referer else None, timeout=60000)
+    except Exception:
+        return None
+    status = getattr(response, "status", 200)
+    if isinstance(status, int) and status >= 400:
+        return None
+    try:
+        body = response.body()
+    except Exception:
+        return None
+    return bytes(body or b"")
+
+
+def _absolute_guard_url(page: Any, href: str) -> str:
+    href = str(href or "").strip()
+    if not href:
+        return ""
+    base = str(getattr(page, "url", "") or f"https://{GUARD_HOST}/")
+    url = urllib.parse.urljoin(base, href)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != GUARD_HOST:
+        return ""
+    return url
+
+
+def fetch_document_via_session(page: Any, href: str) -> DocumentOpenObservation | None:
+    """Fetch a Guard document link's bytes through the signed-in session.
+
+    The Test carrier Chrome runs with a private /tmp, so Playwright's
+    download artifact (in Chrome's private /tmp) cannot be read by the worker
+    (live 2026-10-08: FileNotFoundError). The DownloadScribeItem link returns
+    the PDF directly to an authenticated GET. Returns None when the session
+    fetch is unavailable so the caller can fall back to the click path.
+    A non-PDF, non-.eml body raises IntakeHold (never kept).
+    """
+    url = _absolute_guard_url(page, href)
+    if not url:
+        return None
+    content = _session_get(page, url)
+    if not content:
+        return None
+    if _looks_like_eml_notification(content):
+        return DocumentOpenObservation((), (), True)
+    if not _is_pdf(content):
+        raise IntakeHold("Guard document download is not a PDF")
+    return DocumentOpenObservation((content,), (), False)
+
+
+def _download_bytes(page: Any, download: Any) -> bytes:
+    """Bytes of a Playwright download, refetched through the session if the artifact is unreadable."""
+    try:
+        return Path(str(download.path())).read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        url = str(getattr(download, "url", "") or "")
+        content = _session_get(page, _absolute_guard_url(page, url))
+        if content:
+            return content
+        raise IntakeHold("Guard download artifact is unreadable and the session refetch failed")
 
 
 def read_playwright_pdf_view(page: Any) -> tuple[bytes, ...]:
@@ -1024,6 +1138,57 @@ def select_guard_page(pages: list[Any]) -> Any:
     if len(matches) != 1:
         raise IntakeHold("Expected exactly one Guard Agency Service Center tab")
     return matches[0]
+
+
+def ensure_guard_page(cdp_browser: Any) -> Any:
+    """Return the one signed-in Guard tab, signing in (Test host only) if there is none.
+
+    - Exactly one signed-in Agency Service Center tab: use it.
+    - Several: hold (ambiguous, never guess).
+    - None: on hermes-test-01 only, close stale Guard tabs (signed-out /auth
+      pages) and sign in on a new tab via ``guard_login`` (this module never
+      types credentials itself).
+    """
+    from . import guard_login
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("guard")
+    refuse_production_host()
+    pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
+    matches = [
+        page for page in pages
+        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == GUARD_HOST
+    ]
+    signed_in = [page for page in matches if guard_login.is_logged_in(page)]
+    if len(signed_in) == 1:
+        for stale in matches:
+            if stale is not signed_in[0]:
+                try:
+                    stale.close()
+                except Exception:
+                    pass
+        return signed_in[0]
+    if len(signed_in) > 1:
+        raise IntakeHold("Expected exactly one signed-in Guard Agency Service Center tab")
+    require_hermes_test_host()
+    for stale in matches:
+        try:
+            stale.close()
+        except Exception:
+            pass
+    contexts = list(getattr(cdp_browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Guard auto-login needs an open browser context")
+    page = contexts[0].new_page()
+    try:
+        guard_login.login_guard(page)
+        return page
+    except Exception:
+        try:
+            page.close()
+        except Exception:
+            pass
+        raise
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightGuardBrowser, Callable[[], None]]:
