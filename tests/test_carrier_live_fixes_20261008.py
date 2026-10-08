@@ -997,8 +997,17 @@ class FinysQuickSearchTests(unittest.TestCase):
         def fill(self, value):
             self.page.events.append(("fill", self.sel, value))
 
+        def press_sequentially(self, value, delay=0):
+            self.page.events.append(("type", self.sel, value))
+
         def click(self):
             self.page.events.append(("click", self.sel))
+
+        def get_by_role(self, role, name=None, exact=False):
+            return FinysQuickSearchTests._Loc(self.page, f"{self.sel}>{role}:{name}", self.page.ok_count)
+
+        def inner_text(self):
+            return self.page.label
 
     def _page(self, widget=True):
         test = self
@@ -1008,6 +1017,8 @@ class FinysQuickSearchTests(unittest.TestCase):
 
             def __init__(self):
                 self.events = []
+                self.ok_count = 0
+                self.label = ""
 
             def locator(self, sel):
                 return test._Loc(self, sel, 1 if widget else 0)
@@ -1024,10 +1035,40 @@ class FinysQuickSearchTests(unittest.TestCase):
         with mock.patch.object(fos, "_wait_for", return_value=True):
             fos.search_policy(page, "SCNJM07385")
         self.assertEqual(page.events, [
-            ("fill", fos.FINYS_POLICY_SEARCH_INPUT, "SCNJM07385"),
+            ("click", fos.FINYS_POLICY_SEARCH_INPUT),
+            ("fill", fos.FINYS_POLICY_SEARCH_INPUT, ""),
+            ("type", fos.FINYS_POLICY_SEARCH_INPUT, "SCNJM07385"),
             ("click", fos.FINYS_POLICY_SEARCH_BUTTON),
         ])
         self.assertTrue(fos.FINYS_POLICY_SEARCH_BUTTON.endswith("Button2"))
+
+    def test_open_message_window_is_dismissed_before_typing(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = self._page()
+        page.ok_count = 1
+        with mock.patch.object(fos, "_wait_for", return_value=True):
+            fos.search_policy(page, "SCNJM07385")
+        self.assertEqual(page.events[0], ("click", ".k-window>button:Ok"))
+
+    def test_summary_header_label_confirms_the_policy(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = self._page()
+        page.label = "SCNJM07385"
+        seen = []
+
+        def fake_wait(cond):
+            seen.append(cond())
+            return seen[-1]
+
+        with mock.patch.object(fos, "_wait_for", side_effect=fake_wait):
+            fos.search_policy(page, "SCNJM07385")
+        self.assertEqual(seen, [True])
+        page.label = "HONJ017732"
+        with mock.patch.object(fos, "_wait_for", side_effect=fake_wait):
+            with self.assertRaisesRegex(IntakeHold, "Policy Summary for SCNJM07385"):
+                fos.search_policy(page, "SCNJM07385")
 
     def test_no_widget_and_no_named_box_still_holds(self):
         from robie_job_engine import farmersofsalem_pending_cancellation as fos

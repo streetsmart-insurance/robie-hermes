@@ -389,6 +389,36 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
 # Policy Number row (policyText, then Button2), read on hermes-test-01.
 FINYS_POLICY_SEARCH_INPUT = "#Landing_PolicyQuickSearchWidget_policyText"
 FINYS_POLICY_SEARCH_BUTTON = "#Landing_PolicyQuickSearchWidget_Button2"
+# Policy Summary markers read live: the header label carries the policy number
+# and the left-nav Document Summary anchor has this id.
+FINYS_SUMMARY_POLICY_LABEL = "#SummaryHeader_PolicyNumberLabelLabelValue"
+FINYS_DOCUMENT_SUMMARY_LINK = "#DocumentLibrarySummary"
+FINYS_MESSAGE_OK = ".k-window"
+
+
+def _dismiss_finys_message(page: Any) -> None:
+    """Close one open Finys "Message" window (Kendo modal) with its Ok button.
+
+    Live 2026-10-08: a search with an empty box leaves "Please enter a Policy
+    Number or Insured Name" open, and its overlay blocks every later click.
+    """
+    try:
+        ok = page.locator(FINYS_MESSAGE_OK).get_by_role("button", name="Ok", exact=True)
+        if _count(ok) == 1:
+            ok.click()
+    except Exception:  # noqa: BLE001 - nothing to dismiss
+        pass
+
+
+def _type_into(box: Any, value: str) -> None:
+    """Type like a user; Finys ignores a programmatic fill (live 2026-10-08)."""
+    box.click()
+    box.fill("")
+    typer = getattr(box, "press_sequentially", None)
+    if callable(typer):
+        typer(value, delay=40)
+    else:
+        box.fill(value)
 
 
 def _count(locator: Any) -> int:
@@ -439,10 +469,14 @@ def search_policy(page: Any, policy_number: str) -> None:
     Raises IntakeHold unless the resulting Policy Summary names the policy.
     """
     policy = parse_policy_number(policy_number)
+    _dismiss_finys_message(page)
     widget = _quick_search_widget(page)
     search = widget[0] if widget else _find_search_box(page)
     try:
-        search.fill(policy)
+        if widget:
+            _type_into(search, policy)
+        else:
+            search.fill(policy)
     except Exception as exc:
         raise IntakeHold("Finys policy search box is missing or ambiguous") from exc
     try:
@@ -460,6 +494,12 @@ def search_policy(page: Any, policy_number: str) -> None:
         raise IntakeHold("Finys policy search did not submit") from exc
 
     def summary_shows_policy() -> bool:
+        try:
+            label = page.locator(FINYS_SUMMARY_POLICY_LABEL)
+            if _count(label) == 1 and _norm(label.inner_text()) == policy:
+                return True
+        except Exception:
+            pass
         try:
             headings = page.get_by_role("heading", name="Policy Summary", exact=False).all()
         except Exception:
@@ -479,7 +519,13 @@ def search_policy(page: Any, policy_number: str) -> None:
 
 def open_document_summary(page: Any) -> None:
     """Click the left-nav "Document Summary" link from Policy Summary."""
-    _control(page, "link", "Document Summary").click()
+    try:
+        control = _control(page, "link", "Document Summary")
+    except IntakeHold:
+        control = page.locator(FINYS_DOCUMENT_SUMMARY_LINK)
+        if _count(control) != 1:
+            raise
+    control.click()
 
     def docs_visible() -> bool:
         try:
