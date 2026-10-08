@@ -30,10 +30,8 @@ Referer/Origin headers the portal's CSRF filter demands returns real PDFs;
 direct navigation without Referer is rejected. Document IDs regenerate per
 session, so they are harvested fresh every run and never cached.
 
-FOLLOW-UP (needs live DOM): ``load_transactions()`` / ``list_documents()``
-expect one HTML table, but UFirst Now is an ExtJS app (29 nested tables on
-the transaction list). Until the grid parser is rewritten against a captured
-DOM, those steps hold with the table count in the reason.
+The transaction and document lists are ExtJS grids. ``collect_paged_rows``
+reads every page, not only the first 25 rows.
 """
 from __future__ import annotations
 
@@ -483,6 +481,78 @@ def find_ext_grid(
     return found[0]
 
 
+def _row_key(row: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(row)
+
+
+def collect_paged_rows(
+    first_rows: tuple[tuple[str, ...], ...] | list[tuple[str, ...]],
+    *,
+    next_state: Callable[[], str],
+    click_next: Callable[[], bool],
+    read_rows: Callable[[], tuple[tuple[str, ...], ...]],
+    what: str,
+    max_pages: int = 40,
+) -> tuple[tuple[str, ...], ...]:
+    """Read an ExtJS grid past the first 25-row page until the pager stops.
+
+    ``next_state`` is ``next``, ``done``, ``none``, or ``missing``. A page
+    that does not advance holds. Hitting ``max_pages`` with another page
+    still available holds, so a long list is never silently truncated.
+    """
+    collected = [tuple(row) for row in first_rows]
+    seen = {_row_key(row) for row in collected}
+    pages_read = 1
+    while pages_read < max_pages:
+        state = next_state()
+        if state in {"done", "none", "missing"}:
+            return tuple(collected)
+        if state != "next":
+            raise IntakeHold(f"Utica First {what} paging control is missing or ambiguous")
+        if not click_next():
+            raise IntakeHold(f"Utica First {what} grid page {pages_read + 1} did not advance")
+        pages_read += 1
+        fresh = [tuple(row) for row in read_rows() if _row_key(tuple(row)) not in seen]
+        if not fresh:
+            raise IntakeHold(
+                f"Utica First {what} grid still shows the same rows after paging to page {pages_read}"
+            )
+        for row in fresh:
+            seen.add(_row_key(row))
+            collected.append(row)
+    if next_state() == "next":
+        raise IntakeHold(
+            f"Utica First {what} grid has more than {max_pages} pages; not all rows were read"
+        )
+    return tuple(collected)
+
+
+_EXT_PAGE_STATE_JS = """(gridId) => {
+  const grid = document.getElementById(gridId);
+  if (!grid) return {state: 'missing'};
+  const panel = grid.closest('.x-panel') || grid.parentElement || grid;
+  const next = panel.querySelector('.x-tbar-page-next');
+  if (!next) return {state: 'none'};
+  const btn = next.closest('.x-btn') || next;
+  const cls = btn.className || '';
+  const disabled = cls.indexOf('disabled') !== -1 || btn.getAttribute('aria-disabled') === 'true';
+  return {state: disabled ? 'done' : 'next'};
+}"""
+
+_EXT_PAGE_NEXT_JS = """(gridId) => {
+  const grid = document.getElementById(gridId);
+  if (!grid) return false;
+  const panel = grid.closest('.x-panel') || grid.parentElement || grid;
+  const next = panel.querySelector('.x-tbar-page-next');
+  if (!next) return false;
+  const btn = next.closest('.x-btn') || next;
+  const cls = btn.className || '';
+  if (cls.indexOf('disabled') !== -1 || btn.getAttribute('aria-disabled') === 'true') return false;
+  btn.click();
+  return true;
+}"""
+
+
 _EXT_EXIT_JS = """() => {
   const vis = e => !!(e.offsetParent || e.getClientRects().length);
   const hits = Array.from(document.querySelectorAll('.x-btn-inner'))
@@ -666,7 +736,8 @@ class PlaywrightUticaCancellationBrowser:
                     "Utica First transactions table is missing or ambiguous "
                     f"(found {table_count} tables and no ExtJS grid)"
                 )
-            _, headers, rows = find_ext_grid(grids, _TXN_GRID_HEADERS, what="transactions")
+            grid_id, headers, rows = find_ext_grid(grids, _TXN_GRID_HEADERS, what="transactions")
+            rows = self._all_ext_rows(grid_id, rows, _TXN_GRID_HEADERS, "transactions")
             self._ext_mode = True
             return parse_transactions_grid(headers, rows, list_url=self._list_url)
         table = tables.first if hasattr(tables, "first") else tables
@@ -765,7 +836,8 @@ class PlaywrightUticaCancellationBrowser:
                     "Utica First document table is missing or ambiguous "
                     f"(found {table_count} tables and no ExtJS grid)"
                 )
-            _, headers, rows = find_ext_grid(grids, _DOC_GRID_HEADERS, what="document")
+            grid_id, headers, rows = find_ext_grid(grids, _DOC_GRID_HEADERS, what="document")
+            rows = self._all_ext_rows(grid_id, rows, _DOC_GRID_HEADERS, "document")
             return parse_document_grid(headers, rows, policy_number=policy_number)
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
@@ -778,6 +850,46 @@ class PlaywrightUticaCancellationBrowser:
             for row in row_nodes
         )
         return parse_document_grid(headers, rows, policy_number=policy_number)
+
+    def _all_ext_rows(
+        self,
+        grid_id: str,
+        first_rows: tuple[tuple[str, ...], ...],
+        aliases: dict[str, set[str]],
+        what: str,
+    ) -> tuple[tuple[str, ...], ...]:
+        page = self.page
+
+        def next_state() -> str:
+            evaluate = getattr(page, "evaluate", None)
+            if not callable(evaluate):
+                return "none"
+            try:
+                info = evaluate(_EXT_PAGE_STATE_JS, grid_id)
+            except TypeError:
+                return "none"
+            except Exception:
+                return "none"
+            if not isinstance(info, dict):
+                return "none"
+            return str(info.get("state") or "none")
+
+        def click_next() -> bool:
+            try:
+                return bool(page.evaluate(_EXT_PAGE_NEXT_JS, grid_id))
+            except Exception:
+                return False
+
+        def read_rows() -> tuple[tuple[str, ...], ...]:
+            waiter = getattr(page, "wait_for_timeout", None)
+            if callable(waiter):
+                waiter(1500)
+            _, _, rows = find_ext_grid(self._ext_grids(), aliases, what=what)
+            return rows
+
+        return collect_paged_rows(
+            first_rows, next_state=next_state, click_next=click_next, read_rows=read_rows, what=what
+        )
 
     def download_document(self, doc: UticaDocument) -> bytes:
         """Fetch the notice PDF via the portal's own DocGenServlet URL.

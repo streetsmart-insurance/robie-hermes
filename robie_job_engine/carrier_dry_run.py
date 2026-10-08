@@ -79,7 +79,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".progressive_pending_cancellation",
         browser_cls_name="PlaywrightFaoCancellationBrowser",
         ledger_cls_name="FaoCancellationLedger",
-        select_fn_name="select_fao_page",
+        select_fn_name="ensure_fao_page",
+        select_takes="browser",
     ),
     "guard": CarrierSpec(
         name="guard",
@@ -104,7 +105,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".travelers_pending_cancellation",
         browser_cls_name="PlaywrightTravelersBrowser",
         ledger_cls_name="TravelersDeliveryLedger",
-        select_fn_name="select_travelers_page",
+        select_fn_name="ensure_travelers_page",
+        select_takes="browser",
     ),
     "natgen": CarrierSpec(
         name="natgen",
@@ -131,7 +133,7 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".farmersofsalem_pending_cancellation",
         browser_cls_name="FinysFoSBrowser",
         ledger_cls_name="LocalDeliveryLedger",
-        select_fn_name="_select_finys_page",
+        select_fn_name="ensure_finys_page",
         select_takes="browser",
     ),
 }

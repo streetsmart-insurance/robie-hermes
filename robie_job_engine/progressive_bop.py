@@ -2289,8 +2289,9 @@ def connect_cdp_browser(cdp_url: str | None, *, agent_code: str) -> tuple[Playwr
     playwright = sync_playwright().start()
     try:
         browser = playwright.chromium.connect_over_cdp(url)
-        pages = [page for context in browser.contexts for page in context.pages]
-        return PlaywrightFaoBopBrowser(select_fao_page(pages), agent_code=agent_code), playwright.stop
+        from .progressive_pending_cancellation import ensure_fao_page
+
+        return PlaywrightFaoBopBrowser(ensure_fao_page(browser), agent_code=agent_code), playwright.stop
     except Exception:
         playwright.stop()
         raise

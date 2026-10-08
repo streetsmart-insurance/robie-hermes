@@ -46,9 +46,10 @@ Letter ZIP instead of the cancellation notice. This module never navigates
 to Customer Snapshot and never clicks a transaction Download for a
 cancellation notice.
 
-A missing or non-unique control raises IntakeHold. This module does not
-log in, does not handle MFA, does not upload, note, task, or label in
-EZLynx, and does not register a timer.
+A missing or non-unique control raises IntakeHold. Sign-in, when the tab
+is missing or still on the login form, is ``travelers_login`` (one attempt,
+``travelers_username`` / ``travelers_password``). This module does not
+upload, note, task, or label in EZLynx, and does not register a timer.
 """
 from __future__ import annotations
 
@@ -1031,15 +1032,64 @@ def run_pull(
     }
 
 
+def _is_travelers_page(page: Any) -> bool:
+    host = (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower()
+    return host == TRAVELERS_HOST or host.endswith(".travelers.com")
+
+
 def select_travelers_page(pages: list[Any]) -> Any:
-    """Use the single Travelers foragents portal tab."""
-    matches = [
-        page for page in pages
-        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == TRAVELERS_HOST
-    ]
-    if len(matches) != 1:
-        raise IntakeHold("Expected exactly one Travelers portal tab")
-    return matches[0]
+    """Keep one Travelers tab and close the other Travelers tabs."""
+    matches = [page for page in pages if _is_travelers_page(page)]
+    if not matches:
+        raise IntakeHold("Travelers portal tab is missing")
+    from . import travelers_login
+
+    signed = [page for page in matches if travelers_login.is_signed_in(page)]
+    chosen = signed[0] if signed else matches[0]
+    for extra in matches:
+        if extra is chosen:
+            continue
+        closer = getattr(extra, "close", None)
+        if not callable(closer):
+            continue
+        try:
+            closer()
+        except Exception:
+            pass
+    return chosen
+
+
+def ensure_travelers_page(cdp_browser: Any) -> Any:
+    """Own exactly one Travelers tab: open one if missing, close extras.
+
+    A signed-out tab is signed in once. A rejected login is not retried.
+    """
+    from . import travelers_login
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("travelers")
+    refuse_production_host()
+    pages = [page for context in getattr(cdp_browser, "contexts", []) or [] for page in context.pages]
+    matches = [page for page in pages if _is_travelers_page(page)]
+    if not matches:
+        require_hermes_test_host()
+        contexts = list(getattr(cdp_browser, "contexts", None) or [])
+        if not contexts:
+            raise IntakeHold("Travelers sign-in needs an open browser context")
+        page = contexts[0].new_page()
+        try:
+            travelers_login.login_travelers(page)
+        except Exception:
+            try:
+                page.close()
+            except Exception:
+                pass
+            raise
+        return page
+    chosen = select_travelers_page(matches)
+    if not travelers_login.is_signed_in(chosen):
+        travelers_login.login_travelers(chosen)
+    return chosen
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightTravelersBrowser, Callable[[], None]]:
@@ -1060,8 +1110,7 @@ def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightTravelersBrowser
     playwright = sync_playwright().start()
     try:
         browser = playwright.chromium.connect_over_cdp(url)
-        pages = [page for context in browser.contexts for page in context.pages]
-        return PlaywrightTravelersBrowser(select_travelers_page(pages)), playwright.stop
+        return PlaywrightTravelersBrowser(ensure_travelers_page(browser)), playwright.stop
     except Exception:
         playwright.stop()
         raise

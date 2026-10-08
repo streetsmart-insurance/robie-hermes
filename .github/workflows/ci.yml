@@ -125,7 +125,8 @@ jobs:
             tests/test_carrier_pull_health_check.py \
             tests/test_document_retrieval_prod_filing.py \
             tests/test_carrier_live_fixes_20261008.py \
-            tests/test_carrier_daily_run.py
+            tests/test_carrier_daily_run.py \
+            tests/test_carrier_sign_in_20261008.py
       - name: Test Ascend API notice source
         run: PYTHONPATH=. python -m pytest -q tests/test_ascend_api_notice_source.py tests/test_ascend_notice_driver.py tests/test_ascend_unmatched_digest.py tests/test_install_ascend_unmatched_digest.py tests/test_ascend_stuck_and_agreements.py
 

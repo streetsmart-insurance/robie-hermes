@@ -15,8 +15,10 @@ an HTTP GET on an allowed Progressive host). A document that is not a PDF is
 never kept; a document that cannot be captured is recorded HELD, never
 claimed as downloaded. Billing and renewal paperwork are never targeted.
 
-This module does not log in, does not handle MFA, does not upload, note,
-task, or label in EZLynx, and does not register a timer.
+Sign-in, when the tab is missing or still on the login host, is
+``progressive_login`` (one attempt, ForAgentsOnly, ``progressive-robie-*``
+secrets). This module does not upload, note, task, or label in EZLynx, and
+does not register a timer.
 """
 from __future__ import annotations
 
@@ -239,23 +241,43 @@ def _is_policy_page_url(url: Any) -> bool:
     return host in POLICY_PAGE_HOSTS
 
 
-def open_cl_documents(page: Any) -> None:
-    """CL Express: the DOCUMENTS header item is an <a>, not a tab (live 2026-10-08).
+_DOCUMENTS_NAME = re.compile(r"^\s*documents\s*$", re.IGNORECASE)
+_POLICY_HUB_PATH = re.compile(r"^/app/policy-hub/([A-Za-z0-9-]+)/[^/]+/?$")
+DOCUMENTS_WAIT_MS = 20000
 
-    Its accessible name is "Documents" (CSS upper-cases it), so match any
-    casing, tab role first, then link role; exactly one visible control.
+
+def _with_one_retry(action: Callable[[], Any], *, what: str) -> Any:
+    """Run ``action`` once, and once more if that attempt timed out.
+
+    A second timeout, or any other error, holds with ``what`` instead of
+    surfacing a raw timeout.
     """
-    pattern = re.compile(r"^\s*documents\s*$", re.IGNORECASE)
-    control = None
-    for role in ("tab", "link"):
-        locator = page.get_by_role(role, name=pattern)
+    error: Exception | None = None
+    for attempt in (1, 2):
         try:
+            return action()
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            error = exc
+            timed_out = "timeout" in type(exc).__name__.lower()
+            if attempt == 2 or not timed_out:
+                break
+    name = type(error).__name__ if error is not None else "Error"
+    raise IntakeHold(f"Progressive page {what} did not finish ({name}); one retry was used")
+
+
+def documents_control(page: Any) -> Any | None:
+    """The one visible Documents tab or link, any casing. None when absent."""
+    for role in ("tab", "link", "button"):
+        try:
+            locator = page.get_by_role(role, name=_DOCUMENTS_NAME)
             count = int(locator.count())
         except Exception:
             count = 0
         visible = []
-        for i in range(count):
-            node = locator.nth(i) if hasattr(locator, "nth") else locator
+        for index in range(count):
+            node = locator.nth(index) if hasattr(locator, "nth") else locator
             try:
                 if not hasattr(node, "is_visible") or node.is_visible():
                     visible.append(node)
@@ -264,19 +286,68 @@ def open_cl_documents(page: Any) -> None:
         if len(visible) > 1:
             raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
         if visible:
-            control = visible[0]
-            break
+            return visible[0]
+    return None
+
+
+def policy_hub_documents_url(url: str) -> str:
+    """``.../policy-hub/<policy>/documents`` for a policy-hub page, else ''."""
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if (parsed.hostname or "").lower() != POLICY_SERVICING_HOST or parsed.scheme != "https":
+        return ""
+    match = _POLICY_HUB_PATH.match(parsed.path or "")
+    if match is None:
+        return ""
+    return f"https://{POLICY_SERVICING_HOST}/app/policy-hub/{match.group(1)}/documents"
+
+
+def _wait_for_policy_documents(page: Any) -> None:
+    page.wait_for_selector("text=Policy Documents", timeout=DOCUMENTS_WAIT_MS)
+
+
+def open_cl_documents(page: Any) -> None:
+    """CL Express: the DOCUMENTS header item is an <a>, not a tab (live 2026-10-08).
+
+    Its accessible name is "Documents" (CSS upper-cases it), so match any
+    casing, tab role first, then link role; exactly one visible control.
+    """
+    control = documents_control(page)
     if control is None:
         raise IntakeHold("Progressive control 'DOCUMENTS' is missing or ambiguous")
     control.click()
-    page.wait_for_selector("text=Policy Documents", timeout=20000)
+    _with_one_retry(lambda: _wait_for_policy_documents(page), what="CL Express documents list")
 
 
 def open_policy_servicing_documents(page: Any) -> None:
-    """Policy servicing app: the documents list is not wired yet; hold the policy."""
-    raise IntakeHold(
-        "Progressive personal policy opens on the new policy servicing site; "
-        "its documents page is not wired yet"
+    """Personal-lines policy servicing: the same DOCUMENTS control as CL Express.
+
+    The policy-hub coverages page may not show it. One navigation to the
+    policy's documents route is tried, then the control again. The documents
+    list wait is bounded and retried once. Anything else holds this policy
+    with a specific reason.
+    """
+    control = documents_control(page)
+    if control is None:
+        target = policy_hub_documents_url(str(getattr(page, "url", "") or ""))
+        if not target:
+            raise IntakeHold(
+                "Progressive personal policy on policyservicing has no Documents control"
+            )
+
+        def go() -> None:
+            page.goto(target, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
+
+        _with_one_retry(go, what="policyservicing documents route")
+        control = documents_control(page)
+    if control is not None:
+        control.click()
+    elif not str(getattr(page, "url", "") or "").rstrip("/").endswith("/documents"):
+        raise IntakeHold(
+            "Progressive personal policy on policyservicing has no Documents control"
+        )
+    _with_one_retry(
+        lambda: _wait_for_policy_documents(page),
+        what="policyservicing documents list",
     )
 
 
@@ -647,8 +718,12 @@ class PlaywrightFaoCancellationBrowser:
         require_policy_number(policy_number)
         link = _unique_control(self.page, "link", policy_number, exact=True)
         link.click()
-        self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
-        require_fao_url(str(getattr(self.page, "url", "") or ""))
+
+        def landed() -> None:
+            self.page.wait_for_url(_is_policy_page_url, timeout=POLICY_PAGE_WAIT_MS)
+            require_fao_url(str(getattr(self.page, "url", "") or ""))
+
+        _with_one_retry(landed, what=f"policy {policy_number}")
 
     def open_documents_tab(self) -> None:
         """Open the policy's documents list (CL Express or policy servicing)."""
@@ -789,21 +864,27 @@ class PlaywrightFaoCancellationBrowser:
             pass
 
     def return_to_report(self) -> None:
-        self.page.goto(self._list_url, wait_until="domcontentloaded", timeout=RETURN_TO_REPORT_MS)
+        def go() -> None:
+            self.page.goto(self._list_url, wait_until="domcontentloaded", timeout=RETURN_TO_REPORT_MS)
+
+        _with_one_retry(go, what="return to the pending-cancellation report")
         # Wait for report tabs first (they render before the data tables),
         # then wait for a visible table with data rows.
         try:
             self.page.get_by_role("tab").first.wait_for(timeout=20000)
         except Exception:
             pass
-        # Wait for any visible table; the data table loads via JS after tabs
-        self.page.wait_for_function(
-            """() => {
-                const tables = Array.from(document.querySelectorAll('table'));
-                return tables.some(t => t.offsetParent !== null && t.querySelector('tbody tr'));
-            }""",
-            timeout=25000
-        )
+
+        def tables_ready() -> None:
+            self.page.wait_for_function(
+                """() => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    return tables.some(t => t.offsetParent !== null && t.querySelector('tbody tr'));
+                }""",
+                timeout=25000,
+            )
+
+        _with_one_retry(tables_ready, what="pending-cancellation report table")
 
     def screenshot_report(self) -> bytes:
         from .carrier_page_capture import capture_png
@@ -1204,6 +1285,45 @@ def _recover_report_tab(browser: Any) -> None:
             pass
 
 
+def _fao_family_host(url: str) -> bool:
+    host = (urllib.parse.urlsplit(str(url or "")).hostname or "").lower()
+    if host == "foragentsonly.com" or host.endswith(".foragentsonly.com"):
+        return True
+    return host == "foragentsonlylogin.progressive.com" or host.endswith(".foragentsonlylogin.progressive.com")
+
+
+def ensure_fao_page(cdp_browser: Any) -> Any:
+    """Return one signed-in ForAgentsOnly tab, signing in once if there is none."""
+    from . import progressive_login
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("fao")
+    refuse_production_host()
+    pages = [page for context in getattr(cdp_browser, "contexts", []) or [] for page in context.pages]
+    family = [page for page in pages if _fao_family_host(getattr(page, "url", ""))]
+    signed = [page for page in family if progressive_login.is_signed_in(page)]
+    if len(signed) == 1:
+        return signed[0]
+    if len(signed) > 1:
+        raise IntakeHold("Expected exactly one Progressive FAO tab")
+    require_hermes_test_host()
+    contexts = list(getattr(cdp_browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Progressive sign-in needs an open browser context")
+    page = family[0] if family else contexts[0].new_page()
+    created = page not in family
+    try:
+        progressive_login.login_progressive(page)
+    except Exception:
+        if created:
+            try:
+                page.close()
+            except Exception:
+                pass
+        raise
+    return page
+
+
 def select_fao_page(pages: list[Any]) -> Any:
     """Use the single FAO tab."""
     # The FAO tab may sit on a policy page (CL Express / policy servicing)
@@ -1238,8 +1358,7 @@ def connect_cdp_browser(
     playwright = sync_playwright().start()
     try:
         browser = playwright.chromium.connect_over_cdp(url)
-        pages = [page for context in browser.contexts for page in context.pages]
-        return PlaywrightFaoCancellationBrowser(select_fao_page(pages), agent_code=agent_code), playwright.stop
+        return PlaywrightFaoCancellationBrowser(ensure_fao_page(browser), agent_code=agent_code), playwright.stop
     except Exception:
         playwright.stop()
         raise

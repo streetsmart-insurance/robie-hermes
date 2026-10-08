@@ -876,17 +876,13 @@ class GuardReloginTests(unittest.TestCase):
             self.assertFalse(browser.relogin_if_signed_out())
         login.assert_not_called()
 
-    def test_auth_redirect_relogs_in_and_reselects_cancellations(self):
-        import os
-
+    def test_auth_redirect_does_not_submit_the_password_again(self):
         browser = self._browser("https://gigezrate.guard.com/auth/")
-        with mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
-                mock.patch.object(guard, "require_hermes_test_host"), \
-                mock.patch.object(guard_login, "login_guard") as login:
-            self.assertTrue(browser.relogin_if_signed_out())
-        login.assert_called_once_with(browser.page)
-        browser.page.goto.assert_called_once_with(self.LIST, wait_until="domcontentloaded")
-        browser.load_cancellations.assert_called_once()
+        with mock.patch.object(guard_login, "login_guard") as login:
+            with self.assertRaises(IntakeHold) as ctx:
+                browser.relogin_if_signed_out()
+        login.assert_not_called()
+        self.assertIn("one login attempt only", str(ctx.exception))
 
     def test_relogin_is_capped(self):
         browser = self._browser("https://gigezrate.guard.com/auth/")
@@ -895,7 +891,7 @@ class GuardReloginTests(unittest.TestCase):
             with self.assertRaises(IntakeHold) as ctx:
                 browser.relogin_if_signed_out()
         login.assert_not_called()
-        self.assertIn("expired again", str(ctx.exception))
+        self.assertIn("one login attempt only", str(ctx.exception))
 
     def test_relogin_refuses_non_test_host_before_secrets(self):
         browser = self._browser("https://gigezrate.guard.com/auth/")
@@ -914,14 +910,12 @@ class GuardReloginTests(unittest.TestCase):
             browser.page.url = "https://gigezrate.guard.com/auth/"
 
         browser.page.goto.side_effect = goto
-        with mock.patch.object(guard, "require_hermes_test_host"), \
-                mock.patch.object(guard, "refuse_production_host"), \
-                mock.patch.object(guard_login, "login_guard") as login:
-            login.side_effect = lambda page: setattr(page, "url", self.LIST)
-            browser.return_to_cancellations()
-        login.assert_called_once()
-        self.assertEqual(browser.page.goto.call_count, 2)
-        browser.load_cancellations.assert_called_once()
+        with mock.patch.object(guard_login, "login_guard") as login:
+            with self.assertRaises(IntakeHold) as ctx:
+                browser.return_to_cancellations()
+        login.assert_not_called()
+        self.assertIn("one login attempt only", str(ctx.exception))
+        self.assertEqual(browser.page.goto.call_count, 1)
 
     def test_run_pull_retries_policy_after_session_expiry(self):
         import os

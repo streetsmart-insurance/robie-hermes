@@ -15,7 +15,8 @@ For each carrier, one at a time:
    ``Robie Carrier Pull QA (Nicole)/<Carrier>/<pull date>/`` through the
    carrier Drive ledger (each notice is uploaded once).
 
-Guard and Travelers are skipped until their logins are fixed. A plain-English
+Guard stays off the daily timer until a person confirms the account is not
+locked after the 2026-10-08 rejection. Travelers signs itself in. A plain-English
 summary is written to ``<root>/runs/<date>/summary.txt`` (and JSON). With
 ``--notify`` and ``ROBIE_HEALTH_CHAT_SPACE`` set, the summary is also posted to
 the ROBIE health Chat as the Robie Chat app; neither is set on Test today.
@@ -51,13 +52,16 @@ DAILY_CARRIERS = (
     "progressive",
     "progressive_bop",
     "geico",
+    "travelers",
     "natgen",
     "uticafirst",
     "farmersofsalem",
 )
 SKIPPED_UNTIL_LOGIN_FIXED = {
-    "guard": "Guard login is rejected; skipped until it is fixed",
-    "travelers": "Travelers credentials are not in Secret Manager; skipped until they are",
+    "guard": (
+        "Guard login was rejected on 2026-10-08. The daily timer stays off "
+        "until the account is confirmed unlocked. A manual pull still makes one attempt."
+    ),
 }
 DISPLAY = {name: spec.display for name, spec in SPECS.items()}
 DISPLAY["progressive_bop"] = "Progressive BOP"
@@ -140,6 +144,10 @@ def close_stale_tabs(cdp_url: str, *, http: Callable[..., Any] = _http_json) -> 
 CARRIER_SIGN_IN = {
     "geico": "robie_job_engine.geico_login.ensure_geico_tab",
     "natgen": "robie_job_engine.natgen_login.ensure_natgen_tab",
+    "progressive": "robie_job_engine.progressive_login.ensure_progressive_tab",
+    "progressive_bop": "robie_job_engine.progressive_login.ensure_progressive_tab",
+    "travelers": "robie_job_engine.travelers_login.ensure_travelers_tab",
+    "farmersofsalem": "robie_job_engine.farmersofsalem_login.ensure_farmers_tab",
 }
 
 
@@ -356,6 +364,8 @@ def run_daily(
     open_tab: Callable[[str, str], str | None] = ensure_carrier_tab,
     drive_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
+    from .intake_core import IntakeHold
+
     _require_dry_run_environment()
     os.environ[KILL_SWITCH_ENV] = "0"
     cdp_url = _require_local_cdp(cdp_url)
@@ -380,6 +390,17 @@ def run_daily(
             closed = [f"(tab cleanup failed: {type(exc).__name__})"]
         try:
             opened = open_tab(name, cdp_url)
+        except IntakeHold as exc:
+            # The sign-in already submitted a password. Do not start the pull,
+            # which would submit it again.
+            results[name] = {
+                "display": DISPLAY.get(name, name),
+                "status": "HELD",
+                "reason": str(exc),
+                "downloaded": 0,
+                "held": [],
+            }
+            continue
         except Exception as exc:  # noqa: BLE001 - the pull's own tab check decides
             opened = f"(could not open a tab: {type(exc).__name__})"
         result = run_one(name, day=day, root=root, cdp_url=cdp_url)

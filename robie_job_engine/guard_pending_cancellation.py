@@ -409,34 +409,18 @@ class PlaywrightGuardBrowser:
         )
 
     def relogin_if_signed_out(self) -> bool:
-        """Sign back in (Test host only) when the session expired mid-run.
+        """Hold when the session expires mid-run. Do not submit the password again.
 
-        Live 2026-10-08 (f53568f6): after 3 policies Guard redirected the tab
-        to /auth; every later policy held as "did not open" or "missing from
-        the Cancellations grid". Re-login via ``guard_login`` (secrets from
-        Secret Manager, never logged), reload the list and re-select the
-        Cancellations tab. Capped at GUARD_RELOGIN_LIMIT per run so a
-        persistent sign-out holds instead of looping.
+        Live 2026-10-08: after 3 policies Guard redirected the tab to /auth,
+        and a second sign-in was rejected. Another submission can lock the
+        account, so this run keeps the one login it already made.
         """
         if not self.on_sign_in_page():
             return False
-        if self._relogins >= GUARD_RELOGIN_LIMIT:
-            raise IntakeHold(
-                f"Guard session expired again after {GUARD_RELOGIN_LIMIT} re-logins this run"
-            )
-        refuse_production_host()
-        require_hermes_test_host()
-        from . import guard_login
-
-        self._relogins += 1
-        guard_login.login_guard(self.page)
-        if self._list_url:
-            self.page.goto(self._list_url, wait_until="domcontentloaded")
-            self.page.wait_for_selector("table", timeout=15000)
-            self.load_cancellations()
-        else:
-            self.open_cancellations()
-        return True
+        raise IntakeHold(
+            "Guard session expired mid-pull. Not signing in again this run "
+            "(one login attempt only, so a rejected password cannot lock the account)."
+        )
 
     # -- navigation -----------------------------------------------------
     def open_cancellations(self) -> None:

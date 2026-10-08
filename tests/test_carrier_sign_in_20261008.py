@@ -1,0 +1,500 @@
+"""Sign-in wiring and the 2026-10-08 pull gaps. No live portals."""
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from robie_job_engine.intake_core import IntakeHold
+
+
+def _reset_attempts() -> None:
+    from robie_job_engine import farmersofsalem_login, progressive_login, travelers_login
+
+    progressive_login._PASSWORD_SUBMITTED = False
+    travelers_login._PASSWORD_SUBMITTED = False
+    farmersofsalem_login._PASSWORD_SUBMITTED = False
+
+
+class _Box:
+    def __init__(self, page, kind):
+        self.page = page
+        self.kind = kind
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def fill(self, value):
+        self.page.filled.append((self.kind, value))
+
+
+class _Button:
+    def __init__(self, page):
+        self.page = page
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.page.clicks += 1
+
+
+class _Zero:
+    def count(self):
+        return 0
+
+    first = None
+
+
+class ProgressiveLoginTests(unittest.TestCase):
+    def setUp(self):
+        _reset_attempts()
+
+    def _page(self, *, reject=False, question=False):
+        page = SimpleNamespace(
+            url="about:blank",
+            filled=[],
+            clicks=0,
+            body="User ID\nPassword\nLog In",
+            reject=reject,
+            question=question,
+            password_on=True,
+            answered=False,
+        )
+
+        def goto(url, **_kwargs):
+            page.url = url
+
+        def wait(_ms):
+            if page.clicks and page.reject and not page.answered:
+                page.body = "The user id or password is invalid."
+                page.url = "https://foragentsonlylogin.progressive.com/Login/"
+            elif page.clicks and page.question and not page.answered:
+                page.body = "Security Question\nWhat city were you born in?"
+                page.password_on = False
+            elif page.answered or (page.clicks and not page.reject and not page.question):
+                page.url = "https://www.foragentsonly.com/home"
+                page.body = "Manage Policies"
+                page.password_on = False
+
+        def locator(sel):
+            if sel == "body":
+                return SimpleNamespace(inner_text=lambda: page.body)
+            if sel == "input[type='password']":
+                return _Box(page, "password") if page.password_on else _Zero()
+            if sel == "input[name='userId']":
+                return _Box(page, "user") if page.password_on else _Zero()
+            if sel == "input[type='text']" and page.question and not page.password_on:
+                box = _Box(page, "answer")
+                real_fill = box.fill
+
+                def fill(value):
+                    real_fill(value)
+                    page.answered = True
+
+                box.fill = fill
+                return box
+            if "submit" in sel:
+                return _Zero()
+            return _Zero()
+
+        page.goto = goto
+        page.wait_for_timeout = wait
+        page.locator = locator
+        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+        return page
+
+    def test_secret_names_are_the_robie_pair_only(self):
+        from robie_job_engine import progressive_login as login
+
+        self.assertEqual(login.USER_SECRET, "progressive-robie-login")
+        self.assertEqual(login.PASS_SECRET, "progressive-robie-password")
+        self.assertEqual(login.QUESTIONS_SECRET, "progressive-robie-security-questions")
+        self.assertEqual(login.UNUSED_PROGRESSIVE_USERNAME, "progressive_username")
+        page = self._page()
+        with mock.patch.object(login, "_require_test_host"), \
+                mock.patch.object(login, "_get_secret", side_effect=AssertionError("secrets")):
+            login.login_progressive(
+                page, credentials=lambda: ("33617c", "pw-value"), questions=()
+            )
+        self.assertEqual([kind for kind, _ in page.filled], ["user", "password"])
+        self.assertEqual(page.clicks, 1)
+        self.assertNotIn("pw-value", "")
+
+    def test_rejection_is_one_attempt_and_does_not_echo_the_password(self):
+        from robie_job_engine import progressive_login as login
+
+        page = self._page(reject=True)
+        with mock.patch.object(login, "_require_test_host"), \
+                mock.patch.object(login, "_get_secret") as getter:
+            with self.assertRaises(IntakeHold) as ctx:
+                login.login_progressive(page, credentials=lambda: ("33617c", "pw-value"))
+            with self.assertRaises(IntakeHold) as again:
+                login.login_progressive(self._page(), credentials=lambda: ("33617c", "pw-value"))
+        getter.assert_not_called()
+        self.assertEqual(page.clicks, 1)
+        self.assertIn("Not retried", str(ctx.exception))
+        self.assertIn("already attempted", str(again.exception))
+        self.assertNotIn("pw-value", str(ctx.exception))
+
+    def test_security_question_is_answered_once_from_the_secret(self):
+        from robie_job_engine import progressive_login as login
+
+        page = self._page(question=True)
+        pairs = (("What city were you born in?", "answer-value"),)
+        with mock.patch.object(login, "_require_test_host"):
+            login.login_progressive(page, credentials=lambda: ("33617c", "pw-value"), questions=pairs)
+        self.assertEqual(page.filled[-1], ("answer", "answer-value"))
+        self.assertNotIn("answer-value", page.body)
+        self.assertTrue(page.url.startswith("https://www.foragentsonly.com/"))
+
+    def test_unknown_question_holds_without_a_guess(self):
+        from robie_job_engine import progressive_login as login
+
+        with self.assertRaises(IntakeHold):
+            login.matching_answer((("pet name", "x"), ("first school", "y")), "Security Question\nMother's maiden name")
+
+
+class TravelersTabTests(unittest.TestCase):
+    def setUp(self):
+        _reset_attempts()
+
+    def test_secret_names_and_one_rejection(self):
+        from robie_job_engine import travelers_login as login
+
+        self.assertEqual((login.USER_SECRET, login.PASS_SECRET), ("travelers_username", "travelers_password"))
+        page = SimpleNamespace(
+            url="about:blank", body="Sign In", filled=[], clicks=0, password_on=True,
+        )
+
+        def locator(sel):
+            if sel == "body":
+                return SimpleNamespace(inner_text=lambda: page.body)
+            if sel == "input[type='password']" and page.password_on:
+                return _Box(page, "password")
+            if sel == "input[name='username']":
+                return _Box(page, "user")
+            return _Zero()
+
+        def wait(_ms):
+            if page.clicks:
+                page.body = "Incorrect username or password."
+                page.url = "https://foragents.travelers.com/login"
+
+        page.locator = locator
+        page.goto = lambda url, **k: setattr(page, "url", url)
+        page.wait_for_timeout = wait
+        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+        with mock.patch.object(login, "_require_test_host"):
+            with self.assertRaises(IntakeHold) as ctx:
+                login.login_travelers(page, credentials=lambda: ("CarloF1", "pw-value"))
+            with self.assertRaises(IntakeHold):
+                login.login_travelers(page, credentials=lambda: ("CarloF1", "pw-value"))
+        self.assertEqual(page.clicks, 1)
+        self.assertNotIn("pw-value", str(ctx.exception))
+        self.assertIn("Not retried", str(ctx.exception))
+
+    def test_zero_tabs_opens_one_and_two_tabs_keeps_one(self):
+        from robie_job_engine import travelers_pending_cancellation as travelers
+
+        opened = []
+
+        class Page:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Ctx:
+            def __init__(self, pages):
+                self.pages = pages
+
+            def new_page(self):
+                page = Page("about:blank")
+                opened.append(page)
+                self.pages.append(page)
+                return page
+
+        empty = SimpleNamespace(contexts=[Ctx([])])
+        with mock.patch.object(travelers, "require_carrier_pull", create=True), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(travelers, "refuse_production_host"), \
+                mock.patch.object(travelers, "require_hermes_test_host"), \
+                mock.patch("robie_job_engine.travelers_login.login_travelers", side_effect=lambda page, **k: setattr(page, "url", "https://foragents.travelers.com/Business")), \
+                mock.patch("robie_job_engine.travelers_login.is_signed_in", side_effect=lambda page: "foragents.travelers.com/Business" in page.url and "login" not in page.url):
+            page = travelers.ensure_travelers_page(empty)
+        self.assertEqual(len(opened), 1)
+        self.assertIs(page, opened[0])
+
+        first, second = Page("https://foragents.travelers.com/Business"), Page("https://foragents.travelers.com/login")
+        browser = SimpleNamespace(contexts=[Ctx([first, second])])
+        with mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(travelers, "refuse_production_host"), \
+                mock.patch("robie_job_engine.travelers_login.login_travelers") as login, \
+                mock.patch("robie_job_engine.travelers_login.is_signed_in", side_effect=lambda page: page.url.endswith("/Business")):
+            chosen = travelers.ensure_travelers_page(browser)
+        self.assertIs(chosen, first)
+        self.assertTrue(second.closed)
+        login.assert_not_called()
+
+
+class FarmersLoginTests(unittest.TestCase):
+    def setUp(self):
+        _reset_attempts()
+
+    def test_uses_the_newer_pair_not_the_robie_pair(self):
+        from robie_job_engine import farmersofsalem_login as login
+
+        self.assertEqual(login.USER_SECRET, "farmers_of_salem_username")
+        self.assertEqual(login.PASS_SECRET, "farmers_of_salem_password")
+        self.assertTrue(login.OLDER_USER_SECRET.startswith("farmers_of_salem_robie_"))
+        page = SimpleNamespace(url="about:blank", body="Login", filled=[], clicks=0, password_on=True)
+
+        def locator(sel):
+            if sel == "body":
+                return SimpleNamespace(inner_text=lambda: page.body)
+            if "UserName" in sel:
+                return _Box(page, "user")
+            if sel == "input[type='password']" and page.password_on:
+                return _Box(page, "password")
+            return _Zero()
+
+        def wait(_ms):
+            if page.clicks:
+                page.url = "https://farmersofsalem.com/agent_home.aspx"
+                page.body = "Farmers Of Salem :: Agent Home\nFOS PORTAL"
+                page.password_on = False
+
+        page.locator = locator
+        page.goto = lambda url, **k: setattr(page, "url", url)
+        page.wait_for_timeout = wait
+        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+        finys = SimpleNamespace(url="https://fos.finys.com/")
+        seen = []
+
+        def secrets(name):
+            seen.append(name)
+            return {"farmers_of_salem_username": "user", "farmers_of_salem_password": "pw-value"}[name]
+
+        with mock.patch.object(login, "_require_test_host"), mock.patch.object(login, "_get_secret", side_effect=secrets):
+            returned = login.login_farmers(page, open_portal=lambda _page: finys)
+        self.assertIs(returned, finys)
+        self.assertEqual(seen, ["farmers_of_salem_username", "farmers_of_salem_password"])
+        self.assertEqual(page.clicks, 1)
+        with mock.patch.object(login, "_require_test_host"):
+            with self.assertRaises(IntakeHold) as ctx:
+                login.login_farmers(SimpleNamespace(url="https://farmersofsalem.com/agent_login.aspx"), credentials=lambda: ("u", "p"))
+        self.assertIn("already attempted", str(ctx.exception))
+
+
+class UticaPagingTests(unittest.TestCase):
+    def test_reads_past_the_first_25_rows(self):
+        from robie_job_engine import utica_pending_cancellation as utica
+
+        first = tuple((f"p{i}",) for i in range(25))
+        second = tuple((f"p{i}",) for i in range(25, 30))
+        states = iter(["next", "done"])
+        rows = {"now": first}
+
+        def click():
+            rows["now"] = second
+            return True
+
+        collected = utica.collect_paged_rows(
+            first, next_state=lambda: next(states), click_next=click, read_rows=lambda: rows["now"], what="transactions"
+        )
+        self.assertEqual(len(collected), 30)
+        self.assertEqual(collected[-1], ("p29",))
+
+    def test_same_page_twice_holds(self):
+        from robie_job_engine import utica_pending_cancellation as utica
+
+        rows = (("only",),)
+        with self.assertRaisesRegex(IntakeHold, "same rows"):
+            utica.collect_paged_rows(
+                rows, next_state=lambda: "next", click_next=lambda: True, read_rows=lambda: rows, what="transactions"
+            )
+
+
+class ProgressiveServicingTests(unittest.TestCase):
+    def test_documents_control_on_the_policy_hub(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        link = mock.Mock()
+        link.is_visible.return_value = True
+        tab = mock.Mock()
+        tab.count.return_value = 0
+        links = mock.Mock()
+        links.count.return_value = 1
+        links.nth.return_value = link
+        page = mock.Mock()
+        page.url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
+        page.get_by_role.side_effect = lambda role, name=None: tab if role == "tab" else links
+        fao.open_policy_servicing_documents(page)
+        link.click.assert_called_once()
+        page.wait_for_selector.assert_called()
+
+    def test_missing_control_tries_the_documents_route_once(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        page = mock.Mock()
+        page.url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
+        empty = mock.Mock()
+        empty.count.return_value = 0
+        page.get_by_role.return_value = empty
+        with self.assertRaisesRegex(IntakeHold, "no Documents control"):
+            fao.open_policy_servicing_documents(page)
+        page.goto.assert_called()
+        self.assertIn("/documents", page.goto.call_args.args[0])
+
+    def test_page_wait_retries_once_then_holds(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        calls = {"n": 0}
+
+        def action():
+            calls["n"] += 1
+            raise TimeoutError("timed out")
+
+        with self.assertRaisesRegex(IntakeHold, "one retry was used"):
+            fao._with_one_retry(action, what="policy 871490213")
+        self.assertEqual(calls["n"], 2)
+
+
+class GeicoPolicyLinkTests(unittest.TestCase):
+    def test_policy_number_link_is_followed_when_view_policy_is_absent(self):
+        from robie_job_engine import geico_pending_cancellation_noc as geico
+
+        policy = "1234567890"
+        anchor = mock.Mock()
+        anchor.get_attribute.return_value = "https://edgeextended.geico.com/policy/1234567890"
+        anchor.inner_text.return_value = policy
+        anchors = mock.Mock()
+        anchors.count.return_value = 1
+        anchors.nth.return_value = anchor
+        view = mock.Mock()
+        view.count.return_value = 0
+        row = mock.Mock()
+        row.get_by_role.return_value = view
+        row.locator.return_value = anchors
+        browser = geico.PlaywrightGeicoNocBrowser.__new__(geico.PlaywrightGeicoNocBrowser)
+        browser.page = mock.Mock()
+        with mock.patch.object(browser, "_follow_policy_link", return_value=geico.NoticePath("billing_only")) as follow:
+            path = browser._resolve_policy_without_view_link(row, policy)
+        follow.assert_called_once()
+        self.assertEqual(path.kind, "billing_only")
+
+    def test_unresolvable_row_names_the_policy(self):
+        from robie_job_engine import geico_pending_cancellation_noc as geico
+
+        empty = mock.Mock()
+        empty.count.return_value = 0
+        row = mock.Mock()
+        row.locator.return_value = empty
+        row.get_by_role.return_value = empty
+        browser = geico.PlaywrightGeicoNocBrowser.__new__(geico.PlaywrightGeicoNocBrowser)
+        path = browser._resolve_policy_without_view_link(row, "1234567890")
+        self.assertEqual(path.kind, "no_policy_link")
+        self.assertIn("1234567890", path.detail)
+        self.assertIn("no policy link or details view", path.detail)
+
+
+class FarmersCommercialHoldTests(unittest.TestCase):
+    def test_kendo_link_header_and_commercial_row_without_a_policy(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        def cell(text, link=""):
+            node = SimpleNamespace(inner_text=lambda: link or text)
+
+            def locator(sel):
+                if sel == ".k-link" and link:
+                    return SimpleNamespace(all=lambda: [node])
+                return SimpleNamespace(all=lambda: [])
+
+            return SimpleNamespace(inner_text=lambda: text, locator=locator)
+
+        def row(*texts):
+            cells = [cell(t) for t in texts]
+            return SimpleNamespace(locator=lambda sel: SimpleNamespace(all=lambda: cells))
+
+        live = [
+            row("View Detail", "", "", "HONJ017732", "Noreen", "n", "Agent", "Cancellation", "7", "10/15/2026", "System"),
+            row("View Detail", "", "", "", "Commercial LLC", "n", "Commercial", "Diary", "1", "10/20/2026", "System"),
+        ]
+        heads = [cell("", link=h) if h else cell("") for h in (
+            "Details", "", "Loss #", "Policy/Quote", "Insured Name", "Notes", "Department", "Type",
+            "Due Days", "Due On", "Created By",
+        )]
+
+        class Header:
+            def locator(self, sel):
+                if sel == "thead th":
+                    return SimpleNamespace(all=lambda: heads)
+                if sel.startswith("xpath="):
+                    return SimpleNamespace(count=lambda: 1, first=Body())
+                return SimpleNamespace(all=lambda: [])
+
+        class Body:
+            def locator(self, sel):
+                if sel == "tbody tr":
+                    return SimpleNamespace(all=lambda: list(live))
+                return SimpleNamespace(all=lambda: [], count=lambda: 0)
+
+        page = SimpleNamespace(
+            url="https://fos.finys.com/",
+            locator=lambda sel: SimpleNamespace(all=lambda: [Header(), Body()]),
+        )
+        items = fos.extract_pending_items(page)
+        self.assertEqual([item.policy_number for item in items], ["HONJ017732"])
+        self.assertEqual(len(page.fos_row_holds), 1)
+        self.assertIn("commercial item", page.fos_row_holds[0]["reason"])
+        self.assertIn("Commercial LLC", page.fos_row_holds[0]["reason"])
+
+
+class GuardSecretTests(unittest.TestCase):
+    def test_guard_stays_on_berkshire_secrets(self):
+        from robie_job_engine import guard_login
+
+        self.assertEqual(guard_login.GUARD_USER_SECRET, "berkshire_guard_username")
+        self.assertEqual(guard_login.GUARD_PASS_SECRET, "berkshire_guard_password")
+        self.assertNotEqual(guard_login.GUARD_USER_SECRET, "guard_username")
+
+
+class DailySignInTests(unittest.TestCase):
+    def test_workers_that_need_a_login_are_wired_and_a_rejection_does_not_start_the_pull(self):
+        from datetime import date
+        from pathlib import Path
+        import tempfile
+
+        from robie_job_engine import carrier_daily_run as daily
+
+        self.assertIn("progressive_login.ensure_progressive_tab", daily.CARRIER_SIGN_IN["progressive"])
+        self.assertIn("progressive_login.ensure_progressive_tab", daily.CARRIER_SIGN_IN["progressive_bop"])
+        self.assertIn("travelers_login.ensure_travelers_tab", daily.CARRIER_SIGN_IN["travelers"])
+        self.assertIn("farmersofsalem_login.ensure_farmers_tab", daily.CARRIER_SIGN_IN["farmersofsalem"])
+        self.assertIn("travelers", daily.DAILY_CARRIERS)
+        ran = []
+
+        def open_tab(name, _url):
+            if name == "travelers":
+                raise IntakeHold("Travelers rejected the username or password. Not retried, so the account is not locked.")
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict("os.environ", {"ROBIE_ENV": "TEST"}):
+            summary = daily.run_daily(
+                day=date(2026, 10, 8), root=Path(tmp), carriers=("geico", "travelers"),
+                run_one=lambda name, **_kw: ran.append(name) or {"display": name, "status": "OK", "downloaded": 0, "held": []},
+                close_tabs=lambda _url: [], open_tab=open_tab,
+            )
+            self.assertEqual(ran, ["geico"])
+            self.assertEqual(summary["carriers"]["travelers"]["status"], "HELD")
+            self.assertIn("Not retried", summary["carriers"]["travelers"]["reason"])
+            self.assertEqual(__import__("os").environ[daily.KILL_SWITCH_ENV], "0")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -141,6 +141,7 @@ class NoticePath:
     notice_name: str = ""
     issued_on: date | None = None
     document_id: str = ""
+    detail: str = ""
 
 
 # GEICO serves cancellation notice PDFs from edgeextended.geico.com with a
@@ -1180,20 +1181,101 @@ class PlaywrightGeicoNocBrowser:
         link = rows.get_by_role("link", name="View Policy", exact=True)
         count = _locator_count(link)
         if count == 0:
-            return NoticePath("no_policy_link")
+            return self._resolve_policy_without_view_link(rows, policy)
         if count != 1:
             return NoticePath("ambiguous")
+        return self._follow_policy_link(link, policy)
+
+    def _follow_policy_link(self, link: Any, policy: str) -> NoticePath:
         href = str(link.get_attribute("href") or "")
         host = (urllib.parse.urlsplit(href).hostname or "").casefold()
         if host.startswith("commercialservicing"):
             return NoticePath("commercial_site")
-        if host != POLICY_VIEW_HOST:
-            return NoticePath("ambiguous")
-        with self.page.context.expect_page(timeout=POLICY_TAB_TIMEOUT_MS) as info:
-            link.click()
-        popup = info.value
+        if host and host != POLICY_VIEW_HOST and not host.endswith("geico.com"):
+            return NoticePath(
+                "ambiguous",
+                detail="GEICO policy link does not open a GEICO policy page, so no notice was pulled.",
+            )
+        try:
+            with self.page.context.expect_page(timeout=POLICY_TAB_TIMEOUT_MS) as info:
+                link.click()
+            popup = info.value
+        except Exception as exc:
+            return NoticePath(
+                "no_policy_link",
+                detail=(
+                    f"GEICO alert shows policy {policy} but the policy link did not open "
+                    f"a policy page ({type(exc).__name__}), so no notice was pulled."
+                ),
+            )
         self.policy_page = popup
         return open_billing_notices(popup)
+
+    def _resolve_policy_without_view_link(self, row: Any, policy: str) -> NoticePath:
+        """No "View Policy" link: use a policy-number link or a details control.
+
+        Holds with a specific reason when the row truly has no way to open
+        the policy. The policy number already parsed from the row is kept in
+        the reason.
+        """
+        anchors = row.locator("a")
+        count = _locator_count(anchors)
+        chosen = []
+        for index in range(max(count, 0)):
+            node = anchors.nth(index) if hasattr(anchors, "nth") else anchors
+            try:
+                href = str(node.get_attribute("href") or "")
+                text = _norm(node.inner_text()).replace(" ", "")
+            except Exception:
+                continue
+            host = (urllib.parse.urlsplit(href).hostname or "").casefold()
+            if policy and (policy in text or policy in href.replace(" ", "")):
+                chosen.append(node)
+            elif host.startswith("commercialservicing") or host == POLICY_VIEW_HOST:
+                chosen.append(node)
+        if len(chosen) == 1:
+            return self._follow_policy_link(chosen[0], policy)
+        if len(chosen) > 1:
+            return NoticePath(
+                "ambiguous",
+                detail=f"GEICO alert for policy {policy} has more than one policy link, so no notice was pulled.",
+            )
+        details_name = re.compile(r"^\s*(details|view details|policy details)\s*$", re.IGNORECASE)
+        for role in ("button", "link"):
+            try:
+                control = row.get_by_role(role, name=details_name)
+            except Exception:
+                continue
+            if _locator_count(control) != 1:
+                continue
+            try:
+                (control.first if hasattr(control, "first") else control).click()
+            except Exception as exc:
+                return NoticePath(
+                    "no_policy_link",
+                    detail=(
+                        f"GEICO alert shows policy {policy} but the details view did not open "
+                        f"({type(exc).__name__}), so no notice was pulled."
+                    ),
+                )
+            revealed = row.locator("a")
+            revealed_count = _locator_count(revealed)
+            if revealed_count == 1:
+                return self._follow_policy_link(
+                    revealed.first if hasattr(revealed, "first") else revealed, policy
+                )
+            break
+        if policy and _POLICY_NUMBER.fullmatch(policy):
+            detail = (
+                f"GEICO alert shows policy {policy} on the row but no policy link or details "
+                "view opened a policy page, so no notice was pulled."
+            )
+        else:
+            detail = (
+                "GEICO pending alert has no policy link and no policy number on the row, "
+                "so no notice was pulled."
+            )
+        return NoticePath("no_policy_link", detail=detail)
 
     def download_notice(self, policy_number: str) -> tuple[str, bytes]:
         """Click the notice link, capture the viewer URL's documentId, intercept the PDF XHR.
@@ -1626,12 +1708,15 @@ def run_pull(
                 fail(row["reason"])
             path = browser.inspect_notice_path(alert.policy_number)
             back()
-            if path.kind in {"no_policy_link", "commercial_site"}:
-                reason = (
-                    "Commercial policy. Geico has no policy page link on this alert, so no notice was pulled."
-                    if path.kind == "no_policy_link"
-                    else "Commercial policy. Geico sends this one to its separate commercial site, so no notice was pulled."
-                )
+            if path.kind in {"no_policy_link", "commercial_site", "ambiguous"} and (
+                path.kind != "ambiguous" or path.detail
+            ):
+                if path.kind == "commercial_site":
+                    reason = "Commercial policy. Geico sends this one to its separate commercial site, so no notice was pulled."
+                else:
+                    reason = path.detail or (
+                        "Commercial policy. Geico has no policy page link on this alert, so no notice was pulled."
+                    )
                 row = _row_payload(alert, outcome="HELD", reason=reason)
                 held.append(row)
                 remember(alert, row)
@@ -1689,7 +1774,7 @@ def run_pull(
         path = browser.inspect_notice_path(alert.policy_number)
         soft_reason = ""
         if path.kind == "no_policy_link":
-            soft_reason = "Geico has no policy page link on this alert, so no notice was pulled."
+            soft_reason = path.detail or "Geico has no policy page link on this alert, so no notice was pulled."
         elif path.kind == "noc" and notice_is_stale(path.issued_on, alert.due_on):
             issued = path.issued_on
             soft_reason = (
