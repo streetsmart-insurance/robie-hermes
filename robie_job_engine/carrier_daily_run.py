@@ -43,7 +43,8 @@ from .carrier_dry_run import KILL_SWITCH_ENV, SPECS, _require_dry_run_environmen
 
 EASTERN = ZoneInfo("America/New_York")
 DEFAULT_ROOT = "/var/lib/robie-carrier-pull-test"
-DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+CARRIER_CDP_PORT = 9223
+DEFAULT_CDP_URL = f"http://127.0.0.1:{CARRIER_CDP_PORT}"
 
 DAILY_CARRIERS = (
     "progressive",
@@ -80,6 +81,11 @@ def _require_local_cdp(url: str) -> str:
         raise IntakeHold("Daily carrier run must use the local Test CDP endpoint")
     if (parsed.hostname or "").lower() not in {"127.0.0.1", "localhost"}:
         raise IntakeHold("Daily carrier run must use the local Test CDP endpoint")
+    # Only the carrier Chrome. Port 9222 is the EZLynx Chrome: never attach
+    # to it (live 2026-10-08: an env file's ROBIE_BROWSER_CDP_URL pointed the
+    # first service run at 9222; it was stopped within 20 seconds).
+    if parsed.port != CARRIER_CDP_PORT:
+        raise IntakeHold(f"Daily carrier run only attaches to the carrier Chrome on port {CARRIER_CDP_PORT}")
     return url.rstrip("/")
 
 
@@ -202,6 +208,7 @@ def run_carrier(
     env = dict(os.environ)
     env[KILL_SWITCH_ENV] = "0"
     env["ROBIE_ENV"] = "TEST"
+    env["ROBIE_BROWSER_CDP_URL"] = _require_local_cdp(cdp_url)
     try:
         cmd = carrier_command(name, day=day, root=root, cdp_url=cdp_url, python=python)
         proc = runner(cmd, capture_output=True, text=True, timeout=timeout, env=env)
@@ -356,7 +363,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default=DEFAULT_ROOT, help="state root: packs/, runs/")
     parser.add_argument("--as-of", default=None, help="pull date YYYY-MM-DD (default: today, Eastern)")
     parser.add_argument("--carriers", default=None, help="comma list (default: the daily set; Guard/Travelers are skipped)")
-    parser.add_argument("--cdp-url", default=os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL)
+    # Deliberately not read from ROBIE_BROWSER_CDP_URL: Test env files point
+    # that at the EZLynx Chrome (9222).
+    parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help="carrier Chrome CDP (port 9223 only)")
     parser.add_argument("--upload-drive", action="store_true", help="upload new PDFs to the carrier QA Drive folders")
     parser.add_argument("--notify", action="store_true", help="post the summary to ROBIE_HEALTH_CHAT_SPACE")
     return parser

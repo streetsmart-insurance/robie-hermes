@@ -221,6 +221,28 @@ class DailyRunTests(unittest.TestCase):
         with self.assertRaises(Exception):
             daily.close_stale_tabs("http://10.0.0.5:9223", http=lambda *a, **k: [])
 
+    def test_never_attaches_to_the_ezlynx_chrome_on_9222(self):
+        touched = []
+        with self.assertRaisesRegex(Exception, "9223"):
+            daily.close_stale_tabs("http://127.0.0.1:9222", http=lambda *a, **k: touched.append(a))
+        self.assertEqual(touched, [])
+        with self.assertRaisesRegex(Exception, "9223"):
+            daily.run_daily(day=date(2026, 10, 9), root=self.root, cdp_url="http://127.0.0.1:9222",
+                            run_one=self._ok, close_tabs=lambda u: [])
+        with mock.patch.dict(os.environ, {"ROBIE_BROWSER_CDP_URL": "http://127.0.0.1:9222"}):
+            self.assertEqual(daily.build_parser().parse_args([]).cdp_url, "http://127.0.0.1:9223")
+        seen = {}
+
+        def runner(cmd, **kw):
+            seen["cmd"], seen["env"] = cmd, kw["env"]
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        with mock.patch.dict(os.environ, {"ROBIE_BROWSER_CDP_URL": "http://127.0.0.1:9222"}):
+            daily.run_carrier("natgen", day=date(2026, 10, 9), root=self.root,
+                              cdp_url="http://127.0.0.1:9223", runner=runner)
+        self.assertEqual(seen["env"]["ROBIE_BROWSER_CDP_URL"], "http://127.0.0.1:9223")
+        self.assertIn("http://127.0.0.1:9223", seen["cmd"])
+
     def test_stale_tab_rules_keep_portal_tabs_and_one_page(self):
         pages = [
             {"type": "page", "id": "A1", "url": "https://clpolicy.foragentsonly.com/Express/PDFHandler.ashx?x=1"},
@@ -268,6 +290,8 @@ class DailyRunTests(unittest.TestCase):
         self.assertNotIn("--notify", exec_line)
         self.assertIn("--upload-drive", exec_line)
         self.assertIn("/var/lib/robie-carrier-pull-test/release", service)
+        self.assertIn("--cdp-url http://127.0.0.1:9223", exec_line)
+        self.assertNotIn("9222", exec_line)
         self.assertIn("Mon..Fri *-*-* 07:30:00 America/New_York", timer)
 
 
