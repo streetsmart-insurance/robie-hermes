@@ -561,15 +561,19 @@ class PlaywrightGuardBrowser:
                     # This sibling starts the next section; stop.
                     break
 
-                # Documents are <a> elements inside sibling <div>s (not the div itself).
-                # Find all anchors within this sibling.
-                anchors = sib.locator("a")
-                try:
-                    anchor_count = int(anchors.count())
-                except Exception:
-                    anchor_count = 0
-                for ai in range(anchor_count):
-                    anchor = anchors.nth(ai)
+                # Live 2026-10-07 (hermes-test-01 hand patch): document <a>s
+                # sit inside sibling <div>s. Older markup had the <a> as the
+                # sibling itself; accept both shapes.
+                if tag == "a":
+                    anchor_nodes = [sib]
+                else:
+                    anchors = sib.locator("a")
+                    try:
+                        anchor_count = int(anchors.count())
+                    except Exception:
+                        anchor_count = 0
+                    anchor_nodes = [anchors.nth(ai) for ai in range(anchor_count)]
+                for anchor in anchor_nodes:
                     try:
                         text = _norm(_read_text(anchor))
                     except Exception:
@@ -909,11 +913,17 @@ def run_pull(
             if doc.group.casefold() == "policy documents" and is_cancellation_document(doc.description)
         ]
         if len(targets) != 1:
+            # Name the candidates so the next live run shows exactly which
+            # documents collided (doc disambiguation is a follow-up).
+            candidates = "; ".join(
+                f"{doc.description} [{doc.scribe_item_id or 'no id'}]" for doc in targets[:6]
+            )
             held.append(_row_payload(
                 row, outcome="HELD",
                 reason=(
                     f"Guard policy {row.policy_number} cancellation document "
                     f"is missing or ambiguous (found {len(targets)})"
+                    + (f": {candidates}" if candidates else "")
                 ),
             ))
             browser.return_to_cancellations()

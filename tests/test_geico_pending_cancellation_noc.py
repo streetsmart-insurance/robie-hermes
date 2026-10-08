@@ -37,6 +37,7 @@ from robie_job_engine.geico_pending_cancellation_noc import (
     main,
     noc_document_id,
     noc_filename,
+    non_high_alert_rows,
     parse_alert_grid,
     pdf_bytes_from_observation,
     qa_pack_dir,
@@ -178,6 +179,12 @@ class ParseTests(unittest.TestCase):
         grid = prove_grid(extra=(row("6000000001", "Low Row", "Private Passenger Auto", "9/26/2026", severity="Medium"),))
         policies = [alert.policy_number for alert in parse_alert_grid(grid)]
         self.assertNotIn("6000000001", policies)
+        # ...and the run reports why it was not pulled (hold-reason capture).
+        reported = non_high_alert_rows(grid)
+        self.assertEqual([item["policy_number"] for item in reported], ["6000000001"])
+        self.assertEqual(reported[0]["outcome"], "HELD")
+        self.assertIn("Medium, not High", reported[0]["reason"])
+        self.assertEqual(non_high_alert_rows(prove_grid()), [])
 
     def test_unknown_product_duplicate_and_ragged_rows_hold(self):
         bad = (

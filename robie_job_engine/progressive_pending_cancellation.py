@@ -33,6 +33,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .carrier_locators import unique_control_ci
 from .intake_core import IntakeHold, SourceArchive, SourceItem
 from .progressive_agent_context import (
     DEFAULT_AGENT_CODE,
@@ -65,7 +66,7 @@ DRIVE_UPLOAD_UNAVAILABLE = (
     "refusing to report the pack as uploaded"
 )
 HERMES_TEST_HOST = "hermes-test-01"
-# Live policy numbers: 6-12 digits, optional 2-4 letter prefix (e.g. 970498127, NJA129565).
+# Live policy numbers: 6-12 digits, optional 2-3 letter prefix (e.g. 970498127, NJA129565).
 _POLICY_NUMBER = re.compile(r"^(?:[A-Z]{2,3})?\d{6,12}(?:-\d+)?$")
 # Report grid headers (column order may vary; matching is by alias).
 _REPORT_HEADERS = (
@@ -551,7 +552,8 @@ class PlaywrightFaoCancellationBrowser:
 
     def open_documents_tab(self) -> None:
         """On the CL Express policy page, open the DOCUMENTS tab."""
-        _unique_control(self.page, "tab", "DOCUMENTS", exact=True).click()
+        # Exact first, then any casing ("Documents"): portal casing drifts.
+        unique_control_ci(self.page, "tab", "DOCUMENTS", carrier="Progressive").click()
         self.page.wait_for_selector("text=Policy Documents", timeout=15000)
 
     def list_documents(self, policy_number: str) -> tuple[FaoDocument, ...]:

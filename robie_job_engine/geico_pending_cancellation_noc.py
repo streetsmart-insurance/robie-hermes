@@ -476,8 +476,10 @@ def parse_alert_grid(grid: AlertGrid) -> tuple[AlertRow, ...]:
             continue
         status = _norm(cells[indexes["status"]])
         if status.casefold() != "high":
-            # Skip non-High alerts (e.g. Medium/Low) instead of holding the run.
-            # Only High-priority pending cancellations are processed.
+            # Live 2026-10-07 (hermes-test-01 hand patch): the Pending
+            # Cancellations view can list Medium/Low alerts. Skip them instead
+            # of holding the whole run; run_pull reports each one with a
+            # reason via non_high_alert_rows().
             continue
         policy = _norm(cells[indexes["policy_number"]])
         insured = _norm(cells[indexes["insured_name"]])
@@ -504,6 +506,37 @@ def parse_alert_grid(grid: AlertGrid) -> tuple[AlertRow, ...]:
     if len(policies) != len(set(policies)) or len({alert.document_id for alert in alerts}) != len(alerts):
         raise IntakeHold("Pending Cancellations list is ambiguous")
     return tuple(alerts)
+
+
+def non_high_alert_rows(grid: AlertGrid) -> list[dict[str, Any]]:
+    """Non-High alerts parse_alert_grid() skipped, each with a hold reason.
+
+    Never raises: this is reporting only, so a dry run says why an alert on
+    the list was not pulled instead of only counting it.
+    """
+    try:
+        indexes = header_indexes(grid.headers)
+    except IntakeHold:
+        return []
+    rows: list[dict[str, Any]] = []
+    for cells in grid.rows:
+        if len(cells) != len(grid.headers) or not any(_norm(cell) for cell in cells):
+            continue
+        status = _norm(cells[indexes["status"]])
+        if status.casefold() == "high":
+            continue
+        rows.append({
+            "policy_number": _norm(cells[indexes["policy_number"]]),
+            "insured_name": _norm(cells[indexes["insured_name"]]),
+            "status": status,
+            "product": _norm(cells[indexes["product"]]),
+            "outcome": "HELD",
+            "reason": (
+                f"Geico lists this alert as {status or 'no severity'}, not High; "
+                "only High pending cancellations are pulled"
+            ),
+        })
+    return rows
 
 
 def require_noc_pdf_parity(*, targeted_ids: set[str], verified_ids: set[str]) -> dict[str, Any]:
@@ -1511,7 +1544,7 @@ def run_pull(
     alerts = parse_alert_grid(grid)
     png = require_png(browser.screenshot_pending_cancellations())
     seen = {alert.policy_number: _row_payload(alert, outcome="LISTED") for alert in alerts}
-    held: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = non_high_alert_rows(grid)
     downloaded: list[dict[str, Any]] = []
     targeted: list[AlertRow] = []
     skipped: list[str] = []

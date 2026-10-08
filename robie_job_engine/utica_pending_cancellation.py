@@ -14,19 +14,26 @@ The document grid's ID column is the durable document identity (like
 Guard's scribeItemId): identical display names are distinct documents,
 so the ledger keys on the document ID, never the name.
 
-A missing or non-unique control raises IntakeHold. This module does not
-log in, does not handle MFA, does not upload, note, task, or label in
+A missing or non-unique control raises IntakeHold. The pull itself does
+not type credentials; ``ensure_utica_page()`` (used by the carrier dry run)
+reuses a signed-in UFirst Now tab or, on hermes-test-01 only, signs in via
+``utica_login`` (Okta + email MFA; see docs/CARRIER_DOCUMENT_RETRIEVAL.md for
+the Gmail requirement). This module does not upload, note, task, or label in
 EZLynx, and does not register a timer.
 
-UNVERIFIED (live-run needed): the USER_SESSION_GUID extraction prefers the
-``USER_SESSION_GUID`` query param and falls back to the SPA's ``osst``
-token; whether they are interchangeable is proven only by a live download.
+Portal labels are Title Case live ("Policy Transactions", "Filter List");
+controls are matched case-insensitively via ``carrier_locators``.
 
-UNVERIFIED (live-run needed): the PDF fetch uses the browser context's
-authenticated request with the Referer/Origin headers the portal's CSRF
-filter demands (direct navigation to the DocGenServlet URL is rejected by
-the filter). The headers path is unit-tested only; a live download is still
-needed to prove the headers satisfy the filter.
+PROVEN live 2026-10-07 (hermes-test-01, Morsan BOP3001386190, 2 PDFs): the
+DocGenServlet fetch with the session GUID, DRAGON_TRANSACTION_ID and the
+Referer/Origin headers the portal's CSRF filter demands returns real PDFs;
+direct navigation without Referer is rejected. Document IDs regenerate per
+session, so they are harvested fresh every run and never cached.
+
+FOLLOW-UP (needs live DOM): ``load_transactions()`` / ``list_documents()``
+expect one HTML table, but UFirst Now is an ExtJS app (29 nested tables on
+the transaction list). Until the grid parser is rewritten against a captured
+DOM, those steps hold with the table count in the reason.
 """
 from __future__ import annotations
 
@@ -43,6 +50,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .carrier_locators import unique_control_ci, wait_for_text_ci
 from .intake_core import IntakeHold, SourceArchive, SourceItem
 
 PROCESS = "utica"
@@ -224,15 +232,38 @@ def _is_csrf_rejection(content: bytes) -> bool:
     return any(marker in lowered for marker in _CSRF_REJECTION_MARKERS)
 
 
+_TXN_KEY = r"""["']?DRAGON_TRANSACTION_ID["']?"""
+_TXN_VALUE = r"""\s*["']?(\d+)["']?"""
+_TRANSACTION_ID_PATTERNS = (
+    # DRAGON_TRANSACTION_ID=123, "DRAGON_TRANSACTION_ID": "123", ...ID: 123
+    re.compile(_TXN_KEY + r"\s*[:=]" + _TXN_VALUE, re.IGNORECASE),
+    # "DRAGON_TRANSACTION_ID","value":"123" and ...ID", "value" : 123
+    re.compile(_TXN_KEY + r"""\s*,\s*["']?value["']?\s*[:=]""" + _TXN_VALUE, re.IGNORECASE),
+    # {"name":"DRAGON_TRANSACTION_ID", ..., "value":"123"} within one object
+    re.compile(_TXN_KEY + r"""\s*,[^{}]{0,200}?["']value["']\s*:""" + _TXN_VALUE, re.IGNORECASE),
+    # <input name="DRAGON_TRANSACTION_ID" ... value="123">
+    re.compile(r"""name\s*=\s*["']DRAGON_TRANSACTION_ID["'][^>]*?\bvalue\s*=""" + _TXN_VALUE, re.IGNORECASE),
+)
+
+
 def transaction_id_from_page(html: str) -> str:
     """Extract the DRAGON_TRANSACTION_ID from the DOCUMENT LIST page.
 
     The PDF URL needs it; the grid does not expose it, so it is read from
-    the document-list page markup. Zero or multiple matches hold.
+    the document-list page markup. Zero or multiple distinct values hold.
+
+    Accepted shapes (live UFirst Now uses the ExtJS name/value pair, seen
+    2026-10-07 as ``"DRAGON_TRANSACTION_ID","value":"1247842754"``):
+
+    - ``DRAGON_TRANSACTION_ID=123`` / ``DRAGON_TRANSACTION_ID: "123"``
+    - ``"DRAGON_TRANSACTION_ID","value":"123"`` (ExtJS name, value pair)
+    - ``{"name":"DRAGON_TRANSACTION_ID","value":"123"}``
+    - ``<input name="DRAGON_TRANSACTION_ID" value="123">``
     """
-    matches = re.findall(
-        r"DRAGON_TRANSACTION_ID[\"']?\s*[:=]\s*[\"']?(\d+)", html or "", re.IGNORECASE
-    )
+    text = html or ""
+    matches: list[str] = []
+    for pattern in _TRANSACTION_ID_PATTERNS:
+        matches.extend(pattern.findall(text))
     unique = sorted(set(matches))
     if len(unique) != 1:
         raise IntakeHold("Utica First DRAGON_TRANSACTION_ID is missing or ambiguous")
@@ -420,25 +451,41 @@ class PlaywrightUticaCancellationBrowser:
 
     # -- navigation -----------------------------------------------------
     def open_transactions(self) -> None:
-        """Open the POLICY TRANSACTIONS tab."""
+        """Open the Policy Transactions tab (label casing varies live).
+
+        Live 2026-10-07 the control reads "Policy Transactions" and is not an
+        ARIA tab, so the visible text is the fallback (first visible match:
+        it is a navigation click, and the grid checks below catch a miss).
+        """
         page = self.page
         require_utica_url(str(getattr(page, "url", "") or ""))
-        page.get_by_text("Policy Transactions").first.click()
-        page.wait_for_timeout(5000)
+        unique_control_ci(
+            page, "tab", "Policy Transactions", carrier="Utica First",
+            text_fallback=True, first_visible_text=True,
+        ).click()
+        if not wait_for_text_ci(page, "Transaction List", timeout_ms=15000):
+            # The heading wording is not proven live; the hand patch on Test
+            # waited a fixed 5 s. Settle briefly; the grid parse still holds
+            # if the list never rendered.
+            page.wait_for_timeout(3000)
         self._list_url = require_utica_url(str(getattr(page, "url", "") or ""))
 
     def select_filter_all(self) -> None:
-        """Select the "All" filter radio and apply it."""
+        """Select the "All" filter radio and apply it ("Filter List" live)."""
         page = self.page
-        _unique_control(page, "radio", "All", exact=True).check()
-        _unique_control(page, "button", "Filter List", exact=True).click()
+        unique_control_ci(page, "radio", "All", carrier="Utica First").check()
+        unique_control_ci(page, "button", "Filter List", carrier="Utica First").click()
         page.wait_for_selector("table", timeout=15000)
 
     def load_transactions(self) -> tuple[TransactionRow, ...]:
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
-            raise IntakeHold("Utica First transactions table is missing or ambiguous")
+        table_count = int(tables.count())
+        if table_count != 1:
+            raise IntakeHold(
+                "Utica First transactions table is missing or ambiguous "
+                f"(found {table_count} tables; the ExtJS grid parser is a follow-up)"
+            )
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -469,20 +516,19 @@ class PlaywrightUticaCancellationBrowser:
             raise IntakeHold(
                 f"Utica First transaction row {row.policy_number!r} is missing or ambiguous"
             )
-        link = grid_row.first.get_by_role("link", name="Documents", exact=True)
         try:
-            if int(link.count()) != 1:
-                raise IntakeHold(
-                    f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
-                )
+            link = unique_control_ci(
+                grid_row.first, "link", "Documents", carrier="Utica First"
+            )
         except IntakeHold:
-            raise
-        except Exception:
             raise IntakeHold(
                 f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
             )
         link.first.click()
-        page.wait_for_selector("text=POLICY | TRANSACTION | DOCUMENT LIST", timeout=15000)
+        if not wait_for_text_ci(page, "Document List", timeout_ms=15000):
+            # Heading wording unproven live; the DRAGON_TRANSACTION_ID read
+            # below holds if the document list never rendered.
+            page.wait_for_timeout(3000)
         html = page.content() if callable(getattr(page, "content", None)) else ""
         self._transaction_id = transaction_id_from_page(str(html))
         # The DocGenServlet request's Referer must be the in-app page the
@@ -492,8 +538,12 @@ class PlaywrightUticaCancellationBrowser:
     def list_documents(self, policy_number: str) -> tuple[UticaDocument, ...]:
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
-            raise IntakeHold("Utica First document table is missing or ambiguous")
+        table_count = int(tables.count())
+        if table_count != 1:
+            raise IntakeHold(
+                "Utica First document table is missing or ambiguous "
+                f"(found {table_count} tables; the ExtJS grid parser is a follow-up)"
+            )
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -822,33 +872,38 @@ def select_utica_page(pages: list[Any]) -> Any:
 
 
 def ensure_utica_page(cdp_browser: Any) -> Any:
-    """Find the signed-in UFirst Now tab, or log in automatically.
-    
-    BUILT 2026-10-07 (Ralph). If no signed-in tab exists, creates a new
-    page and performs the full Okta login (with automatic email MFA
-    handling via utica_login module).
+    """Return the one signed-in UFirst Now tab, signing in if there is none.
+
+    BUILT 2026-10-07 (Ralph); tightened in the Test-patch reconcile.
+
+    - Exactly one signed-in UFirst Now tab: use it (expired tabs are ignored).
+    - Several signed-in tabs: hold (ambiguous, never guess).
+    - None: on hermes-test-01 only, open a new tab and run
+      ``utica_login.login_utica`` (Okta + email MFA). Production hosts and any
+      other host hold before credentials are read.
     """
     from . import utica_login
-    
-    # First, look for an existing signed-in tab
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("uticafirst")
+    refuse_production_host()
     pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
     matches = [
         page for page in pages
         if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == UTICA_HOST
     ]
-    
-    # Check if any match is actually signed in
-    for page in matches:
-        try:
-            body = page.locator("body").inner_text().lower()
-            if "welcome" in body or "carlo ferrara" in body:
-                return page
-        except Exception:
-            pass
-    
-    # No signed-in tab — perform auto-login in a new page
-    ctx = cdp_browser.contexts[0]
-    page = ctx.new_page()
+    signed_in = [page for page in matches if utica_login.is_logged_in(page)]
+    if len(signed_in) == 1:
+        return signed_in[0]
+    if len(signed_in) > 1:
+        raise IntakeHold("Expected exactly one signed-in Utica First UFirst Now tab")
+
+    # No signed-in tab: auto-login is a Test-host action only.
+    require_hermes_test_host()
+    contexts = list(getattr(cdp_browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Utica First auto-login needs an open browser context")
+    page = contexts[0].new_page()
     try:
         utica_login.login_utica(page)
         return page

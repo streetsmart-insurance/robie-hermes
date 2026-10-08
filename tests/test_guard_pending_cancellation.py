@@ -746,6 +746,9 @@ class PullTests(unittest.TestCase):
         self.assertEqual(len(receipt["held"]), 6)
         for held in receipt["held"]:
             self.assertIn("found 2", held["hold_reason"])
+            # The hold names the colliding documents (disambiguation follow-up).
+            self.assertIn("Cancellation [", held["hold_reason"])
+            self.assertIn("Cancellation Notice [", held["hold_reason"])
 
     def test_non_pdf_download_holds(self):
         page = FakeGuardPage(doc_outcomes={"PRAU716089": "nonpdf"})

@@ -276,6 +276,32 @@ def _shared_cdp(cdp_url: str | None) -> Iterator[Any]:
         playwright.stop()
 
 
+def hold_reason(entry: Any) -> str:
+    """The specific reason one held item was held.
+
+    Carriers disagree on the key: Utica/Guard/Progressive/Travelers use
+    ``hold_reason`` (Guard's ``reason`` is the carrier's cancellation reason,
+    not ours), GEICO/Farmers of Salem use ``reason``. Prefer ``hold_reason``.
+    """
+    if not isinstance(entry, dict):
+        return str(entry or "").strip() or "held (no reason recorded)"
+    for key in ("hold_reason", "reason", "error"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return value
+    return "held (no reason recorded)"
+
+
+def _held_label(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    parts = [str(entry.get(key) or "").strip() for key in ("policy_number", "insured_name")]
+    parts = [part for part in parts if part]
+    if not parts and entry.get("activity_date"):
+        parts = [f"activity {entry['activity_date']}"]
+    return " ".join(parts)
+
+
 def _normalize_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     downloaded = receipt.get("downloaded", []) or []
     held = receipt.get("held", []) or []
@@ -313,12 +339,15 @@ def _run_one(
             held = None
             if isinstance(details, dict):
                 held = details.get("held")
+            held_list = held if isinstance(held, list) and held else [{"reason": str(exc)}]
             return {
                 "display": spec.display,
                 "status": "HELD",
+                "reason": str(exc),
                 "downloaded": 0,
                 "skipped": 0,
-                "held": held if isinstance(held, list) and held else [{"reason": str(exc)}],
+                "held": held_list,
+                "hold_reasons": [hold_reason(item) for item in held_list],
                 "error": None,
                 "pack": str(pack),
             }
@@ -328,6 +357,7 @@ def _run_one(
             "downloaded": 0,
             "skipped": 0,
             "held": [],
+            "hold_reasons": [],
             "error": f"{type(exc).__name__}: {exc}",
             "pack": str(pack),
         }
@@ -338,6 +368,7 @@ def _run_one(
         "downloaded": norm["downloaded"],
         "skipped": norm["skipped"],
         "held": norm["held"],
+        "hold_reasons": [hold_reason(item) for item in norm["held"]],
         "error": None,
         "pack": str(pack),
     }
@@ -380,6 +411,15 @@ def run_dry_run(
     }
 
 
+def _held_lines(held: list[Any]) -> list[str]:
+    lines = []
+    for entry in held or []:
+        label = _held_label(entry)
+        prefix = f"{label}: " if label else ""
+        lines.append(f"    · held {prefix}{hold_reason(entry)}")
+    return lines
+
+
 def render_summary(summary: dict[str, Any]) -> str:
     """Plain-English one-screen summary of the dry run."""
     lines = [
@@ -392,9 +432,14 @@ def render_summary(summary: dict[str, Any]) -> str:
         if r["status"] == "OK":
             extra = f", {len(r['held'])} held" if r["held"] else ""
             lines.append(f"- {r['display']}: OK — {r['downloaded']} downloaded, {r['skipped']} skipped{extra}.")
+            lines.extend(_held_lines(r["held"]))
         elif r["status"] == "HELD":
-            reason = r["held"][0].get("reason", "held") if r["held"] else "held"
+            reason = r.get("reason") or (hold_reason(r["held"][0]) if r["held"] else "held")
             lines.append(f"- {r['display']}: HELD — {reason}")
+            item_lines = _held_lines(r["held"])
+            # Do not repeat the run-level reason as its only item.
+            if not (len(r["held"]) == 1 and hold_reason(r["held"][0]) == reason):
+                lines.extend(item_lines)
         else:
             lines.append(f"- {r['display']}: FAILED — {r['error']}")
     t = summary["totals"]
