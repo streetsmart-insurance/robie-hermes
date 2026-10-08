@@ -21,6 +21,13 @@
 #     --release-dir /opt/streetsmart-hermes/current \
 #     --live
 #
+# Live to another @streetsmart.insurance address (for example accounting@).
+# --to writes 40-recipient.conf next to 30-live.conf. --to needs --live.
+# Re-running --live without --to removes it, so mail goes back to hello@:
+#   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
+#     --release-dir /opt/streetsmart-hermes/current \
+#     --live --to accounting@streetsmart.insurance
+#
 # Rollback disables the timer before the timer file is removed:
 #   sudo /opt/streetsmart-hermes/current/scripts/install-ascend-unmatched-digest.sh \
 #     --rollback /root/robie-ascend-unmatched-digest-YYYYMMDDTHHMMSSZ
@@ -40,19 +47,21 @@ TIMER="robie-ascend-unmatched-digest.timer"
 DROPIN_NAME="${UNIT}.d"
 LIVE_EXAMPLE="30-live.conf.example"
 LIVE_CONF="30-live.conf"
+TO_CONF="40-recipient.conf"
 
 RELEASE_DIR=""
 PREFIX=""
 BACKUP_ROOT=""
 ROLLBACK=""
 DO_LIVE=0
+DIGEST_TO=""
 DRY_ONCE=0
 ENABLE_TIMER=0
 SYSTEMCTL="${ASCEND_DIGEST_INSTALL_SYSTEMCTL:-systemctl}"
 ANALYZE="${ASCEND_DIGEST_INSTALL_ANALYZE:-systemd-analyze}"
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -89,6 +98,10 @@ while [[ $# -gt 0 ]]; do
     --live)
       DO_LIVE=1
       shift
+      ;;
+    --to)
+      DIGEST_TO="${2:-}"
+      shift 2
       ;;
     --systemctl)
       SYSTEMCTL="${2:-}"
@@ -259,7 +272,7 @@ install_release() {
   ensure_dir "$DROPIN_DIR"
   install_file "$src_unit" "${ETC}/${UNIT}"
   install_file "$src_timer" "${ETC}/${TIMER}"
-  rm -f "${DROPIN_DIR}/${LIVE_CONF}"
+  rm -f "${DROPIN_DIR}/${LIVE_CONF}" "${DROPIN_DIR}/${TO_CONF}"
 
   "${SYSTEMCTL}" daemon-reload
   "${ANALYZE}" verify "${ETC}/${UNIT}"
@@ -274,6 +287,14 @@ install_release() {
     install_file "$src_live" "${DROPIN_DIR}/${LIVE_CONF}"
     if ! grep -q 'ASCEND_UNMATCHED_DIGEST_LIVE=1' "${DROPIN_DIR}/${LIVE_CONF}"; then
       die "live drop-in does not set ASCEND_UNMATCHED_DIGEST_LIVE=1"
+    fi
+    if [[ -n "$DIGEST_TO" ]]; then
+      local to_tmp
+      to_tmp="$(mktemp)"
+      printf '[Service]\n# Written by install-ascend-unmatched-digest.sh --to\nEnvironment=ASCEND_UNMATCHED_DIGEST_TO=%s\n' "$DIGEST_TO" > "$to_tmp"
+      install_file "$to_tmp" "${DROPIN_DIR}/${TO_CONF}"
+      rm -f "$to_tmp"
+      echo "RECIPIENT=${DIGEST_TO}"
     fi
     "${SYSTEMCTL}" daemon-reload
   fi
@@ -303,6 +324,12 @@ if [[ -n "$ROLLBACK" ]]; then
   fi
   restore_from_backup "$ROLLBACK"
   exit 0
+fi
+
+if [[ -n "$DIGEST_TO" ]]; then
+  [[ "$DO_LIVE" -eq 1 ]] || die "--to needs --live"
+  [[ "$DIGEST_TO" =~ ^[A-Za-z0-9._%+-]+@streetsmart\.insurance$ ]] \
+    || die "--to must be one @streetsmart.insurance address"
 fi
 
 if [[ "$DO_LIVE" -eq 0 && "$DRY_ONCE" -eq 0 && "$ENABLE_TIMER" -eq 0 ]]; then

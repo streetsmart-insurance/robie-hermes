@@ -462,6 +462,12 @@ class EzlynxApiClient:
     All failures raise EzlynxApiError with redacted messages.
     """
 
+    # PolicyApi search ignores ApplicantName, Email, and PhoneNumber and
+    # pages the whole book (totalSize around 38k). Its rows carry no insured
+    # name, email, or phone. A name, email, or phone search here can never
+    # pick one client, so callers that match clients skip it.
+    identity_search_supported = False
+
     def __init__(
         self,
         config: EzlynxApiConfig,

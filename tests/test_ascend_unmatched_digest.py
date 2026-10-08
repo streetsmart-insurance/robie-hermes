@@ -426,7 +426,8 @@ def test_sample_digest_is_plain_english():
     assert "Bare Insured, intent to cancel." in body
     assert "Ascend did not include a policy number." in body
     assert "Robie couldn't match this Ascend notice" not in body
-    assert body.count(digest._UNMATCHED_ASK) == 4
+    assert body.count(digest._UNMATCHED_ASK) == 3
+    assert body.count(digest._NO_NUMBER_ASK) == 1
     assert "Still unmatched after 14 days: Old Mill LLC, payment." in body
     assert body.endswith(
         "Fix the policy number in Ascend or EZLynx and it drops off this list once Robie matches it and files the note. "

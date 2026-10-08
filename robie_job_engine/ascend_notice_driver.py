@@ -1053,6 +1053,25 @@ def _resolve_named_search(
     return _unique_identity(result, predicate, via=via, label=label)
 
 
+def identity_search_supported(ezlynx_client: Any) -> bool:
+    """False when the client says name, email, and phone search cannot work.
+
+    The real EZLynx API client sets ``identity_search_supported = False``.
+    Other clients (test doubles, a future search API) keep the cascade.
+    """
+    try:
+        flag = getattr(ezlynx_client, "identity_search_supported", True)
+    except Exception:  # noqa: BLE001 - a strict double without the flag keeps the cascade
+        return True
+    return flag is not False
+
+
+def unresolved_reason_for(outcome: str) -> str:
+    """The ``applicant_unresolved`` reason for a policy-step outcome."""
+    text = str(outcome or "").strip() or POLICY_OUTCOME_NO_NUMBER
+    return f"applicant_unresolved: {text}"
+
+
 def resolve_applicant(
     ezlynx_client: Any,
     policy_numbers: list[str],
@@ -1085,6 +1104,12 @@ def resolve_applicant(
         resolution, reason, fall_through = _resolve_by_policy_numbers(ezlynx_client, numbers)
         if resolution is not None or not fall_through:
             return resolution, reason
+    if not identity_search_supported(ezlynx_client):
+        # The real PolicyApi cannot search by name, email, or phone. Every
+        # such call returned one unfiltered page of the book, which read as
+        # "name search incomplete" and held the notice with no plain reason.
+        # Say what actually happened so it goes to the accounting list.
+        return None, unresolved_reason_for(current_policy_search_outcome())
     reasons: list[str] = []
     name = str(insured_name or "").strip()
     email = str(insured_email or "").strip()
@@ -1301,6 +1326,7 @@ NOTICE_CATEGORY: dict[str, str] = {
     triage.PROCESSING_PAYMENT: CATEGORY_PAYMENTS,
     triage.PAID_OFF: CATEGORY_PAYMENTS,
     triage.DISPUTED_CHARGE: CATEGORY_PAYMENTS,
+    triage.NEW_PROGRAM: CATEGORY_PAYMENTS,
     triage.INTENT_TO_CANCEL: CATEGORY_CANCELLATION_NOTICES,
     triage.CANCELLATION: CATEGORY_CANCELLATION_NOTICES,
     triage.REINSTATEMENT: CATEGORY_CANCELLATION_NOTICES,
@@ -2238,6 +2264,136 @@ def _write_scope_refusal_reason(applicant_id: str) -> str:
     )
 
 
+def program_policy_numbers(program: Any, program_uuid: str) -> list[str]:
+    """Carrier policy numbers on the Ascend program, for an email that has none.
+
+    The program read in triage comes first. Then the numbers the API poll
+    saved from the program's billables. Read only. Empty when neither has one.
+    """
+    from .ascend_api_notice_source import policy_numbers_of, stored_program_policy_numbers
+
+    numbers = policy_numbers_of(program if isinstance(program, dict) else None)
+    if numbers:
+        return numbers
+    try:
+        return stored_program_policy_numbers(program_uuid)
+    except Exception as exc:  # noqa: BLE001 - no saved numbers is the old behavior
+        logger.warning("saved program policy lookup failed: %s", type(exc).__name__)
+        return []
+
+
+EMAIL_REVIEW_DB_ENV = "ASCEND_EMAIL_UNMATCHED_DB"
+EMAIL_REVIEW_FILE = "email-unmatched.db"
+EMAIL_REVIEW_KEY_PREFIX = "email|"
+
+
+def email_review_db_path() -> Path | None:
+    """Where unmatched email notices wait for the accounting list.
+
+    ``ASCEND_EMAIL_UNMATCHED_DB`` names the file. Otherwise it sits in the
+    email unit's state folder (``ASCEND_DRIVER_STATE_DIR``). With neither
+    set, nothing is saved, which is the old behavior.
+    """
+    override = str(os.environ.get(EMAIL_REVIEW_DB_ENV) or "").strip()
+    if override:
+        return Path(override)
+    state_dir = str(os.environ.get("ASCEND_DRIVER_STATE_DIR") or "").strip()
+    if state_dir:
+        return Path(state_dir) / EMAIL_REVIEW_FILE
+    return None
+
+
+def email_review_key(notice: EmailNotice, notice_type: str, program_uuid: str) -> str:
+    """One key per Ascend email, the same in every staff mailbox that got it."""
+    import hashlib
+
+    digest = hashlib.sha256(
+        normalize_notice_body(f"{notice.subject}\n{notice.body}").encode("utf-8")
+    ).hexdigest()[:20]
+    program = str(program_uuid or "").strip().lower() or "no-program"
+    return f"{EMAIL_REVIEW_KEY_PREFIX}{program}|{str(notice_type or '').strip().lower()}|{digest}"
+
+
+def _money_cents(text: str | None) -> int | None:
+    match = re.search(r"\$\s?([\d,]+\.\d{2})", str(text or ""))
+    if not match:
+        return None
+    try:
+        return int(round(float(match.group(1).replace(",", "")) * 100))
+    except ValueError:
+        return None
+
+
+def _remember_email_review_row(
+    notice: EmailNotice,
+    notice_type: str,
+    program_uuid: str,
+    triaged: dict[str, Any],
+    policy_numbers: list[str],
+    result: NoticeResult,
+    ctx: DriverContext,
+) -> bool:
+    """Put an unmatched email notice on the accounting list. Never files.
+
+    The API poll already lists its own notices, so its synthetic ``api:``
+    mail is skipped here. Nothing is written to EZLynx. A store error is
+    logged and the notice stays a review item in the run summary.
+    """
+    if str(notice.message_id or "").startswith("api:"):
+        return False
+    path = email_review_db_path()
+    if path is None:
+        return False
+    try:
+        from .ascend_api_notice_source import ApiNotice, EventKeyStore, _iso, _now
+        from .ascend_unmatched_digest import persist_unmatched_notice
+
+        moment = getattr(ctx, "now", None) or _now()
+        row = ApiNotice(
+            event_key=email_review_key(notice, notice_type, program_uuid),
+            event_type=notice_type,
+            program_id=str(program_uuid or "").strip().lower(),
+            anchor=str(notice.internal_date or ""),
+            occurred_at=str(notice.internal_date or ""),
+            policy_numbers=tuple(policy_numbers),
+            insured_name=str(triaged.get("insured_name") or "").strip(),
+            program={},
+            subject=notice.subject,
+            body="",
+            amount_cents=_money_cents(triaged.get("note_text")),
+        )
+        persist_unmatched_notice(
+            EventKeyStore(path),
+            row,
+            {"reason": result.reason, "detail": dict(result.detail)},
+            seen_at=_iso(moment),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - the review item is still in the summary
+        logger.warning("email review list save failed: %s", type(exc).__name__)
+        return False
+
+
+def _close_email_review_row(
+    notice: EmailNotice, notice_type: str, program_uuid: str, ctx: DriverContext
+) -> None:
+    """Take an email notice off the accounting list once it matches."""
+    if str(notice.message_id or "").startswith("api:"):
+        return
+    path = email_review_db_path()
+    if path is None or not path.exists():
+        return
+    try:
+        from .ascend_api_notice_source import EventKeyStore, _iso, _now
+
+        moment = getattr(ctx, "now", None) or _now()
+        EventKeyStore(path).resolve_unmatched(
+            email_review_key(notice, notice_type, program_uuid), _iso(moment)
+        )
+    except Exception as exc:  # noqa: BLE001 - an open row only stays on the list
+        logger.warning("email review list close failed: %s", type(exc).__name__)
+
+
 def process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     """Run one email through triage -> note -> task. Never raises."""
     try:
@@ -2311,6 +2467,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.reason = "api_already_filed"
         result.detail["event_key"] = covered_key
         result.detail["duplicate_source"] = "ascend_api"
+        _close_email_review_row(notice, notice_type, program_uuid, ctx)
         return result
 
     category = category_for(notice_type)
@@ -2324,9 +2481,23 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
         result.detail["needs_human_review"] = True
         return result
     else:
+        email_numbers = [str(p) for p in (triaged.get("policy_numbers") or []) if str(p or "").strip()]
+        policy_numbers = email_numbers or program_policy_numbers(triaged.get("program"), program_uuid)
+        if policy_numbers and not email_numbers:
+            # The email named no policy. The Ascend program did. Name it in
+            # the note too, so staff can see which policy this is.
+            result.detail["policy_numbers_from"] = "ascend_program"
+            triaged["policy_numbers"] = list(policy_numbers)
+            triaged["note_text"] = triage.build_staff_note(
+                notice_type,
+                notice.subject,
+                notice.body,
+                list(policy_numbers),
+                triaged.get("insured_name"),
+            )
         resolution, reason = resolve_applicant(
             ctx.ezlynx_client,
-            [str(p) for p in (triaged.get("policy_numbers") or [])],
+            list(policy_numbers),
             triaged.get("insured_name"),
             notice_insured_email(notice.body),
             notice_insured_phone(notice.body),
@@ -2337,7 +2508,18 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             if outcome:
                 result.detail["unmatched_reason"] = outcome
             result.detail["needs_human_review"] = True
+            if _remember_email_review_row(
+                notice,
+                notice_type,
+                program_uuid,
+                triaged,
+                list(policy_numbers),
+                result,
+                ctx,
+            ):
+                result.detail["review_list"] = True
             return result
+        _close_email_review_row(notice, notice_type, program_uuid, ctx)
     needs_csr_task = notice_type == triage.CANCELLATION or (
         notice_type == triage.INTENT_TO_CANCEL and intent_to_cancel_csr_task_enabled()
     )
