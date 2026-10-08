@@ -38,8 +38,16 @@ def test_scrubbed_fixture_converts_central_created_date_and_live_label():
     text = FIXTURE.read_text(encoding="utf-8")
     assert "Ferrara" not in text
     assert "Calhoun" not in text
-    tasks = parse_task_report(text)
+    tasks = parse_task_report_detail(text, include_labeled_notes=False).tasks
     assert [task.task_id for task in tasks] == ["90029523", "90025064", "90025065"]
+    # Carlo's rule (Oct 7 2026): a labeled row assigned to someone else is
+    # picked up too, as a label-only request that is never reassigned.
+    everything = parse_task_report_detail(text, include_labeled_notes=True).tasks
+    assert [task.task_id for task in everything] == [
+        "90029523", "90025064", "90025065", "90025066",
+    ]
+    assert [task.source for task in everything] == ["task", "task", "task", "label"]
+    assert everything[3].assigned_to == ""
     lead = tasks[0]
     assert lead.activity_labels == "Robie lead follow-up"
     assert lead.created_at == "2026-10-05T09:11:00"
@@ -57,7 +65,7 @@ def test_exactly_500_rows_logs_a_truncation_warning(caplog):
     ]
     text = HEADER + "\n" + "\n".join(rows) + "\n"
     with caplog.at_level(logging.WARNING, logger="ezlynx_task_report"):
-        parsed = parse_task_report_detail(text)
+        parsed = parse_task_report_detail(text, include_labeled_notes=False)
     assert parsed.row_count == REPORT_ROW_CAP
     assert len(parsed.tasks) == 1
     assert any("truncated" in record.message for record in caplog.records)

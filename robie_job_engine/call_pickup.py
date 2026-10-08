@@ -223,6 +223,79 @@ def calling_day(moment: datetime) -> str:
     return current.date().isoformat()
 
 
+# Day-one hard cap (Jake Oct 7). After the first live day, intake uses
+# MAX_TASKS_PER_RUN (25) instead. Set ROBIE_CALL_DAILY_CAP=0 to disable.
+DAY_ONE_CALL_CAP = 5
+DAILY_CAP_ENV = "ROBIE_CALL_DAILY_CAP"
+
+
+def daily_call_cap(env: Mapping[str, str] | None = None) -> int | None:
+    """Hard daily dial cap, or None when uncapped.
+
+    Unset means day-one (5). Explicit 0 disables. Any positive integer is
+    the hard cap for that process.
+    """
+    source = _source(env)
+    raw = str(source.get(DAILY_CAP_ENV) or "").strip()
+    if not raw:
+        return DAY_ONE_CALL_CAP
+    try:
+        value = int(raw)
+    except ValueError:
+        return DAY_ONE_CALL_CAP
+    if value <= 0:
+        return None
+    return value
+
+
+class DailyCallCapStore:
+    """Count of outbound dials placed today (America/New_York)."""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS call_daily_cap (
+                    call_day TEXT NOT NULL PRIMARY KEY,
+                    dial_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def count(self, day: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT dial_count FROM call_daily_cap WHERE call_day = ?",
+                (day,),
+            ).fetchone()
+        return int(row["dial_count"]) if row is not None else 0
+
+    def record(self, day: str) -> int:
+        """Increment and return the new count for ``day``."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO call_daily_cap (call_day, dial_count)
+                VALUES (?, 1)
+                ON CONFLICT(call_day) DO UPDATE SET
+                    dial_count = dial_count + 1
+                """,
+                (day,),
+            )
+            row = conn.execute(
+                "SELECT dial_count FROM call_daily_cap WHERE call_day = ?",
+                (day,),
+            ).fetchone()
+        return int(row["dial_count"])
+
+
 class CallDedupeStore:
     """One claim per note per America/New_York day."""
 

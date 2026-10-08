@@ -247,10 +247,10 @@ def test_old_and_unparseable_tasks_get_one_hold_note_and_never_dial(tmp_path, mo
     assert run_intake(db_path=str(db)) == 0
     bodies = {discussion: body for discussion, body in notes.notes}
     assert set(bodies) == {"70026158", "70020004"}
-    assert "older than the calling window" in bodies["70026158"]
-    assert "could not be read" in bodies["70020004"]
-    assert "could not be read" not in bodies["70026158"]
-    assert "older than the calling window" not in bodies["70020004"]
+    assert "too old for an automated call" in bodies["70026158"]
+    assert "could not tell when this" in bodies["70020004"]
+    assert "could not tell when this" not in bodies["70026158"]
+    assert "too old for an automated call" not in bodies["70020004"]
     assert all("732" not in body and "555" not in body for body in bodies.values())
     assert bland.dials == 0
     statuses = SeenTaskStore(str(db)).statuses()
@@ -314,8 +314,8 @@ def test_hold_note_without_an_id_is_not_repeated(tmp_path, monkeypatch):
     )
     assert run_intake(db_path=str(db)) == 0
     bodies = {discussion: body for discussion, body in notes.notes}
-    assert "older than the calling window" in bodies["70026158"]
-    assert "could not be read" in bodies["70020004"]
+    assert "too old for an automated call" in bodies["70026158"]
+    assert "could not tell when this" in bodies["70020004"]
     statuses = SeenTaskStore(str(db)).statuses()
     assert statuses["90026158"] == "hitl_attempted"
     assert statuses["90020004"] == "hitl_attempted"
@@ -692,7 +692,7 @@ def test_lease_refusal_before_a_hold_note_stays_retryable(tmp_path, monkeypatch)
     )
     assert run_intake(db_path=str(db)) == 0
     assert len(notes.notes) == 1
-    assert "older than the calling window" in notes.notes[0][1]
+    assert "too old for an automated call" in notes.notes[0][1]
     assert SeenTaskStore(str(db)).statuses()["90026158"] == "hitl"
     assert bland.dials == 0
 
@@ -792,7 +792,7 @@ def test_lease_outage_holds_tasks_that_aged_out_before_the_lease_returns(
     assert bland.dials == 0
     assert len(notes.notes) == 2
     assert {discussion for discussion, _body in notes.notes} == {"70026158", "70020002"}
-    assert all("older than the calling window" in body for _discussion, body in notes.notes)
+    assert all("too old for an automated call" in body for _discussion, body in notes.notes)
     store = JobStore(str(db))
     with store.connect() as conn:
         statuses = [row[0] for row in conn.execute("SELECT status FROM jobs")]
