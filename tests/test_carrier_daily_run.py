@@ -167,7 +167,7 @@ class DailyRunTests(unittest.TestCase):
         summary = daily.run_daily(
             day=date(2026, 10, 9), root=self.root, carriers=daily._carrier_list(None),
             run_one=lambda name, **kw: calls.append(name) or self._ok(name),
-            close_tabs=lambda url: tabs.append(url) or [],
+            close_tabs=lambda url: tabs.append(url) or [], open_tab=lambda name, url: None,
         )
         self.assertEqual(calls, list(daily.DAILY_CARRIERS))
         self.assertEqual(summary["carriers"]["guard"]["status"], "SKIPPED")
@@ -191,7 +191,7 @@ class DailyRunTests(unittest.TestCase):
         summary = daily.run_daily(
             day=date(2026, 10, 9), root=self.root,
             run_one=lambda name, **kw: daily.run_carrier(name, runner=runner, **kw),
-            close_tabs=lambda url: [],
+            close_tabs=lambda url: [], open_tab=lambda name, url: None,
         )
         r = summary["carriers"]
         self.assertEqual(r["progressive"]["status"], "FAILED")
@@ -207,7 +207,7 @@ class DailyRunTests(unittest.TestCase):
 
         summary = daily.run_daily(
             day=date(2026, 10, 9), root=self.root, carriers=("natgen",), upload_drive=True,
-            run_one=lambda name, **kw: self._ok(name), close_tabs=lambda url: [], drive_factory=no_drive,
+            run_one=lambda name, **kw: self._ok(name), close_tabs=lambda url: [], open_tab=lambda name, url: None, drive_factory=no_drive,
         )
         self.assertEqual(summary["carriers"]["natgen"]["status"], "OK")
         self.assertIn("not configured", summary["carriers"]["natgen"]["drive"]["reason"])
@@ -410,3 +410,80 @@ class BopNoticeRefetchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenCarrierTabTests(unittest.TestCase):
+    def test_opens_geico_home_when_no_geico_tab_and_never_types(self):
+        calls = []
+
+        def http(url, method="GET"):
+            calls.append((method, url))
+            if url.endswith("/json/list"):
+                return [{"type": "page", "url": "https://fos.finys.com/"}]
+            return {"id": "X"}
+
+        opened = daily.ensure_carrier_tab("geico", "http://127.0.0.1:9223", http=http, sleep=lambda s: None)
+        self.assertEqual(opened, "https://gateway2.geico.com/")
+        self.assertIn(("PUT", "http://127.0.0.1:9223/json/new?https://gateway2.geico.com/"), calls)
+
+    def test_keeps_existing_natgen_tab_and_skips_unmapped_carriers(self):
+        calls = []
+
+        def http(url, method="GET"):
+            calls.append((method, url))
+            return [{"type": "page", "url": "https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5"}]
+
+        self.assertIsNone(daily.ensure_carrier_tab("natgen", "http://127.0.0.1:9223", http=http, sleep=lambda s: None))
+        self.assertNotIn("PUT", [m for m, _ in calls])
+        self.assertIsNone(daily.ensure_carrier_tab("utica", "http://127.0.0.1:9223", http=http, sleep=lambda s: None))
+
+    def test_refuses_the_ezlynx_chrome(self):
+        with self.assertRaises(Exception):
+            daily.ensure_carrier_tab("geico", "http://127.0.0.1:9222", http=lambda *a, **k: [], sleep=lambda s: None)
+
+    def test_run_daily_opens_tabs_and_turns_sign_in_page_into_plain_hold(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["ROBIE_ENV"] = "TEST"
+        opened = []
+
+        def run_one(name, **_):
+            if name == "geico":
+                return {"display": "GEICO", "status": "HELD", "downloaded": 0, "held": [],
+                        "reason": "Geico Gateway session is not authenticated"}
+            return {"display": name, "status": "OK", "downloaded": 0, "held": []}
+
+        summary = daily.run_daily(
+            day=date(2026, 10, 9), root=Path(tmp.name), carriers=("geico", "natgen"),
+            run_one=run_one, close_tabs=lambda url: [],
+            open_tab=lambda name, url: opened.append(name) or None,
+        )
+        self.assertEqual(opened, ["geico", "natgen"])
+        self.assertIn("GEICO: held. GEICO needs a person to sign in on the carrier browser", summary["text"])
+
+
+class PlainSummaryTests(unittest.TestCase):
+    def test_summary_has_no_field_names_selectors_or_exception_names(self):
+        summary = {
+            "as_of": "2026-10-09",
+            "carriers": {
+                "progressive": {"display": "Progressive (FAO)", "status": "FAILED", "downloaded": 0, "held": [],
+                                "error": "exit -15"},
+                "progressive_bop": {"display": "Progressive BOP", "status": "HELD", "downloaded": 0, "held": [],
+                                    "reason": 'a[data-at="header-nav__parent-link"] matched 0; page https://x'},
+                "geico": {"display": "GEICO", "status": "FAILED", "downloaded": 0, "held": [],
+                          "error": "TimeoutExpired: timed out after 1800 s"},
+                "utica": {"display": "Utica First", "status": "OK", "downloaded": 2,
+                          "held": ["KeyError: 'policy_number'", "Utica First policy X has no notice document"],
+                          "drive": {"status": "HELD", "reason": "RefreshError: invalid_grant"}},
+            },
+            "totals": {"pdfs": 2, "uploaded": 0, "failed": 2},
+        }
+        text = daily.render_summary(summary)
+        for bad in ("[", "=", "http", "Error", "Expired", "policy_number", "invalid_grant", "exit -15"):
+            self.assertNotIn(bad, text)
+        self.assertIn("Progressive (FAO): failed, stopped before it finished", text)
+        self.assertIn("GEICO: failed, did not finish in time", text)
+        self.assertIn("Progressive BOP: held. a carrier page did not look as expected", text)
+        self.assertIn("not uploaded to Drive: Drive was not reachable", text)
+        self.assertIn("1 held: Utica First policy X has no notice document", text)

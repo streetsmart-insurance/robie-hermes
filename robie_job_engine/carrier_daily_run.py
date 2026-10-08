@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -130,6 +131,49 @@ def close_stale_tabs(cdp_url: str, *, http: Callable[..., Any] = _http_json) -> 
             continue
         closed.append(str(target.get("url") or "")[:80])
     return closed
+
+
+# Portal home per carrier whose pull needs an already-open tab. When no tab
+# on that host is open, the runner opens one here; the carrier Chrome profile
+# keeps the portal's saved session, so this usually lands signed in. Nothing
+# is typed: a tab that lands on a sign-in page holds in the carrier's own
+# check ("session is not authenticated") and the summary says it needs a
+# person to sign in.
+CARRIER_HOME_URLS = {
+    "geico": "https://gateway2.geico.com/",
+    "natgen": "https://natgenagency.com/MainMenu.aspx",
+}
+
+
+def ensure_carrier_tab(
+    name: str,
+    cdp_url: str,
+    *,
+    http: Callable[..., Any] = _http_json,
+    sleep: Callable[[float], None] | None = None,
+) -> str | None:
+    """Open the carrier's portal home on the carrier Chrome if no tab is on it.
+
+    Returns the opened URL, or None when a tab already exists or the carrier
+    has no home URL here.
+    """
+    home = CARRIER_HOME_URLS.get(name)
+    if not home:
+        return None
+    base = _require_local_cdp(cdp_url)
+    host = urllib.parse.urlsplit(home).hostname
+    targets = http(f"{base}/json/list") or []
+    for target in targets:
+        if isinstance(target, dict) and target.get("type") == "page":
+            if (urllib.parse.urlsplit(str(target.get("url") or "")).hostname or "").lower() == host:
+                return None
+    http(f"{base}/json/new?{home}", method="PUT")
+    if sleep is None:
+        import time
+
+        sleep = time.sleep
+    sleep(20)  # let the portal finish its redirects before the pull attaches
+    return home
 
 
 def parse_json_tail(stdout: str) -> dict[str, Any] | None:
@@ -236,6 +280,23 @@ def upload_carrier(name: str, *, day: date, root: Path, drive: Any) -> dict[str,
         return {"status": "HELD", "reason": f"{type(exc).__name__}: {exc}"[:300]}
 
 
+_TECHNICAL = re.compile(r"[\[\]{}<>#=$]|\b[a-z]+_[a-z_]+\b|[A-Z][a-z]+(?:Error|Exception|Expired)\b|https?://|\.py\b")
+
+
+def plain(text: Any, fallback: str) -> str:
+    """One plain-English sentence for the health Chat (no field names or code)."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return fallback
+    if "timed out" in text.lower() or "timeout" in text.lower():
+        return "did not finish in time"
+    if re.fullmatch(r"exit -?\d+", text):
+        return "stopped before it finished"
+    if _TECHNICAL.search(text):
+        return fallback
+    return text.rstrip(".")[:160]
+
+
 def render_summary(summary: dict[str, Any]) -> str:
     day = summary["as_of"]
     lines = [f"Robie carrier pull for {day} (Test; nothing filed to EZLynx, no emails sent)."]
@@ -250,9 +311,9 @@ def render_summary(summary: dict[str, Any]) -> str:
             if r["held"]:
                 text += f", {len(r['held'])} held"
         elif r["status"] == "HELD":
-            text = f"- {r['display']}: held. {r.get('reason') or 'see log'}"
+            text = f"- {r['display']}: held. {plain(r.get('reason'), 'a carrier page did not look as expected')}"
         else:
-            text = f"- {r['display']}: failed. {r.get('error') or 'see log'}"
+            text = f"- {r['display']}: failed, {plain(r.get('error'), 'stopped with an error (details are in the Test log)')}"
         drive = r.get("drive")
         if drive:
             if drive.get("status") == "OK":
@@ -260,10 +321,11 @@ def render_summary(summary: dict[str, Any]) -> str:
                 if drive["held"]:
                     text += f", {len(drive['held'])} not uploaded"
             else:
-                text += f"; Drive upload held: {drive.get('reason')}"
+                text += f"; not uploaded to Drive: {plain(drive.get('reason'), 'Drive was not reachable')}"
         lines.append(text + ".")
         reasons: dict[str, int] = {}
         for reason in r["held"]:
+            reason = plain(reason, "a carrier page did not look as expected")
             reasons[reason] = reasons.get(reason, 0) + 1
         for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]:
             lines.append(f"    {count} held: {reason}")
@@ -296,6 +358,7 @@ def run_daily(
     do_notify: bool = False,
     run_one: Callable[..., dict[str, Any]] = run_carrier,
     close_tabs: Callable[[str], list[str]] = close_stale_tabs,
+    open_tab: Callable[[str, str], str | None] = ensure_carrier_tab,
     drive_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     _require_dry_run_environment()
@@ -320,8 +383,16 @@ def run_daily(
             closed = close_tabs(cdp_url)
         except Exception as exc:  # noqa: BLE001
             closed = [f"(tab cleanup failed: {type(exc).__name__})"]
+        try:
+            opened = open_tab(name, cdp_url)
+        except Exception as exc:  # noqa: BLE001 - the pull's own tab check decides
+            opened = f"(could not open a tab: {type(exc).__name__})"
         result = run_one(name, day=day, root=root, cdp_url=cdp_url)
         result["closed_tabs"] = closed
+        if opened:
+            result["opened_tab"] = opened
+        if result.get("status") == "HELD" and "not authenticated" in str(result.get("reason") or "").lower():
+            result["reason"] = f"{result['display']} needs a person to sign in on the carrier browser"
         if upload_drive:
             if drive is None:
                 result["drive"] = {"status": "HELD", "reason": drive_error or "Drive is not available"}
