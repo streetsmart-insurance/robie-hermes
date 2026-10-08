@@ -703,6 +703,29 @@ def click_forms_view(page: Any) -> None:
     found[0][1].click()
 
 
+def raise_if_natgen_error_page(page: Any, policy_number: str) -> None:
+    """NatGen sends some policy links to ErrorPage.aspx (live 2026-10-08:
+    "Renewal policy exists: 2031936859-01"). Hold that policy with NatGen's
+    own one-line reason instead of a generic missing-control hold."""
+    url = str(getattr(page, "url", "") or "")
+    if "/errorpage.aspx" not in urllib.parse.urlsplit(url).path.casefold():
+        return
+    detail = ""
+    try:
+        text = str(page.locator("body").inner_text())
+    except Exception:  # noqa: BLE001
+        text = ""
+    for line in text.splitlines():
+        line = _norm(line)
+        if line and line.casefold() not in {"error page"}:
+            detail = line[:120]
+            break
+    raise IntakeHold(
+        f"NatGen showed an error page for {policy_number}"
+        + (f": {detail}" if detail else "")
+    )
+
+
 def click_history_noc(row: Any, label: str) -> None:
     matches = []
     for role in ("link", "button"):
@@ -765,11 +788,21 @@ class PlaywrightNatGenNocBrowser:
             if self._live_history_grid():
                 self._open_live_history_noc()
                 return
+            raise_if_natgen_error_page(self.page, policy_number)
             click_named(self.page, "Policy History", roles=("link", "button", "tab"))
             self._open_most_recent_history_noc()
             click_forms_view(self.page)
 
-        observation = collect_noc_observation(self.page, open_noc)
+        try:
+            observation = collect_noc_observation(self.page, open_noc)
+        except Exception:
+            # Never strand the tab on a policy or error page: the next row
+            # (or the next run) needs the list back.
+            try:
+                self._restore_list()
+            except Exception:  # noqa: BLE001 - the original hold is the reason
+                pass
+            raise
         self._restore_list()
         return observation
 
@@ -1131,7 +1164,24 @@ class NatGenPendingCancellationPortal:
         row = self._rows.get(document_id)
         if row is None:
             raise IntakeHold("Selected carrier document is missing or ambiguous")
-        content = pdf_bytes_from_observation(self.browser.capture_noc(document_id))
+        try:
+            content = pdf_bytes_from_observation(self.browser.capture_noc(document_id))
+        except NocDateHold:
+            raise
+        except IntakeHold as exc:
+            # One policy that will not open holds alone; the other NOCs are
+            # still pulled and the run stays HELD with this reason.
+            reason = str(exc) if row.policy_number in str(exc) else f"{exc} for {row.policy_number}"
+            self.date_holds.append({
+                "policy_number": row.policy_number,
+                "processed_date": row.processed_on.isoformat(),
+                "listed": row.cancel_effective.isoformat(),
+                "observed": None,
+                "reason": reason,
+                "held_filename": None,
+                "document_id": row.document_id,
+            })
+            raise NocDateHold(reason) from exc
         self._require_listed_cancel_date(row, content)
         return SourceItem(
             system="natgen",

@@ -471,12 +471,22 @@ class PlaywrightGuardBrowser:
         require_policy_number(policy_number)
         # Blazor UI: use JS click instead of Playwright click
         if hasattr(self.page, "evaluate") and callable(self.page.evaluate):
-            self.page.evaluate(f"""(() => {{
+            script = f"""(() => {{
                 const links = Array.from(document.querySelectorAll('a'));
                 const link = links.find(a => a.textContent.trim() === '{policy_number}');
                 if (link) {{ link.click(); return true; }}
                 return false;
-            }})()""")
+            }})()"""
+            clicked = self.page.evaluate(script)
+            if clicked is False:
+                # Live 2026-10-08: the list page came back on the In Force
+                # tab, so the next policy link was not there. Re-select
+                # Cancellations once, then hold this policy if still absent.
+                self._select_cancellations_tab()
+                if self.page.evaluate(script) is False:
+                    raise IntakeHold(
+                        f"Guard policy link {policy_number} is missing from the Cancellations grid"
+                    )
         else:
             link = _unique_control(self.page, "link", policy_number, exact=True)
             link.click()
@@ -696,8 +706,14 @@ class PlaywrightGuardBrowser:
         return collect_document_observation(page, action.first.click)
 
     def return_to_cancellations(self) -> None:
+        """Reload Book of Business and re-select the Cancellations tab.
+
+        /portal/book-of-business opens on the In Force tab, so a bare goto
+        left the next policy's link off the page (live 2026-10-08).
+        """
         self.page.goto(self._list_url, wait_until="domcontentloaded")
         self.page.wait_for_selector("table", timeout=15000)
+        self.load_cancellations()
 
     def screenshot_cancellations(self) -> bytes:
         # full_page=True hangs on font loading; use viewport screenshot with timeout
@@ -1014,7 +1030,18 @@ def run_pull(
     rows = browser.load_cancellations()
 
     for row in rows:
-        browser.open_policy(row.policy_number)
+        try:
+            browser.open_policy(row.policy_number)
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Guard Policy Center for {row.policy_number} did not open ({type(exc).__name__})"
+            )
+            held.append(_row_payload(row, outcome="HELD", reason=reason))
+            try:
+                browser.return_to_cancellations()
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         try:
             browser.open_printable_documents()
             docs = browser.list_documents(row.policy_number)

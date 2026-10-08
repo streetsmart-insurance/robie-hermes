@@ -343,3 +343,122 @@ class QaDriveLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardOnePolicyHoldsTests(unittest.TestCase):
+    """Live 2026-10-08 PR run: policy 1 pulled, policy 2 timed out -> whole carrier FAILED."""
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_policy_center_timeout_holds_that_policy_only(self):
+        from test_guard_pending_cancellation import AS_OF, LIVE_POLICIES, FakeGuardPage
+
+        from robie_job_engine.intake_core import SourceArchive
+
+        first = LIVE_POLICIES[0][0]
+
+        class Browser(guard.PlaywrightGuardBrowser):
+            def open_policy(self, policy_number):
+                if policy_number == first:
+                    raise type("TimeoutError", (Exception,), {})("Timeout 15000ms exceeded")
+                return super().open_policy(policy_number)
+
+        out = Path(self.tmp.name)
+        receipt = guard.run_pull(
+            Browser(FakeGuardPage()), guard.GuardDeliveryLedger(out), SourceArchive(out / "sources"), as_of=AS_OF
+        )
+        self.assertEqual(receipt["count"], len(LIVE_POLICIES) - 1)
+        self.assertEqual(len(receipt["held"]), 1)
+        self.assertIn(first, receipt["held"][0]["hold_reason"])
+        self.assertIn("did not open", receipt["held"][0]["hold_reason"])
+
+    def test_return_to_cancellations_reselects_the_tab(self):
+        browser = guard.PlaywrightGuardBrowser.__new__(guard.PlaywrightGuardBrowser)
+        browser.page = mock.Mock()
+        browser._list_url = "https://gigezrate.guard.com/portal/book-of-business"
+        browser.load_cancellations = mock.Mock(return_value=())
+        browser.return_to_cancellations()
+        browser.page.goto.assert_called_once()
+        browser.load_cancellations.assert_called_once()
+
+    def test_missing_policy_link_reselects_then_holds(self):
+        browser = guard.PlaywrightGuardBrowser.__new__(guard.PlaywrightGuardBrowser)
+        browser.page = mock.Mock()
+        browser.page.evaluate.return_value = False
+        browser._select_cancellations_tab = mock.Mock()
+        with self.assertRaises(IntakeHold) as ctx:
+            browser.open_policy("PRAU716089")
+        browser._select_cancellations_tab.assert_called_once()
+        self.assertIn("missing from the Cancellations grid", str(ctx.exception))
+        browser.page.wait_for_selector.assert_not_called()
+
+
+class NatGenErrorPageTests(unittest.TestCase):
+    def _page(self, url, body):
+        page = mock.Mock()
+        page.url = url
+        page.locator.return_value.inner_text.return_value = body
+        return page
+
+    def test_error_page_holds_with_natgen_reason(self):
+        from robie_job_engine import natgen_pending_cancellation as ng
+
+        page = self._page(
+            "https://natgenagency.com/ErrorPage.aspx?eid=961733806",
+            "Error Page\nRenewal policy exists: 2031936859-01\nNJ - Integon National - Personal Auto",
+        )
+        with self.assertRaises(IntakeHold) as ctx:
+            ng.raise_if_natgen_error_page(page, "2031936859 00")
+        self.assertIn("Renewal policy exists: 2031936859-01", str(ctx.exception))
+        self.assertIn("2031936859 00", str(ctx.exception))
+
+    def test_normal_page_passes(self):
+        from robie_job_engine import natgen_pending_cancellation as ng
+
+        ng.raise_if_natgen_error_page(self._page("https://natgenagency.com/Policy/PolicySummary.aspx", "x"), "1")
+
+    def test_one_policy_hold_does_not_stop_the_pull(self):
+        from datetime import date
+
+        from robie_job_engine import natgen_pending_cancellation as ng
+        from robie_job_engine.natgen_retrieval import NocDateHold
+
+        portal = ng.NatGenPendingCancellationPortal.__new__(ng.NatGenPendingCancellationPortal)
+        row = SimpleNamespace(
+            policy_number="2031936859 00", processed_on=date(2026, 10, 8),
+            cancel_effective=date(2026, 10, 20), document_id="doc-1", source_url="u", filename="f.pdf",
+        )
+        portal._rows = {"doc-1": row}
+        portal.date_holds = []
+        portal.browser = SimpleNamespace(
+            capture_noc=mock.Mock(side_effect=IntakeHold("NatGen showed an error page for 2031936859 00: Renewal policy exists"))
+        )
+        with self.assertRaises(NocDateHold):
+            portal.download_document("doc-1")
+        self.assertEqual(len(portal.date_holds), 1)
+        self.assertEqual(portal.date_holds[0]["document_id"], "doc-1")
+        self.assertIsNone(portal.date_holds[0]["observed"])
+
+    def test_capture_failure_still_restores_list(self):
+        from robie_job_engine import natgen_pending_cancellation as ng
+
+        browser = ng.PlaywrightNatGenNocBrowser.__new__(ng.PlaywrightNatGenNocBrowser)
+        browser.page = SimpleNamespace(url="https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5")
+        browser._list_url = browser.page.url
+        browser._grid = object()
+        browser._row_locators = (object(),)
+        browser._restore_list = mock.Mock()
+        target = SimpleNamespace(document_id="d", row_index=0, policy_number="1")
+        with mock.patch.object(ng, "parse_noc_grid", return_value=[target]), \
+                mock.patch.object(ng, "collect_noc_observation", side_effect=IntakeHold("boom")):
+            with self.assertRaises(IntakeHold):
+                browser.capture_noc("d")
+        browser._restore_list.assert_called_once()
