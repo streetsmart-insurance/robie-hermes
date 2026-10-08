@@ -834,18 +834,61 @@ def test_call_jake_at_his_cell_dials_his_cell(clean_state):
     "Confirm the address. If voicemail, ask her to call 732-555-0142.",
     "Confirm the address. If you get voicemail ask them to call 732-555-0142.",
     "Confirm the address. If no answer, leave a message to call 732-555-0142.",
-    "Confirm the address. Call back number 732-555-0142.",
-    "Confirm the address. Callback: 732-555-0142",
-    "Confirm the address. Call-back at 732-555-0142",
-    "Confirm the address. Ask him to call 732-555-0142.",
-    "Confirm the address. Tell them to call us at 732-555-0142.",
+    "Confirm the address. If no answer: 732-555-0142",
     "Confirm the address. Leave a message with 732-555-0142 as the number.",
+    "Confirm the address. Ask him to call 732-555-0142.",
+    "Confirm the address. Ask him to call us back at 732-555-0142.",
+    "Confirm the address. Tell them to call us at 732-555-0142.",
+    "Confirm the address. Have her call back 732-555-0142.",
+    "Confirm the address. Call us back at 732-555-0142.",
+    "Confirm the address. Callback number 732-555-0142.",
+    "Confirm the address. Call back number: 732-555-0142",
+    "Confirm the address. Call-back # 732-555-0142",
     "Confirm the address. If voicemail ask him to call 7325550142",
 ])
-def test_callback_wording_number_is_never_the_dial_target(text):
+def test_number_we_ask_them_to_call_is_never_the_dial_target(text):
     assert rch._phone_directive(text) == (None, False)
     assert rch._extract_explicit_phone(text) is None
     assert rch._phones_in_text(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Call back Mrs. Smith at 732-555-0142 about her renewal.",
+    "Please call back Mrs. Smith at 732-555-0142 about her renewal.",
+    "Please call back 732-555-0142 about the renewal.",
+    "call back the client at (732) 555-0142 about the renewal",
+    "Client asked us to call back. Call at 732-555-0142 about the renewal.",
+    "Call back John at 732-555-0142 re: renewal. If voicemail, ask him "
+    "to call us back.",
+])
+def test_plain_call_back_request_still_dials(text):
+    assert rch._extract_explicit_phone(text) == "+17325550142"
+
+
+def test_call_back_request_dials_through_the_handler(clean_state):
+    bland = FakeBland()
+    ports = make_ports(bland=bland)
+    task = make_task(**{
+        "task_id": "T-0142",
+        "Applicant Name": "Mary Smith",
+        "Task Description":
+            "Please call back Mrs. Smith at 732-555-0142 about her renewal.",
+    })
+    result = rch.handle_robie_call_task(task, make_config(), ports)
+    assert result["ok"] is True
+    assert bland.dials == 1
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-0142")]["phone"] == "+17325550142"
+
+
+@pytest.mark.parametrize("text", [
+    "Call back Jake at 732-481-2520 about the renewal.",
+    "Please call back 732-481-2520 about the renewal.",
+    "Please call back 732-462-8343 about the renewal.",
+    "Call back the client at 732-298-6745 about the renewal.",
+])
+def test_streetsmart_number_refused_even_as_a_call_back_request(text):
+    assert rch._phone_directive(text) == (None, False)
 
 
 def test_dial_number_before_a_voicemail_line_still_dials():

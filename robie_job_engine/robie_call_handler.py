@@ -636,20 +636,27 @@ _NAMED_CALLEE_RE = re.compile(
 )
 
 
-# Wording that introduces a number the CLIENT should call, not the number
-# Robie should dial: "If voicemail: Ask him to call <office line>." A number
-# after this wording in the same line or sentence is never dialed (task
-# 63558413, Oct 8 2026: Robie dialed Jake's office line from the voicemail
-# line of his own test task).
+# Wording that introduces a number we ask the OTHER person to call, not the
+# number Robie should dial: "If voicemail: Ask him to call <office line>."
+# A number after this wording in the same line or sentence is never dialed
+# (task 63558413, Oct 8 2026: Robie dialed Jake's office line from the
+# voicemail line of his own test task). A plain dial request that says
+# "call back" ("Call back Mrs. Smith at ...", "Please call back <number>")
+# is NOT callback wording and still dials.
 _CALLBACK_CONTEXT_RE = re.compile(
     r"(?i)(?:"
+    # "If voicemail: ...", "if you get his voicemail, ...", "if no answer ..."
     r"\bif\s+(?:you\s+(?:get|reach|hit)\s+)?(?:(?:a|the|his|her|their)\s+)?"
     r"(?:voice\s*-?\s*mail|vm|no\s+answer|no\s+one\s+answers)\b"
-    r"|\bcall\s*-?\s*backs?\b"
-    r"|\bcallbacks?\b"
+    # "leave a message ...", "leave a voicemail ..."
+    r"|\bleave\s+(?:(?:a|the)\s+)?(?:message|msg|voice\s*-?\s*mail|vm)\b"
+    # "ask/tell/have him|her|them to call (us/back) ..."
     r"|\b(?:ask|tell|have)\s+(?:him|her|them|the\s+client|the\s+customer|"
     r"the\s+insured)\s+(?:to\s+)?(?:call|ring|phone|reach)\b"
-    r"|\bleave\s+(?:(?:a|the)\s+)?(?:message|msg|voice\s*-?\s*mail|vm)\b"
+    # "call us back at ..."
+    r"|\bcall\s+us\s+back\b"
+    # "callback number ...", "call-back #", "call back no."
+    r"|\bcall\s*-?\s*back\s*(?:number|num|no\b|#|line|phone)"
     r")"
 )
 # Where a clause starts: a new line, or the end of a sentence.
@@ -785,10 +792,12 @@ def _phone_directive(instruction: str) -> tuple:
 
     Digits are a phone only when the request clearly gives one: phone,
     cell, number, or "call at" wording, or a phone-formatted number.
-    A number after callback or voicemail wording ("if voicemail", "call
-    back", "ask him to call", "leave a message") is the client's callback
-    number, not a dial target, and is skipped. A StreetSmart number (staff
-    direct dials, main line, caller ID) is never dialed.
+    A number we ask the other person to call ("if voicemail ...", "ask
+    him to call us back ...", "call us back at", "callback number",
+    "leave a message ...") is not a dial target and is skipped. A plain
+    "call back <person> at <number>" request still dials. A StreetSmart
+    number (staff direct dials, main line, caller ID) is never dialed,
+    however it is worded.
     Digits after policy/pol/claim/quote are never a phone. A known policy
     shape is never a phone. A bare 10-digit run with none of those signals
     is ambiguous — the caller must ask, not dial.
