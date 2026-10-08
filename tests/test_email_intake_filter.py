@@ -200,10 +200,28 @@ class JunkIsSkipped(unittest.TestCase):
         )
         self.assertSkip(email, "no_ask")
 
-    def test_bare_forward_with_other_recipients_is_fyi(self):
+    def test_bare_forward_with_other_recipients_is_skipped(self):
         email = mail(subject="Fwd: Premium audit status request", body=CARRIER_FWD,
                      to="robie@streetsmart.insurance, erika@streetsmart.insurance")
-        self.assertSkip(email, "fyi_forward")
+        self.assertSkip(email, "forward_no_note")
+
+    def test_bare_forward_to_robie_alone_is_skipped(self):
+        # Carlo 2026-10-08 6:45 AM: "skip forwards with no note". Prod Oct 6-7:
+        # three premium-audit forwards from Carlo with no text above them.
+        for subject in (
+            "Fwd: Premium audit status request - WC policy WC 0000001 (ACME Construction)",
+            "Fwd: [EXTERNAL] Premium audit status request - WC policy PWC0000000 (expired term)",
+        ):
+            email = mail(subject=subject, body=CARRIER_FWD, attachments=("audit.pdf",))
+            decision = self.assertSkip(email, "forward_no_note")
+            self.assertIn("audit.desk@carrier.example", decision.detail)
+
+    def test_bare_forward_with_only_a_signature_is_skipped(self):
+        email = mail(subject="Fwd: audit", body="Best Regards,\nCarlo\n\n" + CARRIER_FWD)
+        self.assertSkip(email, "forward_no_note")
+
+    def test_bare_forward_without_fwd_subject_is_skipped(self):
+        self.assertSkip(mail(subject="Premium audit status request", body=CARRIER_FWD), "forward_no_note")
 
 
 class RealRequestsAreKept(unittest.TestCase):
@@ -224,14 +242,14 @@ class RealRequestsAreKept(unittest.TestCase):
         )
         self.assertKeep(email, "direct_ask")
 
-    def test_forward_with_short_instruction(self):
+    def test_forward_with_note_is_kept(self):
+        # Real Prod notes from Oct 7: "file this" and
+        # "please make sure this is taken care of", above a client email.
         fwd = CARRIER_FWD.replace("audit.desk@carrier.example", "client@example.com")
-        self.assertKeep(mail(subject="Fwd: Action needed: carrier is waiting on your workers comp audit", body="file this\n\n" + fwd), "direct_ask")
-        self.assertKeep(mail(subject="Fwd: adding new location", body="please make sure this is taken care of\n\n" + fwd), "direct_ask")
-
-    def test_bare_forward_of_carrier_mail_to_robie_alone(self):
-        self.assertKeep(mail(subject="Fwd: Premium audit status request - WC policy WC 0000001", body=CARRIER_FWD,
-                             attachments=("audit.pdf",)), "forwarded_to_robie")
+        self.assertKeep(mail(subject="Fwd: Action needed: carrier is waiting on your workers comp audit - Policy WC 0000002",
+                             body="file this\n\n" + fwd), "direct_ask")
+        self.assertKeep(mail(subject="Fwd: adding new location",
+                             body="please make sure this is taken care of\n\n" + fwd), "direct_ask")
 
     def test_question_to_robie(self):
         email = mail(sender="sandeep@streetsmart.insurance",
@@ -270,12 +288,13 @@ class DedupeAndContinuation(unittest.TestCase):
         conn.close()
 
     def test_same_request_resent_on_thread_is_duplicate(self):
-        first = mail(subject="Fwd: Premium audit status request", body=CARRIER_FWD, msg_id="a", thread_id="T")
+        body = "please file this\n\n" + CARRIER_FWD
+        first = mail(subject="Fwd: Premium audit status request", body=body, msg_id="a", thread_id="T")
         d1 = classify_inbound(first, db_path=self.db)
         self.assertTrue(d1.keep)
         self.add_job("job-a", "a", {"gmail_thread_id": "T", "email_intake": d1.as_payload(),
                                     "request_text": f"Subject: {first.subject}\n\n{first.body}"})
-        again = mail(subject="Fwd: Premium audit status request", body=CARRIER_FWD, msg_id="b", thread_id="T")
+        again = mail(subject="Fwd: Premium audit status request", body=body, msg_id="b", thread_id="T")
         d2 = classify_inbound(again, db_path=self.db)
         self.assertFalse(d2.keep)
         self.assertEqual(d2.reason, "duplicate")
@@ -301,6 +320,11 @@ class DedupeAndContinuation(unittest.TestCase):
         self.add_job("job-a", "a", {"gmail_thread_id": "T", "request_text": "Subject: Re: x\n\nplease file this"})
         d = classify_inbound(mail(subject="Re: x", body="also update the address please", msg_id="b", thread_id="T"), db_path=self.db)
         self.assertTrue(d.keep)
+
+    def test_bare_forward_on_waiting_thread_is_still_a_continuation(self):
+        self.add_job("job-w", "w", {"gmail_thread_id": "T"}, status="NEEDS_CLARIFICATION")
+        d = classify_inbound(mail(subject="Fwd: quote", body=CARRIER_FWD, msg_id="r", thread_id="T"), db_path=self.db)
+        self.assertEqual(d.kind, "continuation")
 
     def test_answer_on_thread_robie_is_waiting_on(self):
         self.add_job("job-w", "w", {"gmail_thread_id": "T"}, status="AWAITING_HUMAN_INPUT")

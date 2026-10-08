@@ -480,6 +480,13 @@ def classify_inbound(
     in_to = mailbox.lower() in to_list
     top = new_text(email.body)
 
+    # Carlo 2026-10-08 6:45 AM: a forward only becomes a job when the
+    # forwarder wrote their own note above it ("file this"). A bare forward
+    # is skipped, even when it was sent to Robie alone.
+    if not top and (is_forward_subject(email.subject) or _FORWARD_MARKER.search(str(email.body or ""))):
+        fwd_from = forwarded_sender(email.body)
+        return _skip("forward_no_note", f"forward of {fwd_from or 'unknown sender'} with no note", **stamp)
+
     if not in_to:
         if robie_named_with_ask(top):
             return IntakeDecision(True, KEEP_REQUEST, "robie_named_with_ask", "Robie cc'd but asked by name", **stamp)
@@ -492,17 +499,6 @@ def classify_inbound(
 
     if has_ask(top):
         return IntakeDecision(True, KEEP_REQUEST, "direct_ask", "", **stamp)
-
-    if not top and is_forward_subject(email.subject):
-        fwd_from = forwarded_sender(email.body)
-        others = [a for a in to_list if a != mailbox.lower()]
-        if fwd_from and not is_automated_address(fwd_from) and not others:
-            # A bare forward sent to Robie alone is how staff hand Robie a
-            # carrier or client email (e.g. premium audit requests).
-            return IntakeDecision(
-                True, KEEP_REQUEST, "forwarded_to_robie", f"forward of {fwd_from} sent to Robie alone", **stamp
-            )
-        return _skip("fyi_forward", "forward with no ask for Robie", **stamp)
 
     return _skip("no_ask", "no ask for Robie in the new text", **stamp)
 
