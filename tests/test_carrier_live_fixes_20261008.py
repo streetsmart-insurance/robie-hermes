@@ -1066,3 +1066,65 @@ class FinysQuickSearchTests(unittest.TestCase):
         self.assertEqual(receipt["count"], 1)
         self.assertEqual([h["policy_number"] for h in receipt["held"]], [HONJ])
         self.assertIn("Policy Summary", receipt["held"][0]["reason"])
+
+
+class FaoStuckTabTests(unittest.TestCase):
+    """Live 2026-10-08 f53568f6: one hung policygateway tab -> 11 later policies timed out."""
+
+    def _browser(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        browser = fao.PlaywrightFaoCancellationBrowser.__new__(fao.PlaywrightFaoCancellationBrowser)
+        browser._list_url = fao.REPORT_URL
+        browser.agent_code = "x"
+        stuck = mock.Mock()
+        fresh = mock.Mock()
+        fresh.url = fao.REPORT_URL
+        stuck.context = SimpleNamespace(new_page=mock.Mock(return_value=fresh))
+        browser.page = stuck
+        return browser, stuck, fresh
+
+    def test_replace_opens_report_in_same_context_and_closes_stuck_tab(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        browser, stuck, fresh = self._browser()
+        browser.replace_stuck_tab()
+        self.assertIs(browser.page, fresh)
+        fresh.goto.assert_called_once_with(fao.REPORT_URL, wait_until="domcontentloaded",
+                                           timeout=fao.STUCK_TAB_GOTO_MS)
+        stuck.close.assert_called_once_with(run_before_unload=False)
+
+    def test_fresh_tab_off_fao_is_closed_and_stuck_tab_kept(self):
+        browser, stuck, fresh = self._browser()
+        fresh.url = "https://evil.example/"
+        with self.assertRaises(IntakeHold):
+            browser.replace_stuck_tab()
+        fresh.close.assert_called_once()
+        stuck.close.assert_not_called()
+        self.assertIs(browser.page, stuck)
+
+    def test_run_pull_replaces_tab_when_return_to_report_hangs(self):
+        import os
+        import tempfile
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = tuple(
+            SimpleNamespace(policy_number=n, tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in ("984419689", "970498127")
+        )
+        timeout = type("TimeoutError", (Exception,), {})
+        browser = mock.Mock()
+        browser.screenshot_report.return_value = b"\x89PNG\r\n\x1a\n"
+        browser.load_current_tab.side_effect = [rows, (), ()]
+        browser.open_policy_summary.side_effect = [timeout("gateway"), timeout("gateway")]
+        browser.return_to_report.side_effect = timeout("stuck")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            fao.run_pull(browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                         as_of=__import__("datetime").date(2026, 10, 8))
+        self.assertEqual(browser.replace_stuck_tab.call_count, 2)

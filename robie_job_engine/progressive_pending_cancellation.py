@@ -51,6 +51,8 @@ CL_POLICY_HOST = "clpolicy.foragentsonly.com"
 POLICY_SERVICING_HOST = "policyservicing.apps.foragentsonly.com"
 POLICY_PAGE_HOSTS = (CL_POLICY_HOST, POLICY_SERVICING_HOST)
 POLICY_PAGE_WAIT_MS = 30000
+RETURN_TO_REPORT_MS = 30000
+STUCK_TAB_GOTO_MS = 45000
 REPORT_PATH = "/managepolicies/reports/policiesneedservice/policiespendingcancellation/"
 REPORT_URL = f"https://{FAO_HOST}{REPORT_PATH}"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
@@ -732,8 +734,40 @@ class PlaywrightFaoCancellationBrowser:
         button = self.document_button(doc)
         return collect_document_capture(self.page, button.click)
 
+    def replace_stuck_tab(self) -> None:
+        """Swap a hung FAO tab for a fresh one on the report, same signed-in context.
+
+        Live 2026-10-08 (f53568f6): the policygateway link for some policies
+        (e.g. 984419689) never commits a navigation. The tab stays stuck, so
+        the return to the report and every later policy timed out (11 held).
+        Open the report in a new tab of the same browser context (cookies,
+        no credentials typed), then close the stuck tab.
+        """
+        old = self.page
+        context = getattr(old, "context", None)
+        if callable(context):
+            context = context()
+        new_page = getattr(context, "new_page", None)
+        if not callable(new_page):
+            raise IntakeHold("Progressive FAO tab is stuck and no browser context is available")
+        fresh = new_page()
+        try:
+            fresh.goto(self._list_url or REPORT_URL, wait_until="domcontentloaded", timeout=STUCK_TAB_GOTO_MS)
+            require_fao_url(str(getattr(fresh, "url", "") or ""))
+        except Exception:
+            try:
+                fresh.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        self.page = fresh
+        try:
+            old.close(run_before_unload=False)
+        except Exception:  # noqa: BLE001 - a stuck tab may refuse; the fresh tab is in use
+            pass
+
     def return_to_report(self) -> None:
-        self.page.goto(self._list_url, wait_until="domcontentloaded")
+        self.page.goto(self._list_url, wait_until="domcontentloaded", timeout=RETURN_TO_REPORT_MS)
         # Wait for report tabs first (they render before the data tables),
         # then wait for a visible table with data rows.
         try:
@@ -1010,10 +1044,7 @@ def run_pull(
                 f"Progressive FAO policy {row.policy_number} page did not open ({type(exc).__name__})"
             )
             held.append(_row_payload(row, outcome="HELD", reason=reason))
-            try:
-                browser.return_to_report()
-            except Exception:  # noqa: BLE001
-                pass
+            _recover_report_tab(browser)
             continue
         if row.reason == "UNDERWRITING":
             _pull_underwriting_memos(
@@ -1105,6 +1136,21 @@ def run_pull(
         "rows": rows_payload,
         "ezlynx": "not_run",
     }
+
+
+def _recover_report_tab(browser: Any) -> None:
+    """Back to the report after a held policy; replace the tab if it is stuck."""
+    try:
+        browser.return_to_report()
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    replace = getattr(browser, "replace_stuck_tab", None)
+    if callable(replace):
+        try:
+            replace()
+        except Exception:  # noqa: BLE001 - the next policy holds on its own
+            pass
 
 
 def select_fao_page(pages: list[Any]) -> Any:
