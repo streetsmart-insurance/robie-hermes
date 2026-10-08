@@ -394,6 +394,15 @@ FINYS_POLICY_SEARCH_BUTTON = "#Landing_PolicyQuickSearchWidget_Button2"
 FINYS_SUMMARY_POLICY_LABEL = "#SummaryHeader_PolicyNumberLabelLabelValue"
 FINYS_DOCUMENT_SUMMARY_LINK = "#DocumentLibrarySummary"
 FINYS_MESSAGE_OK = ".k-window"
+FINYS_LANDING_URL = f"https://{FINYS_HOST}/"
+
+
+def _has_pending_grid(page: Any) -> bool:
+    try:
+        _find_table_by_headers(page, _PENDING_FIELDS, required=("policy_number", "due_date"))
+        return True
+    except IntakeHold:
+        return False
 
 
 def _dismiss_finys_message(page: Any) -> None:
@@ -669,7 +678,17 @@ class FinysFoSBrowser:
 
     def load_pending_items(self) -> tuple[PendingItem, ...]:
         require_finys_url(str(getattr(self.page, "url", "") or ""))
-        items = extract_pending_items(self.page)
+        try:
+            items = extract_pending_items(self.page)
+        except IntakeHold:
+            # Live 2026-10-08: the tab was left on a Policy Summary (same
+            # https://fos.finys.com/ URL), so the task grid was absent. Close
+            # any Finys message, reload the landing page once, and re-read.
+            _dismiss_finys_message(self.page)
+            self.page.goto(FINYS_LANDING_URL, wait_until="domcontentloaded")
+            if not _wait_for(lambda: _has_pending_grid(self.page)):
+                raise
+            items = extract_pending_items(self.page)
         try:
             self._tasks_url = str(getattr(self.page, "url", "") or "") or None
         except Exception:

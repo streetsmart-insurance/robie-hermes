@@ -37,6 +37,27 @@ INVALID_CREDENTIALS = (
     "Guard rejected the user code/password (berkshire_guard_* secrets). "
     "Not retried, to avoid locking the account."
 )
+ACCOUNT_LOCKED = (
+    "Guard reports the account is locked or disabled (berkshire_guard_* user). "
+    "Not retried; unlock it in the Guard portal first."
+)
+_LOGIN_MESSAGE_TERMS = ("invalid", "incorrect", "locked", "disabled", "suspended", "expired", "attempt")
+_LOCKED_TERMS = ("locked", "disabled", "suspended")
+
+
+def login_error_message(body: str) -> str:
+    """The sign-in page's own error line(s), so a hold says what Guard said.
+
+    Live 2026-10-08: a rejection was reported only as "invalid", which did
+    not show whether Guard meant a wrong password or a locked account. Only
+    page text is read; typed values are never in inner_text.
+    """
+    lines = []
+    for line in str(body or "").splitlines():
+        text = " ".join(line.split())
+        if text and any(term in text.lower() for term in _LOGIN_MESSAGE_TERMS):
+            lines.append(text[:160])
+    return " | ".join(lines[:3])
 
 
 def _get_secret(name: str) -> str:
@@ -105,7 +126,12 @@ def login_guard(page: Any) -> None:
         # Never echo the exception text: it can carry the typed value.
         raise IntakeHold(f"Guard login entry failed: {type(exc).__name__}")
     page.wait_for_timeout(LOGIN_SETTLE_MS)
-    if "invalid" in _body(page).lower() and _host_and_path(page)[1].startswith("/auth"):
-        raise IntakeHold(INVALID_CREDENTIALS)
-    if not is_logged_in(page):
-        raise IntakeHold("Guard login failed - not on the Agency Service Center after sign-in")
+    if is_logged_in(page):
+        return
+    message = login_error_message(_body(page))
+    said = f" Guard said: {message!r}" if message else ""
+    if any(term in message.lower() for term in _LOCKED_TERMS):
+        raise IntakeHold(ACCOUNT_LOCKED + said)
+    if message and _host_and_path(page)[1].startswith("/auth"):
+        raise IntakeHold(INVALID_CREDENTIALS + said)
+    raise IntakeHold("Guard login failed - not on the Agency Service Center after sign-in" + said)

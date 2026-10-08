@@ -179,6 +179,24 @@ class GuardLoginTests(unittest.TestCase):
         self.assertEqual(page.login.clicked, 1)
         self.assertNotIn("pw-value", str(ctx.exception))
 
+    def test_invalid_hold_quotes_guards_own_message(self):
+        page = _GuardLoginPage("Login\nInvalid User Code/Password combination.\nLOGIN", "https://gigezrate.guard.com/auth/")
+        with mock.patch.object(guard_login, "_get_secret", side_effect=self._secrets):
+            with self.assertRaises(IntakeHold) as ctx:
+                guard_login.login_guard(page)
+        self.assertIn("rejected the user code/password", str(ctx.exception))
+        self.assertIn("Invalid User Code/Password combination.", str(ctx.exception))
+
+    def test_locked_account_is_reported_as_locked_not_wrong_password(self):
+        page = _GuardLoginPage("Login\nYour account has been locked after 3 invalid attempts.", "https://gigezrate.guard.com/auth/")
+        with mock.patch.object(guard_login, "_get_secret", side_effect=self._secrets):
+            with self.assertRaises(IntakeHold) as ctx:
+                guard_login.login_guard(page)
+        self.assertIn("locked or disabled", str(ctx.exception))
+        self.assertIn("account has been locked", str(ctx.exception))
+        self.assertEqual(page.login.clicked, 1)
+        self.assertNotIn("pw-value", str(ctx.exception))
+
     def test_dry_run_guard_spec_auto_logs_in(self):
         from robie_job_engine import carrier_dry_run
 
@@ -1169,3 +1187,36 @@ class FaoStuckTabTests(unittest.TestCase):
             fao.run_pull(browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
                          as_of=__import__("datetime").date(2026, 10, 8))
         self.assertEqual(browser.replace_stuck_tab.call_count, 2)
+
+
+class FinysLandingReloadTests(unittest.TestCase):
+    """Live 2026-10-08 c01e424c: tab left on Policy Summary -> "Finys table is missing"."""
+
+    def test_reloads_landing_once_then_reads_tasks(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = mock.Mock()
+        page.url = "https://fos.finys.com/"
+        browser = fos.FinysFoSBrowser(page)
+        items = (SimpleNamespace(policy_number="HONJ017732"),)
+        with mock.patch.object(fos, "extract_pending_items",
+                               side_effect=[IntakeHold("Finys table is missing or ambiguous"), items]), \
+                mock.patch.object(fos, "_has_pending_grid", return_value=True), \
+                mock.patch.object(fos, "_dismiss_finys_message") as dismiss:
+            self.assertEqual(browser.load_pending_items(), items)
+        page.goto.assert_called_once_with(fos.FINYS_LANDING_URL, wait_until="domcontentloaded")
+        dismiss.assert_called_once()
+
+    def test_still_missing_after_reload_holds(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        page = mock.Mock()
+        page.url = "https://fos.finys.com/"
+        browser = fos.FinysFoSBrowser(page)
+        with mock.patch.object(fos, "extract_pending_items",
+                               side_effect=IntakeHold("Finys table is missing or ambiguous")), \
+                mock.patch.object(fos, "_wait_for", return_value=False), \
+                mock.patch.object(fos, "_dismiss_finys_message"):
+            with self.assertRaisesRegex(IntakeHold, "Finys table"):
+                browser.load_pending_items()
+        page.goto.assert_called_once()
