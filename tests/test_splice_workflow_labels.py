@@ -724,7 +724,10 @@ def test_splice_dials_only_the_phone_on_file(monkeypatch):
     assert "9085550199" not in ports.bland.calls[0]["phone"]
 
 
-def test_lead_follow_up_keeps_typed_number_then_phone_on_file(monkeypatch):
+def test_lead_follow_up_uses_only_the_phone_on_file(monkeypatch):
+    """Carlo's rule (Oct 7 2026): staff just add the label; Robie uses the
+    number on the client's account. A number typed in the note is ignored.
+    Only Robie Call dials a typed number."""
     _prod_env(monkeypatch)
     typed_ports = _ports()
     typed = _handle(_task(**{
@@ -733,7 +736,7 @@ def test_lead_follow_up_keeps_typed_number_then_phone_on_file(monkeypatch):
         "Task Description": "Call at 908-555-0199 about the homeowners quote.",
     }), typed_ports)
     assert typed["ok"] is True
-    assert typed_ports.bland.calls[0]["phone"] == "+19085550199"
+    assert typed_ports.bland.calls[0]["phone"] == "+17325550142"
 
     file_ports = _ports()
     filed = _handle(_task(**{

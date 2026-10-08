@@ -1,0 +1,6 @@
+tests/
+scripts/
+__pycache__/
+*.pyc
+*.md
+!deterministic-scripts-DRAFT.md

@@ -571,7 +571,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         alert(problems)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Alert post failed: %s", type(exc).__name__)
+        # Oct 6 2026: every alert failed for a day as ChatAppIdentityError
+        # and the journal showed only the class name. Log the reason (it
+        # names env vars, paths and the service-account email, never key
+        # material) and, for an identity failure, page by email because
+        # Chat is the thing that is down.
+        reason = str(exc).strip()[:300] or "no detail"
+        logger.error("Alert post failed: %s: %s", type(exc).__name__, reason)
+        from .chat_app_post import ChatAppIdentityError, alert_chat_app_identity_failure
+
+        if isinstance(exc, ChatAppIdentityError):
+            alert_chat_app_identity_failure(
+                f"task intake health alert could not post: {reason}"
+            )
         return 2
     return 2
 

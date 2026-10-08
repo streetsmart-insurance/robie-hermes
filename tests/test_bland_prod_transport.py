@@ -12,6 +12,7 @@ from robie_job_engine.bland_prod_wiring import build_call_dependencies, live_cal
 from robie_job_engine.bland_transport import (
     PROD_HOST,
     BlandTransportRefused,
+    get_call,
     post_call,
 )
 from robie_job_engine.ezlynx_applicant_phone import (
@@ -214,3 +215,30 @@ def test_intake_defaults_to_dry_run_and_wires_the_bland_client():
     )
     assert live_dry is False
     assert live_bland.execute is True
+
+
+def test_requests_carry_a_browser_user_agent_for_cloudflare():
+    """Cloudflare in front of api.bland.ai answers the stock Python-urllib
+    User-Agent with HTTP 403 (error code 1010). Every request must carry a
+    browser User-Agent. Proven 2026-10-07 from hermes-test-01: stock UA 403,
+    browser UA 200 on a read-only GET."""
+    headers = []
+
+    def urlopen(request, timeout=0):
+        headers.append({k.lower(): v for k, v in request.header_items()})
+        return _Response(b'{"call_id":"SYN-CALL"}')
+
+    post_call(
+        {"phone_number": "+15555550123", "voice": "SYN-VOICE", "max_duration": 1},
+        api_key=SECRET, execute=True, env=PROD_ENV, hostname=PROD_HOST, urlopen=urlopen,
+    )
+    get_call(
+        "SYN-CALL", api_key=SECRET, execute=True, env=PROD_ENV, hostname=PROD_HOST,
+        urlopen=urlopen,
+    )
+    assert len(headers) == 2
+    for sent in headers:
+        agent = sent.get("user-agent", "")
+        assert agent.startswith("Mozilla/5.0"), agent
+        assert "python" not in agent.casefold()
+        assert sent.get("authorization") == SECRET

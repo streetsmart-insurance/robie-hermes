@@ -545,3 +545,41 @@ def test_healthy_probe_is_quiet_and_simulate_failure_does_not_post(monkeypatch, 
     )
     assert main([]) == 0
     assert "simulated" not in capsys.readouterr().out
+
+
+def test_identity_failure_logs_the_reason_and_pages_by_email(monkeypatch, caplog):
+    """Oct 6 2026: alerts failed all day and the log said only the class name."""
+    import logging
+
+    from robie_job_engine.chat_app_post import ChatAppIdentityError
+
+    monkeypatch.setattr(
+        "robie_job_engine.task_intake_health.check_task_intake",
+        lambda **_kwargs: ["the Task Check-In email is missing"],
+    )
+
+    def broken_alert(_problems):
+        raise ChatAppIdentityError("ROBIE_CHAT_SA_KEY_FILE is not set; refusing")
+
+    paged: list[str] = []
+    monkeypatch.setattr("robie_job_engine.task_intake_health.alert", broken_alert)
+    monkeypatch.setattr(
+        "robie_job_engine.chat_app_post.alert_chat_app_identity_failure",
+        lambda reason: paged.append(reason) or True,
+    )
+    with caplog.at_level(logging.ERROR):
+        assert main([]) == 2
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ChatAppIdentityError: ROBIE_CHAT_SA_KEY_FILE is not set" in text
+    assert paged and "ROBIE_CHAT_SA_KEY_FILE is not set" in paged[0]
+
+
+def test_health_unit_loads_the_chat_identity_files():
+    from pathlib import Path
+
+    unit = (
+        Path(__file__).resolve().parents[1]
+        / "deploy" / "systemd" / "robie-task-intake-health.service"
+    ).read_text(encoding="utf-8")
+    assert "EnvironmentFile=-/etc/streetsmart-hermes/robie-4359-health.env" in unit
+    assert "EnvironmentFile=-/etc/streetsmart-hermes/robie-svc-chat-key.env" in unit
