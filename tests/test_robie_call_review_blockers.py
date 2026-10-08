@@ -1118,22 +1118,45 @@ def test_recording_counts_toward_daily_cap_and_is_not_retried(
 # Multiple typed numbers: first line or labeled wins; otherwise ask (#811).
 # ---------------------------------------------------------------------------
 
-def test_jake_exact_text_first_line_bare_asks(clean_state):
-    """Jake's exact task: bare cell on line 1, callback on last line.
-    After #814 the callback is skipped. The bare first-line run still
-    needs 'call at' / 'phone' / 'cell' wording, so we ask."""
+def test_jake_exact_text_dials_the_bare_first_line_cell(clean_state):
+    """Jake's exact task 63558413: bare cell alone on line 1, voicemail
+    callback (his office DID) on the last line. The first-line number is
+    dialed; 481-2520 never is (#814)."""
+    assert rch._typed_phone_choice(JAKE_TASK_63558413_WITH_CELL) == (
+        "+17326688161", None, "only")
     bland = FakeBland()
     ports = make_ports(bland=bland)
-    assert rch._phone_directive(JAKE_TASK_63558413_WITH_CELL) == (None, True)
     result = rch.handle_robie_call_task(
         _jake_task(JAKE_TASK_63558413_WITH_CELL, task_id="T-jake-bare"),
         make_config(), ports)
-    assert result["ok"] is False
-    assert bland.dials == 0
-    assert "could not tell which number to dial" in clean_state.body
-    assert "write 'call at' or 'phone' before the number" in clean_state.body
+    assert result["ok"] is True
+    assert bland.dials == 1
+    assert ports.job_checkpoint.data[
+        rch._checkpoint_key("T-jake-bare")]["phone"] == "+17326688161"
     assert "2520" not in str(ports.job_checkpoint.data)
-    assert "8161" not in str(ports.job_checkpoint.data)
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Bare number alone on the first line dials (with or without +1).
+    ("7326688161\nCalling: Jake", ("+17326688161", None, "only")),
+    ("+1 7326688161\nCalling: Jake", ("+17326688161", None, "only")),
+    ("\n  7326688161  \nCalling: Jake", ("+17326688161", None, "only")),
+    # Bare number anywhere else still asks (could be a policy number).
+    ("Call John about the renewal.\n7326688161", (None, rch.AMBIGUOUS_DIGITS, "")),
+    ("7326688161 renewal for John", (None, rch.AMBIGUOUS_DIGITS, "")),
+    # Not a dialable shape on the first line: still asks.
+    ("0685786571\nrenewal", (None, rch.AMBIGUOUS_DIGITS, "")),
+    # A StreetSmart number on the first line is never dialed (#814).
+    ("7324812520\nCalling: Jake", (None, None, "")),
+    ("7324628343\nCalling: Jake", (None, None, "")),
+    # Bare first line plus another labeled number: two winners, ask.
+    ("7326688161\nCell: 908-555-0199", (None, rch.MULTIPLE_NUMBERS, "")),
+    # Bare first line plus a voicemail callback: callback skipped, dial.
+    ("7326688161\nIf voicemail: ask him to call 908-555-0199.",
+     ("+17326688161", None, "only")),
+])
+def test_bare_first_line_rule(text, expected):
+    assert rch._typed_phone_choice(text) == expected
 
 
 def test_jake_text_with_labeled_cell_dials_the_cell_not_the_callback(clean_state):

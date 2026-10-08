@@ -827,20 +827,48 @@ def _first_line_span(text: str) -> tuple:
     return 0, 0
 
 
+# A first line that is only a phone number: "7326688161", "+1 7326688161",
+# "17326688161". Area code and exchange must start 2-9 (a dialable NANP
+# number).
+_BARE_FIRST_LINE_RE = re.compile(r"^\s*(\+?1[\s.\-]?)?([2-9]\d{2}[2-9]\d{6})\s*[.,;]?\s*$")
+
+
+def _bare_first_line_phone(text: str) -> Optional[tuple]:
+    """(start, digits) when the first line of the description is a bare
+    phone number and nothing else. Robie Call treats that as the number to
+    dial (Jake writes his test tasks this way, task 63558413). A bare
+    10-digit run anywhere else still asks: it could be a policy number.
+    #814's exclusions still apply (a StreetSmart number is never dialed)."""
+    first_start, first_end = _first_line_span(text or "")
+    if first_end <= first_start:
+        return None
+    match = _BARE_FIRST_LINE_RE.match(text[first_start:first_end])
+    if not match:
+        return None
+    digits = "".join(c for c in match.group(0) if c.isdigit())
+    if _never_dial(text, first_start + match.start(2), digits):
+        return None
+    return first_start + match.start(2), digits
+
+
 def _typed_phone_choice(instruction: str) -> tuple:
     """(normalized phone or None, why-not or None, how it was chosen).
 
     One distinct typed number: dial it. Two or more distinct typed numbers
     (after #814's callback/voicemail and StreetSmart exclusions): dial only
     the one that clearly wins, the one on the first line or the one
-    explicitly labeled ("phone", "cell", "at", "call X at"). If none wins,
+    explicitly labeled ("phone", "cell", "at", "call X at"). A first line
+    that is only a phone number counts as typed. If none wins,
     or more than one does, do not guess: why-not is MULTIPLE_NUMBERS (the
     same rule as the Cloud Run Robie Call hard block, #811). A bare 10-digit
-    run with no phone wording stays AMBIGUOUS_DIGITS: it could be a policy
-    number.
+    run with no phone wording anywhere but alone on the first line stays
+    AMBIGUOUS_DIGITS: it could be a policy number.
     """
     text = instruction or ""
     matches = _clear_phone_matches(text)
+    bare_first = _bare_first_line_phone(text)
+    if bare_first is not None and all(start != bare_first[0] for start, _ in matches):
+        matches = sorted(matches + [bare_first], key=lambda item: item[0])
     distinct: List[str] = []
     for _, raw in matches:
         phone = _normalize_phone("".join(c for c in raw if c.isdigit()))
