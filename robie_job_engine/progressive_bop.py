@@ -1137,6 +1137,11 @@ def _home_hold(page: Any, *, css_count: int, role_count: int, detail: str) -> In
     )
 
 
+def _is_cl_express_page(page: Any) -> bool:
+    parsed = urllib.parse.urlsplit(_safe_page_url(str(getattr(page, "url", "") or "")))
+    return parsed.scheme == "https" and (parsed.hostname or "").casefold() == "clpolicy.foragentsonly.com"
+
+
 def _on_fao_shell_home(page: Any) -> bool:
     return _FAO_SHELL_HOME_URL.fullmatch(_safe_page_url(str(getattr(page, "url", "") or ""))) is not None
 
@@ -1272,6 +1277,17 @@ def ensure_fao_shell_home(page: Any) -> None:
     """
     if _on_fao_shell_home(page):
         return
+    if _is_cl_express_page(page):
+        # Live 2026-10-08: a Progressive pull stopped on a CL Express policy
+        # page (clpolicy.foragentsonly.com), which has no FAO header Home
+        # control. Open the Manage Policies landing on the same tab instead.
+        try:
+            page.goto(MANAGE_POLICIES_LANDING_URL, wait_until="domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
+        except Exception as exc:
+            raise IntakeHold("Progressive Manage Policies page did not open") from exc
+        assert_authenticated(page)
+        if _on_fao_shell_home(page):
+            return
     try:
         target = _resolve_visible_home(page)
     except _HomeNotReady as miss:

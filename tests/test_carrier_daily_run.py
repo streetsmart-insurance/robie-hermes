@@ -330,6 +330,32 @@ class ProgressiveMemoKeyTests(unittest.TestCase):
                 issued_on=date(2026, 9, 2), legacy_id="progressive:1:memo:underwriting-memo"))
 
 
+class BopClExpressHomeTests(unittest.TestCase):
+    """Live 2026-10-08: BOP started with the FAO tab left on a CL Express policy page."""
+
+    def test_cl_express_tab_goes_to_manage_policies_landing(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = mock.Mock()
+        page.url = "https://clpolicy.foragentsonly.com/Express/Default.aspx"
+
+        def goto(url, **kw):
+            page.url = url
+
+        page.goto.side_effect = goto
+        with mock.patch.object(bop, "assert_authenticated"):
+            bop.ensure_fao_shell_home(page)
+        page.goto.assert_called_once()
+        self.assertEqual(page.url, bop.MANAGE_POLICIES_LANDING_URL)
+
+    def test_shell_home_is_a_no_op(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = mock.Mock(url=bop.MANAGE_POLICIES_LANDING_URL)
+        bop.ensure_fao_shell_home(page)
+        page.goto.assert_not_called()
+
+
 class BopNoticeRefetchTests(unittest.TestCase):
     URL = "https://bop.americanstrategic.com/Documents/Get?id=1"
 

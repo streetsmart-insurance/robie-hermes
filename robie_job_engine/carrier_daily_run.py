@@ -60,7 +60,7 @@ SKIPPED_UNTIL_LOGIN_FIXED = {
 }
 DISPLAY = {name: spec.display for name, spec in SPECS.items()}
 DISPLAY["progressive_bop"] = "Progressive BOP"
-CARRIER_TIMEOUT_S = {"progressive": 3000, "progressive_bop": 900}
+CARRIER_TIMEOUT_S = {"progressive": 2400, "progressive_bop": 900}
 DEFAULT_TIMEOUT_S = 1800
 
 # Tabs that are never a carrier's portal tab and confuse the tab selectors.
