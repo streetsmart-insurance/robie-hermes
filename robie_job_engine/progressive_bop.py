@@ -52,6 +52,7 @@ import hashlib
 import json
 import os
 import re
+from urllib.parse import urlparse
 import sys
 import tempfile
 import urllib.parse
@@ -434,7 +435,7 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
             raise IntakeHold("Pending Cancel policy number is missing or ambiguous")
         seen.add(number)
         policies.append(PendingCancelPolicy(number, insured, report_date))
-    blankish = bool(_BLANK_TEXT.search(raw))
+    blankish = bool(_BLANK_TEXT.search(raw)) or _header_only_report(raw)
     if blankish and policies:
         raise IntakeHold("Pending Cancel report is missing or ambiguous")
     if not policies:
@@ -450,6 +451,27 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
         source=source,
         blank=False,
     )
+
+
+_HEADER_ONLY_TITLE = re.compile(r"pending cancel for non[-\s]?payment", re.IGNORECASE)
+_HEADER_ONLY_COLUMNS = ("policy number", "insured name", "cancel date", "amount due")
+_LONG_DIGITS = re.compile(r"\d{6,}")
+
+
+def _header_only_report(text: str) -> bool:
+    """The BOP PDF for a day with no policies: title and column headers only.
+
+    Live 2026-10-08: "Pending Cancel for Non-Payment / Print Date / Policy
+    Number ... Cancel Date / Amount Due / Page 1 of 1". Any run of six or
+    more digits (a policy or phone number) means rows may be present, so it
+    is not blank and the normal parse (and its holds) applies.
+    """
+    flat = _norm(str(text or "")).casefold()
+    if not flat or not _HEADER_ONLY_TITLE.search(flat):
+        return False
+    if not all(column in flat for column in _HEADER_ONLY_COLUMNS):
+        return False
+    return not _LONG_DIGITS.search(flat)
 
 
 def parse_pdf_report(blob: bytes, *, report_date: date) -> PendingCancelReport:
@@ -1878,12 +1900,68 @@ def download_export(page: Any, names: tuple[str, ...]) -> bytes | None:
         locator.click()
 
     observation = collect_pdf(page, click)
-    blobs = list(observation.downloads)
+    blobs = [blob for blob in observation.downloads if blob]
     for view in observation.pages:
-        blobs.extend(view.pdfs)
+        blobs.extend(blob for blob in view.pdfs if blob)
+    if not blobs:
+        # The Test carrier Chrome runs sandboxed (PrivateTmp, ProtectSystem
+        # strict), so a CDP download lands in Chrome's private /tmp and comes
+        # back empty here. The BOP reports page posts #reports-form; replay that
+        # POST in the same browser context and keep only a real PDF.
+        replayed = _replay_bop_reports_form(page)
+        if replayed is None:
+            return None
+        blobs = [replayed]
     if len(blobs) != 1:
         raise IntakeHold("Pending Cancel report export is missing or ambiguous")
     return blobs[0]
+
+
+_BOP_REPORTS_FORM = "#reports-form"
+_BOP_REPORTS_FORM_JS = """(form) => {
+  const out = {};
+  for (const el of form.elements) { if (el.name) out[el.name] = String(el.value || ""); }
+  return {action: form.action, method: (form.method || "").toLowerCase(), fields: out};
+}"""
+_BOP_REPORTS_FORM_FIELDS = frozenset({"ReportId", "StartDate", "EndDate", "AgentId", "FileFormat"})
+
+
+def _replay_bop_reports_form(page: Any) -> bytes | None:
+    """Re-post the BOP ``#reports-form`` (PDF only) after its export click.
+
+    Returns None when this is not the BOP reports page, the form was not set
+    up for a PDF export, or the reply is not a PDF.
+    """
+    if urlparse(str(getattr(page, "url", "") or "")).hostname != _BOP_APP_HOST:
+        return None
+    try:
+        form = page.locator(_BOP_REPORTS_FORM)
+        if form.count() != 1:
+            return None
+        info = form.evaluate(_BOP_REPORTS_FORM_JS)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    action = urlparse(str(info.get("action") or ""))
+    fields = info.get("fields")
+    if (
+        action.scheme != "https"
+        or action.hostname != _BOP_APP_HOST
+        or action.path.rstrip("/").casefold() != "/reports"
+        or info.get("method") != "post"
+        or not isinstance(fields, dict)
+        or set(fields) != _BOP_REPORTS_FORM_FIELDS
+        or str(fields.get("FileFormat", "")).casefold() != "pdf"
+    ):
+        return None
+    response = page.context.request.post(action.geturl(), form=fields, timeout=DOWNLOAD_TIMEOUT_MS)
+    if getattr(response, "ok", True) is False:
+        return None
+    body = response.body()
+    if not isinstance(body, (bytes, bytearray)) or not _is_pdf(bytes(body)):
+        return None
+    return bytes(body)
 
 
 def read_report_from_page(page: Any, report_date: date) -> PendingCancelReport:

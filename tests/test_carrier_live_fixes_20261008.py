@@ -1398,3 +1398,72 @@ class FaoViewerTimeoutTests(unittest.TestCase):
                                    as_of=date(2026, 10, 8))
         self.assertEqual([h["policy"] for h in receipt["held"]], ["875934744", "970498127"])
         self.assertIn("capture failed (TimeoutError)", receipt["held"][0]["reason"])
+
+
+class BopSandboxedDownloadTests(unittest.TestCase):
+    """Live 2026-10-08 d83ed53b: the sandboxed carrier Chrome returns empty downloads."""
+
+    HEADER_ONLY = (
+        "Pending Cancel for Non-Payment\nPrint Date: 10/08/2026\nPolicy Number\nInception \nDate\n"
+        "Insured Name / Business Name\nState\nPhone \nNumber\nEmail Address\nCancel Date\nAmount Due\nPage 1 of 1"
+    )
+    FIELDS = {"ReportId": "3", "StartDate": "10/08/2026", "EndDate": "10/08/2026", "AgentId": "000000", "FileFormat": "pdf"}
+
+    def _page(self, *, fields=None, body=b"%PDF-1.4 report", url="https://bop.americanstrategic.com/"):
+        page = mock.Mock(url=url)
+        form = page.locator.return_value
+        form.count.return_value = 1
+        form.evaluate.return_value = {
+            "action": "https://bop.americanstrategic.com/Reports",
+            "method": "post",
+            "fields": dict(self.FIELDS if fields is None else fields),
+        }
+        page.context.request.post.return_value = SimpleNamespace(ok=True, body=lambda: body)
+        return page
+
+    def test_header_only_pdf_text_is_a_blank_report(self):
+        from datetime import date
+        from robie_job_engine import progressive_bop as bop
+
+        report = bop.policies_from_report_text(self.HEADER_ONLY, report_date=date(2026, 10, 8), source="pdf")
+        self.assertTrue(report.blank)
+        self.assertEqual(report.policies, ())
+
+    def test_header_with_a_long_number_still_holds(self):
+        from datetime import date
+        from robie_job_engine import progressive_bop as bop
+
+        text = self.HEADER_ONLY.replace("Page 1 of 1", "Acme LLC NJ 7325550123 10/20/2026 $100.00\nPage 1 of 1")
+        with self.assertRaisesRegex(IntakeHold, "policies are missing or ambiguous"):
+            bop.policies_from_report_text(text, report_date=date(2026, 10, 8), source="pdf")
+
+    def test_empty_download_replays_the_reports_form_for_a_pdf(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = self._page()
+        empty = bop.PdfObservation(downloads=(b"",), pages=())
+        with mock.patch.object(bop, "_matching_exports", return_value=[mock.Mock()]), \
+                mock.patch.object(bop, "collect_pdf", return_value=empty):
+            self.assertEqual(bop.download_export(page, bop._PDF_EXPORTS), b"%PDF-1.4 report")
+        args, kwargs = page.context.request.post.call_args
+        self.assertEqual(args[0], "https://bop.americanstrategic.com/Reports")
+        self.assertEqual(kwargs["form"], self.FIELDS)
+
+    def test_xls_form_or_non_pdf_reply_is_not_used(self):
+        from robie_job_engine import progressive_bop as bop
+
+        self.assertIsNone(bop._replay_bop_reports_form(self._page(fields={**self.FIELDS, "FileFormat": "xls"})))
+        self.assertIsNone(bop._replay_bop_reports_form(self._page(body=b"<html>")))
+        self.assertIsNone(bop._replay_bop_reports_form(self._page(url="https://www.foragentsonly.com/")))
+        extra = self._page(fields={**self.FIELDS, "Other": "x"})
+        self.assertIsNone(bop._replay_bop_reports_form(extra))
+        extra.context.request.post.assert_not_called()
+
+    def test_empty_xls_download_without_pdf_replay_falls_through(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = self._page(fields={**self.FIELDS, "FileFormat": "xls"})
+        empty = bop.PdfObservation(downloads=(b"",), pages=())
+        with mock.patch.object(bop, "_matching_exports", return_value=[mock.Mock()]), \
+                mock.patch.object(bop, "collect_pdf", return_value=empty):
+            self.assertIsNone(bop.download_export(page, bop._EXCEL_EXPORTS))
