@@ -319,9 +319,14 @@ class EnsureUticaPageTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(ctx.created, [])
 
-    def test_two_signed_in_tabs_hold(self):
-        with self.assertRaises(IntakeHold):
-            self._run([_Tab(SIGNED_IN, "Welcome"), _Tab(SIGNED_IN, "Welcome")])
+    def test_two_signed_in_tabs_reuse_one_and_close_the_extra(self):
+        first, second = _Tab(SIGNED_IN, "Welcome"), _Tab(SIGNED_IN, "Welcome")
+        page, ctx, calls = self._run([first, second])
+        self.assertIs(page, first)
+        self.assertTrue(second.closed)
+        self.assertFalse(first.closed)
+        self.assertEqual(calls, [])
+        self.assertEqual(ctx.created, [])
 
     def test_no_signed_in_tab_logs_in_on_test_host(self):
         page, ctx, calls = self._run([_Tab("https://example.com")])

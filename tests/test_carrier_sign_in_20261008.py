@@ -519,14 +519,121 @@ class FaoBudgetAndLogTests(unittest.TestCase):
         self.assertIn("policy 871490213 start", text)
         self.assertIn("policy 871490213 start", buffer.getvalue())
 
-    def test_page_budget_interrupts_a_blocked_call(self):
+    def test_worker_deadline_interrupts_a_blocked_call(self):
         import time
 
         from robie_job_engine import progressive_pending_cancellation as fao
 
-        with self.assertRaises(fao.FaoBudget):
-            with fao.time_budget(0.05, "policyservicing documents page exceeded its time budget"):
+        with self.assertRaises(fao.FaoDeadline):
+            with fao.time_budget(0.05, "worker deadline", fao.FaoDeadline):
                 time.sleep(2)
+
+    def test_page_budget_does_not_replace_the_worker_alarm(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        fired = []
+        previous = fao.signal.signal(fao.signal.SIGALRM, lambda *_: fired.append("outer"))
+        fao.signal.setitimer(fao.signal.ITIMER_REAL, 5)
+        try:
+            with fao.time_budget(0.01, "page"):
+                pass
+            self.assertEqual(fao.signal.getitimer(fao.signal.ITIMER_REAL)[0] > 0, True)
+        finally:
+            fao.signal.setitimer(fao.signal.ITIMER_REAL, 0)
+            fao.signal.signal(fao.signal.SIGALRM, previous)
+
+    def test_summary_timeout_opens_a_fresh_tab_and_the_next_policy_runs(self):
+        import os
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = tuple(
+            SimpleNamespace(policy_number=n, tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in ("970498127", "871490213")
+        )
+        browser = mock.Mock()
+        browser.screenshot_report.return_value = b"\x89PNG\r\n\x1a\n"
+        browser.load_current_tab.side_effect = [rows, (), ()]
+        browser.open_policy_summary.side_effect = type("TimeoutError", (Exception,), {})("summary")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            receipt = fao.run_pull(
+                browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                as_of=date(2026, 10, 8),
+            )
+        self.assertEqual(browser.replace_stuck_tab.call_count, 2)
+        browser.return_to_report.assert_not_called()
+        self.assertEqual(receipt["status"], "PULLED")
+        self.assertEqual(len(receipt["held"]), 2)
+
+    def test_worker_deadline_is_partial_and_counts_unprocessed_policies(self):
+        import os
+        import tempfile
+        from contextlib import nullcontext
+        from datetime import date
+        from pathlib import Path
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        rows = tuple(
+            SimpleNamespace(policy_number=str(n), tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in range(3)
+        )
+        browser = mock.Mock()
+        browser.screenshot_report.return_value = b"\x89PNG\r\n\x1a\n"
+        browser.load_current_tab.side_effect = [rows, (), ()]
+        browser.open_policy_summary.side_effect = fao.FaoDeadline("deadline")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}), \
+                mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"), \
+                mock.patch.object(fao, "time_budget", lambda *a, **k: nullcontext()):
+            receipt = fao.run_pull(
+                browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                as_of=date(2026, 10, 8),
+            )
+        self.assertEqual(receipt["status"], "PARTIAL")
+        self.assertNotEqual(receipt["status"], "PULLED")
+        self.assertEqual(receipt["unprocessed"], 3)
+        self.assertIn("3 policies left unprocessed", receipt["reason"])
+
+
+class UticaTabTests(unittest.TestCase):
+    def test_extra_oneshield_sso_tabs_are_closed_and_one_is_reused(self):
+        from robie_job_engine import utica_pending_cancellation as utica
+
+        class Page:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+
+            def close(self, **_kwargs):
+                self.closed = True
+
+        tabs = [
+            Page("https://ufirstnow.uticafirst.com/oneshield/sso?osst=1"),
+            Page("https://ufirstnow.uticafirst.com/oneshield/sso?osst=2"),
+            Page("https://ufirstnow.uticafirst.com/oneshield/sso?osst=3"),
+        ]
+        context = SimpleNamespace(pages=tabs, new_page=mock.Mock())
+        browser = SimpleNamespace(contexts=[context])
+        with mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(utica, "refuse_production_host"), \
+                mock.patch("robie_job_engine.utica_login.is_logged_in", side_effect=lambda page: page is tabs[0]):
+            kept = utica.ensure_utica_page(browser)
+        self.assertIs(kept, tabs[0])
+        self.assertFalse(tabs[0].closed)
+        self.assertTrue(tabs[1].closed and tabs[2].closed)
+        context.new_page.assert_not_called()
 
     def test_worker_deadline_is_not_an_exception_playwright_can_swallow(self):
         from robie_job_engine import progressive_pending_cancellation as fao

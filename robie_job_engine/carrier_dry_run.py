@@ -365,6 +365,20 @@ def _run_one(
             "pack": str(pack),
         }
     norm = _normalize_receipt(receipt if isinstance(receipt, dict) else {})
+    receipt_status = str(receipt.get("status") or "") if isinstance(receipt, dict) else ""
+    if receipt_status in {"PARTIAL", "FAIL", "FAILED"}:
+        return {
+            "display": spec.display,
+            "status": "PARTIAL" if receipt_status == "PARTIAL" else "FAILED",
+            "reason": str(receipt.get("reason") or receipt.get("deadline") or "the pull stopped early"),
+            "downloaded": norm["downloaded"],
+            "skipped": norm["skipped"],
+            "held": norm["held"],
+            "hold_reasons": [hold_reason(item) for item in norm["held"]],
+            "unprocessed": receipt.get("unprocessed"),
+            "error": None,
+            "pack": str(pack),
+        }
     return {
         "display": spec.display,
         "status": "OK",

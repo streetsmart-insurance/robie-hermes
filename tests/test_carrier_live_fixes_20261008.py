@@ -1145,7 +1145,7 @@ class FaoStuckTabTests(unittest.TestCase):
         self.assertIs(browser.page, fresh)
         fresh.goto.assert_called_once_with(fao.REPORT_URL, wait_until="domcontentloaded",
                                            timeout=fao.STUCK_TAB_GOTO_MS)
-        stuck.close.assert_called_once_with(run_before_unload=False)
+        stuck.close.assert_called_once_with(run_before_unload=False, timeout=5000)
 
     def test_fresh_tab_off_fao_is_closed_and_stuck_tab_kept(self):
         browser, stuck, fresh = self._browser()

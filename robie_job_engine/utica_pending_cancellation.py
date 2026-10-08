@@ -1104,9 +1104,11 @@ def run_pull(
             targeted=targeted, rows_payload=rows_payload,
         )
     finally:
-        from .carrier_tabs import close_new_pages
+        from .carrier_tabs import close_new_pages, context_pages
 
-        close_new_pages(getattr(browser, "page", None), pages_before, keep=getattr(browser, "page", None))
+        page = getattr(browser, "page", None)
+        close_new_pages(page, pages_before, keep=page)
+        _close_extra_utica_tabs(page, context_pages(page))
 
 
 def _utica_pull_body(
@@ -1225,6 +1227,30 @@ def _utica_pull_body(
     }
 
 
+def _is_utica_tab(url: str) -> bool:
+    """UFirst Now, its OneShield SSO page, or the Okta host this login opens."""
+    parts = urllib.parse.urlsplit(str(url or ""))
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").lower()
+    if host == UTICA_HOST or host == "login.uticafirst.com":
+        return True
+    return "oneshield" in host or "oneshield" in path
+
+
+def _close_extra_utica_tabs(keep: Any, pages: list[Any]) -> int:
+    from .carrier_tabs import close_page
+
+    closed = 0
+    for page in pages:
+        if page is keep:
+            continue
+        if not _is_utica_tab(str(getattr(page, "url", "") or "")):
+            continue
+        if close_page(page):
+            closed += 1
+    return closed
+
+
 def select_utica_page(pages: list[Any]) -> Any:
     """Use the single UFirst Now tab."""
     matches = [
@@ -1253,40 +1279,34 @@ def ensure_utica_page(cdp_browser: Any) -> Any:
     require_carrier_pull("uticafirst")
     refuse_production_host()
     pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
-    matches = [
-        page for page in pages
-        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == UTICA_HOST
-    ]
-    signed_in = [page for page in matches if utica_login.is_logged_in(page)]
-    if len(signed_in) == 1:
-        return signed_in[0]
-    if len(signed_in) > 1:
-        raise IntakeHold("Expected exactly one signed-in Utica First UFirst Now tab")
+    owned = [page for page in pages if _is_utica_tab(str(getattr(page, "url", "") or ""))]
+    signed_in = [page for page in owned if utica_login.is_logged_in(page)]
+    # Reuse one existing tab. Extra OneShield SSO tabs from earlier runs are closed.
+    keep = signed_in[0] if signed_in else (owned[0] if owned else None)
+    _close_extra_utica_tabs(keep, owned)
+    if keep is not None and utica_login.is_logged_in(keep):
+        return keep
 
-    # No signed-in tab: auto-login is a Test-host action only.
     require_hermes_test_host()
     contexts = list(getattr(cdp_browser, "contexts", None) or [])
     if not contexts:
         raise IntakeHold("Utica First auto-login needs an open browser context")
     from .carrier_tabs import close_new_pages
 
-    before = set()
-    for context in contexts:
-        existing_pages = getattr(context, "pages", None)
-        if not isinstance(existing_pages, list):
-            continue
-        for existing in existing_pages:
-            before.add(id(existing))
-    page = contexts[0].new_page()
+    before = {id(page) for page in pages}
+    created = keep is None
+    page = keep if keep is not None else contexts[0].new_page()
     try:
         utica_login.login_utica(page)
         close_new_pages(page, before, keep=page)
+        _close_extra_utica_tabs(page, [p for ctx in cdp_browser.contexts for p in ctx.pages])
         return page
     except Exception:
-        try:
-            page.close()
-        except Exception:
-            pass
+        if created:
+            try:
+                page.close()
+            except Exception:
+                pass
         raise
 
 

@@ -238,6 +238,8 @@ def normalize_result(name: str, payload: dict[str, Any] | None, *, returncode: i
     }
     if result.get("reason"):
         out["reason"] = result["reason"]
+    if result.get("unprocessed") is not None:
+        out["unprocessed"] = result["unprocessed"]
     return out
 
 
@@ -316,6 +318,13 @@ def render_summary(summary: dict[str, Any]) -> str:
                 text += f" ({r['note']})"
             if r["held"]:
                 text += f", {len(r['held'])} held"
+        elif r["status"] == "PARTIAL":
+            left = r.get("unprocessed")
+            extra = f", {left} policies left" if left is not None else ""
+            text = (
+                f"- {r['display']}: partial. {r['downloaded']} downloaded{extra}. "
+                f"{plain(r.get('reason'), 'the pull stopped early')}"
+            )
         elif r["status"] == "HELD":
             text = f"- {r['display']}: held. {plain(r.get('reason'), 'a carrier page did not look as expected')}"
         else:

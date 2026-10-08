@@ -50,7 +50,7 @@ def close_page(page: Any) -> bool:
     if not callable(closer):
         return False
     try:
-        closer(run_before_unload=False)
+        closer(run_before_unload=False, timeout=5000)
         return True
     except TypeError:
         try:
