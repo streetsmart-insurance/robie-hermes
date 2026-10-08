@@ -187,6 +187,7 @@ def parse_task_report_detail(
     newest_et: datetime | None = None
     label_seen: set[tuple[str, str, str]] = set()
     robie_task_ids: set[str] = set()
+    robie_discussions: set[tuple[str, str]] = set()
     for line_no, row in enumerate(reader, start=2):
         row_count += 1
         # Fail-closed on ragged rows
@@ -217,6 +218,10 @@ def parse_task_report_detail(
             )
 
         robie_task_ids.add(task_id)
+        robie_discussions.add((
+            (row.get("Applicant ID") or "").strip(),
+            (row.get("Discussion ID") or "").strip(),
+        ))
         created_at = (row.get("Created Date") or "").strip()
         created_date = (row.get("Task Created Date") or "").strip()
         created_et = report_created_et(created_at or created_date)
@@ -244,11 +249,23 @@ def parse_task_report_detail(
         ))
 
     # A labeled row whose Task ID is also a Robie AI task row is that
-    # task, handled by the original path. Keep one.
-    tasks = [
-        task for task in tasks
-        if task.source != SOURCE_LABEL or task.task_id not in robie_task_ids
-    ]
+    # task, handled by the original path. Keep one. A labeled note on the
+    # same client discussion as a Robie AI task in this report is left to
+    # that task too: the call dedupe keys on note text, so both paths could
+    # otherwise dial the same client the same day.
+    kept: list[AssignedTask] = []
+    for task in tasks:
+        if task.source == SOURCE_LABEL and (
+            task.task_id in robie_task_ids
+            or (task.applicant_id, task.discussion_id) in robie_discussions
+        ):
+            logger.info(
+                "labeled row %s left to the Robie AI task on discussion %s",
+                task.task_id, task.discussion_id,
+            )
+            continue
+        kept.append(task)
+    tasks = kept
 
     if row_count == REPORT_ROW_CAP:
         logger.warning(

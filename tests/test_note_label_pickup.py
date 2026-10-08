@@ -111,6 +111,17 @@ def test_a_labeled_row_that_is_also_a_robie_task_is_kept_once_as_a_task():
     assert [(t.task_id, t.source) for t in tasks] == [("90031111", "task")]
 
 
+def test_a_labeled_note_on_a_robie_task_discussion_is_left_to_the_task():
+    text = _csv(
+        _note_row(1, label="Robie Call", note="task", created="2026-10-05T09:00:00",
+                  task_id="90031111", assigned="Robie AI", discussion="70031111"),
+        _note_row(1, label="Robie Call", note="labeled note", created="2026-10-05T09:05:00",
+                  discussion="70031111"),
+    )
+    tasks = parse_task_report_detail(text, include_labeled_notes=True).tasks
+    assert [(t.task_id, t.source) for t in tasks] == [("90031111", "task")]
+
+
 def test_note_pickup_can_be_turned_off():
     assert note_label_pickup_enabled({}) is True
     assert note_label_pickup_enabled({"ROBIE_NOTE_LABEL_PICKUP": "1"}) is True
