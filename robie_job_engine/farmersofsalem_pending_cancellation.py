@@ -70,7 +70,9 @@ DRIVE_UPLOAD_UNAVAILABLE = (
 )
 
 # Live policy numbers look like HONJ038633: four letters, six digits.
-_POLICY_NUMBER = re.compile(r"^[A-Za-z]{4}\d{6}$")
+# Live Finys 2026-10-08: HONJ017732 / CDNJ001979 (4 letters + 6 digits) and
+# SCNJM07385 (5 letters + 5 digits); always 10 characters.
+_POLICY_NUMBER = re.compile(r"^(?=.{10}$)[A-Za-z]{4,5}\d{5,6}$")
 _DATE_MDY = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
 # (notice key, filename label, keywords in priority order)

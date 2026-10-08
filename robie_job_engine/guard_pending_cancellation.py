@@ -1014,6 +1014,18 @@ def newest_cancellation_documents(docs: Any) -> list[GuardDocument]:
     return [doc for doc in cancels if doc.issued == newest]
 
 
+def _return_to_list_quietly(browser: Any) -> None:
+    """Best-effort return to the Cancellations list between policies.
+
+    A slow reload must not fail the whole carrier: the next policy's open
+    holds on its own if the list is not back.
+    """
+    try:
+        browser.return_to_cancellations()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_pull(
     browser: PlaywrightGuardBrowser,
     ledger: GuardDeliveryLedger,
@@ -1055,17 +1067,17 @@ def run_pull(
                 f"Guard Policy Center for {row.policy_number} did not open ({type(exc).__name__})"
             )
             held.append(_row_payload(row, outcome="HELD", reason=reason))
-            try:
-                browser.return_to_cancellations()
-            except Exception:  # noqa: BLE001
-                pass
+            _return_to_list_quietly(browser)
             continue
         try:
             browser.open_printable_documents()
             docs = browser.list_documents(row.policy_number)
-        except IntakeHold as exc:
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Guard printable documents for {row.policy_number} did not load ({type(exc).__name__})"
+            )
+            held.append(_row_payload(row, outcome="HELD", reason=reason))
+            _return_to_list_quietly(browser)
             continue
         targets = newest_cancellation_documents(docs)
         if len(targets) != 1:
@@ -1082,7 +1094,7 @@ def run_pull(
                     + (f": {candidates}" if candidates else "")
                 ),
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         doc = targets[0]
         try:
@@ -1094,11 +1106,11 @@ def run_pull(
                 rows_payload.append(_row_payload(
                     row, outcome="ALREADY_DELIVERED", filename=doc.filename
                 ))
-                browser.return_to_cancellations()
+                _return_to_list_quietly(browser)
                 continue
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         observation = browser.open_document(doc)
         if observation.emailed and not observation.downloads and not observation.viewer_pdfs:
@@ -1110,7 +1122,7 @@ def run_pull(
                 ),
                 filename=doc.filename,
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         content = (
             observation.downloads[0] if observation.downloads else observation.viewer_pdfs[0]
@@ -1120,7 +1132,7 @@ def run_pull(
                 row, outcome="HELD",
                 reason=f"Guard document {doc.description!r} open is missing or ambiguous",
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         source = SourceItem(
             system=PROCESS,
@@ -1137,7 +1149,7 @@ def run_pull(
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         downloaded.append({
             "document_id": doc.document_id,
@@ -1153,7 +1165,7 @@ def run_pull(
         })
         targeted.append(doc.document_id)
         rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
-        browser.return_to_cancellations()
+        _return_to_list_quietly(browser)
 
     return {
         "status": "PULLED",

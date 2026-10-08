@@ -555,7 +555,12 @@ class PlaywrightFaoCancellationBrowser:
     def load_report(self) -> None:
         """Open the Policies pending cancel or renewal report directly."""
         page = self.page
-        require_fao_url(str(getattr(page, "url", "") or ""))
+        current = require_fao_url(str(getattr(page, "url", "") or ""))
+        if _is_policy_page_url(current):
+            # A tab left on a policy page (CL Express / policy servicing)
+            # goes back to the FAO report before the agent check.
+            page.goto(REPORT_URL, wait_until="domcontentloaded")
+            require_fao_url(str(getattr(page, "url", "") or ""))
         assert_agent_context(page, self.agent_code)
         page.goto(REPORT_URL, wait_until="domcontentloaded")
         require_fao_url(str(getattr(page, "url", "") or ""))
@@ -1104,9 +1109,12 @@ def run_pull(
 
 def select_fao_page(pages: list[Any]) -> Any:
     """Use the single FAO tab."""
+    # The FAO tab may sit on a policy page (CL Express / policy servicing)
+    # from the previous run; it is still the one FAO tab.
+    hosts = {FAO_HOST, *POLICY_PAGE_HOSTS}
     matches = [
         page for page in pages
-        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == FAO_HOST
+        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() in hosts
     ]
     if len(matches) != 1:
         raise IntakeHold("Expected exactly one Progressive FAO tab")

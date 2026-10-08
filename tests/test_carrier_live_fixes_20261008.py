@@ -763,3 +763,76 @@ class UticaExtGridTests(unittest.TestCase):
             browser.open_transactions()
         exit_click.assert_called_once_with(page)
         control.click.assert_called_once()
+
+
+class SecondLiveRoundTests(unittest.TestCase):
+    """PR-code run 6e436e68 on hermes-test-01."""
+
+    def test_fos_five_letter_policy_numbers(self):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        for value in ("HONJ017732", "CDNJ001979", "SCNJM07385"):
+            self.assertEqual(fos.parse_policy_number(value), value)
+        for bad in ("QCD0039860X", "AB12", "SCNJM0738"):
+            with self.assertRaises(IntakeHold):
+                fos.parse_policy_number(bad)
+
+    def test_fao_tab_on_cl_express_is_still_the_fao_tab(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        cl = SimpleNamespace(url="https://clpolicy.foragentsonly.com/Express/Default.aspx?pageName=PolicyDocuments")
+        other = SimpleNamespace(url="https://bop.americanstrategic.com/")
+        self.assertIs(fao.select_fao_page([cl, other]), cl)
+        fao_tab = SimpleNamespace(url="https://www.foragentsonly.com/home/")
+        with self.assertRaises(IntakeHold):
+            fao.select_fao_page([cl, fao_tab])
+
+    def test_fao_report_load_from_policy_page_goes_home_before_agent_check(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        page = mock.Mock()
+        page.url = "https://clpolicy.foragentsonly.com/Express/Default.aspx?pageName=PolicyDocuments"
+        seen = []
+
+        def goto(url, **kw):
+            page.url = url
+            seen.append(("goto", url))
+
+        page.goto.side_effect = goto
+        browser = fao.PlaywrightFaoCancellationBrowser.__new__(fao.PlaywrightFaoCancellationBrowser)
+        browser.page, browser.agent_code, browser._list_url = page, "12345", ""
+        with mock.patch.object(fao, "assert_agent_context", side_effect=lambda p, c: seen.append(("agent", p.url))):
+            browser.load_report()
+        self.assertEqual(seen[0], ("goto", fao.REPORT_URL))
+        self.assertEqual(seen[1], ("agent", fao.REPORT_URL))
+
+    def test_guard_printable_documents_timeout_holds_one_policy(self):
+        import os
+        import tempfile
+
+        from test_guard_pending_cancellation import AS_OF, LIVE_POLICIES, FakeGuardPage
+
+        from robie_job_engine.intake_core import SourceArchive
+
+        first = LIVE_POLICIES[0][0]
+
+        class Browser(guard.PlaywrightGuardBrowser):
+            def __init__(self, page):
+                super().__init__(page)
+                self._current = ""
+
+            def open_policy(self, policy_number):
+                self._current = policy_number
+                return super().open_policy(policy_number)
+
+            def open_printable_documents(self):
+                if self._current == first:
+                    raise type("TimeoutError", (Exception,), {})("waiting for text=Policy Documents")
+                return super().open_printable_documents()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}):
+            out = Path(tmp)
+            receipt = guard.run_pull(Browser(FakeGuardPage()), guard.GuardDeliveryLedger(out),
+                                     SourceArchive(out / "sources"), as_of=AS_OF)
+        self.assertEqual(receipt["count"], len(LIVE_POLICIES) - 1)
+        self.assertIn("did not load", receipt["held"][0]["hold_reason"])
