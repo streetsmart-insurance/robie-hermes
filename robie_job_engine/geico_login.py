@@ -107,7 +107,8 @@ def _fill_first(page: Any, selectors: tuple[str, ...], value: str) -> None:
         if loc.count() and loc.first.is_visible():
             loc.first.fill(value)
             return
-    page.locator("input").first.fill(value)
+    # Never fall through to a cookie checkbox / Optanon control.
+    raise IntakeHold("GEICO Gateway sign-in form did not show a username field")
 
 
 def _click_first(page: Any, selectors: tuple[str, ...], *, timeout: int = 7000) -> bool:
@@ -120,6 +121,32 @@ def _click_first(page: Any, selectors: tuple[str, ...], *, timeout: int = 7000) 
         except Exception:
             continue
     return False
+
+
+
+def _dismiss_cookie_banner(page: Any, *, sleep: Callable[[float], None]) -> None:
+    for name in ("Reject Optional Cookies", "Confirm My Choices", "Accept All Cookies"):
+        try:
+            page.get_by_role("button", name=name, exact=True).click(timeout=3000)
+            sleep(1)
+            return
+        except Exception:
+            continue
+
+
+def _open_sign_in_from_expired(page: Any, *, sleep: Callable[[float], None]) -> None:
+    """Follow the Session expired "Click here" link to the federation login."""
+    _dismiss_cookie_banner(page, sleep=sleep)
+    try:
+        page.locator("a[href*='federation/login']").first.click(timeout=8000)
+    except Exception:
+        try:
+            page.get_by_role("link", name=re.compile(r"^here$", re.I)).first.click(timeout=8000)
+        except Exception as exc:
+            raise IntakeHold(
+                "GEICO Gateway session expired and the log-back-in link was not found"
+            ) from exc
+    sleep(8)
 
 
 def login_geico(
@@ -142,16 +169,14 @@ def login_geico(
         return page
     if is_session_expired(page):
         # "Session expired ... Click here to log back in": follow the link to
-        # the sign-in form instead of typing into the expired page.
-        try:
-            page.get_by_text(re.compile(r"click here", re.I)).first.click(timeout=8000)
-        except Exception as exc:
-            raise IntakeHold("GEICO Gateway session expired and the log-back-in link was not found") from exc
-        sleep(8)
+        # the federation sign-in form instead of typing into the expired page.
+        _open_sign_in_from_expired(page, sleep=sleep)
         if is_signed_in(page):
             page.goto(CLIENT_ALERTS, wait_until="domcontentloaded", timeout=60_000)
             sleep(6)
             return page
+    else:
+        _dismiss_cookie_banner(page, sleep=sleep)
     user, password = (credentials or geico_credentials)()
     if not user or not password:
         raise IntakeHold("GEICO Gateway credentials are not available from secrets")
