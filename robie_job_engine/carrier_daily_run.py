@@ -133,16 +133,21 @@ def close_stale_tabs(cdp_url: str, *, http: Callable[..., Any] = _http_json) -> 
     return closed
 
 
-# Portal home per carrier whose pull needs an already-open tab. When no tab
-# on that host is open, the runner opens one here; the carrier Chrome profile
-# keeps the portal's saved session, so this usually lands signed in. Nothing
-# is typed: a tab that lands on a sign-in page holds in the carrier's own
-# check ("session is not authenticated") and the summary says it needs a
-# person to sign in.
-CARRIER_HOME_URLS = {
-    "geico": "https://gateway2.geico.com/",
-    "natgen": "https://natgenagency.com/MainMenu.aspx",
+# Carriers whose pull expects an already-open signed-in tab. When none exists
+# (or the session expired), the runner signs in through the carrier login
+# module. Credentials stay in Secret Manager; NatGen reads its email code the
+# same way Utica does. Nothing is posted to clients.
+CARRIER_SIGN_IN = {
+    "geico": "robie_job_engine.geico_login.ensure_geico_tab",
+    "natgen": "robie_job_engine.natgen_login.ensure_natgen_tab",
 }
+
+
+def _import_ensure(path: str) -> Callable[[str], str]:
+    module_name, attr = path.rsplit(".", 1)
+    import importlib
+
+    return getattr(importlib.import_module(module_name), attr)
 
 
 def ensure_carrier_tab(
@@ -151,29 +156,19 @@ def ensure_carrier_tab(
     *,
     http: Callable[..., Any] = _http_json,
     sleep: Callable[[float], None] | None = None,
+    sign_in: Callable[[str], str] | None = None,
 ) -> str | None:
-    """Open the carrier's portal home on the carrier Chrome if no tab is on it.
+    """Sign in (or reopen) the carrier portal tab when this carrier needs one.
 
-    Returns the opened URL, or None when a tab already exists or the carrier
-    has no home URL here.
+    Returns the portal URL after sign-in, or None when the carrier does not
+    need a pre-opened tab. ``sign_in`` is injectable for tests.
     """
-    home = CARRIER_HOME_URLS.get(name)
-    if not home:
+    path = CARRIER_SIGN_IN.get(name)
+    if not path:
         return None
     base = _require_local_cdp(cdp_url)
-    host = urllib.parse.urlsplit(home).hostname
-    targets = http(f"{base}/json/list") or []
-    for target in targets:
-        if isinstance(target, dict) and target.get("type") == "page":
-            if (urllib.parse.urlsplit(str(target.get("url") or "")).hostname or "").lower() == host:
-                return None
-    http(f"{base}/json/new?{home}", method="PUT")
-    if sleep is None:
-        import time
-
-        sleep = time.sleep
-    sleep(20)  # let the portal finish its redirects before the pull attaches
-    return home
+    ensure = sign_in if sign_in is not None else _import_ensure(path)
+    return ensure(base)
 
 
 def parse_json_tail(stdout: str) -> dict[str, Any] | None:
@@ -392,7 +387,7 @@ def run_daily(
         if opened:
             result["opened_tab"] = opened
         if result.get("status") == "HELD" and "not authenticated" in str(result.get("reason") or "").lower():
-            result["reason"] = f"{result['display']} needs a person to sign in on the carrier browser"
+            result["reason"] = f"{result['display']} sign-in did not leave a usable session"
         if upload_drive:
             if drive is None:
                 result["drive"] = {"status": "HELD", "reason": drive_error or "Drive is not available"}

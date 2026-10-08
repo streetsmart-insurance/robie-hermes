@@ -17,12 +17,15 @@ Environment=ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0
 # Environment=, and robie-recording.env points ROBIE_BROWSER_CDP_URL at the
 # EZLynx Chrome on 9222). The runner refuses any port but 9223.
 Environment=HOME=/opt/streetsmart-hermes-test
+Environment=ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com
+Environment=UTICA_MFA_MAILBOX=carlo@streetsmart.insurance
 # ROBIE_GOOGLE_TOKEN_FILE: the Test Drive token (Drive upload only).
 EnvironmentFile=-/etc/streetsmart-hermes-test/robie-recording.env
 EnvironmentFile=-/etc/streetsmart-hermes-test/robie-carrier-pull.env
-# No --notify: posting the summary to the ROBIE health Chat needs approval and
-# ROBIE_HEALTH_CHAT_SPACE; the summary is written to runs/<date>/summary.txt.
-ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull-test --cdp-url http://127.0.0.1:9223 --upload-drive
+# --notify posts the plain-English summary to ROBIE_HEALTH_CHAT_SPACE (same
+# ROBIE health Chat Prod uses). Space and Chat app key come from
+# robie-carrier-pull.env. The summary is also written to runs/<date>/summary.txt.
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull-test --cdp-url http://127.0.0.1:9223 --upload-drive --notify
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

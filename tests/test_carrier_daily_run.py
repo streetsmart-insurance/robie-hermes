@@ -287,7 +287,7 @@ class DailyRunTests(unittest.TestCase):
         self.assertIn("ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0", service)
         self.assertNotIn("/current", service)
         exec_line = next(line for line in service.splitlines() if line.startswith("ExecStart="))
-        self.assertNotIn("--notify", exec_line)
+        self.assertIn("--notify", exec_line)
         self.assertIn("--upload-drive", exec_line)
         self.assertIn("/var/lib/robie-carrier-pull-test/release", service)
         self.assertIn("--cdp-url http://127.0.0.1:9223", exec_line)
@@ -413,35 +413,29 @@ if __name__ == "__main__":
 
 
 class OpenCarrierTabTests(unittest.TestCase):
-    def test_opens_geico_home_when_no_geico_tab_and_never_types(self):
-        calls = []
+    def test_calls_geico_and_natgen_sign_in_helpers(self):
+        called = []
 
-        def http(url, method="GET"):
-            calls.append((method, url))
-            if url.endswith("/json/list"):
-                return [{"type": "page", "url": "https://fos.finys.com/"}]
-            return {"id": "X"}
+        def sign_in(url):
+            called.append(url)
+            return "https://gateway2.geico.com/"
 
-        opened = daily.ensure_carrier_tab("geico", "http://127.0.0.1:9223", http=http, sleep=lambda s: None)
+        opened = daily.ensure_carrier_tab(
+            "geico", "http://127.0.0.1:9223", http=lambda *a, **k: [], sign_in=sign_in
+        )
         self.assertEqual(opened, "https://gateway2.geico.com/")
-        self.assertIn(("PUT", "http://127.0.0.1:9223/json/new?https://gateway2.geico.com/"), calls)
-
-    def test_keeps_existing_natgen_tab_and_skips_unmapped_carriers(self):
-        calls = []
-
-        def http(url, method="GET"):
-            calls.append((method, url))
-            return [{"type": "page", "url": "https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5"}]
-
-        self.assertIsNone(daily.ensure_carrier_tab("natgen", "http://127.0.0.1:9223", http=http, sleep=lambda s: None))
-        self.assertNotIn("PUT", [m for m, _ in calls])
-        self.assertIsNone(daily.ensure_carrier_tab("utica", "http://127.0.0.1:9223", http=http, sleep=lambda s: None))
+        self.assertEqual(called, ["http://127.0.0.1:9223"])
+        self.assertIsNone(
+            daily.ensure_carrier_tab("utica", "http://127.0.0.1:9223", http=lambda *a, **k: [], sign_in=sign_in)
+        )
 
     def test_refuses_the_ezlynx_chrome(self):
         with self.assertRaises(Exception):
-            daily.ensure_carrier_tab("geico", "http://127.0.0.1:9222", http=lambda *a, **k: [], sleep=lambda s: None)
+            daily.ensure_carrier_tab(
+                "geico", "http://127.0.0.1:9222", http=lambda *a, **k: [], sign_in=lambda u: u
+            )
 
-    def test_run_daily_opens_tabs_and_turns_sign_in_page_into_plain_hold(self):
+    def test_run_daily_opens_tabs_and_turns_failed_sign_in_into_plain_hold(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         os.environ["ROBIE_ENV"] = "TEST"
@@ -456,10 +450,75 @@ class OpenCarrierTabTests(unittest.TestCase):
         summary = daily.run_daily(
             day=date(2026, 10, 9), root=Path(tmp.name), carriers=("geico", "natgen"),
             run_one=run_one, close_tabs=lambda url: [],
-            open_tab=lambda name, url: opened.append(name) or None,
+            open_tab=lambda name, url: opened.append(name) or "signed-in",
         )
         self.assertEqual(opened, ["geico", "natgen"])
-        self.assertIn("GEICO: held. GEICO needs a person to sign in on the carrier browser", summary["text"])
+        self.assertIn("GEICO: held. GEICO sign-in did not leave a usable session", summary["text"])
+
+
+class GeicoNatgenLoginTests(unittest.TestCase):
+    def test_geico_credentials_parse_producer_shapes(self):
+        from robie_job_engine import geico_login as gl
+
+        with mock.patch.object(gl, "_get_secret", side_effect=lambda n: {
+            "geico-gateway-producer": '{"username":"I001234","password":"x"}',
+        }[n]):
+            self.assertEqual(gl.geico_credentials(), ("I001234", "x"))
+        with mock.patch.object(gl, "_get_secret", side_effect=lambda n: {
+            "geico-gateway-producer": "I009999",
+            "geico-extend-password": "pw",
+        }[n]):
+            self.assertEqual(gl.geico_credentials(), ("I009999", "pw"))
+
+    def test_geico_login_skips_typing_when_already_signed_in(self):
+        from robie_job_engine import geico_login as gl
+
+        page = mock.MagicMock()
+        page.url = "https://gateway2.geico.com/"
+        page.evaluate.return_value = "Welcome to GEICO Gateway"
+        page.locator.return_value.count.return_value = 0
+        ctx = mock.MagicMock()
+        ctx.pages = []
+        ctx.new_page.return_value = page
+        out = gl.login_geico(ctx, sleep=lambda s: None, credentials=lambda: ("u", "p"))
+        self.assertIs(out, page)
+        page.locator.return_value.first.fill.assert_not_called()
+
+    def test_natgen_login_reads_email_code_on_mfa(self):
+        from robie_job_engine import natgen_login as nl
+
+        page = mock.MagicMock()
+        page.url = "https://natgenagency.com/login"
+        page.evaluate.return_value = "Multi-factor verification required"
+        # locator chain used for fills / clicks
+        loc = mock.MagicMock()
+        loc.count.return_value = 1
+        loc.first.is_visible.return_value = True
+        page.locator.return_value = loc
+        page.get_by_text.return_value.first.click.return_value = None
+        page.get_by_role.return_value.first.click.return_value = None
+        ctx = mock.MagicMock()
+        ctx.pages = []
+        ctx.new_page.return_value = page
+        codes = []
+
+        def reader(**kw):
+            codes.append(kw.get("not_before"))
+            return "123456"
+
+        # After MFA, goto reports lands signed in
+        def set_url(url, **kw):
+            page.url = url
+        page.goto.side_effect = set_url
+        # Force MFA path: first is_signed_in False (login path), then True after MFA
+        with mock.patch.object(nl, "is_signed_in", side_effect=[False, True]):
+            out = nl.login_natgen(
+                ctx, sleep=lambda s: None, clock=lambda: 1000.0,
+                credentials=lambda: ("user", "pass"), code_reader=reader,
+            )
+        self.assertIs(out, page)
+        self.assertEqual(codes, [1000.0])
+        loc.first.fill.assert_any_call("123456")
 
 
 class PlainSummaryTests(unittest.TestCase):
