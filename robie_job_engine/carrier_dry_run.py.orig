@@ -121,8 +121,7 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".utica_pending_cancellation",
         browser_cls_name="PlaywrightUticaCancellationBrowser",
         ledger_cls_name="UticaDeliveryLedger",
-        select_fn_name="ensure_utica_page",
-        select_takes="browser",
+        select_fn_name="select_utica_page",
     ),
     "farmersofsalem": CarrierSpec(
         name="farmersofsalem",

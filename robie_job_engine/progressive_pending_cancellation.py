@@ -65,8 +65,8 @@ DRIVE_UPLOAD_UNAVAILABLE = (
     "refusing to report the pack as uploaded"
 )
 HERMES_TEST_HOST = "hermes-test-01"
-# Live policy numbers are numeric, 6-12 digits (e.g. 970498127, 876263535).
-_POLICY_NUMBER = re.compile(r"^\d{6,12}$")
+# Live policy numbers: 6-12 digits, optional 2-4 letter prefix (e.g. 970498127, NJA129565).
+_POLICY_NUMBER = re.compile(r"^(?:[A-Z]{2,3})?\d{6,12}(?:-\d+)?$")
 # Report grid headers (column order may vary; matching is by alias).
 _REPORT_HEADERS = (
     ("insured_name", frozenset({"primary named insured", "insured", "insured name", "named insured"})),
@@ -140,7 +140,7 @@ def parse_carrier_date(text: str) -> date:
 
 
 def require_policy_number(text: str) -> str:
-    cleaned = _norm(text).replace(" ", "")
+    cleaned = _norm(text).replace(" ", "").upper()
     if not _POLICY_NUMBER.fullmatch(cleaned):
         raise IntakeHold(f"Progressive FAO policy number is missing or ambiguous: {text!r}")
     return cleaned

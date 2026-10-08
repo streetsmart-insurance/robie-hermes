@@ -821,6 +821,45 @@ def select_utica_page(pages: list[Any]) -> Any:
     return matches[0]
 
 
+def ensure_utica_page(cdp_browser: Any) -> Any:
+    """Find the signed-in UFirst Now tab, or log in automatically.
+    
+    BUILT 2026-10-07 (Ralph). If no signed-in tab exists, creates a new
+    page and performs the full Okta login (with automatic email MFA
+    handling via utica_login module).
+    """
+    from . import utica_login
+    
+    # First, look for an existing signed-in tab
+    pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
+    matches = [
+        page for page in pages
+        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == UTICA_HOST
+    ]
+    
+    # Check if any match is actually signed in
+    for page in matches:
+        try:
+            body = page.locator("body").inner_text().lower()
+            if "welcome" in body or "carlo ferrara" in body:
+                return page
+        except Exception:
+            pass
+    
+    # No signed-in tab — perform auto-login in a new page
+    ctx = cdp_browser.contexts[0]
+    page = ctx.new_page()
+    try:
+        utica_login.login_utica(page)
+        return page
+    except Exception:
+        try:
+            page.close()
+        except Exception:
+            pass
+        raise
+
+
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightUticaCancellationBrowser, Callable[[], None]]:
     """Attach to the local carrier Chrome. Exactly one UFirst Now tab."""
     from .document_retrieval_filing import require_carrier_pull
