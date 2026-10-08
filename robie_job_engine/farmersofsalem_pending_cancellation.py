@@ -106,9 +106,17 @@ _CANCELLATION_TASK_TYPES = ("cancellation", "cancel", "non-pay", "nonpay", "non 
 # Header aliases for the Document Summary table.
 _DOC_FIELDS = (
     ("description", frozenset({"description", "document", "document description", "type", "form", "title"})),
-    ("doc_date", frozenset({"date", "document date", "created", "issued", "effective date"})),
+    ("doc_date", frozenset({"date", "document date", "created", "issued", "effective date", "process date"})),
     ("action", frozenset({"action", "view", ""})),
+    # Live 2026-10-08 Finys Document Summary: "" | Email | Description |
+    # Department | Department Group | Type | Process Date | Remove from list.
+    # The notice kind is in Type (e.g. "Intent to Cancel Notice") while
+    # Description holds the form code (e.g. "renewal reminder notice").
+    ("doc_type", frozenset({"type", "document type"})),
 )
+# The row's download icon: <a id="dlink_<n>" onclick="...OnDownloadClick"><img></a>.
+# The Email and "Remove from list" checkboxes in the same row are never touched.
+FINYS_DOC_DOWNLOAD_LINK = "a[id^='dlink_']"
 
 
 class PullHeld(RuntimeError):
@@ -561,6 +569,12 @@ def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
         except IntakeHold:
             doc_date = None
         notice_key = classify_notice(description)
+        if notice_key is None and "doc_type" in indexes and indexes["doc_type"] != indexes["description"]:
+            doc_type = _cell_text(row, indexes["doc_type"])
+            if doc_type:
+                notice_key = classify_notice(doc_type)
+                if notice_key is not None:
+                    description = f"{description} ({doc_type})"
         view: Any | None = None
         if notice_key is not None:
             try:
@@ -569,6 +583,11 @@ def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
                 links = []
             exact = [link for link in links if _norm(link.inner_text()).casefold() == "view"]
             candidates = exact or links
+            if not candidates:
+                try:
+                    candidates = row.locator(FINYS_DOC_DOWNLOAD_LINK).all()
+                except Exception:
+                    candidates = []
             if len(candidates) == 1:
                 view = candidates[0]
             elif candidates:

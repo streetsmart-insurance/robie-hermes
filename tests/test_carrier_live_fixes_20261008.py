@@ -1220,3 +1220,86 @@ class FinysLandingReloadTests(unittest.TestCase):
             with self.assertRaisesRegex(IntakeHold, "Finys table"):
                 browser.load_pending_items()
         page.goto.assert_called_once()
+
+
+class FinysDocumentSummaryLiveTests(unittest.TestCase):
+    """Live 2026-10-08 fcc8ca8f: notice kind sits in Type, date in Process Date, icon link."""
+
+    HEADERS = ("", "Email", "Description", "Department", "Department Group", "Type", "Process Date", "Remove from list")
+
+    def _row(self, cells, links=1):
+        icon = mock.Mock(name="dlink")
+        row = SimpleNamespace(cells=cells)
+        row.get_by_role = lambda *a, **k: SimpleNamespace(all=lambda: [])
+        row.locator = lambda sel: SimpleNamespace(all=lambda: [icon] * links)
+        return row, icon
+
+    def _extract(self, rows):
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        indexes = fos._header_indexes(self.HEADERS, fos._DOC_FIELDS)
+        with mock.patch.object(fos, "_find_table_by_headers", return_value=(None, indexes)), \
+                mock.patch.object(fos, "_table_body_rows", return_value=rows), \
+                mock.patch.object(fos, "_cell_text", side_effect=lambda row, i: row.cells[i]):
+            return fos.extract_documents(mock.Mock()), indexes
+
+    def test_headers_map_type_and_process_date(self):
+        _, indexes = self._extract([])
+        self.assertEqual(indexes["description"], 2)
+        self.assertEqual(indexes["doc_type"], 5)
+        self.assertEqual(indexes["doc_date"], 6)
+
+    def test_intent_to_cancel_in_type_column_is_the_target_with_icon_link(self):
+        from datetime import date
+
+        from robie_job_engine import farmersofsalem_pending_cancellation as fos
+
+        itc, icon = self._row(["", "", "renewal reminder notice", "Billing", "Billing",
+                               "Intent to Cancel Notice", "9/14/2026", ""])
+        inv, _ = self._row(["", "", "renewalinvoice", "Billing", "Billing", "Renewal Invoice", "8/12/2026", ""])
+        docs, _ = self._extract([itc, inv])
+        target = fos.select_target_document(docs)
+        self.assertEqual(target.notice_key, "intent-to-cancel")
+        self.assertEqual(target.doc_date, date(2026, 9, 14))
+        self.assertIs(target.view, icon)
+        self.assertIsNone(docs[1].notice_key)
+
+    def test_two_icon_links_in_one_row_hold(self):
+        itc, _ = self._row(["", "", "x", "Billing", "Billing", "Intent to Cancel Notice", "9/14/2026", ""], links=2)
+        with self.assertRaisesRegex(IntakeHold, "View link"):
+            self._extract([itc])
+
+
+class BopStaleTabTests(unittest.TestCase):
+    """Live 2026-10-08 03637095: stale BOP tab under a 'Session Expired' modal."""
+
+    def test_closes_only_bop_app_tabs_in_the_shell_context(self):
+        from robie_job_engine import progressive_bop as bop
+
+        stale = mock.Mock(url="https://bop.americanstrategic.com/")
+        other = mock.Mock(url="https://fos.finys.com/")
+        shell = mock.Mock(url="https://www.foragentsonly.com/landingpages/managepolicies/")
+        shell.context = SimpleNamespace(pages=[shell, stale, other])
+        self.assertEqual(bop.close_stale_bop_tabs(shell), 1)
+        stale.close.assert_called_once()
+        other.close.assert_not_called()
+        shell.close.assert_not_called()
+
+    def test_session_expired_modal_holds_with_a_clear_reason(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = mock.Mock()
+        dialog = page.locator.return_value
+        dialog.count.return_value = 1
+        dialog.is_visible.return_value = True
+        dialog.inner_text.return_value = "× Session Expired You've been logged out due to inactivity. Ok"
+        with self.assertRaisesRegex(IntakeHold, "Session Expired"):
+            bop.open_pending_cancel_report(page)
+        page.get_by_role.return_value.click.assert_not_called()
+
+    def test_no_modal_carries_on(self):
+        from robie_job_engine import progressive_bop as bop
+
+        page = mock.Mock()
+        page.locator.return_value.count.return_value = 0
+        bop._raise_if_bop_session_expired(page)

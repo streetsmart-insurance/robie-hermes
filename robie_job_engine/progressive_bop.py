@@ -1679,6 +1679,41 @@ def ensure_manage_policies_landing(page: Any) -> None:
         raise IntakeHold("Progressive Manage Policies page did not open")
 
 
+def close_stale_bop_tabs(shell: Any) -> int:
+    """Close BOP application tabs left by an earlier run before signing on again.
+
+    Live 2026-10-08 (03637095): a BOP tab from a morning run sat on "Session
+    Expired - You've been logged out due to inactivity"; the new sign-on
+    attached to it and the View Reports click timed out under that modal.
+    Only bop.americanstrategic.com pages in the shell's context are closed.
+    """
+    closed = 0
+    for target in _context_pages(shell):
+        if target is shell or not _is_bop_app_url(_target_url(target)):
+            continue
+        _close_if_possible(target)
+        closed += 1
+    return closed
+
+
+BOP_SESSION_EXPIRED = (
+    "Progressive BOP application shows 'Session Expired' (logged out due to "
+    "inactivity); not dismissed or retried in this run"
+)
+
+
+def _raise_if_bop_session_expired(page: Any) -> None:
+    try:
+        dialog = page.locator("#modalAlertDialog")
+        if int(dialog.count()) != 1 or not dialog.is_visible():
+            return
+        text = str(dialog.inner_text() or "")
+    except Exception:
+        return
+    if "session expired" in text.casefold() or "logged out" in text.casefold():
+        raise IntakeHold(BOP_SESSION_EXPIRED)
+
+
 def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
     """Open Businessowner/Contractor GL in one new window from Manage Policies Home.
 
@@ -1686,6 +1721,7 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     Manage Policies landing, where exactly one visible GL link is expected.
     """
     ensure_manage_policies_landing(page)
+    close_stale_bop_tabs(page)
     try:
         with page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup:
             _click_shell_home_gl(page)
@@ -1705,6 +1741,7 @@ def open_pending_cancel_report(report_page: Any, report_date: date | None = None
         report_page.get_by_role("button", name="VIEW REPORTS", exact=True).wait_for(timeout=15000)
     except Exception:
         pass
+    _raise_if_bop_session_expired(report_page)
     _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
     # The reports panel may expose direct export buttons (e.g. "Export Pending
     # Cancel for Non-Payment Xls") without a "Pending Cancel for Nonpayment"
