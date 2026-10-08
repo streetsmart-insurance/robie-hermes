@@ -18,9 +18,16 @@ from urllib.parse import urlsplit
 from .intake_core import IntakeHold
 
 
-LOGIN_URL = "https://farmersofsalem.com/agent_login.aspx"
+LOGIN_URL = "https://www.farmersofsalem.com/agent_login.aspx"
+AGENT_HOME_URL = "https://www.farmersofsalem.com/agent/agent_home.aspx"
 PORTAL_HOST = "farmersofsalem.com"
 FINYS_HOST = "fos.finys.com"
+# Live agent_login.aspx (read-only, 2026-10-08). The name attributes use $
+# where the ids use _. The agent-search widget (SearchAgentByNameUserControl1)
+# is also a visible text input and is not the login.
+USER_ID = "ctl00_ContentPlaceHolder1_txtName"
+PASS_ID = "ctl00_ContentPlaceHolder1_txtPass"
+SUBMIT_ID = "ctl00_ContentPlaceHolder1_btnLogin"
 GCP_PROJECT = "streetsmart-hermes-poc"
 USER_SECRET = "farmers_of_salem_username"
 PASS_SECRET = "farmers_of_salem_password"
@@ -28,22 +35,17 @@ OLDER_USER_SECRET = "farmers_of_salem_robie_username"
 OLDER_PASS_SECRET = "farmers_of_salem_robie_password"
 SETTLE_MS = 4000
 _PASSWORD_SUBMITTED = False
-# ASP.NET WebForms ids look like ctl00_Content_txtUserName. Hidden duplicates
-# of the same input are common; only a visible one counts.
 _USER_SELECTORS = (
-    "input[id$='txtUserName']",
-    "input[name$='txtUserName']",
-    "input[id*='UserName']",
-    "input[name*='UserName']",
-    "input[name*='username']",
-    "input[type='email']",
-    "input[type='text']",
+    f"#{USER_ID}",
+    "input[name='ctl00$ContentPlaceHolder1$txtName']",
 )
 _PASS_SELECTORS = (
-    "input[id$='txtPassword']",
-    "input[name$='txtPassword']",
-    "input[id*='Password']",
-    "input[type='password']",
+    f"#{PASS_ID}",
+    "input[name='ctl00$ContentPlaceHolder1$txtPass']",
+)
+_SUBMIT_SELECTORS = (
+    f"#{SUBMIT_ID}",
+    "input[name='ctl00$ContentPlaceHolder1$btnLogin']",
 )
 _REJECT_TERMS = ("invalid", "incorrect", "does not match", "locked", "disabled", "unsuccessful", "rejected", "try again")
 
@@ -121,11 +123,18 @@ def _visible_matches(page: Any, selector: str) -> list[Any]:
     return matches
 
 
-def _visible_password(page: Any) -> bool:
-    for selector in _PASS_SELECTORS:
-        if _visible_matches(page, selector):
-            return True
-    return False
+def _on_agent_path(url: str) -> bool:
+    """True for /agent/... on the Farmers of Salem host. Not /agent_login.aspx."""
+    parts = urlsplit(url or "")
+    host = (parts.hostname or "").lower()
+    if PORTAL_HOST not in host:
+        return False
+    return (parts.path or "").lower().startswith("/agent/")
+
+
+def _login_form_visible(page: Any) -> bool:
+    """The ContentPlaceHolder1 password box is on screen. Search fields do not count."""
+    return any(_visible_matches(page, selector) for selector in _PASS_SELECTORS)
 
 
 def _signed_in_markers(page: Any) -> bool:
@@ -154,11 +163,11 @@ def _visible_matches_locator(locator: Any) -> bool:
 
 
 def is_signed_in(page: Any) -> bool:
-    """True on the agent home or Finys, not on a visible login form.
+    """True on Finys, or any /agent/ page that is not showing the login form.
 
-    A hidden password input (ASP.NET keeps those on the home page) is not a
-    login form. The home page is recognised from its title, its text, or a
-    FOS PORTAL / Logout link, and sign-in is skipped.
+    Live home is https://www.farmersofsalem.com/agent/agent_home.aspx
+    ('Farmers Of Salem :: Agent Home'). That page is not sent to
+    agent_login.aspx. /agent_login.aspx is not an /agent/ path.
     """
     url = str(getattr(page, "url", "") or "")
     host = _host(url)
@@ -167,13 +176,13 @@ def is_signed_in(page: Any) -> bool:
         return True
     if PORTAL_HOST not in host:
         return False
-    if _signed_in_markers(page) and not _visible_password(page):
+    if _on_agent_path(url) and not _login_form_visible(page):
         return True
-    if "login" in path or "signin" in path:
-        return False
-    if _visible_password(page):
-        return False
-    return _signed_in_markers(page)
+    if "agent home" in _title(page).lower() and not _login_form_visible(page):
+        return True
+    if _signed_in_markers(page) and not _login_form_visible(page):
+        return True
+    return False
 
 
 def _rejection_message(body: str) -> str:
@@ -212,18 +221,17 @@ def _type(locator: Any, value: str) -> None:
 
 
 def _click_submit(page: Any) -> bool:
-    for name in ("Login", "Log In", "Sign In", "Submit"):
-        try:
-            button = page.get_by_role("button", name=re.compile(rf"^{name}$", re.IGNORECASE))
-        except Exception:
-            continue
-        if _count(button) == 1:
-            (button.first if hasattr(button, "first") else button).click()
+    """Click ContentPlaceHolder1's btnLogin. The agent-search submit is not it.
+
+    The live control is an input type=submit. The page has no button elements.
+    """
+    for selector in _SUBMIT_SELECTORS:
+        matches = _visible_matches(page, selector)
+        if len(matches) > 1:
+            raise IntakeHold("Farmers of Salem sign-in form is ambiguous")
+        if len(matches) == 1:
+            matches[0].click()
             return True
-    locator = page.locator("button[type='submit'], input[type='submit']")
-    if _count(locator) == 1:
-        (locator.first if hasattr(locator, "first") else locator).click()
-        return True
     return False
 
 

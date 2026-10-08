@@ -257,22 +257,25 @@ class FarmersLoginTests(unittest.TestCase):
         def locator(sel):
             if sel == "body":
                 return SimpleNamespace(inner_text=lambda: page.body)
-            if "UserName" in sel:
+            if sel == f"#{login.USER_ID}":
                 return _Box(page, "user")
-            if sel == "input[type='password']" and page.password_on:
+            if sel == f"#{login.PASS_ID}" and page.password_on:
                 return _Box(page, "password")
+            if sel == f"#{login.SUBMIT_ID}":
+                return _Button(page)
             return _Zero()
 
         def wait(_ms):
             if page.clicks:
-                page.url = "https://farmersofsalem.com/agent_home.aspx"
+                page.url = login.AGENT_HOME_URL
                 page.body = "Farmers Of Salem :: Agent Home\nFOS PORTAL"
                 page.password_on = False
 
         page.locator = locator
+        page.title = lambda: "Farmers Of Salem :: Agent Login"
         page.goto = lambda url, **k: setattr(page, "url", url)
         page.wait_for_timeout = wait
-        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+        page.get_by_role = lambda role, name=None: _Zero()
         finys = SimpleNamespace(url="https://fos.finys.com/")
         seen = []
 
@@ -552,15 +555,25 @@ class FarmersHomeTests(unittest.TestCase):
                 return Hidden()
 
         page = SimpleNamespace(
-            url="https://www.farmersofsalem.com/agent_home.aspx",
+            url=login.AGENT_HOME_URL,
             body="Welcome back",
             gotos=[],
         )
         page.title = lambda: "Farmers Of Salem :: Agent Home"
-        page.locator = lambda sel: PasswordField() if "password" in sel.lower() or "Password" in sel else _Zero()
+        page.locator = lambda sel: PasswordField() if login.PASS_ID in sel else _Zero()
         page.get_by_role = lambda role, name=None: _Zero()
         page.goto = lambda url, **k: page.gotos.append(url)
         self.assertTrue(login.is_signed_in(page))
+        other = SimpleNamespace(url="https://www.farmersofsalem.com/agent/book.aspx", body="", gotos=[])
+        other.title = lambda: "Book"
+        other.locator = lambda sel: _Zero()
+        other.get_by_role = lambda role, name=None: _Zero()
+        self.assertTrue(login.is_signed_in(other))
+        login_page = SimpleNamespace(url=login.LOGIN_URL, body="Enter Your User Name", gotos=[])
+        login_page.title = lambda: "Farmers Of Salem :: Agent Login"
+        login_page.locator = lambda sel: _Zero()
+        login_page.get_by_role = lambda role, name=None: _Zero()
+        self.assertFalse(login.is_signed_in(login_page))
         finys = SimpleNamespace(url="https://fos.finys.com/")
         with mock.patch.object(login, "_require_test_host"), mock.patch.object(login, "_get_secret") as secret:
             returned = login.login_farmers(page, open_portal=lambda _page: finys)
@@ -568,62 +581,89 @@ class FarmersHomeTests(unittest.TestCase):
         self.assertEqual(page.gotos, [])
         self.assertIs(returned, finys)
 
-    def test_hidden_duplicate_inputs_are_not_an_ambiguous_form(self):
+    def test_live_login_form_ignores_the_agent_search_inputs(self):
+        """Three visible text inputs. Only ContentPlaceHolder1 is the login."""
         from robie_job_engine import farmersofsalem_login as login
 
         class Field:
-            def __init__(self, visible, kind):
-                self.visible = visible
-                self.kind = kind
+            def __init__(self, field_id):
+                self.field_id = field_id
+                self.filled = None
+                self.clicked = 0
 
             def is_visible(self):
-                return self.visible
+                return True
 
             def fill(self, value):
                 self.filled = value
 
-        hidden_user, visible_user = Field(False, "user"), Field(True, "user")
-        hidden_pass, visible_pass = Field(False, "password"), Field(True, "password")
-
-        class Loc:
-            def __init__(self, nodes):
-                self.nodes = nodes
+            def click(self):
+                self.clicked += 1
 
             def count(self):
-                return len(self.nodes)
+                return 1
+
+        fields = {
+            login.USER_ID: Field(login.USER_ID),
+            "ctl00_SearchAgentByNameUserControl1_txtName": Field("search-name"),
+            "ctl00_SearchAgentByNameUserControl1_txtZip": Field("zip"),
+            login.PASS_ID: Field(login.PASS_ID),
+            login.SUBMIT_ID: Field(login.SUBMIT_ID),
+            "ctl00_SearchAgentByNameUserControl1_btnSearch": Field("search-button"),
+        }
+
+        class One:
+            def __init__(self, field):
+                self.field = field
+                self.first = field
+
+            def count(self):
+                return 1
 
             def nth(self, index):
-                return self.nodes[index]
+                return self.field
+
+            def fill(self, value):
+                self.field.fill(value)
+
+            def click(self):
+                self.field.click()
+
+            def is_visible(self):
+                return True
 
         page = SimpleNamespace(
-            url="https://farmersofsalem.com/agent_login.aspx",
-            body="User Name\nPassword\nLogin",
+            url=login.LOGIN_URL,
+            body="Enter Your User Name",
             clicks=0,
-            password_on=True,
         )
-        page.title = lambda: "Login"
+        page.title = lambda: "Farmers Of Salem :: Agent Login"
         page.goto = lambda url, **k: None
         page.wait_for_timeout = lambda _ms: None
-        page.get_by_role = lambda role, name=None: _Button(page) if role == "button" else _Zero()
+        page.get_by_role = lambda role, name=None: _Zero()
 
         def locator(sel):
             if sel == "body":
                 return SimpleNamespace(inner_text=lambda: page.body)
-            if "UserName" in sel or "username" in sel:
-                return Loc([hidden_user, visible_user])
-            if "Password" in sel or sel == "input[type='password']":
-                return Loc([hidden_pass, visible_pass])
+            for field_id, field in fields.items():
+                if field_id in sel and "ContentPlaceHolder1" in sel:
+                    return One(field)
             return _Zero()
 
         page.locator = locator
         with mock.patch.object(login, "_require_test_host"):
             with self.assertRaises(IntakeHold):
-                # Password is submitted once; the home never appears, so the attempt holds.
                 login.login_farmers(page, credentials=lambda: ("user", "pw-value"), open_portal=lambda p: p)
-        self.assertEqual(getattr(visible_user, "filled", None), "user")
-        self.assertEqual(getattr(visible_pass, "filled", None), "pw-value")
-        self.assertFalse(hasattr(hidden_user, "filled"))
-        self.assertEqual(page.clicks, 1)
+        self.assertEqual(fields[login.USER_ID].filled, "user")
+        self.assertEqual(fields[login.PASS_ID].filled, "pw-value")
+        self.assertEqual(login._USER_SELECTORS[0], f"#{login.USER_ID}")
+        self.assertIn("ctl00$ContentPlaceHolder1$txtName", login._USER_SELECTORS[1])
+        self.assertIn("ctl00$ContentPlaceHolder1$txtPass", login._PASS_SELECTORS[1])
+        self.assertEqual(login._SUBMIT_SELECTORS[0], f"#{login.SUBMIT_ID}")
+        self.assertEqual(fields[login.SUBMIT_ID].clicked, 1)
+        self.assertIsNone(fields["ctl00_SearchAgentByNameUserControl1_txtName"].filled)
+        self.assertIsNone(fields["ctl00_SearchAgentByNameUserControl1_txtZip"].filled)
+        self.assertEqual(fields["ctl00_SearchAgentByNameUserControl1_btnSearch"].clicked, 0)
 
 
 class TabHygieneTests(unittest.TestCase):
