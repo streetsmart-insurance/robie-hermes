@@ -109,6 +109,9 @@ jobs:
         run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_preflight.py tests/test_health_check_import_root.py tests/test_health_check_profile.py
       - name: Test document retrieval filing
         run: ROBIE_ENV=TEST PYTHONPATH=. python -m unittest tests.test_document_retrieval_filing tests.test_progressive_fao_memo tests.test_gemini_ui_rescue
+      - name: Test shared EZLynx API CLI (stub clients, no live calls)
+        run: PYTHONPATH=. python -m pytest -q tests/test_ezlynx_api_cli.py
+
       - name: Test Ascend API notice source
         run: PYTHONPATH=. python -m pytest -q tests/test_ascend_api_notice_source.py tests/test_ascend_notice_driver.py tests/test_ascend_unmatched_digest.py tests/test_install_ascend_unmatched_digest.py tests/test_ascend_stuck_and_agreements.py
 
