@@ -739,12 +739,31 @@ def test_every_read_verb_makes_only_gets_and_never_calls_the_write_gate(tmp_path
     assert "start" not in [line["phase"] for line in audit_lines(svc)]
 
 
+def _installer(root, *argv):
+    import subprocess
+
+    return subprocess.run(
+        ["bash", str(root / "scripts" / "install-ezlynx-api-cli.sh"), *argv],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def _fake_host(prefix: Path, *, production: bool = False, test: bool = False) -> None:
+    for flag, name in ((production, "streetsmart-hermes"), (test, "streetsmart-hermes-test")):
+        if flag:
+            py = prefix / "opt" / name / "venv" / "bin" / "python"
+            py.parent.mkdir(parents=True)
+            py.write_text("#!/bin/sh\n")
+            py.chmod(0o755)
+
+
 def test_wrapper_and_installer_are_wired_for_the_release(tmp_path):
     import subprocess
 
     root = Path(cli.__file__).resolve().parents[1]
     wrapper = (root / "scripts" / "ezlynx-api").read_text()
-    assert "sudo -n -u \"${RUN_AS}\"" in wrapper and "RUN_AS=\"streetsmart-hermes\"" in wrapper
+    assert "sudo -n -u \"${RUN_AS}\"" in wrapper
+    assert "RUN_AS=\"${EZLYNX_API_RUN_AS:-streetsmart-hermes}\"" in wrapper
     assert re.search(r"^cd /$", wrapper, re.M)
     assert "unset ROBIE_EZLYNX_WRITE_SCOPE" in wrapper and "ROBIE_PLAYGROUND" in wrapper
     assert "-m robie_job_engine.ezlynx_api_cli" in wrapper
@@ -752,24 +771,268 @@ def test_wrapper_and_installer_are_wired_for_the_release(tmp_path):
     assert os.access(root / "scripts" / "ezlynx-api", os.X_OK)
     for script in ("ezlynx-api", "install-ezlynx-api-cli.sh"):
         assert subprocess.run(["bash", "-n", str(root / "scripts" / script)]).returncode == 0
-    prefix = tmp_path / "root"
-    proc = subprocess.run(
-        ["bash", str(root / "scripts" / "install-ezlynx-api-cli.sh"), "--prefix", str(prefix),
-         "--release-dir", str(root), "--robie-env", "TEST"],
-        capture_output=True, text=True, check=False,
-    )
+    # Production layout (the default).
+    prefix = tmp_path / "prod"
+    _fake_host(prefix, production=True)
+    proc = _installer(root, "--prefix", str(prefix), "--release-dir", str(root))
     assert proc.returncode == 0, proc.stderr
     assert (prefix / "usr/local/bin/ezlynx-api").read_text() == wrapper
     assert stat.S_IMODE((prefix / "var/lib/ezlynx-api-cli").stat().st_mode) == 0o750
-    assert "ROBIE_ENV=TEST" in (prefix / "etc/streetsmart-hermes/ezlynx-api-cli.env").read_text()
-    dry = subprocess.run(
-        ["bash", str(root / "scripts" / "install-ezlynx-api-cli.sh"), "--dry-run", "--release-dir", str(root)],
-        capture_output=True, text=True, check=False,
-    )
-    assert dry.returncode == 0 and "dry-run" in dry.stdout
-    gone = subprocess.run(
-        ["bash", str(root / "scripts" / "install-ezlynx-api-cli.sh"), "--prefix", str(prefix), "--uninstall"],
-        capture_output=True, text=True, check=False,
-    )
+    conf = (prefix / "etc/streetsmart-hermes/ezlynx-api-cli.env").read_text()
+    assert "ROBIE_ENV=PRODUCTION" in conf and "EZLYNX_API_RUN_AS=streetsmart-hermes\n" in conf
+    assert "EZLYNX_API_RELEASE=/opt/streetsmart-hermes/current\n" in conf
+    assert "EZLYNX_API_PYTHON=/opt/streetsmart-hermes/venv/bin/python\n" in conf
+    assert "ROBIE_API_CLI_STATE_DIR=/var/lib/ezlynx-api-cli\n" in conf
+    gone = _installer(root, "--prefix", str(prefix), "--uninstall")
     assert gone.returncode == 0
     assert not (prefix / "usr/local/bin/ezlynx-api").exists() and (prefix / "var/lib/ezlynx-api-cli").is_dir()
+
+
+def test_installer_test_layout(tmp_path):
+    root = Path(cli.__file__).resolve().parents[1]
+    prefix = tmp_path / "test"
+    _fake_host(prefix, test=True)
+    proc = _installer(root, "--prefix", str(prefix), "--release-dir", str(root), "--robie-env", "TEST")
+    assert proc.returncode == 0, proc.stderr
+    conf = (prefix / "etc/streetsmart-hermes-test/ezlynx-api-cli.env").read_text()
+    assert "ROBIE_ENV=TEST" in conf and "EZLYNX_API_RUN_AS=streetsmart-hermes-test\n" in conf
+    assert "EZLYNX_API_RELEASE=/opt/streetsmart-hermes-test/releases/current\n" in conf
+    assert "EZLYNX_API_PYTHON=/opt/streetsmart-hermes-test/venv/bin/python\n" in conf
+    assert "ROBIE_API_CLI_STATE_DIR=/var/lib/ezlynx-api-cli-test\n" in conf
+    assert stat.S_IMODE((prefix / "var/lib/ezlynx-api-cli-test").stat().st_mode) == 0o750
+    assert not (prefix / "etc/streetsmart-hermes").exists()
+    dry = _installer(root, "--prefix", str(prefix), "--dry-run", "--release-dir", str(root), "--robie-env", "TEST")
+    assert dry.returncode == 0 and "streetsmart-hermes-test" in dry.stdout and "ROBIE_ENV=TEST" in dry.stdout
+
+
+def test_installer_refuses_the_wrong_layout_for_the_host(tmp_path):
+    root = Path(cli.__file__).resolve().parents[1]
+    # Test host, Production layout asked for: refuse and say what to use.
+    prefix = tmp_path / "testhost"
+    _fake_host(prefix, test=True)
+    proc = _installer(root, "--prefix", str(prefix), "--release-dir", str(root))
+    assert proc.returncode == 2
+    assert "--robie-env TEST" in proc.stderr and "wrong layout" in proc.stderr
+    assert not (prefix / "usr/local/bin/ezlynx-api").exists()
+    # Production host, Test layout asked for.
+    prefix2 = tmp_path / "prodhost"
+    _fake_host(prefix2, production=True)
+    proc = _installer(root, "--prefix", str(prefix2), "--release-dir", str(root), "--robie-env", "TEST")
+    assert proc.returncode == 2 and "--robie-env PRODUCTION" in proc.stderr
+    assert not (prefix2 / "usr/local/bin/ezlynx-api").exists()
+    # A host with neither install, and a dry run on it, also refuse.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for extra in ((), ("--dry-run",)):
+        proc = _installer(root, "--prefix", str(empty), "--release-dir", str(root), *extra)
+        assert proc.returncode == 2 and "no PRODUCTION Hermes install" in proc.stderr
+    # No virtualenv, no install.
+    novenv = tmp_path / "novenv"
+    (novenv / "opt" / "streetsmart-hermes").mkdir(parents=True)
+    proc = _installer(root, "--prefix", str(novenv), "--release-dir", str(root))
+    assert proc.returncode == 2 and "virtualenv is missing" in proc.stderr
+
+
+def test_installer_refuses_a_release_dir_from_the_other_layout(tmp_path):
+    # Without --prefix the release must sit under this host's own root. Dry run
+    # exits before touching anything, so this is safe to run unprivileged.
+    root = Path(cli.__file__).resolve().parents[1]
+    proc = _installer(root, "--dry-run", "--release-dir", str(root), "--robie-env", "TEST")
+    assert proc.returncode == 2  # no /opt/streetsmart-hermes-test here, or release not under it
+
+
+def test_wrapper_runs_selftest_with_global_gemini_location(tmp_path):
+    import subprocess
+    import sys
+
+    root = Path(cli.__file__).resolve().parents[1]
+    me = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "EZLYNX_API_RUN_AS": me,
+        "EZLYNX_API_RELEASE": str(root),
+        "EZLYNX_API_PYTHON": sys.executable,
+        "ROBIE_API_CLI_STATE_DIR": str(tmp_path / "state"),
+    }
+    if (Path("/etc/streetsmart-hermes/ezlynx-api-cli.env").exists()
+            or Path("/etc/streetsmart-hermes-test/ezlynx-api-cli.env").exists()):
+        pytest.skip("a real settings file is installed on this machine")
+    proc = subprocess.run(
+        ["bash", str(root / "scripts" / "ezlynx-api"), "--agent", "wrapper-test", "selftest"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)["result"]
+    assert result["gemini"]["location"] == "global" and result["gemini"]["model"] == "gemini-3.8-flash"
+    assert result["state_dir"] == str(tmp_path / "state")
+    # A missing release is a clear refusal, not a Python traceback.
+    env["EZLYNX_API_RELEASE"] = str(tmp_path / "nope")
+    proc = subprocess.run(
+        ["bash", str(root / "scripts" / "ezlynx-api"), "--agent", "wrapper-test", "selftest"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 2 and "no release at" in proc.stderr and "Traceback" not in proc.stderr
+    env["EZLYNX_API_RELEASE"] = str(root)
+    env["EZLYNX_API_PYTHON"] = str(tmp_path / "no-python")
+    proc = subprocess.run(
+        ["bash", str(root / "scripts" / "ezlynx-api"), "--agent", "wrapper-test", "selftest"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 2 and "layout does not match" in proc.stderr
+
+
+def test_wrapper_test_layout_never_exports_the_prod_secret():
+    root = Path(cli.__file__).resolve().parents[1]
+    wrapper = (root / "scripts" / "ezlynx-api").read_text()
+    guarded = wrapper.split('if [[ "${ROBIE_ENV}" != "TEST" ]]; then', 1)[1].split("fi", 1)[0]
+    assert "ROBIE_EZLYNX_API_PROD_SECRET" in guarded
+    assert wrapper.count("ROBIE_EZLYNX_API_PROD_SECRET") == 2  # one export line, only inside the guard
+    assert 'ROBIE_GEMINI_LOCATION="${ROBIE_GEMINI_LOCATION:-global}"' in wrapper
+
+
+# ------------------------------------------------------ Vertex location
+def _vertex_urls(location):
+    from robie_job_engine.gemini_field_helper import VertexGeminiFieldClient
+
+    seen = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}).encode()
+
+    def opener(request, timeout=None):
+        seen.append(request.full_url)
+        return Resp()
+
+    client = VertexGeminiFieldClient(project="proj", location=location, model="gemini-3.8-flash",
+                                     opener=opener, token_provider=lambda: "tok")
+    assert client.generate_content("hi") == "ok"
+    assert client.generate_unique_field("hi") == "ok"
+    return seen
+
+
+def test_vertex_global_location_uses_the_global_host():
+    expected = ("https://aiplatform.googleapis.com/v1/projects/proj/locations/global/"
+                "publishers/google/models/gemini-3.8-flash:generateContent")
+    assert _vertex_urls("global") == [expected, expected]
+    assert "global-aiplatform" not in expected
+
+
+def test_vertex_regional_location_keeps_the_regional_host():
+    expected = ("https://us-central1-aiplatform.googleapis.com/v1/projects/proj/locations/us-central1/"
+                "publishers/google/models/gemini-3.8-flash:generateContent")
+    assert _vertex_urls("us-central1") == [expected, expected]
+
+
+def test_vertex_location_with_odd_characters_is_refused():
+    from robie_job_engine.gemini_field_helper import VertexGeminiFieldClient
+
+    client = VertexGeminiFieldClient(project="proj", location="evil.example.com/x", model="m",
+                                     opener=lambda *a, **k: pytest.fail("no request"), token_provider=lambda: "tok")
+    with pytest.raises(RuntimeError, match="unexpected characters"):
+        client.generate_content("hi")
+
+
+def test_cli_gemini_location_defaults_to_global(monkeypatch):
+    monkeypatch.delenv("ROBIE_GEMINI_LOCATION", raising=False)
+    monkeypatch.setenv("ROBIE_GEMINI_PROJECT", "proj")
+    assert cli.gemini_location() == "global"
+    client = cli.LiveServices(Path("/nonexistent")).gemini(None)
+    assert client.location == "global" and client.model == "gemini-3.8-flash"
+    assert cli.LiveServices(Path("/nonexistent")).gemini("gemini-3.8-flash-lite").location == "global"
+    monkeypatch.setenv("ROBIE_GEMINI_LOCATION", "us-east5")
+    assert cli.gemini_location() == "us-east5"
+    assert cli.LiveServices(Path("/nonexistent")).gemini(None).location == "us-east5"
+
+
+def test_the_shared_helper_default_is_unchanged_for_other_callers(monkeypatch):
+    # The HITL helper keeps its own default; only the CLI defaults to global.
+    from robie_job_engine import gemini_field_helper as helper
+
+    monkeypatch.delenv("ROBIE_GEMINI_LOCATION", raising=False)
+    monkeypatch.setenv("ROBIE_GEMINI_PROJECT", "proj")
+    assert helper.VertexGeminiFieldClient().location == helper.DEFAULT_VERTEX_LOCATION
+
+
+# ------------------------------------------------------ OCR not installed
+def test_docs_read_without_ocr_warns_about_blank_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "ocr_available", lambda: False)
+    svc = Svc(tmp_path, extract=lambda data: (["real text " * 10, "", "  \n"], []))
+    svc.fake.bodies["111"] = pdf_bytes(3)
+    code, payload = run(svc, "docs", "read", "111")
+    assert code == 0
+    result = payload["result"]
+    assert result["blank_pages"] == [2, 3] and result["ocr_pages"] == []
+    assert len(result["warnings"]) == 1
+    assert "OCR is not installed" in result["warnings"][0] and "2 of 3" in result["warnings"][0]
+    assert "docs ask --direct" in result["warnings"][0]
+
+
+def test_docs_read_with_ocr_has_no_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "ocr_available", lambda: True)
+    svc = Svc(tmp_path, extract=lambda data: (["real text " * 10, "scanned words here"], [2]))
+    svc.fake.bodies["111"] = pdf_bytes(2)
+    code, payload = run(svc, "docs", "read", "111")
+    assert code == 0 and payload["result"]["warnings"] == [] and payload["result"]["blank_pages"] == []
+
+
+def test_docs_ask_all_blank_without_ocr_stops_before_gemini(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "ocr_available", lambda: False)
+    gemini = FakeGemini()
+    svc = Svc(tmp_path, gemini=gemini, extract=lambda data: (["", " "], []))
+    svc.fake.bodies["111"] = pdf_bytes(2)
+    code, payload = run(svc, "docs", "ask", "111", "What is the limit?")
+    assert code == cli.EXIT_ERROR and payload["error"]["code"] == "no_text_in_document"
+    assert "OCR is not installed" in payload["error"]["message"] and "--direct" in payload["error"]["message"]
+    assert "Nothing was sent to Gemini" in payload["error"]["message"]
+    assert gemini.calls == []
+
+
+def test_docs_ask_partly_blank_without_ocr_answers_and_warns(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "ocr_available", lambda: False)
+    gemini = FakeGemini()
+    svc = Svc(tmp_path, gemini=gemini, extract=lambda data: (["Limit is $1,000,000. " * 3, ""], []))
+    svc.fake.bodies["111"] = pdf_bytes(2)
+    code, payload = run(svc, "docs", "ask", "111", "What is the limit?")
+    assert code == 0 and len(gemini.calls) == 1
+    assert "OCR is not installed" in payload["result"]["warnings"][0]
+
+
+def test_docs_read_poppler_missing_is_a_clear_error(tmp_path):
+    from robie_job_engine.robie_filer_extract import ExtractionUnavailable
+
+    def broken(_data):
+        raise ExtractionUnavailable("pdftotext/pdfinfo are not installed on this host")
+
+    svc = Svc(tmp_path, extract=broken)
+    svc.fake.bodies["111"] = pdf_bytes(1)
+    code, payload = run(svc, "docs", "read", "111")
+    assert code == cli.EXIT_ERROR and payload["error"]["code"] == "extraction_unavailable"
+    assert "poppler-utils" in payload["error"]["message"] and "--direct" in payload["error"]["message"]
+
+
+def test_selftest_reports_missing_ocr_and_global_location(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "ocr_available", lambda: False)
+    monkeypatch.delenv("ROBIE_GEMINI_LOCATION", raising=False)
+    monkeypatch.setenv("ROBIE_GEMINI_PROJECT", "proj")
+    svc = Svc(tmp_path)
+    code, payload = run(svc, "selftest")
+    assert code == 0
+    result = payload["result"]
+    assert result["ocr_available"] is False and "OCR is not installed" in result["warnings"][0]
+    assert result["gemini"]["location"] == "global"
+
+
+def test_upload_refuses_the_audit_log_and_test_hermes_home(tmp_path):
+    svc = Svc(tmp_path)
+    for path in ("/var/lib/ezlynx-api-cli/audit.jsonl", "/var/lib/ezlynx-api-cli-test/audit.jsonl",
+                 "/opt/streetsmart-hermes-test/.hermes/robie_google_token.json"):
+        code, payload = run(svc, "docs", "upload", ALLOWED, "--file", path, "--name", "x.pdf", "--dry-run")
+        assert code == cli.EXIT_REFUSED and payload["error"]["code"] == "sensitive_path", path

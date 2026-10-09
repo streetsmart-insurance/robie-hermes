@@ -62,8 +62,19 @@ Verbs that take only a document or discussion id accept
   **UNVERIFIED**: the request shape is covered by a stub test only. Use
   extracted text unless a scan has no readable text.
 - Model, project and location come from `ROBIE_GEMINI_MODEL`,
-  `ROBIE_GEMINI_PROJECT` and `ROBIE_GEMINI_LOCATION` (the wrapper defaults
-  them to `gemini-3.8-flash`, `streetsmart-hermes-poc`, `us-central1`).
+  `ROBIE_GEMINI_PROJECT` and `ROBIE_GEMINI_LOCATION` (the wrapper and the CLI
+  default them to `gemini-3.8-flash`, `streetsmart-hermes-poc`, `global`).
+  `gemini-3.8-flash` answers only in the `global` location (404 in
+  `us-central1`). `global` has no regional host, so the client calls
+  `https://aiplatform.googleapis.com/v1/projects/P/locations/global/...`;
+  any other location uses `https://LOCATION-aiplatform.googleapis.com`.
+- The service account that runs the tool needs `aiplatform.endpoints.predict`
+  (for example `roles/aiplatform.user`). The Test host's service account does
+  not have it, so `docs ask` returns HTTP 403 there.
+- A scanned PDF page has no text without OCR. If tesseract is not installed
+  (the Test host), `docs read` returns `blank_pages` and a `warnings` entry,
+  and `docs ask` refuses with `no_text_in_document` when every page is blank
+  (nothing is sent to Gemini). Use `docs ask --direct` for scans.
 
 ## Write verbs (the existing allowlist applies)
 
@@ -105,24 +116,49 @@ The log is not rotated by this tool.
 
 ## Install (needs a release on the host and Carlo's go)
 
+Production:
+
 ```
 sudo /opt/streetsmart-hermes/current/scripts/install-ezlynx-api-cli.sh \
-  --release-dir /opt/streetsmart-hermes/current           # add --robie-env TEST on hermes-test-01
+  --release-dir /opt/streetsmart-hermes/current
 ```
 
-It copies `scripts/ezlynx-api` to `/usr/local/bin/ezlynx-api`, creates the
-state folder, writes `/etc/streetsmart-hermes/ezlynx-api-cli.env`
-(`ROBIE_ENV` only), and runs `selftest`. Preview with `--dry-run`. Remove with
-`--uninstall` (the audit folder stays). It does not restart any service.
+Test host (`hermes-test-01`):
 
-The wrapper runs the Python from `/opt/streetsmart-hermes/current`, so a new
-release is picked up without reinstalling it.
+```
+sudo /opt/streetsmart-hermes-test/releases/current/scripts/install-ezlynx-api-cli.sh \
+  --robie-env TEST --release-dir /opt/streetsmart-hermes-test/releases/current
+```
+
+| | Production | Test |
+|---|---|---|
+| user | `streetsmart-hermes` | `streetsmart-hermes-test` |
+| release | `/opt/streetsmart-hermes/current` | `/opt/streetsmart-hermes-test/releases/current` |
+| state and audit | `/var/lib/ezlynx-api-cli` | `/var/lib/ezlynx-api-cli-test` |
+| settings file | `/etc/streetsmart-hermes/ezlynx-api-cli.env` | `/etc/streetsmart-hermes-test/ezlynx-api-cli.env` |
+| EZLynx secret | Production | UAT only |
+
+`--robie-env` picks the layout. The installer refuses a host that does not
+match (for example the Production layout on the Test host, or a release dir
+from the other layout) and says which `--robie-env` to use.
+
+It copies `scripts/ezlynx-api` to `/usr/local/bin/ezlynx-api`, creates the
+state folder, writes the settings file (`ROBIE_ENV`, the service user, the
+release link, the Python path and the state folder; no secrets), and runs
+`selftest`. Preview with `--dry-run`. Remove with `--uninstall` (the audit
+folder stays). It does not restart any service. The wrapper needs to run as
+that service user or as a user with passwordless `sudo -n -u` to it, and says
+so if not.
+
+The wrapper runs the Python from the release link, so a new release is picked
+up without reinstalling it.
 
 ## Known limits
 
 - Reads and writes both use the Prod EZLynx API credentials from Secret
   Manager; reads are not separately credentialed.
 - `docs read` handles PDFs and plain text. Images need `docs ask --direct`
-  (UNVERIFIED). The tesseract install has English only.
+  (UNVERIFIED). The tesseract install has English only, and the Test host has
+  no tesseract at all (see the OCR note under `docs ask`).
 - Applicant-level documents only unless `--policy-master-id` is given.
 - Task creation, policy create, deletes, and any-client writes are not here.

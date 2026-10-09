@@ -32,6 +32,7 @@ PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 HITL_OPERATOR = "Carlo"
 DEFAULT_VERTEX_LOCATION = "us-central1"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+_LOCATION_RE = re.compile(r"[a-z][a-z0-9-]{1,40}")
 _POSITIONAL_MARKERS = (".first", ".nth", ".last", "nth=", " >> nth")
 _SECRET_LABEL = re.compile(
     r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
@@ -248,6 +249,29 @@ class VertexGeminiFieldClient:
     def configured(self) -> bool:
         return bool(self.project and self.location and self.model)
 
+    def _generate_url(self) -> str:
+        """generateContent URL for this project, location and model.
+
+        A regional location (``us-central1``) is addressed on
+        ``{location}-aiplatform.googleapis.com``. The ``global`` location has no
+        regional host: it is ``aiplatform.googleapis.com`` with
+        ``/locations/global/`` in the path. Some models (``gemini-3.8-flash``)
+        answer only in ``global``.
+        """
+        location = self.location.strip()
+        if not _LOCATION_RE.fullmatch(location):
+            raise RuntimeError("Vertex location has unexpected characters")
+        host = (
+            "aiplatform.googleapis.com"
+            if location == "global"
+            else f"{location}-aiplatform.googleapis.com"
+        )
+        return (
+            f"https://{host}/v1/"
+            f"projects/{self.project}/locations/{location}/"
+            f"publishers/google/models/{self.model}:generateContent"
+        )
+
     def _access_token(self) -> str:
         if self._token_provider is not None:
             return self._token_provider()
@@ -269,11 +293,7 @@ class VertexGeminiFieldClient:
         if not self.configured():
             raise RuntimeError("Vertex Gemini project is not configured")
         token = self._access_token()
-        url = (
-            f"https://{self.location}-aiplatform.googleapis.com/v1/"
-            f"projects/{self.project}/locations/{self.location}/"
-            f"publishers/google/models/{self.model}:generateContent"
-        )
+        url = self._generate_url()
         body = json.dumps(
             {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -333,11 +353,7 @@ class VertexGeminiFieldClient:
         if not self.configured():
             raise RuntimeError("Vertex Gemini project is not configured")
         token = self._access_token()
-        url = (
-            f"https://{self.location}-aiplatform.googleapis.com/v1/"
-            f"projects/{self.project}/locations/{self.location}/"
-            f"publishers/google/models/{self.model}:generateContent"
-        )
+        url = self._generate_url()
         body = json.dumps(
             {
                 "contents": [
