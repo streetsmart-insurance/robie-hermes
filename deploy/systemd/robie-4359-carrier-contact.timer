@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ROBIE phase-2 4359 carrier-contact worker daily 09:00 ET
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 America/New_York
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=robie-4359-carrier-contact.service
+
+[Install]
+WantedBy=timers.target

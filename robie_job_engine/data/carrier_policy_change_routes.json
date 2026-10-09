@@ -1,0 +1,2201 @@
+{
+  "generated_from": "carrier-directory-full-sweep-20260927.md",
+  "curation": "human-reviewed 2026-09-27; see tools/curate_carrier_routes.py OVERRIDES",
+  "route_status_meanings": {
+    "ok": "safe for the worker to email (verified policy-change address)",
+    "manual": "directory lists a route that needs an agent (portal/phone/fax-only or ambiguous); never emailed",
+    "missing": "no actionable policy-change route; Nicole's fill-in queue"
+  },
+  "reconciliation": "The 2026-09-27 directory sweep counted 103 present / 103 missing under a loose bar (any route-keyword row with an email, phone, URL, or annotation, including heuristic-derived rows). This table applies the worker's stricter bar: only routes an agent can act on (email, portal, phone, fax with real contact info). actionable = ok + manual; the rest ship as missing. Records the sweep counted as present but which carry no actionable contact are listed in loose_bar_present_but_unactionable.",
+  "loose_bar_present_but_unactionable": [
+    {
+      "record_id": "41",
+      "reason": "sweep: ambiguous ('Put UW email'); no contact info"
+    },
+    {
+      "record_id": "91",
+      "reason": "sweep: Ambiguous (notes reference endorsements but truncated, no address)"
+    },
+    {
+      "record_id": "195",
+      "reason": "sweep: present via video link only; no contact info"
+    }
+  ],
+  "refresh": "Re-run tools/extract_carrier_policy_change_routes.py then tools/draft_carrier_routes.py then this script when Nicole's directory fill-in adds policy-change contacts; review the diff.",
+  "carriers": [
+    {
+      "record_id": "189",
+      "name": "Twin Lights Insurance Company",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "190",
+      "name": "TypTap Home and Flood Insurance",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "191",
+      "name": "Universal Casualty Risk Retention Group, Inc.",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "192",
+      "name": "Universal Insurance Program MGA",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "193",
+      "name": "Universal Insurance Programs, LLC",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES; Policy Changes Contact;",
+          "type": "email",
+          "email": "processing@uiprograms.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "194",
+      "name": "Universal Programs *Submission Center Keep",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "195",
+      "name": "UPC Insurance",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "196",
+      "name": "US Assure",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "197",
+      "name": "US RISK",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "198",
+      "name": "USG Insurance Services, Inc. MGA",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "199",
+      "name": "USLI Direct Bill",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "\u2190 POLICY CHANGES routing: endorsements via brians@usli.com",
+          "type": "email",
+          "email": "brians@usli.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "200",
+      "name": "Utica First Insurance Company",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change \u2014 Commercial",
+          "type": "email",
+          "email": "cl@uticafirst.com",
+          "cc_emails": [],
+          "phone": "(800) 456-4556",
+          "url": null,
+          "notes": ""
+        },
+        {
+          "label": "Policy Change \u2014 Personal",
+          "type": "email",
+          "email": "PL@uticafirst.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "201",
+      "name": "Veracity Insurance Solutions",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "202",
+      "name": "WESCO INS CO",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "203",
+      "name": "Worldwide Facilities LLC",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "204",
+      "name": "Wright National Flood Ins. Co",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "205",
+      "name": "XPT Partners MGA",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "206",
+      "name": "Zing\u00ae Jewelers Mutual Group",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "1",
+      "name": "21st Century Centennial Ins Co Assigned Risk Carrier NJPAIP",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "karen.costello@farmersinsurance.com",
+          "cc_emails": [],
+          "phone": "(866) 447-2611",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "2",
+      "name": "5 Star Specialty Programs",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "Trucking@5starp.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "3",
+      "name": "A-One Commercial Insurance RRG",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "4",
+      "name": "A-One Commercial Insurance RRG",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "endorsementsa-one@riskservcos.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "5",
+      "name": "Accredited Surety Agency LLC",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "gfendler@accreditedsuretyllc.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "6",
+      "name": "Adriatic-Carrier",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "laurie@adriaticinsurance.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "7",
+      "name": "Agricultural Insurance Management Services (view/311557)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "8",
+      "name": "Allstate Insurance *NEW-Carrier",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "portal",
+          "email": null,
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "directory prefers portal; email listed only if present"
+        }
+      ]
+    },
+    {
+      "record_id": "9",
+      "name": "Allstate New Jersey Insurance Company Assigned Risk Carrier NJPAIP",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "10",
+      "name": "ALTAMONT INSURANCE GROUP, LLC. (view/174589)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "11",
+      "name": "American European (Rutgers)-Carrier",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "12",
+      "name": "American Millennium Ins Co",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "Al.Block@citadelrisk.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "13",
+      "name": "American Modern Property & Casualty Ins Co",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "servicecenter@amig.com",
+          "cc_emails": [],
+          "phone": "(800) 217-5150",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "14",
+      "name": "American Specialty Insurance & Risk Services, Inc",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "requestchange@americanspecialty.com",
+          "cc_emails": [],
+          "phone": "(260) 755-7265",
+          "url": null,
+          "notes": "named person bhohlbein@americanspecialty.com also listed"
+        }
+      ]
+    },
+    {
+      "record_id": "15",
+      "name": "AmWINS",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "16",
+      "name": "Anderson & Murison",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "personalumbrella@amqts.com",
+          "cc_emails": [],
+          "phone": "(800) 234-6977",
+          "url": null,
+          "notes": "endorsements@amqts.com is the RENEWAL policy-changes address"
+        }
+      ]
+    },
+    {
+      "record_id": "17",
+      "name": "Anderson and Murison MGA (view/473777)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "18",
+      "name": "Annex Risk (view/497322)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "19",
+      "name": "Apogee Insurance Group MGA (view/290303)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "pdecew@apogeeinsgroup.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "20",
+      "name": "Appalachian Underwriters, Inc MGA (view/530319)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "essubmissions@appund.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "21",
+      "name": "Applied Underwriters",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "22",
+      "name": "ARI Insurance Company (now AmTrust)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "23",
+      "name": "Arrowhead General Insurance Agency, Inc (view/384882)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "24",
+      "name": "ASI (AMERICAN STRATEGIC INS) (view/488574)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "njendorsements@email.progressive.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "25",
+      "name": "Associated Underwriters Incorperated",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "26",
+      "name": "Assurant / American Bankers Insurance Company of Florida (view/259557)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "flood.service.center@assurant.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "27",
+      "name": "Atlas General Insurance Services (Contractors)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "28",
+      "name": "Attune Insurance (view/497373)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "29",
+      "name": "Axis Group (view/565787)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "30",
+      "name": "Bankers Flood Insurance Program-Wholesaler (view/64410)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "31",
+      "name": "Berkley Assigned Risk",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "32",
+      "name": "Berkshire Hathaway Inc",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "bhservices@bhhomestate.com",
+          "cc_emails": [],
+          "phone": "(800) 488-2930",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "33",
+      "name": "BiBERK by Berkshire Hathaway (view/971042)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "34",
+      "name": "Bind Desk",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES; Policy Changes Contact",
+          "type": "email",
+          "email": "service@binddesk.com",
+          "cc_emails": [],
+          "phone": "(877) 465-7473",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "35",
+      "name": "Blue Ridge Specialty",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "service@blueridgespecialty.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "36",
+      "name": "Breckenridge Insurance MGA (view/384883)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "37",
+      "name": "Builders and Tradesmen (BTIS)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES/ENDORSEMENTS",
+          "type": "email",
+          "email": "endorsements@btisinc.com",
+          "cc_emails": [],
+          "phone": "(916) 772-9200",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "38",
+      "name": "Burns & Wilcox (view/385015)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "39",
+      "name": "Cabrillo Coastal (US Coastal)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes/Endorsements",
+          "type": "email",
+          "email": "wecare@cabgen.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "directory: 'You can do online but email is best'"
+        }
+      ]
+    },
+    {
+      "record_id": "40",
+      "name": "CannGen Insurance Services, LLC (view/262235)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "41",
+      "name": "Century Insurance Group",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "42",
+      "name": "CHESAPEAKE EMPLOYERS INS CO (view/578171)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "endorsements@ceiwc.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "43",
+      "name": "Chubb Group",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "customercenter@chubb.com",
+          "cc_emails": [],
+          "phone": "(800) 777-2131",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "44",
+      "name": "Classic American Car Insurance (Collector Car American Modern)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "45",
+      "name": "Clear Spring (view/236011)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "46",
+      "name": "CMM BROKERAGE INC",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "POLICY CHANGES",
+          "type": "email",
+          "email": "cmyman@cmmbrokerage.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "47",
+      "name": "CNA (view/337496)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "48",
+      "name": "CNA Surety (view/578178)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "49",
+      "name": "Comp Care (view/400992)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "50",
+      "name": "Core Programs, LLC (view/408817)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "51",
+      "name": "Corgi (view/1078887)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "52",
+      "name": "Cossio Insurance Agency LLC",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "53",
+      "name": "Coterie Insurance (view/417414)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "54",
+      "name": "Couch Braunsdorf MGA",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "dhernandez@mcgowanprograms.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "55",
+      "name": "Cover Whale MGA (view/363662)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "Hello@coverwhale.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "56",
+      "name": "Dovetail MGA",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "57",
+      "name": "Eidyia Solutions",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "JoelDavenport@eidyiasolutions.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "58",
+      "name": "Eiydia Insurance Solutions",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "joel.davenport@eidyiasolutions.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "59",
+      "name": "Embark General (view/258818)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "60",
+      "name": "Embark General Insurance Agency, LLC (view/258831)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "61",
+      "name": "Encompass",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Endorsements/Policy Changes",
+          "type": "portal",
+          "email": "encuwnortheast@encompassins.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "directory prefers portal; worker never auto-sends the email"
+        }
+      ]
+    },
+    {
+      "record_id": "62",
+      "name": "Evolum RIsk Management (view/1105386)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "63",
+      "name": "Evolution Insurance XINSURANCE (animal liability) (view/28329)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "64",
+      "name": "FastComp MGA (view/557764)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "65",
+      "name": "Foremost Insurance Group (Personal Auto)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Endorsements/Policy Change",
+          "type": "email",
+          "email": "policyservicedocuments@farmersinsurance.com",
+          "cc_emails": [],
+          "phone": "(855) 319-7763 ext. 1",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "66",
+      "name": "Foremost MetLife Auto & Home",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change",
+          "type": "email",
+          "email": "policyservicedocuments@farmersinsurance.com",
+          "cc_emails": [],
+          "phone": "(855) 319-7763",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "67",
+      "name": "Foremost Signature",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "68",
+      "name": "ForemostSTAR Insurance Group (Recreational, Mobile Home, Motorcycle, ATV, Dwelling Fire)",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Policy Changes/Endorsement",
+          "type": "portal",
+          "email": "policyupdate@foremost.com",
+          "cc_emails": [],
+          "phone": "(800) 527-3905",
+          "url": null,
+          "notes": "directory prefers portal; worker never auto-sends the email"
+        }
+      ]
+    },
+    {
+      "record_id": "69",
+      "name": "Fox Point Programs, Inc MGA (view/556250)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "70",
+      "name": "Francis L Dean & Associates, MGA (view/571487)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "71",
+      "name": "Franklin Mut Grp. FMI",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes \u2014 Personal",
+          "type": "email",
+          "email": "plunderwriting@fmiweb.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        },
+        {
+          "label": "Policy Changes \u2014 Commercial",
+          "type": "email",
+          "email": "CLUnderwriting@fmiweb.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "72",
+      "name": "FTP INC.",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes \u2014 Commercial",
+          "type": "email",
+          "email": "jmoscato@ftpins.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        },
+        {
+          "label": "Policy Changes \u2014 Personal",
+          "type": "email",
+          "email": "nmay@ftpins.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "73",
+      "name": "Fully Covered Agent (view/116215)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "74",
+      "name": "Geico (view/530299)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "geicocommuwia@geicomail.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "75",
+      "name": "Geovera",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "76",
+      "name": "Great American Insurance Company (view/524686)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "77",
+      "name": "Great Bay Insurance Company (view/1121720)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "78",
+      "name": "Great Bay Insurance Group (view/175225)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "endorsements@greatbayinsure.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "79",
+      "name": "Great Lakes Managing Agency (view/294507)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "80",
+      "name": "GreatPoint Programs (view/451060)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "81",
+      "name": "Hagerty Classic Car",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "agent@hagerty.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "82",
+      "name": "Hanover Fire & Cas Ins Co. (view/556252)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "83",
+      "name": "Hanover Insurance (view/495807)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "84",
+      "name": "Hartford Casualty Assigned Risk",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "85",
+      "name": "Hartford Disability-Carrier (view/35977)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "86",
+      "name": "Hartford Flood Insurance (view/32076)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "87",
+      "name": "Healthcare Providers Service Org. (view/840686)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "88",
+      "name": "HealthCare Providers Services Organization (view/280466)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "89",
+      "name": "Hippo Insurance",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "90",
+      "name": "Hiscox Insurance (accessed through BTIS and All Risks) Carrier (view/20197)",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Portal",
+          "type": "portal",
+          "email": null,
+          "cc_emails": [],
+          "phone": null,
+          "url": "https://www.contacthiscox.com",
+          "notes": "directory prefers portal; email listed only if present"
+        }
+      ]
+    },
+    {
+      "record_id": "91",
+      "name": "Homeowners Choice P&C (view/239475)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "92",
+      "name": "HoneyComb Insurance (view/468294)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "service@honeycombinsurance.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "93",
+      "name": "Hub International",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "94",
+      "name": "Hull & Company (view/327875)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "cvotta@hullco.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "95",
+      "name": "Hyundai Insurance",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "support@hyundaiinsuranceusa.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "96",
+      "name": "ICW (view/497046)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "97",
+      "name": "INS LINK POWERED BY USG INSURANCE SERVICES, INC.",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "getconnected@usgins.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "98",
+      "name": "Insurance Helper",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "99",
+      "name": "Insurtec Inc (view/219908)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "nnhoeper@insurtecinc.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "100",
+      "name": "Insurtec Inc",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "support@hyundaiinsuranceusa.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "101",
+      "name": "Insurtec Inc MGA (view/352159)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "102",
+      "name": "Integon National Insurance Company (Assigned Risk)-Carrier NJPAIP (view/22800)",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Ambiguous",
+          "type": "fax",
+          "email": null,
+          "cc_emails": [],
+          "phone": "(201) 368-8649",
+          "url": null,
+          "notes": "Fax Only \u2014 not a callable phone route; agent faxes"
+        }
+      ]
+    },
+    {
+      "record_id": "103",
+      "name": "InterGUARD Ltd",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "underwriting3@guard.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "104",
+      "name": "International Transportation & Marine Agency (ITMA)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "105",
+      "name": "Interstate",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "106",
+      "name": "Jewelers Mutual (view/848510)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "107",
+      "name": "JIBNA JEWELRY INSURANCE BROKERAGE NORTH AMERICA",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "underwriting@insure-jewelry.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "108",
+      "name": "JIMCOR MGA (view/250231)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "mcanning@jimcor.com",
+          "cc_emails": [
+            "TGiambrone@jimcor.com"
+          ],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "109",
+      "name": "Keating DBA Novatae (view/267453)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "Kellie.Jennison@novatae.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "110",
+      "name": "Kingstone Insurance",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "portal",
+          "email": "pldocs@kingstoneic.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": "https://goo.gl/woUNvK",
+          "notes": "directory: 'Done Online via System'; email as fallback"
+        }
+      ]
+    },
+    {
+      "record_id": "111",
+      "name": "Lemonade (view/176110)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "112",
+      "name": "Leon G. Silver MGA (view/348382)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "113",
+      "name": "Liberty Insurance Underwriters, Inc.-Carrier E/O Carrier (view/24859)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "114",
+      "name": "Liberty Mutual Assigned Risk",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "115",
+      "name": "Liberty Mutual Insurance Personal (view/578959)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "116",
+      "name": "LineUnderwriters (view/661365)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "117",
+      "name": "Markel Insurance Company",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "mscsupport@markel.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "118",
+      "name": "MarketScout A Division of Noatae (view/439183)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "119",
+      "name": "Marshall & Sterling MGA (view/556251)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "120",
+      "name": "Merchants Insurance Group",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "MidlanticOffice@Merchantsgroup.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "121",
+      "name": "Mercury",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "PPAUW@mercuryinsurance.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "122",
+      "name": "MGA Resource, LLC (Tuscano Agency-MGA Resource) (view/242129)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "brokerchanges@tuscano.com",
+          "cc_emails": [
+            "processing@tuscano.com"
+          ],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "123",
+      "name": "MHC Managing General Agency, LLC (view/290283)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "124",
+      "name": "Morstan General Agency/Bridge/Hull- Wholesaler (view/262253)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "BHerman@morstan.com",
+          "cc_emails": [
+            "agoldfarb@morstan.com",
+            "kmarkoe@morstan.com"
+          ],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "125",
+      "name": "MyMGA.com Personal Umbrella (view/311052)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "126",
+      "name": "Narragansett Bay Ins. Co. (view/578919)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "nbicunderwriting@nbic.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "127",
+      "name": "National Continental Ins",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "caipcsr@nationalcontinental.com",
+          "cc_emails": [],
+          "phone": "8009372247",
+          "url": null,
+          "notes": "directory: address in testing phase per National \u2014 agent verifies before use; worker never auto-sends"
+        }
+      ]
+    },
+    {
+      "record_id": "128",
+      "name": "National Partners (view/990640)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "129",
+      "name": "National Specialty Ins Co",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "130",
+      "name": "Nationwide Excess and Surplus (view/321047)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "131",
+      "name": "Nationwide Insurance",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change \u2014 Personal",
+          "type": "email",
+          "email": "erequest@nationwide.com",
+          "cc_emails": [],
+          "phone": "(877) 669-6877",
+          "url": null,
+          "notes": ""
+        },
+        {
+          "label": "Policy Change \u2014 Commercial",
+          "type": "email",
+          "email": "CLAmendment@nationwide.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "132",
+      "name": "Nautilus Insurance Group (view/371799)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "133",
+      "name": "New England Excess Exchange MGA (view/327876)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Endorsements/Inspection/Loss Runs/Policy Changes/; Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "csr@neee.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "134",
+      "name": "New York State Insurance Fund (NYSIF)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "135",
+      "name": "Next Insurance (view/488022)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "136",
+      "name": "NFS Edge Flood (Accessed through UPC) Flood pro",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "137",
+      "name": "NJCRIB",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "138",
+      "name": "Obie (view/631974)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "139",
+      "name": "Omaha National (view/942517)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes Transaction; Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "Accountmanagement@omahanational.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "140",
+      "name": "Openly (view/171764)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "service@openly.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "141",
+      "name": "OpenRoad (view/1119791)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "142",
+      "name": "Pacific Specialty (view/1003344)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "143",
+      "name": "Paramount General Agency",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change",
+          "type": "email",
+          "email": "crystal@paramounttx.com",
+          "cc_emails": [
+            "endorsement@paramounttx.com"
+          ],
+          "phone": "(866) 514-2200 ext. 540",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "144",
+      "name": "Paramount Program (view/326746)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "145",
+      "name": "Patriot Underwriters",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Endorsements",
+          "type": "email",
+          "email": "cnucera@patnat.com",
+          "cc_emails": [],
+          "phone": "(609) 291-1575",
+          "url": null,
+          "notes": "'Policy Changes' row empty; Endorsements row used"
+        }
+      ]
+    },
+    {
+      "record_id": "146",
+      "name": "Pennsylvania Manufacturers Association/Old Rebulic NJCRIB (view/243937)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "policyservices@ormarks.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "147",
+      "name": "Personal Umbrella- STATE OF FL- A division of Personalumbrella.com (view/220904)",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "phone",
+          "email": null,
+          "cc_emails": [],
+          "phone": "(510) 903-3313",
+          "url": null,
+          "notes": "phone-only via Rosemary Tolmer, Underwriter, Endorsements"
+        }
+      ]
+    },
+    {
+      "record_id": "148",
+      "name": "PIE Insurance (view/417410)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "149",
+      "name": "PMA COMPANIES (view/242750)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "150",
+      "name": "Prime Insurance Company",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "policyservices@primeis.com",
+          "cc_emails": [],
+          "phone": "(877) 243-8181",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "151",
+      "name": "Prime Underwriting Agency Inc. (view/244153)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "service@primeua.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "152",
+      "name": "Progressive Insurance (view/391072)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "commercialauto@email.progressive.com",
+          "cc_emails": [
+            "Upload@progressiveagent.com"
+          ],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "153",
+      "name": "Prospect General",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "cbb@prospectgeneral.com",
+          "cc_emails": [
+            "REIEnd@prospectgeneral.com"
+          ],
+          "phone": "(619) 567-1269",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "154",
+      "name": "Providence Mutual Fire Insurance Company",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "155",
+      "name": "Quantum Risk Solutions, LLC (view/138120)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "156",
+      "name": "Rider Ins Co- Carrier (view/67081)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "157",
+      "name": "Risk Placement Services (RPS)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "RPS.SanDiego-2.CommEnd@rpsins.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "endorsements desk; named UW addresses not used"
+        }
+      ]
+    },
+    {
+      "record_id": "158",
+      "name": "RLI Ins Co (view/578958)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "159",
+      "name": "Rocklake-Scout Insurance Group",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "Gabe.McGavock@rlig.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "160",
+      "name": "SageSure Insurance. (view/952492)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Routes: Policy Changes = Email with address",
+          "type": "email",
+          "email": "PolicyServices@SageSure.com",
+          "cc_emails": [],
+          "phone": "(877) 304-4785 ext. 2",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "161",
+      "name": "Salt Insure (view/942884)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "162",
+      "name": "Scottish American",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address",
+          "type": "email",
+          "email": "dgoddard@scottishamerican.com",
+          "cc_emails": [],
+          "phone": "(718) 906-5309",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "163",
+      "name": "Selective Flood Insurance",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address",
+          "type": "email",
+          "email": "Floodnewjersey@selective.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "164",
+      "name": "SIS Wholesale (Preferred Contractors Insurance)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "Endorsements@sisinsure.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "'Policy Changes' row empty; Endorsements row used"
+        }
+      ]
+    },
+    {
+      "record_id": "165",
+      "name": "Specialty Coverage Insurance Agency",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address",
+          "type": "email",
+          "email": "tmurgio@spciagency.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "166",
+      "name": "Star Mutual RRG, Inc (view/1076933)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Notes: \"NAIC Code: 17024 Policy Changes: all endorsements are processed directly by the agent who bound the\"; Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address. Renewals: Missing. Document Download: Missing. Audits: Missing",
+          "type": "email",
+          "email": "agents@starrrg.com",
+          "cc_emails": [],
+          "phone": "(855) 569-7827",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "167",
+      "name": "State Farm Indemnity Company -Assigned Risk Carrier NJPAIP (view/67082)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "168",
+      "name": "State Workers Insurance Fund (view/971068)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "169",
+      "name": "State Workers' Insurance Fund (SWIF) (view/1077887)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "170",
+      "name": "Steadily Insurance (view/578960)",
+      "route_status": "manual",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "portal",
+          "email": null,
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": "directory: 'Agents do their own endorsements in the portal'"
+        }
+      ]
+    },
+    {
+      "record_id": "171",
+      "name": "Sterling Surplus Underwriters (view/858784)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "172",
+      "name": "Stillwater Insurance Svcs, Inc (view/578961)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "ins@stillwater.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "173",
+      "name": "Swyfft Insurance",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address. Renewals: Missing. Document Download: Email with address",
+          "type": "email",
+          "email": "CUSTOMERSUPPORT@SWYFFT.COM",
+          "cc_emails": [],
+          "phone": "(855) 479-9338",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "174",
+      "name": "Tapco MGA (view/530304)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "Endorsements@gotapco.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "175",
+      "name": "TAPCO Underwriters Inc. (view/863687)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "176",
+      "name": "Target Insurance Services",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "177",
+      "name": "Texas Mutual WC Insurance Company (view/710641)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "178",
+      "name": "The Hartford Service Center",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "agency.service@thehartford.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "179",
+      "name": "The Main Street America Group (MSA)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change \u2014 Commercial",
+          "type": "email",
+          "email": "MSACLProcessing@msagroup.com",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "180",
+      "name": "The McGowan Companies (view/347671)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "181",
+      "name": "TIP National LLC",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "182",
+      "name": "Tokio Marine HCC (view/661292)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "183",
+      "name": "Tokio Marine HCC",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address. Renewals: Missing. Document Download: Email with address",
+          "type": "email",
+          "email": "ArtisanEdgeHelp@tmhcc.com",
+          "cc_emails": [],
+          "phone": "(916) 587-1640",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "184",
+      "name": "Travelers Assigned Risk Workers Comp",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes/Endorsements; Routes \u2014 Policy Changes: Email with address. Underwriters: Email with address. Renewals: Missing. Document Download: Email with address",
+          "type": "email",
+          "email": "arwc@travelers.com",
+          "cc_emails": [],
+          "phone": "(800) 443-4404",
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "185",
+      "name": "Travelers Service Center",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Change \u2014 Commercial",
+          "type": "email",
+          "email": "scenter@travelers.com",
+          "cc_emails": [],
+          "phone": "(800) 252-2268",
+          "url": null,
+          "notes": ""
+        },
+        {
+          "label": "Policy Change \u2014 Personal",
+          "type": "email",
+          "email": "piservice@travelers.com",
+          "cc_emails": [],
+          "phone": "(800) 842-8574",
+          "url": null,
+          "notes": "directory: 'DO it online' for personal; email as fallback"
+        }
+      ]
+    },
+    {
+      "record_id": "186",
+      "name": "Travelers/CNA (Continental) Hartford assigned risk-NJCRIB (view/487850)",
+      "route_status": "missing",
+      "routes": []
+    },
+    {
+      "record_id": "187",
+      "name": "Trinity Underwriters (view/239341)",
+      "route_status": "ok",
+      "routes": [
+        {
+          "label": "Policy Changes",
+          "type": "email",
+          "email": "endorsements@trinityunderwriters.net",
+          "cc_emails": [],
+          "phone": null,
+          "url": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "record_id": "188",
+      "name": "Tuscano Agency (view/582469)",
+      "route_status": "missing",
+      "routes": []
+    }
+  ]
+}
