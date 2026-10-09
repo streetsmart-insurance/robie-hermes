@@ -93,6 +93,11 @@ def _iter_csv_attachments(full_msg: dict) -> "list[tuple[str, str]]":
     return found
 
 
+# Gmail receive time of the report fetch_report_csv last returned. A task
+# fired after this cannot be in that report (verify_due_tasks waits).
+LAST_REPORT_RECEIVED_AT: datetime | None = None
+
+
 def fetch_report_csv(subject: str) -> tuple[bytes | None, str]:
     """Fetch the latest task-report CSV attachment from the report mailbox.
 
@@ -138,6 +143,12 @@ def fetch_report_csv(subject: str) -> tuple[bytes | None, str]:
                     f"(limit {REPORT_MAX_AGE_HOURS}h)"
                 )
             data = adapter.get_attachment_bytes(gmail_id, attachment_id)
+            global LAST_REPORT_RECEIVED_AT
+            LAST_REPORT_RECEIVED_AT = (
+                datetime.fromtimestamp(internal_ms / 1000, tz=timezone.utc)
+                if internal_ms
+                else None
+            )
             return data, f"{name} ({age_h:.1f}h old)"
         return None, "no CSV attachment found on recent report emails"
     except Exception as exc:
@@ -181,7 +192,12 @@ def main() -> int:
             logger.warning("report unavailable: %s", report_detail)
 
     # 3. Verify due tasks.
-    outcome = verify_due_tasks(store, report_rows, report_available)
+    outcome = verify_due_tasks(
+        store,
+        report_rows,
+        report_available,
+        report_received_at=LAST_REPORT_RECEIVED_AT if report_available else None,
+    )
     counts = store.counts()
     logger.info(
         "verified=%d missing=%d unverified=%d queue=%s",
