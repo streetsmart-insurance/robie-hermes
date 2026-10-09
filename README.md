@@ -63,6 +63,9 @@ Integration boundaries:
   Return `None` when it is not; the adapter must then create a fresh navigation/session and read
   the server-backed UI state.
 - Reporting reads the persisted status/evidence. It must never infer success from worker text.
+- Staff schedules (meeting synthesis, staff fun, holiday office alerts) are
+  documented in `docs/STAFF_JOBS.md`. Holiday alerts read the Holiday Schedule
+  Google Doc and stay dry-run until the send flags in that doc are turned on.
 - A future Gemini native Computer Use worker can implement the same `ComputerWorker` protocol;
   it is intentionally not required for this reliability gate.
 

@@ -1,6 +1,6 @@
-# Staff automation jobs: meeting synthesis + staff fun
+# Staff automation jobs: meeting synthesis, staff fun, holiday alerts
 
-Two scheduled jobs on the ROBIE job engine. Both follow the standard
+Three scheduled jobs on the ROBIE job engine. Each follows the standard
 recurring-job pattern: `OperationsStore.ensure_recurring_job` registers the
 schedule, `robie-scheduler` claims due schedules each minute, and the bounded
 engine runs them through a Worker + Verifier pair.
@@ -32,15 +32,96 @@ engine runs them through a Worker + Verifier pair.
   thread replies if Form creation fails), and emails Carlo a gift-card
   budget/fulfillment reminder (prizes stay manual).
 
+## Job 3 — Holiday office alerts (`staff.holiday.alert`)
+
+- **Schedule:** weekdays 9:00 AM America/New_York (`0 9 * * 1-5`).
+- **Source of truth:** Google Doc `Holiday Schedule & Out-of-Office SOP`
+  (`1_sE6cCkyu0SuqucWU6z-FOnKqGBQkTTe02HtoeFv784`). Every run exports the Doc
+  as HTML and reads **every row** of the table under “2026–2027 Holiday
+  Schedule” (Holiday / event, Date, Office status). There is no hard-coded
+  holiday list. Dates in that table are smart chips; a Docs API text read
+  drops them (`Monday, ` with no date), so the job uses the HTML export
+  (markdown tables are also accepted). If the heading or table cannot be
+  parsed, the job **fails closed** and sends nothing.
+- **Windows** (America/New_York), named constants in
+  `robie_job_engine/staff_holiday_alert.py`:
+  - `LEAD_DAYS_HEADS_UP = 14` — first alert. Due from T-14 until the day
+    before the nudge window. Upcoming CLOSED / early-close, plan ahead,
+    clients aware, link to the Doc.
+  - `LEAD_DAYS_NUDGE = 3` — second alert. Due from T-3 through the morning
+    of the event. Shorter and urgent. It tells staff to turn on the Gmail
+    vacation responder (Doc template), block the day in Google Calendar,
+    and set RingCentral forward-all / queue per the Doc, and it links the
+    Doc again.
+  Past dates are skipped. The weekday run inside each window sends that
+  phase once. Overrides: `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_HEADS_UP` and
+  `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_NUDGE`. While the send flags are off, every
+  run only prints both phases.
+- **Copy:** deterministic templates (no Gemini), one for each phase. Chat
+  copy may include emoji. The nudge is the message that carries the
+  out-of-office checklist.
+- **Row shapes:** a multi-day “and” date becomes one alert per day. A
+  combined status such as Memorial Day (`Closed; close early Friday …`)
+  emits both the closed day and the early-close day. `Observed Friday, Jul 3`
+  is dropped when that Friday already has an explicit row (the Jul 3 early
+  close), so one day does not get two emails. Black Friday on the Doc is a
+  normal closed-day row and is not special-cased.
+- **Dedup:** the job database table `holiday_alert_sends` records
+  `(event_date, status_kind, phase)` with phase `heads_up` or `nudge`.
+  Each phase sends once. A heads-up does not block the later nudge.
+  Dry-run does not write the ledger. A pending row with no receipt is held
+  and not resent (fail closed against a duplicate). Clear a stuck pending
+  row only after checking that the email was not already sent:
+
+  ```sql
+  DELETE FROM holiday_alert_sends
+  WHERE event_date='YYYY-MM-DD' AND status_kind='closed' AND phase='heads_up'
+    AND state='pending' AND COALESCE(email_message_id, '')='';
+  ```
+- **Channels, default OFF:**
+  - Email to `StreetSmart@streetsmart.insurance` from
+    `robie@streetsmart.insurance` (same delegated Gmail path as the other
+    staff jobs).
+  - Optional Google Chat via `post_chat_webhook` /
+    `streetsmart-general-chat-webhook`. Incoming webhooks post as the
+    webhook app. They do **not** support a true `@all` mention. This job
+    sends a plain space post. `@all` would need the Chat API with a
+    principal that is allowed to mention the space, which this job does not
+    use.
+- **Live send stays off** until Carlo sets both the master flag and a
+  channel flag on `robie-scheduler` (then restart the service):
+
+  ```bash
+  ROBIE_HOLIDAY_ALERT_SEND=true
+  ROBIE_HOLIDAY_ALERT_EMAIL=true
+  # optional:
+  ROBIE_HOLIDAY_ALERT_CHAT=true
+  ```
+
+  Payload `dry_run=true` forces a dry run even when those flags are on.
+  Payload `dry_run=false` does **not** enable sending by itself. Unset flags
+  mean dry-run: the worker prints `HOLIDAY_ALERT_DRY_RUN` lines and stores
+  the plan. Nothing is emailed or posted.
+
+This job type is **not** in `deploy/job_type_gate/grandfathered.json`. On
+Production the new-job-type gate holds it until three clean Test audits.
+Do not treat a schedule install as permission to email the agency. No
+Capability Map row is added here.
+
 ## Secrets and environment (names only — values live in Secret Manager)
 
 | Env var | Default secret | Used by |
 |---|---|---|
 | `ROBIE_GEMINI_API_KEY_SECRET` | `projects/streetsmart-hermes-poc/secrets/gemini-api-key/versions/latest` | Gemini synthesis + post generation |
-| `ROBIE_GENERAL_CHAT_WEBHOOK_SECRET` | `projects/streetsmart-hermes-poc/secrets/streetsmart-general-chat-webhook/versions/latest` | staff-fun chat post |
+| `ROBIE_GENERAL_CHAT_WEBHOOK_SECRET` | `projects/streetsmart-hermes-poc/secrets/streetsmart-general-chat-webhook/versions/latest` | staff-fun chat post; optional holiday alert chat |
 | `ROBIE_GMAIL_DELEGATED_SA` | `hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com` | Gmail send as robie@ (domain-wide delegation, proven) |
 | `ROBIE_GOOGLE_TOKEN_FILE` | (already in scheduler env) | Drive / Docs / Forms API |
 | `ROBIE_GEMINI_MODEL` | `gemini-3.8-flash` | Gemini model override |
+| `ROBIE_HOLIDAY_ALERT_SEND` | unset (off) | Master switch for holiday live send |
+| `ROBIE_HOLIDAY_ALERT_EMAIL` | unset (off) | Holiday email channel |
+| `ROBIE_HOLIDAY_ALERT_CHAT` | unset (off) | Holiday Chat channel |
+| `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_HEADS_UP` | `14` | T-14 heads-up window |
+| `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_NUDGE` | `3` | T-3 out-of-office nudge window |
 
 No systemd unit changes are needed: every secret name has a working default
 and the Drive token env var is already set on `robie-scheduler.service`.
@@ -60,7 +141,7 @@ import sys; sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
 from robie_job_engine.operations import OperationsStore
 ops = OperationsStore("/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
 for s in ops.list_recurring_jobs():
-    if s["action_type"] in ("meeting.synthesis.weekly", "staff.fun.monthly"):
+    if s["action_type"] in ("meeting.synthesis.weekly", "staff.fun.monthly", "staff.holiday.alert"):
         print(s["task_name"], s["cron_spec"], s["timezone"], "next:", s["next_run_at"])
 EOF
 ```
@@ -70,8 +151,13 @@ EOF
 ```bash
 python3 scripts/dry_run_staff_jobs.py --job synthesis   # reads real Drive notes, Gemini synthesis, prints email body, no send
 python3 scripts/dry_run_staff_jobs.py --job fun         # generates October post, prints it, no chat post
+python3 scripts/dry_run_staff_jobs.py --job holiday     # HTML-exports the Holiday Schedule Doc, prints planned alerts, no send
+python3 scripts/dry_run_staff_jobs.py --job holiday --fixture tests/fixtures/holiday_schedule_2026_2027.html --today 2026-10-05
 ```
 
 Dry runs use `hatch_gws_cli` for Drive access and the Secret Manager
 `gemini-api-key`; they never send email, post to chat, or modify the social
-drafts doc.
+drafts doc. The holiday dry run never writes `holiday_alert_sends`, even if
+the send flags are present in the environment. It exports HTML rather than
+calling the Docs text API, because smart-chip dates are missing from that
+text.

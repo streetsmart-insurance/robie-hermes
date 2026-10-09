@@ -276,6 +276,26 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
             "the Gemini content generation fails",
         ),
     ),
+    "staff.holiday.alert": ExecutableSkillContract(
+        expected_destination_result=(
+            "due holiday office alerts are planned from the live Holiday Schedule "
+            "Doc; a T-14 heads-up and a T-3 out-of-office nudge can each send "
+            "once, and live email or Chat is sent only when the send flags are on"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="HolidayAlertVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "the holiday schedule table parsed into at least one event",
+            "dry-run records the planned alerts and does not send",
+            "a live send has a Gmail read-back or a 2xx chat webhook for each new alert",
+        ),
+        failure_conditions=(
+            "the holiday schedule table cannot be parsed",
+            "a live Gmail send or chat webhook fails",
+            "a pending ledger row has no receipt and would risk a duplicate send",
+        ),
+    ),
 }
 
 
@@ -344,6 +364,11 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("worker",),
     },
     "staff.fun.monthly": {
+        "schema_verified": True,
+        "required": ("worker",),
+        "identity": ("worker",),
+    },
+    "staff.holiday.alert": {
         "schema_verified": True,
         "required": ("worker",),
         "identity": ("worker",),

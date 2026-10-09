@@ -150,11 +150,14 @@ def build_runtime_engine(
     workers["accountability-report"] = AccountabilityReportWorker()
     from .meeting_synthesis import MeetingSynthesisVerifier, MeetingSynthesisWorker
     from .staff_fun import StaffFunVerifier, StaffFunWorker
+    from .staff_holiday_alert import HolidayAlertVerifier, HolidayAlertWorker
 
     workers["meeting-synthesis"] = MeetingSynthesisWorker()
     workers["staff-fun"] = StaffFunWorker()
+    workers["staff-holiday-alert"] = HolidayAlertWorker()
     verifiers["meeting.synthesis.weekly"] = MeetingSynthesisVerifier()
     verifiers["staff.fun.monthly"] = StaffFunVerifier()
+    verifiers["staff.holiday.alert"] = HolidayAlertVerifier()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
     accountability_verifier = AccountabilityReportVerifier()
     verifiers["accountability.daily"] = accountability_verifier
