@@ -39,6 +39,20 @@ asks whether to add producers' mailboxes.
    below, then `40-auto-any-applicant.conf` (`--live --auto --any-applicant`).
    The first auto run sets a start mark; older mail is never back-filed.
 
+## Install commands (run on the host, after the release is current)
+
+```
+# Install, one verification dry run, timer stopped:
+sudo /opt/streetsmart-hermes/current/scripts/install-robie-filer.sh --release-dir /opt/streetsmart-hermes/current
+# Step 1 live on the 10-minute timer (after Carlo's go):
+sudo /opt/streetsmart-hermes/current/scripts/install-robie-filer.sh --release-dir /opt/streetsmart-hermes/current --live --enable-timer
+# Rollback (prints the backup path on install):
+sudo /opt/streetsmart-hermes/current/scripts/install-robie-filer.sh --rollback /root/robie-filer-<stamp>
+```
+
+The installer never installs `40-auto-any-applicant.conf` and removes it if
+present, so step 2 always needs its own reviewed change.
+
 ## Write-scope patch (not in this branch)
 
 The write gate picks applicants, not actions. `--any-applicant` needs a
