@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Pending Cancel for Non-Payment</h1>
+  <!--
+    After Apply on hermes-test-01, commit 673e611. The button no longer says
+    Select Date Range. Its id is still dropdownMenu2. The menu is the next
+    div and is closed. The text inputs keep MM/DD/YYYY.
+  -->
+  <div class="dropdown">
+    <button type="button" id="dropdownMenu2" class="dropdown-toggle" aria-expanded="false">09/29/2026 - 09/29/2026</button>
+    <div class="dropdown-menu" style="display: none;">
+      <input class="report-start" type="text" value="09/29/2026">
+      <input class="report-end" type="text" value="09/29/2026">
+      <button type="button">Apply</button>
+    </div>
+  </div>
+  <button type="button">Export Pending Cancel for Non-Payment Pdf</button>
+  <button type="button">Export Pending Cancel for Non-Payment Xls</button>
+</body>
+</html>

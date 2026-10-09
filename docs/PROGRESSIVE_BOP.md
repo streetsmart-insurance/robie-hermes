@@ -24,16 +24,45 @@ tab and writes one QA pack for `--report-date`:
    or `Go to Businessowner/Contractor GL policy search`. Zero or two matches
    hold. A Communications / underwritinglegacy tab still opens Home first,
    then clicks Manage Policies and then `Businessowner/Contractor GL`.
-2. View Reports → Pending Cancel for Nonpayment. The live control is the
-   button `VIEW REPORTS`. `expect_popup` returns
+2. Pending Cancel report. `expect_popup` returns
    `sbr*.foragentsonly.com/.../HPLanding.aspx` (`Close this window`) as soon
    as that window opens. The pull then waits up to 20s for
    `https://bop.americanstrategic.com/` (or that application's frame) and
-   does not click View Reports on the landing page. It closes the landing
+   does not click report controls on the landing page. It closes the landing
    page when the application is a different page. A failed close does not
-   hold. HPLanding alone, after that wait, holds.
+   hold. HPLanding alone, after that wait, holds. On the BOP application the
+   pull waits until a known control is visible, or until the network is idle.
+   It does not sleep a fixed interval, and it does not look before that.
+   An older page still uses `View Reports` / `VIEW REPORTS`, then
+   `Pending Cancel for Nonpayment`. The reports page seen on hermes-test-01
+   on 2026-09-30 has no View Reports control. It has
+   `Export Pending Cancel for Non-Payment Pdf` and
+   `Export Pending Cancel for Non-Payment Xls`. Those buttons are already
+   the report. On 2026-09-30 both downloads were 0 bytes while the date
+   control still showed `Select Date Range`. A later check of the select
+   attempt held with Report Dates missing: there is no combobox by that
+   name, and that text is not a label for an input. The control is a
+   dropdown button whose text starts as `Select Date Range`. On
+   hermes-test-01 that button was found by name, the menu opened, and both
+   text inputs took `MM/DD/YYYY` (jQuery datepicker `mm/dd/yy`). Apply was
+   clicked. The button then read `09/29/2026 - 09/29/2026` and the inputs
+   kept that date, but the name `Select Date Range` was gone, so the
+   read-back held. The pull now keeps the button by `#dropdownMenu2` (or
+   the element it already found). The menu is the div right after that
+   button. After Apply it reads page-level `.report-start` and
+   `.report-end` with `input_value` even though the menu is closed, and it
+   reads the pinned button text. Either one showing the process date is
+   enough. It waits for the network to go idle. Then it exports. A missing
+   control, a value that does not stick, or a page that does not finish
+   loading holds. The export is not downloaded.
+   The click only downloads. It does not bind, cancel, or pay.
 3. Full-page PNG of that report, then read policies from the on-screen policy
-   table, or from one Excel export, or from one PDF export.
+   table, or from the PDF export, or from the Xls export. The PDF export is
+   preferred. A list PDF is read for insured, policy number, and cancel date,
+   the same fields the other Wave A pulls keep. Xls is read as xlsx (zip XML,
+   no extra package), an HTML table, or CSV. A classic BIFF `.xls` file holds
+   with a plain reason. An empty or truncated download holds. It is not an
+   empty report and it is not "no docs".
 4. For each policy, on the original FAO shell: search the policy → Documents →
    Policy → download the Notice of Non Payment whose date is the report date.
 5. Save `[Policy Number] - NOC - Non Payment.pdf`.
@@ -189,9 +218,46 @@ is a failed pull, not a partial success. This code has not been run on
 - Live accessible names: `Manage Policies`, `Businessowner/Contractor GL`,
   `Go to Businessowner/Contractor GL policy search` (shell Home only, one
   exact link or button), `View Reports`, `Pending Cancel for Nonpayment`,
+  `Export Pending Cancel for Non-Payment Pdf`,
+  `Export Pending Cancel for Non-Payment Xls`,
+  `Select Date Range`, `Apply`, `.report-start`, `.report-end`,
   the shell policy search, `Documents`, and the `Policy` document tab. A
   mismatch holds; do not widen these from Production.
 - Whether Businessowner/Contractor GL opens exactly one new window.
+- Page-ready wait, reported from hermes-test-01 on 2026-09-30: the reports
+  page showed the Pending Cancel for Non-Payment row and its pdf and xls
+  icons. Both exports were 0 bytes while the date control still showed
+  `Select Date Range`. Commit `cb066a9` then held with `Progressive BOP
+  Report Dates control is missing or ambiguous` and did not export. The
+  read-only page has no select and no combobox named Report Dates. The
+  words Report Dates are not a label for an input. The control is a
+  dropdown button, text `Select Date Range`, `id="dropdownMenu2"`, which
+  opens a menu. The menu has unlabeled text inputs `.report-start` and
+  `.report-end`, plus Apply. Commit `673e611` found the button by name,
+  filled both inputs as `MM/DD/YYYY`, and clicked Apply. The button then
+  read `09/29/2026 - 09/29/2026` and both inputs kept that date. The pull
+  held with `Progressive BOP Report Dates could not be read after it was
+  set` because the name `Select Date Range` no longer matched. This
+  read-back change has not been run there. Do not deploy it while that
+  host is in use.
+- The inputs are text fields with jQuery datepicker format `mm/dd/yy`.
+  `MM/DD/YYYY` was accepted. A different type still holds.
+- The menu is the div immediately after `#dropdownMenu2`. A different
+  wrapper holds before export.
+- After Apply the inputs are hidden. Their values still read. The pinned
+  button text is `MM/DD/YYYY - MM/DD/YYYY`. Either one is acceptance.
+- Whether the network goes idle after Apply and the export is then
+  non-empty for 9/29 and 9/30. A 0-byte file must still hold and must not
+  become an empty pack.
+- Whether the PDF export is a policy list (insured, policy number, cancel
+  date) or a packet of per-policy notices. A list is parsed. The per-policy
+  Notice of Non Payment is still downloaded from FAO Documents. A cancel date
+  that is not the requested report date holds. Confirm that against a live
+  non-empty file.
+- Whether the Xls export, once non-empty, is xlsx, an HTML table, CSV, or
+  classic BIFF `.xls`. xlsx, HTML, and CSV are read with the standard
+  library. BIFF holds until a real file shows that format. No Excel package
+  was added.
 - Whether the report is an HTML policy table, an Excel control, or a PDF
   control. An empty scan with no policy table, no export, and no no-records
   phrase holds, so a blank pack is not invented from a failed parse.

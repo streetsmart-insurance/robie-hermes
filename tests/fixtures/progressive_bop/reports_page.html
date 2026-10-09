@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Pending Cancel for Non-Payment</h1>
+  <p>The reports page exposes the export buttons.</p>
+  <!--
+    Live hermes-test-01, commit cb066a9: there is no select and no combobox
+    named Report Dates. Those words are not a label for an input. The control
+    is a dropdown button, text Select Date Range, id dropdownMenu2. The open
+    menu has unlabeled inputs report-start and report-end, plus Apply.
+  -->
+  <p>Report Dates</p>
+  <div class="dropdown">
+    <button type="button" id="dropdownMenu2" class="dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">Select Date Range</button>
+    <div class="dropdown-menu" role="menu" aria-labelledby="dropdownMenu2">
+      <input class="report-start" type="text">
+      <input class="report-end" type="text">
+      <button type="button">Apply</button>
+    </div>
+  </div>
+  <button type="button">Export Pending Cancel for Non-Payment Pdf</button>
+  <button type="button">Export Pending Cancel for Non-Payment Xls</button>
+</body>
+</html>

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -38,6 +39,11 @@ from robie_job_engine.progressive_bop import (
     parse_excel_report,
     parse_pdf_report,
     parse_report_rows,
+    parse_xls_export,
+    apply_bop_report_dates,
+    _DATE_MENU_NEXT_DIV,
+    _PENDING_CANCEL_PDF_EXPORT,
+    _PENDING_CANCEL_XLS_EXPORT,
     policies_from_report_text,
     read_report_from_page,
     report_from_extracted,
@@ -1150,6 +1156,790 @@ class BopLivePageFixTests(unittest.TestCase):
         away = FakePage(set(), url="https://www.foragentsonly.com/home")
         ensure_manage_policies_landing(away)
         self.assertEqual(away.clicked, [("goto", "https://www.foragentsonly.com/landingpages/managepolicies/")])
+
+
+FIXTURES = Path(__file__).resolve().parents[0] / "fixtures" / "progressive_bop"
+
+
+def _fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def _button_labels(page_html: str) -> list[str]:
+    labels = re.findall(r"<button[^>]*>(.*?)</button>", page_html, flags=re.IGNORECASE | re.DOTALL)
+    return [_norm_space(label) for label in labels]
+
+
+def _norm_space(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+class _SilentContext:
+    def on(self, event, fn):
+        return None
+
+    def remove_listener(self, event, fn):
+        return None
+
+
+class _FinishedDownload:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.finished = False
+
+    def failure(self):
+        self.finished = True
+        return None
+
+    def save_as(self, path):
+        if not self.finished:
+            raise AssertionError("save_as ran before the download finished")
+        Path(path).write_bytes(self.payload)
+
+
+class _MissingControl:
+    def count(self):
+        return 0
+
+    def is_visible(self):
+        return False
+
+    def locator(self, selector):
+        return self
+
+    def get_by_role(self, role, name=None, exact=True):
+        return self
+
+    def wait_for(self, state="visible", timeout=None):
+        raise TimeoutError("Timeout 20000ms exceeded")
+
+
+class _MenuInput:
+    def __init__(self, page: "_ExportPage", css: str, *, chained_to_name: bool = False):
+        self.page = page
+        self.css = css
+        self.value = ""
+        self.chained_to_name = chained_to_name
+
+    def count(self):
+        if not self.page.has_inputs:
+            return 0
+        if self.css == ".report-start":
+            return self.page.start_count
+        return 1
+
+    def is_visible(self):
+        return self.page.menu_open and self.count() == 1
+
+    def wait_for(self, state="visible", timeout=None):
+        if state == "visible" and self.is_visible():
+            return None
+        raise TimeoutError("Timeout 20000ms exceeded")
+
+    def get_attribute(self, name):
+        if name == "type":
+            return self.page.input_type
+        return None
+
+    def _store(self) -> "_MenuInput":
+        if self.css == ".report-start":
+            return self.page.menu.start
+        return self.page.menu.end
+
+    def fill(self, value):
+        if not self.is_visible():
+            raise RuntimeError("hidden")
+        stored = value if self.page.dates_stick else ""
+        self._store().value = stored
+        self.page.date_values[self.css] = stored
+
+    def input_value(self):
+        if self.chained_to_name and self.page.button_text != "Select Date Range":
+            raise RuntimeError("Select Date Range resolved to 0 elements")
+        if not self.page.menu_open:
+            self.page.hidden_value_reads += 1
+        if self.page.applied and self.page.dates in {"button-text", "unchanged"}:
+            return ""
+        return self._store().value
+
+
+class _ApplyButton:
+    def __init__(self, page: "_ExportPage"):
+        self.page = page
+
+    def count(self):
+        return self.page.apply_count
+
+    def is_visible(self):
+        return self.page.menu_open and self.count() == 1
+
+    def wait_for(self, state="visible", timeout=None):
+        if state == "visible" and self.is_visible():
+            return None
+        raise TimeoutError("Timeout 20000ms exceeded")
+
+    def click(self):
+        self.page.date_clicks.append("apply")
+        self.page.applied = True
+        if self.page.dates in {"button-text", "renamed"}:
+            start = self.page.menu.start.value
+            end = self.page.menu.end.value
+            self.page.button_text = f"{start} - {end}"
+        if self.page.dates == "renamed":
+            self.page.menu_open = False
+
+
+class _DateMenu:
+    def __init__(self, page: "_ExportPage"):
+        self.page = page
+        self.start = _MenuInput(page, ".report-start")
+        self.end = _MenuInput(page, ".report-end")
+
+    def count(self):
+        return 1 if self.page.has_menu else 0
+
+    def is_visible(self):
+        return self.page.menu_open
+
+    def locator(self, selector):
+        self.page.menu_queries.append(selector)
+        chained = self.page.menu_source == "role"
+        if selector == ".report-start":
+            return _MenuInput(self.page, ".report-start", chained_to_name=chained)
+        if selector == ".report-end":
+            return _MenuInput(self.page, ".report-end", chained_to_name=chained)
+        return _MissingControl()
+
+    def get_by_role(self, role, name=None, exact=True):
+        self.page.menu_roles.append((role, name))
+        if role == "button" and name == "Apply" and self.page.apply_count:
+            return _ApplyButton(self.page)
+        return _MissingControl()
+
+
+class _DateToggle:
+    def __init__(self, page: "_ExportPage", via: str):
+        self.page = page
+        self.via = via
+
+    def count(self):
+        if self.via == "role":
+            if self.page.button_text != "Select Date Range":
+                return 0
+            return self.page.role_count
+        if self.via == "id":
+            return self.page.id_count
+        return 1
+
+    def is_visible(self):
+        return self.count() == 1
+
+    def wait_for(self, state="visible", timeout=None):
+        if state == "visible" and self.is_visible():
+            return None
+        raise TimeoutError("Timeout 20000ms exceeded")
+
+    def click(self):
+        self.page.date_clicks.append(self.via)
+        if self.page.dates != "stuck":
+            self.page.menu_open = True
+
+    def inner_text(self):
+        self.page.text_reads.append(self.via)
+        if self.via == "role" and self.page.button_text != "Select Date Range":
+            raise RuntimeError("Select Date Range resolved to 0 elements")
+        return self.page.button_text
+
+    def locator(self, selector):
+        self.page.menu_queries.append(selector)
+        if self.via == "role" and self.count() == 0:
+            raise RuntimeError("Select Date Range resolved to 0 elements")
+        self.page.menu_source = self.via
+        if self.page.has_menu and selector == _DATE_MENU_NEXT_DIV:
+            return self.page.menu
+        return _MissingControl()
+
+    def get_attribute(self, name):
+        if name == "id":
+            return self.page.element_id
+        return None
+
+    def element_handle(self):
+        if self.count() != 1:
+            return None
+        return _DateToggle(self.page, "handle")
+
+
+class _ExportPage(FakePage):
+    """BOP reports page whose export buttons download canned bytes.
+
+    ``dates`` is ``custom`` (text inputs in the Select Date Range menu),
+    ``date`` (type=date), ``missing``, ``ambiguous``, ``id``, ``duplicate-id``,
+    ``stuck``, ``no-inputs``, ``reject``, ``no-apply``, ``button-text``,
+    ``unchanged``, or ``bad-type``.
+    """
+
+    def __init__(
+        self,
+        files: dict[str, bytes],
+        *,
+        body: str = "Pending Cancel for Non-Payment",
+        dates: str = "custom",
+        refresh: str | None = None,
+    ):
+        super().__init__(
+            {("button", name) for name in files},
+            body=body,
+            url="https://bop.americanstrategic.com/reports",
+        )
+        self.files = files
+        self.context = _SilentContext()
+        self.dates = dates
+        self.refresh = refresh
+        self.dates_stick = dates != "reject"
+        self.input_type = "date" if dates == "date" else "number" if dates == "bad-type" else "text"
+        self.role_count = 0 if dates in {"missing", "id", "duplicate-id"} else 2 if dates == "ambiguous" else 1
+        self.id_count = 0 if dates == "missing" else 2 if dates == "duplicate-id" else 1
+        self.has_menu = dates not in {"missing", "no-menu"}
+        self.element_id = None if dates == "captured" else "dropdownMenu2"
+        self.menu_source = ""
+        self.hidden_value_reads = 0
+        self.text_reads: list[str] = []
+        self.has_inputs = dates != "no-inputs"
+        self.start_count = 2 if dates == "duplicate-start" else 1
+        self.apply_count = 0 if dates == "no-apply" else 2 if dates == "duplicate-apply" else 1
+        self.menu_open = False
+        self.applied = False
+        self.button_text = "Select Date Range"
+        self.date_values: dict[str, str] = {}
+        self.date_clicks: list[str] = []
+        self.locators: list[str] = []
+        self.menu_queries: list[str] = []
+        self.menu_roles: list[tuple] = []
+        self.role_lookups: list[tuple] = []
+        self.states: list[str] = []
+        self.events: list[str] = []
+        self.exported = False
+        self.menu = _DateMenu(self)
+        if refresh is not None:
+            def wait_for_load_state(state, timeout=None, page=self):
+                page.states.append(state)
+                page.events.append(state)
+                if page.refresh == "timeout":
+                    raise TimeoutError("Timeout 20000ms exceeded")
+
+            self.wait_for_load_state = wait_for_load_state
+
+    def locator(self, selector):
+        self.locators.append(selector)
+        if selector == "#dropdownMenu2":
+            return _DateToggle(self, "id")
+        if selector == ".report-start":
+            return _MenuInput(self, ".report-start")
+        if selector == ".report-end":
+            return _MenuInput(self, ".report-end")
+        return super().locator(selector)
+
+    def get_by_role(self, role, name=None, exact=True):
+        self.role_lookups.append((role, name))
+        if role == "button" and name == "Select Date Range":
+            return _DateToggle(self, "role")
+        return super().get_by_role(role, name=name, exact=exact)
+
+    def expect_download(self, timeout=None):
+        page = self
+
+        class _Download:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                page.exported = True
+                page.events.append("export")
+                name = page.clicked[-1][1]
+                self.value = _FinishedDownload(page.files[name])
+                return False
+
+        return _Download()
+
+
+def _minimal_xlsx(rows: list[list[str]]) -> bytes:
+    shared: list[str] = []
+
+    def shared_index(value: str) -> int:
+        shared.append(value)
+        return len(shared) - 1
+
+    sheet_rows = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = []
+        for column_index, value in enumerate(row):
+            column = chr(ord("A") + column_index)
+            index = shared_index(value)
+            cells.append(f'<c r="{column}{row_index}" t="s"><v>{index}</v></c>')
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    shared_xml = "".join(f"<si><t>{item}</t></si>" for item in shared)
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<worksheet xmlns="{ns}"><sheetData>{"".join(sheet_rows)}</sheetData></worksheet>'
+    )
+    shared_part = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<sst xmlns="{ns}" count="{len(shared)}" uniqueCount="{len(shared)}">{shared_xml}</sst>'
+    )
+    buffer = io.BytesIO()
+    with __import__("zipfile").ZipFile(buffer, "w") as zipped:
+        zipped.writestr("[Content_Types].xml", "<Types></Types>")
+        zipped.writestr("xl/workbook.xml", f'<workbook xmlns="{ns}"></workbook>')
+        zipped.writestr("xl/worksheets/sheet1.xml", sheet)
+        zipped.writestr("xl/sharedStrings.xml", shared_part)
+    return buffer.getvalue()
+
+
+class PendingCancelExportTests(unittest.TestCase):
+    def test_fixture_page_has_export_buttons_and_no_view_reports(self):
+        html = _fixture("reports_page.html").decode("utf-8")
+        labels = _button_labels(html)
+        self.assertEqual(
+            labels,
+            [
+                "Select Date Range",
+                "Apply",
+                _PENDING_CANCEL_PDF_EXPORT,
+                _PENDING_CANCEL_XLS_EXPORT,
+            ],
+        )
+        self.assertNotIn("View Reports", html)
+        self.assertNotIn("VIEW REPORTS", html)
+        self.assertNotIn("<select", html.lower())
+        self.assertNotIn("<label", html.lower())
+        self.assertIn(">Report Dates</p>", html)
+        self.assertIn('id="dropdownMenu2"', html)
+        self.assertIn('class="dropdown-menu"', html)
+        self.assertIn('class="report-start"', html)
+        self.assertIn('class="report-end"', html)
+        self.assertIn('type="text"', html)
+        self.assertLess(html.index('id="dropdownMenu2"'), html.index(_PENDING_CANCEL_PDF_EXPORT))
+
+    def test_export_page_does_not_click_view_reports(self):
+        html = _fixture("reports_page.html").decode("utf-8")
+        labels = _button_labels(html)
+        report = FakePage(
+            {("button", label) for label in labels},
+            url="https://bop.americanstrategic.com/reports",
+            body=html,
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.clicked, [])
+        self.assertNotIn(("link", "View Reports"), report.clicked)
+        self.assertNotIn(("button", "VIEW REPORTS"), report.clicked)
+
+    def test_network_idle_before_controls_and_no_fixed_sleep(self):
+        class _Late(FakePage):
+            def __init__(self):
+                super().__init__(set(), url="https://bop.americanstrategic.com/reports")
+                self.states: list[str] = []
+
+            def wait_for_load_state(self, state, timeout=None):
+                self.states.append(state)
+                if state == "networkidle":
+                    self.roles.update({
+                        ("button", _PENDING_CANCEL_PDF_EXPORT),
+                        ("button", _PENDING_CANCEL_XLS_EXPORT),
+                    })
+
+            def wait_for_timeout(self, _ms):
+                raise AssertionError("fixed sleep")
+
+        report = _Late()
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.states, ["networkidle"])
+        self.assertEqual(report.clicked, [])
+
+    def test_visible_export_button_is_enough_and_does_not_sleep(self):
+        class _Locator(FakeLocator):
+            def count(self):
+                if not self.page.ready:
+                    return 0
+                return FakeLocator.count(self)
+
+            def or_(self, _other):
+                return self
+
+            def wait_for(self, state="visible", timeout=None):
+                self.page.waits.append(state)
+                self.page.ready = True
+                self.page.roles.update({
+                    ("button", _PENDING_CANCEL_PDF_EXPORT),
+                    ("button", _PENDING_CANCEL_XLS_EXPORT),
+                })
+
+        class _Late(FakePage):
+            def __init__(self):
+                super().__init__(set(), url="https://bop.americanstrategic.com/reports")
+                self.ready = False
+                self.waits: list[str] = []
+
+            def get_by_role(self, role, name=None, exact=True):
+                return _Locator(self, role=role, name=name)
+
+            def wait_for_load_state(self, state, timeout=None):
+                raise AssertionError(state)
+
+            def wait_for_timeout(self, _ms):
+                raise AssertionError("fixed sleep")
+
+        report = _Late()
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(report.waits, ["visible"])
+        self.assertEqual(report.clicked, [])
+
+    def test_pdf_list_fixture_extracts_insured_policy_and_cancel_date(self):
+        text = _fixture("pending_cancel_list.txt").decode("utf-8")
+        page = _ExportPage({_PENDING_CANCEL_PDF_EXPORT: _text_pdf(text)})
+        report = read_report_from_page(page, DAY)
+        self.assertEqual(report.source, "pdf")
+        self.assertEqual(
+            [(row.policy_number, row.insured_name) for row in report.policies],
+            [("860521214", "3JR Contracting LLC"), ("879512352", "ALTI TRANSPORT LLC")],
+        )
+        self.assertTrue(all(row.report_date == DAY for row in report.policies))
+        self.assertEqual(page.clicked, [("button", _PENDING_CANCEL_PDF_EXPORT)])
+        self.assertEqual(page.date_clicks, ["id", "apply"])
+        self.assertEqual(
+            page.date_values,
+            {
+                ".report-start": DAY.strftime("%m/%d/%Y"),
+                ".report-end": DAY.strftime("%m/%d/%Y"),
+            },
+        )
+        self.assertEqual(
+            [item for item in page.role_lookups if item == ("button", "Select Date Range")],
+            [("button", "Select Date Range")],
+        )
+        self.assertLess(page.locators.index("#dropdownMenu2"), page.locators.index(".report-start"))
+        self.assertIn(".report-end", page.locators)
+        self.assertIn(_DATE_MENU_NEXT_DIV, page.menu_queries)
+        self.assertNotIn("role", page.text_reads)
+        self.assertNotIn(("button", "Apply"), page.role_lookups)
+        self.assertIn(("button", "Apply"), page.menu_roles)
+        with self.assertRaises(IntakeHold):
+            policies_from_report_text(
+                "860521214 3JR Contracting LLC 09/25/2026",
+                report_date=DAY,
+            )
+
+    def test_zero_byte_download_holds_and_is_not_an_empty_report(self):
+        empty = _fixture("empty_export.bin")
+        self.assertEqual(empty, b"")
+        page = _ExportPage(
+            {
+                _PENDING_CANCEL_PDF_EXPORT: empty,
+                _PENDING_CANCEL_XLS_EXPORT: empty,
+            },
+            body="Pending Cancel for Non-Payment. No records.",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("empty file (0 bytes)", reason)
+        self.assertIn("not a report with no policies", reason)
+        self.assertNotIn("No records", reason)
+        with self.assertRaises(IntakeHold) as extracted:
+            report_from_extracted(
+                tables=[],
+                page_text="Pending Cancel for Nonpayment. No records found.",
+                excel_bytes=None,
+                pdf_bytes=empty,
+                report_date=DAY,
+            )
+        self.assertIn("empty file (0 bytes)", str(extracted.exception))
+
+    def test_truncated_pdf_fixture_holds(self):
+        page = _ExportPage({_PENDING_CANCEL_PDF_EXPORT: _fixture("truncated_export.pdf")})
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("truncated", reason)
+        self.assertIn("not a report with no policies", reason)
+
+    def test_html_xls_fixture_is_a_list_when_the_pdf_is_empty(self):
+        page = _ExportPage({
+            _PENDING_CANCEL_PDF_EXPORT: _fixture("empty_export.bin"),
+            _PENDING_CANCEL_XLS_EXPORT: _fixture("pending_cancel_list.html"),
+        })
+        report = read_report_from_page(page, DAY)
+        self.assertEqual(report.source, "excel")
+        self.assertEqual(
+            [row.policy_number for row in report.policies],
+            ["860521214", "879512352"],
+        )
+        self.assertEqual(report.policies[0].insured_name, "3JR Contracting LLC")
+        direct = parse_xls_export(_fixture("pending_cancel_list.html"), report_date=DAY)
+        self.assertEqual(direct.policies[1].insured_name, "ALTI TRANSPORT LLC")
+
+    def test_xlsx_zip_parses_without_openpyxl(self):
+        blob = _minimal_xlsx([
+            ["Policy Number", "Named Insured", "Cancel Date"],
+            ["860521214", "3JR Contracting LLC", "09/26/2026"],
+        ])
+        with patch.dict(sys.modules, {"openpyxl": None}):
+            report = parse_excel_report(blob, report_date=DAY)
+        self.assertEqual(report.source, "excel")
+        self.assertEqual(report.policies[0].policy_number, "860521214")
+        self.assertEqual(report.policies[0].insured_name, "3JR Contracting LLC")
+        classic = b"\xd0\xcf\x11\xe0" + b"\x00" * 600
+        with self.assertRaises(IntakeHold) as caught:
+            parse_xls_export(classic, report_date=DAY)
+        self.assertIn("older Excel workbook", str(caught.exception))
+        self.assertIn("not treated as a report with no policies", str(caught.exception))
+        csv_report = parse_xls_export(
+            b"Policy Number,Named Insured,Cancel Date\n860521214,3JR Contracting LLC,09/26/2026\n",
+            report_date=DAY,
+        )
+        self.assertEqual(csv_report.policies[0].insured_name, "3JR Contracting LLC")
+
+    def test_a_failed_download_holds_before_the_file_is_read(self):
+        from robie_job_engine.progressive_bop import _finished_download_bytes
+
+        class _Failed:
+            def failure(self):
+                return "net::ERR_ABORTED"
+
+            def save_as(self, path):
+                raise AssertionError("save_as ran before the download finished")
+
+        with self.assertRaises(IntakeHold) as caught:
+            _finished_download_bytes(_Failed(), label=_PENDING_CANCEL_PDF_EXPORT)
+        self.assertIn("did not finish", str(caught.exception))
+        self.assertIn("not a report with no policies", str(caught.exception))
+
+    def test_complete_no_records_pdf_is_still_a_blank_report(self):
+        page = _ExportPage({
+            _PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records."),
+        })
+        report = read_report_from_page(page, DAY)
+        self.assertTrue(report.blank)
+        self.assertEqual(report.policies, ())
+        self.assertEqual(report.source, "pdf")
+        self.assertEqual(page.date_values[".report-start"], DAY.strftime("%m/%d/%Y"))
+        self.assertEqual(page.date_values[".report-end"], DAY.strftime("%m/%d/%Y"))
+
+    def test_missing_report_dates_holds_before_export(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="missing",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        reason = str(caught.exception)
+        self.assertIn("Report Dates control is missing or ambiguous", reason)
+        self.assertIn("export was not downloaded", reason)
+        self.assertFalse(page.exported)
+        self.assertEqual(page.clicked, [])
+
+    def test_rejected_date_holds_before_export(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="reject",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        self.assertIn("report start did not accept", str(caught.exception))
+        self.assertIn("export was not downloaded", str(caught.exception))
+        self.assertEqual(page.date_clicks, ["id"])
+        self.assertFalse(page.exported)
+
+    def test_date_input_uses_iso_and_text_input_uses_month_day_year(self):
+        typed = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="date",
+        )
+        choice = apply_bop_report_dates(typed, DAY)
+        self.assertEqual(choice.kind, "exact")
+        self.assertEqual(choice.start, DAY)
+        self.assertEqual(choice.end, DAY)
+        self.assertEqual(
+            typed.date_values,
+            {".report-start": DAY.isoformat(), ".report-end": DAY.isoformat()},
+        )
+        self.assertEqual(typed.date_clicks, ["id", "apply"])
+
+    def test_id_fallback_is_used_only_when_the_button_name_is_absent(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="id",
+        )
+        apply_bop_report_dates(page, DAY)
+        self.assertEqual(page.date_clicks, ["id", "apply"])
+        self.assertIn("#dropdownMenu2", page.locators)
+        captured = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="captured",
+        )
+        apply_bop_report_dates(captured, DAY)
+        self.assertEqual(captured.date_clicks, ["handle", "apply"])
+        self.assertNotIn("#dropdownMenu2", captured.locators)
+        self.assertIn(_DATE_MENU_NEXT_DIV, captured.menu_queries)
+        ambiguous = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="ambiguous",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(ambiguous, DAY)
+        self.assertIn("missing or ambiguous", str(caught.exception))
+        self.assertNotIn("#dropdownMenu2", ambiguous.locators)
+        self.assertEqual(ambiguous.date_clicks, [])
+        self.assertFalse(ambiguous.exported)
+        duplicate = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="duplicate-id",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(duplicate, DAY)
+        self.assertIn("missing or ambiguous", str(caught.exception))
+        self.assertEqual(duplicate.date_clicks, [])
+        self.assertFalse(duplicate.exported)
+
+    def test_menu_that_does_not_open_holds_before_export(self):
+        for mode in ("stuck", "no-inputs", "no-menu"):
+            with self.subTest(mode=mode):
+                page = _ExportPage(
+                    {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+                    dates=mode,
+                )
+                with self.assertRaises(IntakeHold) as caught:
+                    read_report_from_page(page, DAY)
+                reason = str(caught.exception)
+                self.assertIn("still on Select Date Range", reason)
+                self.assertIn("were not on the page", reason)
+                self.assertIn("export was not downloaded", reason)
+                self.assertNotIn("apply", page.date_clicks)
+                self.assertFalse(page.exported)
+
+    def test_apply_and_unaccepted_range_hold_before_export(self):
+        missing = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="no-apply",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(missing, DAY)
+        self.assertIn("Apply button is missing or ambiguous", str(caught.exception))
+        self.assertFalse(missing.exported)
+        duplicate = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="duplicate-apply",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(duplicate, DAY)
+        self.assertIn("Apply button is missing or ambiguous", str(caught.exception))
+        self.assertFalse(duplicate.exported)
+        bad_type = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="bad-type",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(bad_type, DAY)
+        self.assertIn("not a date or text field", str(caught.exception))
+        self.assertNotIn("apply", bad_type.date_clicks)
+        self.assertFalse(bad_type.exported)
+        cleared = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="unchanged",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(cleared, DAY)
+        self.assertIn("did not accept 2026-09-26", str(caught.exception))
+        self.assertIn("apply", cleared.date_clicks)
+        self.assertFalse(cleared.exported)
+
+    def test_apply_rewrites_the_button_and_keeps_hidden_input_values(self):
+        html = _fixture("report_dates_applied.html").decode("utf-8")
+        labels = _button_labels(html)
+        self.assertIn("09/29/2026 - 09/29/2026", labels)
+        self.assertNotIn("Select Date Range", labels)
+        self.assertIn('id="dropdownMenu2"', html)
+        self.assertIn('class="report-start" type="text" value="09/29/2026"', html)
+        self.assertIn('class="report-end" type="text" value="09/29/2026"', html)
+        self.assertLess(html.index('id="dropdownMenu2"'), html.index('class="dropdown-menu"'))
+        self.assertLess(html.index("</button>"), html.index('class="dropdown-menu"'))
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="renamed",
+        )
+        report = read_report_from_page(page, DAY)
+        shown = f"{DAY.strftime('%m/%d/%Y')} - {DAY.strftime('%m/%d/%Y')}"
+        self.assertTrue(report.blank)
+        self.assertEqual(page.button_text, shown)
+        self.assertGreaterEqual(page.hidden_value_reads, 2)
+        self.assertEqual(page.text_reads, ["id"])
+        self.assertEqual(
+            [item for item in page.role_lookups if item == ("button", "Select Date Range")],
+            [("button", "Select Date Range")],
+        )
+        self.assertTrue(page.exported)
+        renamed = page.get_by_role("button", name="Select Date Range")
+        self.assertEqual(renamed.count(), 0)
+        with self.assertRaises(RuntimeError):
+            renamed.inner_text()
+
+    def test_button_text_is_enough_when_apply_clears_the_inputs(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            dates="button-text",
+        )
+        report = read_report_from_page(page, DAY)
+        self.assertTrue(report.blank)
+        self.assertEqual(page.button_text, f"{DAY.strftime('%m/%d/%Y')} - {DAY.strftime('%m/%d/%Y')}")
+        self.assertTrue(page.exported)
+        self.assertEqual(page.clicked, [("button", _PENDING_CANCEL_PDF_EXPORT)])
+
+    def test_duplicate_start_input_holds(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            dates="duplicate-start",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(page, DAY)
+        self.assertIn("missing or ambiguous", str(caught.exception))
+        self.assertFalse(page.exported)
+
+    def test_page_must_finish_loading_after_the_date_is_accepted(self):
+        page = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("Pending Cancel for Nonpayment. No records.")},
+            refresh="idle",
+        )
+        report = read_report_from_page(page, DAY)
+        self.assertTrue(report.blank)
+        self.assertEqual(page.states, ["networkidle"])
+        self.assertTrue(page.exported)
+        stalled = _ExportPage(
+            {_PENDING_CANCEL_PDF_EXPORT: _text_pdf("No records.")},
+            refresh="timeout",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            read_report_from_page(stalled, DAY)
+        self.assertIn("did not finish loading after Report Dates was set", str(caught.exception))
+        self.assertFalse(stalled.exported)
 
 
 if __name__ == "__main__":
