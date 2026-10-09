@@ -401,6 +401,27 @@ def _docs_for(policy, token):
     ]
 
 
+class _PagingFinysPage(FakeFinysPage):
+    """Two-argument evaluate: page size, then Next until the last page."""
+
+    def __init__(self):
+        super().__init__(pending_rows=PENDING_ROWS[:2])
+        self.pages = (PENDING_ROWS[:2], PENDING_ROWS[2:4], PENDING_ROWS[4:])
+        self.index = 0
+        self.page_size = None
+        self.pending_rows = self.pages[0]
+
+    def evaluate(self, script, *args):
+        if "pageSize" in str(script):
+            self.page_size = args[0] if args else None
+            return "pageSize"
+        if self.index + 1 < len(self.pages):
+            self.index += 1
+            self.pending_rows = self.pages[self.index]
+            return "clicked"
+        return "disabled"
+
+
 def _browser(policy=HONJ, token=b"notice"):
     page = FakeFinysPage(docs_by_policy={policy: _docs_for(policy, pdf_bytes(token))})
     return FinysFoSBrowser(page), page
@@ -506,6 +527,34 @@ class NavigationTests(unittest.TestCase):
         with self.assertRaisesRegex(IntakeHold, "Policy Summary for HONJ038633 is missing or ambiguous"):
             browser.open_policy(HONJ)
 
+    def test_two_tables_use_the_one_with_document_type_and_date(self):
+        class TwoTables(FakeFinysPage):
+            def roots(self):
+                layout = _table(("Menu", "Link"), [("Home", "Open")])
+                docs = self._docs_table(HONJ)
+                nodes = [layout, docs]
+                return [self._adopt(node) for node in nodes]
+
+        page = TwoTables(docs_by_policy={HONJ: _docs_for(HONJ, pdf_bytes(b"n"))})
+        page.searched_policy = HONJ
+        documents = extract_documents(page)
+        self.assertEqual(documents[1].description, "Intent to Cancel Notice")
+
+    def test_policy_summary_accepts_the_number_inside_the_label(self):
+        page = FakeFinysPage()
+        real_locator = page.locator
+        label = FakeNode(tag="span", name=f"Policy {HONJ}")
+
+        def locator(selector):
+            if "PolicyNumber" in selector:
+                label.page = page
+                return FakeLocator([label], page)
+            return real_locator(selector)
+
+        page.locator = locator
+        fos.search_policy(page, HONJ)
+        self.assertEqual(page.state, "policy")
+
     def test_ambiguous_view_links_hold(self):
         ambiguous_rows = [
             (
@@ -537,6 +586,80 @@ class NavigationTests(unittest.TestCase):
         portal.url = "https://example.com/"
         with self.assertRaisesRegex(IntakeHold, "portal tab is missing or ambiguous"):
             open_finys_from_portal(portal)
+
+    def test_agent_portal_url_opens_in_a_new_tab(self):
+        portal = FakePortalPage()
+        opened = FakeFinysPage(url="about:blank")
+        opened.gotos = []
+
+        def goto(url, **kwargs):
+            opened.gotos.append(url)
+            opened.url = "https://fos.finys.com/"
+
+        opened.goto = goto
+        portal.context.new_page = lambda: opened
+        finys = open_finys_from_portal(portal)
+        self.assertIs(finys, opened)
+        self.assertEqual(opened.gotos, [fos.AGENT_PORTAL_URL])
+        self.assertIsNone(portal._popup_value)
+
+    def test_signed_in_finys_tab_is_reused(self):
+        portal = FakePortalPage()
+        existing = FakeFinysPage()
+        portal.context.pages.append(existing)
+
+        def new_page():
+            raise AssertionError("new tab")
+
+        portal.context.new_page = new_page
+        self.assertIs(open_finys_from_portal(portal), existing)
+
+    def test_hidden_portal_link_expands_the_navbar_then_clicks(self):
+        portal = FakePortalPage()
+        clicks = []
+
+        class Control:
+            def __init__(self, name):
+                self.name = name
+
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            def click(self, **kwargs):
+                clicks.append(self.name)
+                if self.name == "link":
+                    portal.on_click(portal._link)
+
+        def locator(selector):
+            if selector == fos.NAVBAR_TOGGLER:
+                return Control("toggler")
+            if selector == fos.PORTAL_LINK_HREF:
+                return Control("link")
+            return FakeLocator([], portal)
+
+        portal.locator = locator
+        portal.context.new_page = lambda: (_ for _ in ()).throw(RuntimeError("no tab"))
+        finys = open_finys_from_portal(portal)
+        self.assertEqual(clicks, ["toggler", "link"])
+        self.assertEqual(finys.url, FINYS_TASKS_URL)
+
+    def test_open_tasks_grid_pages_past_the_first_ten(self):
+        page = _PagingFinysPage()
+        items = fos.read_all_pending_items(page)
+        self.assertEqual(page.page_size, fos.KENDO_PAGE_SIZE)
+        self.assertEqual([item.policy_number for item in items], [row[0] for row in PENDING_ROWS])
+
+    def test_open_tasks_paging_stops_at_the_time_budget(self):
+        page = _PagingFinysPage()
+        clock = iter((0, 0, 1000))
+        with patch.object(fos, "monotonic", lambda: next(clock)):
+            items = fos.read_all_pending_items(page)
+        self.assertEqual(len(items), 2)
+        self.assertTrue(any("time budget" in hold["reason"] for hold in page.fos_row_holds))
 
     def test_finys_url_guard(self):
         page = FakeFinysPage()
@@ -636,6 +759,104 @@ class PullTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(PullHeld, "Document View download is not a PDF"):
             self._run(page)
+
+    def test_cancellation_type_or_notes_are_kept_and_counted(self):
+        class TypedPage(FakeFinysPage):
+            def _tasks_table(self):
+                return _table(
+                    ("Policy/Quote", "Insured Name", "Notes", "Type", "Due On"),
+                    [
+                        (HONJ, "Maria Lua", "please review", "Cancellation", "10/8/2026"),
+                        (HODJ, "Robert Diaz", "referral to underwriting", "Referral", "10/30/2026"),
+                        (HOMJ3, "Susan Park", "non-pay follow up", "Diary", "10/6/2026"),
+                    ],
+                )
+
+        page = TypedPage(pending_rows=())
+        import io
+        buffer = io.StringIO()
+        with patch.object(fos.sys, "stderr", buffer):
+            items = fos.read_all_pending_items(page)
+        self.assertEqual([item.policy_number for item in items], [HONJ, HOMJ3])
+        self.assertIn("kept 2 cancellation rows of 3 grid rows", buffer.getvalue())
+
+    def test_already_downloaded_policy_is_not_opened_again(self):
+        token = pdf_bytes(b"honj-notice")
+        page = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:1],
+            docs_by_policy={HONJ: _docs_for(HONJ, token)},
+        )
+        receipt, _ledger = self._run(page)
+        self.assertEqual(receipt["count"], 1)
+        again = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:1],
+            docs_by_policy={HONJ: _docs_for(HONJ, token)},
+        )
+        opened = []
+        browser = FinysFoSBrowser(again)
+        browser.open_policy = lambda policy: opened.append(policy)
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        receipt2 = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(opened, [])
+        self.assertEqual(receipt2["count"], 0)
+        self.assertEqual(receipt2["skipped"], ["farmersofsalem:HONJ038633:2026-09-28:intent-to-cancel"])
+
+    def test_one_missing_table_holds_that_policy_and_the_pull_continues(self):
+        import io
+
+        token = pdf_bytes(b"hodj-notice")
+        page = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:2],
+            docs_by_policy={
+                HONJ: _docs_for(HONJ, pdf_bytes(b"honj")),
+                HODJ: _docs_for(HODJ, token),
+            },
+        )
+        browser = FinysFoSBrowser(page)
+        real_return = browser.return_to_pending_items
+        calls = {"n": 0}
+
+        def flaky_return():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise IntakeHold("Finys table is missing or ambiguous")
+            return real_return()
+
+        browser.return_to_pending_items = flaky_return
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        buffer = io.StringIO()
+        with patch.object(fos.sys, "stderr", buffer):
+            receipt = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(receipt["status"], "PULLED")
+        self.assertEqual(receipt["count"], 1)
+        self.assertEqual(receipt["held"][0]["policy_number"], HONJ)
+        self.assertIn("tables=", buffer.getvalue())
+
+    def test_duplicate_and_old_rows_are_filtered_before_open(self):
+        from robie_job_engine.farmersofsalem_pending_cancellation import PendingItem
+
+        old = PendingItem(HONJ, "Old", "home", date(2020, 1, 1))
+        current = PendingItem(HODJ, "New", "home", date(2026, 10, 8))
+        duplicate = PendingItem(HODJ, "New", "home", date(2026, 10, 9))
+        unique = fos._dedupe_pending([current, duplicate, old])
+        self.assertEqual([item.policy_number for item in unique], [HODJ, HONJ])
+        kept = fos._due_within(unique, AS_OF, 45)
+        self.assertEqual([item.policy_number for item in kept], [HODJ])
+
+    def test_worker_deadline_is_partial_before_the_outer_limit(self):
+        page = FakeFinysPage(pending_rows=PENDING_ROWS[:2])
+        browser = FinysFoSBrowser(page)
+        browser.open_policy = lambda policy: (_ for _ in ()).throw(AssertionError(policy))
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        self.assertLess(fos.FOS_DEADLINE_S, 25 * 60)
+        with patch.object(fos, "FOS_DEADLINE_S", 0):
+            receipt = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(receipt["status"], "PARTIAL")
+        self.assertEqual(receipt["unprocessed"], 2)
+        self.assertIn("deadline", receipt["reason"])
 
     def test_non_test_env_blocks_pull(self):
         # farmersofsalem is not in the production filing allowlist, so any

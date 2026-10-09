@@ -52,6 +52,7 @@ import hashlib
 import json
 import os
 import re
+from urllib.parse import urlparse
 import sys
 import tempfile
 import urllib.parse
@@ -73,7 +74,8 @@ from .progressive_retrieval import SCOPES
 
 
 BOP_SCOPE = "bop_pending_cancel_nonpayment"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+BOP_APP_URL = "https://bop.americanstrategic.com/"
 DOWNLOAD_TIMEOUT_MS = 8000
 # expect_popup returns the HPLanding window as soon as it opens. The BOP
 # application at https://bop.americanstrategic.com/ shows up after that.
@@ -130,8 +132,8 @@ _DOC_NAME_HEADERS = frozenset({
 _DOC_DATE_HEADERS = frozenset({
     "date", "document date", "processed date", "created", "created date", "notice date",
 })
-_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel")
-_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF")
+_EXCEL_EXPORTS = ("Excel", "Export to Excel", "Download Excel", "Export Excel", "Export Pending Cancel for Non-Payment Xls")
+_PDF_EXPORTS = ("PDF", "Export to PDF", "Download PDF", "Export PDF", "Export Pending Cancel for Non-Payment Pdf")
 _SEARCH_FIELDS = (
     ("searchbox", "Search"),
     ("textbox", "Policy number"),
@@ -433,7 +435,7 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
             raise IntakeHold("Pending Cancel policy number is missing or ambiguous")
         seen.add(number)
         policies.append(PendingCancelPolicy(number, insured, report_date))
-    blankish = bool(_BLANK_TEXT.search(raw))
+    blankish = bool(_BLANK_TEXT.search(raw)) or _header_only_report(raw)
     if blankish and policies:
         raise IntakeHold("Pending Cancel report is missing or ambiguous")
     if not policies:
@@ -449,6 +451,27 @@ def policies_from_report_text(text: str, *, report_date: date, source: str = "pd
         source=source,
         blank=False,
     )
+
+
+_HEADER_ONLY_TITLE = re.compile(r"pending cancel for non[-\s]?payment", re.IGNORECASE)
+_HEADER_ONLY_COLUMNS = ("policy number", "insured name", "cancel date", "amount due")
+_LONG_DIGITS = re.compile(r"\d{6,}")
+
+
+def _header_only_report(text: str) -> bool:
+    """The BOP PDF for a day with no policies: title and column headers only.
+
+    Live 2026-10-08: "Pending Cancel for Non-Payment / Print Date / Policy
+    Number ... Cancel Date / Amount Due / Page 1 of 1". Any run of six or
+    more digits (a policy or phone number) means rows may be present, so it
+    is not blank and the normal parse (and its holds) applies.
+    """
+    flat = _norm(str(text or "")).casefold()
+    if not flat or not _HEADER_ONLY_TITLE.search(flat):
+        return False
+    if not all(column in flat for column in _HEADER_ONLY_COLUMNS):
+        return False
+    return not _LONG_DIGITS.search(flat)
 
 
 def parse_pdf_report(blob: bytes, *, report_date: date) -> PendingCancelReport:
@@ -585,6 +608,7 @@ class LocalNocLedger:
 
     def ensure_private(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.root, 0o700)
         if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
 
@@ -594,6 +618,7 @@ class LocalNocLedger:
         if folder.is_symlink():
             raise IntakeHold("BOP output directory must be private (0700)")
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(folder, 0o700)
         if not folder.is_dir() or folder.stat().st_mode & 0o077:
             raise IntakeHold("BOP output directory must be private (0700)")
         return folder
@@ -620,7 +645,7 @@ class LocalNocLedger:
             raise IntakeHold("Existing NOC file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, report_date: date) -> Path:
+    def record(self, source: SourceItem, *, report_date: date, insured_name: str = "") -> Path:
         self.ensure_private()
         path = self.pdf_path(report_date, source.filename)
         if path.exists() or path.is_symlink():
@@ -647,6 +672,7 @@ class LocalNocLedger:
             "bytes": len(source.content),
             "report_date": report_date.isoformat(),
             "policy_number": source.source_id.split(":")[1] if source.source_id.count(":") >= 2 else "",
+            "insured_name": insured_name,
         }
         self._write(data)
         return path
@@ -775,6 +801,15 @@ class BopPendingCancelPortal:
         require_test()
         if BOP_SCOPE not in SCOPES:
             raise IntakeHold("An approved Progressive scope is required")
+        from .carrier_tabs import snapshot_ids
+
+        self._pages_before = snapshot_ids(getattr(self.browser, "shell", None))
+        try:
+            return self._pull_body()
+        finally:
+            self.close_opened_tabs()
+
+    def _pull_body(self) -> dict[str, Any]:
         capture = self.browser.load_report(self.report_date)
         png = require_png(getattr(capture, "png", None))
         shot = self.ledger.save_screenshot(self.report_date, png)
@@ -806,6 +841,20 @@ class BopPendingCancelPortal:
         if held:
             raise IntakeHold(held)
         return self.verification or {}
+
+    def close_opened_tabs(self) -> None:
+        """Close the BOP application tab this pull opened. The FAO shell stays."""
+        from .carrier_tabs import close_new_pages, close_page
+
+        shell = getattr(self.browser, "shell", None)
+        report = getattr(self.browser, "report_page", None)
+        if report is not None and report is not shell:
+            close_page(report)
+        if shell is not None:
+            close_stale_bop_tabs(shell)
+            before = getattr(self, "_pages_before", None)
+            if isinstance(before, set):
+                close_new_pages(shell, before, keep=shell)
 
     def _pull_policies(self, report: PendingCancelReport) -> list[PolicyOutcome]:
         outcomes: list[PolicyOutcome] = []
@@ -870,7 +919,7 @@ class BopPendingCancelPortal:
         )
         source.validate()
         self.archive.preserve(source)
-        self.ledger.record(source, report_date=policy.report_date)
+        self.ledger.record(source, report_date=policy.report_date, insured_name=policy.insured_name)
         return _outcome_from_policy(policy, "pulled", source=source)
 
     def _finish(
@@ -1111,6 +1160,11 @@ def _home_hold(page: Any, *, css_count: int, role_count: int, detail: str) -> In
     )
 
 
+def _is_cl_express_page(page: Any) -> bool:
+    parsed = urllib.parse.urlsplit(_safe_page_url(str(getattr(page, "url", "") or "")))
+    return parsed.scheme == "https" and (parsed.hostname or "").casefold() == "clpolicy.foragentsonly.com"
+
+
 def _on_fao_shell_home(page: Any) -> bool:
     return _FAO_SHELL_HOME_URL.fullmatch(_safe_page_url(str(getattr(page, "url", "") or ""))) is not None
 
@@ -1209,6 +1263,32 @@ def _expand_main_navigation_once(page: Any, *, css_count: int, role_count: int) 
         ) from exc
 
 
+FAO_HOME_WAIT_MS = 20000
+
+
+def _wait_for_fao_shell_home(page: Any) -> None:
+    """Give the Manage Policies Home navigation time to commit.
+
+    Live 2026-10-08 (f53568f6): BOP ran right after the FAO pull, which left
+    the shell on the pending-cancellation report. The header click navigated,
+    but the URL was read before the landing committed, so BOP held with
+    "FAO Home did not open". Wait (bounded) for the exact landing URL; a
+    near-miss URL still holds below.
+    """
+    if _on_fao_shell_home(page):
+        return
+    waiter = getattr(page, "wait_for_url", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(
+            lambda url: _FAO_SHELL_HOME_URL.fullmatch(_safe_page_url(str(url or ""))) is not None,
+            timeout=FAO_HOME_WAIT_MS,
+        )
+    except Exception:  # noqa: BLE001 - the caller holds with the scrubbed URL
+        pass
+
+
 def ensure_fao_shell_home(page: Any) -> None:
     """Land on FAO Home / Manage Policies Home before the agent-context assert.
 
@@ -1220,6 +1300,17 @@ def ensure_fao_shell_home(page: Any) -> None:
     """
     if _on_fao_shell_home(page):
         return
+    if _is_cl_express_page(page):
+        # Live 2026-10-08: a Progressive pull stopped on a CL Express policy
+        # page (clpolicy.foragentsonly.com), which has no FAO header Home
+        # control. Open the Manage Policies landing on the same tab instead.
+        try:
+            page.goto(MANAGE_POLICIES_LANDING_URL, wait_until="domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
+        except Exception as exc:
+            raise IntakeHold("Progressive Manage Policies page did not open") from exc
+        assert_authenticated(page)
+        if _on_fao_shell_home(page):
+            return
     try:
         target = _resolve_visible_home(page)
     except _HomeNotReady as miss:
@@ -1252,6 +1343,7 @@ def ensure_fao_shell_home(page: Any) -> None:
             role_count=_locator_count(_role_locator(page, MANAGE_POLICIES_NAME, exact=False)),
             detail="Home control click did not complete; FAO Home was not opened",
         ) from exc
+    _wait_for_fao_shell_home(page)
     if not _on_fao_shell_home(page):
         raise _home_hold(
             page,
@@ -1394,7 +1486,7 @@ def _context_pages(*owners: Any) -> list[Any]:
             continue
         context = getattr(owner, "context", None)
         pages = getattr(context, "pages", None) if context is not None else None
-        if pages is None:
+        if not isinstance(pages, (list, tuple)):
             continue
         try:
             items = list(pages)
@@ -1563,6 +1655,29 @@ def _retry_partner_sign_on(popup: Any) -> bool:
     return True
 
 
+def _open_bop_from_hplanding(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[Any, Any]]]:
+    """HPLanding is a step. Follow its BOP link, or open the application URL."""
+    target = popup if popup is not None else shell
+    try:
+        links = target.locator("a[href*='bop.americanstrategic.com']")
+        if int(links.count()) == 1:
+            links.first.click() if hasattr(links, "first") else links.click()
+            pages, frames = _await_bop_surface(shell, popup)
+            if pages or frames:
+                return pages, frames
+    except Exception:
+        pass
+    goto = getattr(target, "goto", None)
+    if not callable(goto):
+        goto = getattr(shell, "goto", None)
+    if callable(goto):
+        try:
+            goto(BOP_APP_URL, wait_until="domcontentloaded", timeout=30_000)
+        except TypeError:
+            goto(BOP_APP_URL)
+    return _await_bop_surface(shell, popup)
+
+
 def _attach_bop_application(shell: Any, popup: Any) -> Any:
     """Use the BOP application, not the dead HPLanding popup.
 
@@ -1587,6 +1702,15 @@ def _attach_bop_application(shell: Any, popup: Any) -> Any:
     if len(frames) == 1:
         _owner, frame = frames[0]
         return _BopFrameSurface(frame, _owner)
+    pages, frames = _open_bop_from_hplanding(shell, popup)
+    if len(pages) == 1:
+        _close_if_possible(popup)
+        return pages[0]
+    if len(frames) == 1:
+        _owner, frame = frames[0]
+        return _BopFrameSurface(frame, _owner)
+    if popup is not None and _is_bop_app_url(_target_url(popup)):
+        return popup
     raise IntakeHold(
         "Businessowner/Contractor GL opened HPLanding instead of the BOP application"
         " (Progressive's Businessowner site never opened after sign-on)"
@@ -1648,6 +1772,41 @@ def ensure_manage_policies_landing(page: Any) -> None:
         raise IntakeHold("Progressive Manage Policies page did not open")
 
 
+def close_stale_bop_tabs(shell: Any) -> int:
+    """Close BOP application tabs left by an earlier run before signing on again.
+
+    Live 2026-10-08 (03637095): a BOP tab from a morning run sat on "Session
+    Expired - You've been logged out due to inactivity"; the new sign-on
+    attached to it and the View Reports click timed out under that modal.
+    Only bop.americanstrategic.com pages in the shell's context are closed.
+    """
+    closed = 0
+    for target in _context_pages(shell):
+        if target is shell or not _is_bop_app_url(_target_url(target)):
+            continue
+        _close_if_possible(target)
+        closed += 1
+    return closed
+
+
+BOP_SESSION_EXPIRED = (
+    "Progressive BOP application shows 'Session Expired' (logged out due to "
+    "inactivity); not dismissed or retried in this run"
+)
+
+
+def _raise_if_bop_session_expired(page: Any) -> None:
+    try:
+        dialog = page.locator("#modalAlertDialog")
+        if int(dialog.count()) != 1 or not dialog.is_visible():
+            return
+        text = str(dialog.inner_text() or "")
+    except Exception:
+        return
+    if "session expired" in text.casefold() or "logged out" in text.casefold():
+        raise IntakeHold(BOP_SESSION_EXPIRED)
+
+
 def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
     """Open Businessowner/Contractor GL in one new window from Manage Policies Home.
 
@@ -1655,6 +1814,7 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     Manage Policies landing, where exactly one visible GL link is expected.
     """
     ensure_manage_policies_landing(page)
+    close_stale_bop_tabs(page)
     try:
         with page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup:
             _click_shell_home_gl(page)
@@ -1668,19 +1828,80 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
     return _attach_bop_application(page, opened)
 
 
-def open_pending_cancel_report(report_page: Any) -> None:
+def open_pending_cancel_report(report_page: Any, report_date: date | None = None) -> None:
+    # The BOP app needs a moment to render after navigation.
+    try:
+        report_page.get_by_role("button", name="VIEW REPORTS", exact=True).wait_for(timeout=15000)
+    except Exception:
+        pass
+    _raise_if_bop_session_expired(report_page)
     _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
-    click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+    # The reports panel may expose direct export buttons (e.g. "Export Pending
+    # Cancel for Non-Payment Xls") without a "Pending Cancel for Nonpayment"
+    # navigation link. Only click through when the link exists.
+    try:
+        click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
+        return
+    except (IntakeHold, RowHold):
+        pass
+    # New portal UI: select a date range before the report renders.
+    if report_date is not None:
+        _select_bop_date_range(report_page, report_date)
 
 
-def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
-    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report."""
+def _select_bop_date_range(page: Any, report_date: date) -> None:
+    """Fill the BOP reports date range and apply it."""
+    btn = page.get_by_role("button", name="Select Date Range", exact=True)
+    if btn.count() != 1:
+        return
+    btn.click()
+    page.wait_for_timeout(2000)
+    date_str = report_date.strftime("%m/%d/%Y")
+    start = page.locator("input.report-start").first
+    end = page.locator("input.report-end").first
+    if start.count() and start.is_visible(timeout=3000):
+        start.fill(date_str)
+    if end.count() and end.is_visible(timeout=3000):
+        end.fill(date_str)
+    apply_btn = page.get_by_role("button", name="Apply", exact=True)
+    if apply_btn.count() == 1:
+        apply_btn.click()
+        page.wait_for_timeout(5000)
+
+
+def navigate_to_pending_cancel(page: Any, agent_code: str, report_date: date | None = None) -> Any:
+    """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report.
+
+    Falls back to direct BOP app navigation if the HPLanding SSO flow fails
+    (the HPLanding "Service Homeowners Policies" button is often disabled).
+    """
     assert_authenticated(page)
     started_on_shell_home = _on_fao_shell_home(page)
     ensure_fao_shell_home(page)
     assert_agent_context(page, agent_code)
     report_page = open_businessowner_window(page, on_shell_home=started_on_shell_home)
-    open_pending_cancel_report(report_page)
+    try:
+        open_pending_cancel_report(report_page, report_date)
+    except (IntakeHold, RowHold) as exc:
+        # Only an HPLanding window without the BOP app falls back to opening
+        # the BOP application directly; any other hold stands.
+        if not _is_hplanding_target(report_page):
+            raise
+        goto = getattr(page, "goto", None)
+        if not callable(goto):
+            raise
+        goto(BOP_APP_URL, wait_until="domcontentloaded")
+        wait = getattr(page, "wait_for_timeout", None)
+        if callable(wait):
+            wait(5000)
+        try:
+            open_pending_cancel_report(page, report_date)
+        except (IntakeHold, RowHold):
+            raise IntakeHold(
+                "HPLanding opened without the BOP application, and opening "
+                "bop.americanstrategic.com directly showed no View Reports either"
+            ) from exc
+        report_page = page
     assert_authenticated(report_page)
     return report_page
 
@@ -1750,12 +1971,68 @@ def download_export(page: Any, names: tuple[str, ...]) -> bytes | None:
         locator.click()
 
     observation = collect_pdf(page, click)
-    blobs = list(observation.downloads)
+    blobs = [blob for blob in observation.downloads if blob]
     for view in observation.pages:
-        blobs.extend(view.pdfs)
+        blobs.extend(blob for blob in view.pdfs if blob)
+    if not blobs:
+        # The Test carrier Chrome runs sandboxed (PrivateTmp, ProtectSystem
+        # strict), so a CDP download lands in Chrome's private /tmp and comes
+        # back empty here. The BOP reports page posts #reports-form; replay that
+        # POST in the same browser context and keep only a real PDF.
+        replayed = _replay_bop_reports_form(page)
+        if replayed is None:
+            return None
+        blobs = [replayed]
     if len(blobs) != 1:
         raise IntakeHold("Pending Cancel report export is missing or ambiguous")
     return blobs[0]
+
+
+_BOP_REPORTS_FORM = "#reports-form"
+_BOP_REPORTS_FORM_JS = """(form) => {
+  const out = {};
+  for (const el of form.elements) { if (el.name) out[el.name] = String(el.value || ""); }
+  return {action: form.action, method: (form.method || "").toLowerCase(), fields: out};
+}"""
+_BOP_REPORTS_FORM_FIELDS = frozenset({"ReportId", "StartDate", "EndDate", "AgentId", "FileFormat"})
+
+
+def _replay_bop_reports_form(page: Any) -> bytes | None:
+    """Re-post the BOP ``#reports-form`` (PDF only) after its export click.
+
+    Returns None when this is not the BOP reports page, the form was not set
+    up for a PDF export, or the reply is not a PDF.
+    """
+    if urlparse(str(getattr(page, "url", "") or "")).hostname != _BOP_APP_HOST:
+        return None
+    try:
+        form = page.locator(_BOP_REPORTS_FORM)
+        if form.count() != 1:
+            return None
+        info = form.evaluate(_BOP_REPORTS_FORM_JS)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    action = urlparse(str(info.get("action") or ""))
+    fields = info.get("fields")
+    if (
+        action.scheme != "https"
+        or action.hostname != _BOP_APP_HOST
+        or action.path.rstrip("/").casefold() != "/reports"
+        or info.get("method") != "post"
+        or not isinstance(fields, dict)
+        or set(fields) != _BOP_REPORTS_FORM_FIELDS
+        or str(fields.get("FileFormat", "")).casefold() != "pdf"
+    ):
+        return None
+    response = page.context.request.post(action.geturl(), form=fields, timeout=DOWNLOAD_TIMEOUT_MS)
+    if getattr(response, "ok", True) is False:
+        return None
+    body = response.body()
+    if not isinstance(body, (bytes, bytearray)) or not _is_pdf(bytes(body)):
+        return None
+    return bytes(body)
 
 
 def read_report_from_page(page: Any, report_date: date) -> PendingCancelReport:
@@ -1810,7 +2087,7 @@ class PlaywrightFaoBopBrowser:
         self._doc_rows: tuple[Any, ...] = ()
 
     def load_report(self, report_date: date) -> ReportCapture:
-        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code)
+        self.report_page = navigate_to_pending_cancel(self.shell, self.agent_code, report_date)
         png = require_png(self.report_page.screenshot(full_page=True, type="png"))
         try:
             report = read_report_from_page(self.report_page, report_date)
@@ -1991,6 +2268,12 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
         opened.append(new_page)
 
     context.on("page", on_page)
+    seen_requests: list[Any] = []
+
+    def on_request(request: Any) -> None:
+        seen_requests.append(request)
+
+    context.on("request", on_request)
     downloads: list[bytes] = []
     clicked = False
     try:
@@ -1999,15 +2282,27 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
             open_document()
             clicked = True
 
+        download = None
         try:
             with page.expect_download(timeout=timeout_ms) as download_info:
                 wrapped()
-            downloads.append(_download_bytes(download_info.value))
+            download = download_info.value
         except (IntakeHold, RowHold):
             raise
         except Exception as exc:
             if not clicked or not _is_download_timeout(exc):
                 raise IntakeHold("Notice of Non Payment capture is missing or ambiguous") from exc
+        if download is not None:
+            try:
+                blob = _download_bytes(download)
+            except Exception:
+                blob = b""
+            if not blob:
+                # Sandboxed carrier Chrome (PrivateTmp): the download lands in
+                # Chrome's private /tmp and reads back empty here. Fetch the
+                # same request again inside this browser session.
+                blob = _refetch_download(page, str(getattr(download, "url", "") or ""), seen_requests)
+            downloads.append(blob)
         for item in opened:
             wait = getattr(item, "wait_for_load_state", None)
             if not callable(wait):
@@ -2025,10 +2320,11 @@ def collect_pdf(page: Any, open_document: Callable[[], None], *, timeout_ms: int
     finally:
         remover = getattr(context, "remove_listener", None)
         if callable(remover):
-            try:
-                remover("page", on_page)
-            except Exception:
-                pass
+            for event, handler in (("page", on_page), ("request", on_request)):
+                try:
+                    remover(event, handler)
+                except Exception:
+                    pass
         for item in opened:
             if not _is_own_tab(item):
                 continue
@@ -2048,18 +2344,19 @@ def connect_cdp_browser(cdp_url: str | None, *, agent_code: str) -> tuple[Playwr
     playwright = sync_playwright().start()
     try:
         browser = playwright.chromium.connect_over_cdp(url)
-        pages = [page for context in browser.contexts for page in context.pages]
-        return PlaywrightFaoBopBrowser(select_fao_page(pages), agent_code=agent_code), playwright.stop
+        from .progressive_pending_cancellation import ensure_fao_page
+
+        return PlaywrightFaoBopBrowser(ensure_fao_page(browser), agent_code=agent_code), playwright.stop
     except Exception:
         playwright.stop()
         raise
 
 
 def select_fao_page(pages: list[Any]) -> Any:
+    from .progressive_pending_cancellation import choose_one_fao_page
+
     matches = [page for page in pages if _is_fao_app_url(str(getattr(page, "url", "") or ""))]
-    if len(matches) != 1:
-        raise IntakeHold("Expected exactly one Progressive FAO tab")
-    return matches[0]
+    return choose_one_fao_page(matches)
 
 
 def require_loopback_cdp(url: str) -> str:
@@ -2252,6 +2549,41 @@ def _http_get(page: Any, url: str) -> bytes:
     if not isinstance(body, (bytes, bytearray)):
         raise IntakeHold("Notice of Non Payment capture is missing or ambiguous")
     return bytes(body)
+
+
+def _refetch_download(page: Any, url: str, seen_requests: list[Any]) -> bytes:
+    """Re-issue the request behind a download in the same browser context.
+
+    Only https Progressive/FAO/BOP URLs; GET as is, POST only for a
+    url-encoded form body seen on that exact URL. Returns b"" unless the
+    reply is a PDF.
+    """
+    if not url or not _allowed_pdf_url(url):
+        return b""
+    matches = [req for req in seen_requests if str(getattr(req, "url", "") or "") == url]
+    request = matches[-1] if matches else None
+    method = str(getattr(request, "method", "GET") or "GET").upper()
+    client = page.context.request
+    try:
+        if method == "GET":
+            response = client.get(url, timeout=DOWNLOAD_TIMEOUT_MS)
+        elif method == "POST":
+            body = getattr(request, "post_data", None)
+            headers = getattr(request, "headers", None) or {}
+            content_type = str(headers.get("content-type") or "") if isinstance(headers, dict) else ""
+            if not body or "application/x-www-form-urlencoded" not in content_type.lower():
+                return b""
+            response = client.post(url, data=body, headers={"content-type": content_type}, timeout=DOWNLOAD_TIMEOUT_MS)
+        else:
+            return b""
+    except Exception:
+        return b""
+    if getattr(response, "ok", True) is False:
+        return b""
+    blob = response.body()
+    if not isinstance(blob, (bytes, bytearray)) or not _is_pdf(bytes(blob)):
+        return b""
+    return bytes(blob)
 
 
 def _download_bytes(download: Any) -> bytes:

@@ -30,8 +30,14 @@ from robie_job_engine.geico_pending_cancellation_noc import (
     classify_line,
     classify_policy_documents,
     collect_notice_observation,
+    extract_document_id,
+    extract_viewer_document_id,
+    fetch_notice_pdf_via_viewer,
+    is_consolidated_viewer_url,
     main,
+    noc_document_id,
     noc_filename,
+    non_high_alert_rows,
     parse_alert_grid,
     pdf_bytes_from_observation,
     qa_pack_dir,
@@ -97,11 +103,15 @@ def prove_grid(*, extra=(), more_pages=False, headers=HEADERS) -> AlertGrid:
     return AlertGrid(LIST_URL, headers, PROVE_ROWS + tuple(extra), more_pages)
 
 
+def _test_doc_uuid(policy_number: str) -> str:
+    return f"00000000-0000-4000-8000-{int(policy_number):012d}"
+
+
 def prove_paths(**overrides) -> dict[str, NoticePath]:
     paths = {
         COMMERCIAL: NoticePath("billing_only"),
-        GUEVARA: NoticePath("noc", "Pending Cancellation Notice"),
-        PANELLA: NoticePath("noc", "CANCELLATION NOTICE"),
+        GUEVARA: NoticePath("noc", "Pending Cancellation Notice", document_id=_test_doc_uuid(GUEVARA)),
+        PANELLA: NoticePath("noc", "CANCELLATION NOTICE", document_id=_test_doc_uuid(PANELLA)),
     }
     paths.update(overrides)
     return paths
@@ -136,7 +146,8 @@ class ScriptedBrowser:
         blob = self.pdfs[policy_number]
         if not blob:
             raise IntakeHold("NOC PDF capture is missing or ambiguous")
-        return blob
+        # Return (document_id, pdf_bytes) per the direct-fetch contract.
+        return _test_doc_uuid(policy_number), blob
 
     def return_to_pending_list(self):
         self.returns += 1
@@ -162,9 +173,21 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(alerts[-1].filename, f"{EXTRA} NOC Geico.pdf")
         self.assertEqual(noc_filename(EXTRA), f"{EXTRA} NOC Geico.pdf")
 
-    def test_non_high_unknown_product_duplicate_and_ragged_rows_hold(self):
+    def test_non_high_alert_is_skipped_not_held(self):
+        # hermes-test-01 hand patch (2026-10-07): a Medium/Low alert on the
+        # Pending Cancellations list no longer holds the whole run.
+        grid = prove_grid(extra=(row("6000000001", "Low Row", "Private Passenger Auto", "9/26/2026", severity="Medium"),))
+        policies = [alert.policy_number for alert in parse_alert_grid(grid)]
+        self.assertNotIn("6000000001", policies)
+        # ...and the run reports why it was not pulled (hold-reason capture).
+        reported = non_high_alert_rows(grid)
+        self.assertEqual([item["policy_number"] for item in reported], ["6000000001"])
+        self.assertEqual(reported[0]["outcome"], "HELD")
+        self.assertIn("Medium, not High", reported[0]["reason"])
+        self.assertEqual(non_high_alert_rows(prove_grid()), [])
+
+    def test_unknown_product_duplicate_and_ragged_rows_hold(self):
         bad = (
-            prove_grid(extra=(row("6000000001", "Low Row", "Private Passenger Auto", "9/26/2026", severity="Medium"),)),
             AlertGrid(LIST_URL, HEADERS, (row("6000000001", "Home", "Homeowners", "9/26/2026"),), False),
             prove_grid(extra=(PROVE_ROWS[1],)),
             AlertGrid(LIST_URL, HEADERS, (("9300116248", "only"),), False),
@@ -185,6 +208,620 @@ class ParseTests(unittest.TestCase):
             noc_filename("123")
         with self.assertRaises(IntakeHold):
             noc_filename("../9300116248")
+
+
+class ViewerUrlTests(unittest.TestCase):
+    """UUID discovery from the consolidated-viewer URL.
+
+    Live 2026-10-05: the notice link href is "#" (Angular). Clicking opens:
+      /documents/consolidated-document-viewer?documentId={uuid}&token=...&visitAppId=E01&convToken=
+    The UUID in that URL is the durable document identity.
+    """
+
+    VIEWER = (
+        "https://edgeextended.geico.com/documents/consolidated-document-viewer"
+        "?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+        "&token=abc123&visitAppId=E01&convToken="
+    )
+
+    def test_extract_viewer_document_id(self):
+        self.assertEqual(
+            extract_viewer_document_id(self.VIEWER),
+            "eaf9b197-7471-3c36-2f23-3ed54027b6d6",
+        )
+
+    def test_extract_viewer_document_id_case_insensitive(self):
+        url = (
+            "https://edgeextended.geico.com/documents/consolidated-document-viewer"
+            "?documentId=EAF9B197-7471-3C36-2F23-3ED54027B6D6&token=x&visitAppId=E01&convToken="
+        )
+        self.assertEqual(
+            extract_viewer_document_id(url),
+            "eaf9b197-7471-3c36-2f23-3ed54027b6d6",
+        )
+
+    def test_is_consolidated_viewer_url(self):
+        self.assertTrue(is_consolidated_viewer_url(self.VIEWER))
+        self.assertFalse(is_consolidated_viewer_url("https://edgeextended.geico.com/view-document?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6"))
+        self.assertFalse(is_consolidated_viewer_url("https://gateway2.geico.com/client-alerts"))
+        self.assertFalse(is_consolidated_viewer_url(""))
+        self.assertFalse(is_consolidated_viewer_url("http://edgeextended.geico.com/documents/consolidated-document-viewer?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6"))
+
+    def test_extract_viewer_document_id_wrong_path_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "viewer URL"):
+            extract_viewer_document_id("https://edgeextended.geico.com/view-document?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+        with self.assertRaisesRegex(IntakeHold, "viewer URL"):
+            extract_viewer_document_id("https://gateway2.geico.com/client-alerts")
+
+    def test_extract_viewer_document_id_missing_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_viewer_document_id(
+                "https://edgeextended.geico.com/documents/consolidated-document-viewer?token=x&visitAppId=E01"
+            )
+        with self.assertRaisesRegex(IntakeHold, "viewer URL"):
+            extract_viewer_document_id("")
+
+    def test_extract_viewer_document_id_malformed_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_viewer_document_id(
+                "https://edgeextended.geico.com/documents/consolidated-document-viewer?documentId=not-a-uuid"
+            )
+
+    def test_extract_document_id_still_works_for_viewer_url(self):
+        # The generic extractor is reused by the viewer-specific one.
+        url = "https://edgeextended.geico.com/documents/consolidated-document-viewer?documentId=eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+        self.assertEqual(extract_document_id(url), "eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+
+    def test_extract_document_id_missing_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view-document")
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("")
+
+    def test_extract_document_id_malformed_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view?documentId=not-a-uuid")
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            extract_document_id("https://edgeextended.geico.com/view?documentId=123")
+
+    def test_noc_document_id_with_uuid(self):
+        did = noc_document_id("6253395526", date(2026, 10, 6), "eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+        self.assertEqual(did, "geico-noc:6253395526:2026-10-06:doc-eaf9b197-7471-3c36-2f23-3ed54027b6d6")
+
+    def test_noc_document_id_without_uuid_unchanged(self):
+        did = noc_document_id("6253395526", date(2026, 10, 6))
+        self.assertEqual(did, "geico-noc:6253395526:2026-10-06")
+
+    def test_noc_document_id_bad_uuid_holds(self):
+        with self.assertRaisesRegex(IntakeHold, "document ID"):
+            noc_document_id("6253395526", date(2026, 10, 6), "not-a-uuid")
+
+
+class NetworkInterceptionTests(unittest.TestCase):
+    """The PDF XHR response handler: capture PDF, ignore everything else.
+
+    Live 2026-10-05: the viewer URL returns an HTML shell (Angular + PDF.js).
+    The PDF bytes arrive via XHR. The handler must capture only real PDFs and
+    fail closed (via the caller) when nothing is captured.
+    """
+
+    def _handler(self):
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        captured: list[bytes] = []
+        return captured, mod._pdf_response_handler(captured)
+
+    def _response(self, *, url="", content_type="", body=b""):
+        return SimpleNamespace(url=url, headers={"content-type": content_type}, body=lambda: body)
+
+    def test_pdf_xhr_captured(self):
+        captured, on_response = self._handler()
+        token = pdf_bytes(b"xhr-pdf")
+        on_response(self._response(
+            url="https://edgeextended.geico.com/api/documents/stream?id=123",
+            content_type="application/pdf",
+            body=token,
+        ))
+        self.assertEqual(captured, [token])
+
+    def test_pdf_url_captured_without_content_type(self):
+        captured, on_response = self._handler()
+        token = pdf_bytes(b"url-pdf")
+        on_response(self._response(
+            url="https://edgeextended.geico.com/documents/file.pdf?token=x",
+            content_type="text/html",
+            body=token,
+        ))
+        self.assertEqual(captured, [token])
+
+    def test_html_shell_ignored(self):
+        """The viewer HTML shell must NOT be captured as a PDF."""
+        captured, on_response = self._handler()
+        on_response(self._response(
+            url="https://edgeextended.geico.com/documents/consolidated-document-viewer?documentId=abc",
+            content_type="text/html",
+            body=b"<html><body>Angular app</body></html>",
+        ))
+        self.assertEqual(captured, [])
+
+    def test_non_pdf_body_ignored(self):
+        captured, on_response = self._handler()
+        on_response(self._response(
+            url="https://edgeextended.geico.com/api/data",
+            content_type="application/pdf",
+            body=b"not actually a pdf",
+        ))
+        self.assertEqual(captured, [])
+
+    def test_json_xhr_ignored(self):
+        captured, on_response = self._handler()
+        on_response(self._response(
+            url="https://edgeextended.geico.com/api/documents/meta",
+            content_type="application/json",
+            body=b'{"documentId": "abc"}',
+        ))
+        self.assertEqual(captured, [])
+
+    def test_multiple_pdfs_all_captured(self):
+        """The caller holds on multiple captures (ambiguous)."""
+        captured, on_response = self._handler()
+        first = pdf_bytes(b"one")
+        second = pdf_bytes(b"two")
+        on_response(self._response(url="https://x/y.pdf", content_type="application/pdf", body=first))
+        on_response(self._response(url="https://x/z.pdf", content_type="application/pdf", body=second))
+        self.assertEqual(captured, [first, second])
+
+    def test_broken_response_ignored(self):
+        captured, on_response = self._handler()
+        on_response(SimpleNamespace())  # no url/headers/body
+        on_response(None)
+        self.assertEqual(captured, [])
+
+
+class LedgerInsuredNameTests(unittest.TestCase):
+    """record() must persist the insured name so the daily sheet can show it."""
+
+    def test_record_persists_insured_name(self):
+        from robie_job_engine.intake_core import SourceItem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalDeliveryLedger(Path(tmp) / "pull")
+            source = SourceItem(
+                system=PROCESS,
+                source_account="gateway.geico.com",
+                source_id="geico:6253395526:test-doc",
+                source_url="https://gateway.geico.com/#noc=test-doc",
+                received_at="2026-10-06T00:00:00+00:00",
+                filename="6253395526 Cancel_Notice.pdf",
+                content=pdf_bytes(b"test"),
+            )
+            ledger.record(
+                source,
+                due_on=date(2026, 10, 6),
+                policy_number="6253395526",
+                insured_name="Charlemagne Guevara",
+            )
+            data = json.loads((Path(tmp) / "pull" / "geico-noc-ledger.json").read_text())
+        entry = data["items"]["geico:6253395526:test-doc"]
+        self.assertEqual(entry["insured_name"], "Charlemagne Guevara")
+        self.assertEqual(entry["policy_number"], "6253395526")
+
+    def test_record_defaults_insured_name_blank(self):
+        from robie_job_engine.intake_core import SourceItem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalDeliveryLedger(Path(tmp) / "pull")
+            source = SourceItem(
+                system=PROCESS,
+                source_account="gateway.geico.com",
+                source_id="geico:6253395526:test-doc2",
+                source_url="https://gateway.geico.com/#noc=test-doc2",
+                received_at="2026-10-06T00:00:00+00:00",
+                filename="6253395526 Cancel_Notice.pdf",
+                content=pdf_bytes(b"test"),
+            )
+            ledger.record(source, due_on=date(2026, 10, 6), policy_number="6253395526")
+            data = json.loads((Path(tmp) / "pull" / "geico-noc-ledger.json").read_text())
+        self.assertEqual(data["items"]["geico:6253395526:test-doc2"]["insured_name"], "")
+
+
+class ViewerFlowTests(unittest.TestCase):
+    """End-to-end viewer flow with mocked Playwright objects (no live portal).
+
+    Flow: click notice link (href="#") -> viewer opens with documentId in URL
+    -> PDF XHR intercepted -> (document_id, pdf_bytes). Fallback: viewer's
+    Download button via frames. Fail-closed on every ambiguity.
+    """
+
+    DOC_ID = "eaf9b197-7471-3c36-2f23-3ed54027b6d6"
+    VIEWER_URL = (
+        "https://edgeextended.geico.com/documents/consolidated-document-viewer"
+        f"?documentId={DOC_ID}&token=sess123&visitAppId=E01&convToken="
+    )
+
+    def _locator(self, *, clicks=None):
+        clicks = clicks if clicks is not None else []
+        class FakeLocator:
+            def get_attribute(self, name):
+                return "#" if name == "href" else None
+            def click(self, *a, **k):
+                clicks.append("clicked")
+        return FakeLocator(), clicks
+
+    def _context(self, *, responses=(), pages=()):
+        listeners: dict[str, list] = {}
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+            def remove_listener(self, event, handler):
+                if handler in listeners.get(event, []):
+                    listeners[event].remove(handler)
+        ctx = FakeContext()
+        # Fire the scripted responses as if the viewer XHR completed.
+        for resp in responses:
+            for handler in list(listeners.get("response", [])):
+                handler(resp)
+        return ctx, listeners
+
+    def _page(self, *, url="", context=None, frames=(), download_bytes=None):
+        page_url = url
+        class FakePage:
+            def __init__(self):
+                self.url = page_url
+                self.context = context
+                self._frames = list(frames)
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+            @property
+            def frames(self):
+                return list(self._frames)
+            def get_by_role(self, role, name=None, exact=True):
+                raise AssertionError("unexpected get_by_role on page")
+        return FakePage()
+
+    def _viewer_page(self, *, context=None, download_bytes=None):
+        """A viewer page whose Download button yields download_bytes (or none)."""
+        outer = self
+        class FakeButton:
+            def click(self, *a, **k):
+                return None
+        class FakeExpectDownload:
+            def __init__(self, blob):
+                self.blob = blob
+            def __enter__(self):
+                return SimpleNamespace(value=SimpleNamespace())
+            def __exit__(self, *a):
+                return False
+        # Simpler: the frame returns a button; the page's expect_download
+        # is stubbed via _download_bytes patch below.
+        class FakeFrame:
+            def get_by_role(self, role, name=None, exact=True):
+                btn = FakeButton()
+                btn.count = lambda: 1
+                return btn
+        class FakeViewerPage:
+            def __init__(self):
+                self.url = outer.VIEWER_URL
+                self.context = context
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+            @property
+            def frames(self):
+                return [FakeFrame()]
+            def get_by_role(self, role, name=None, exact=True):
+                class Empty:
+                    def count(self):
+                        return 0
+                return Empty()
+        return FakeViewerPage()
+
+    def _run(self, page, locator, *, patch_notice=True):
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        orig = mod._notice_match
+        try:
+            if patch_notice:
+                mod._notice_match = lambda p: ("CANCELLATION NOTICE", locator)
+            return fetch_notice_pdf_via_viewer(page)
+        finally:
+            mod._notice_match = orig
+
+    def test_viewer_flow_captures_pdf_xhr(self):
+        """Click -> viewer URL with documentId -> XHR PDF captured."""
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        token = pdf_bytes(b"viewer-xhr")
+        locator, clicks = self._locator()
+
+        listeners: dict[str, list] = {}
+        opened: list = []
+
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+                if event == "response":
+                    # Simulate the viewer's PDF XHR completing after attach.
+                    handler(SimpleNamespace(
+                        url="https://edgeextended.geico.com/api/doc/stream",
+                        headers={"content-type": "application/pdf"},
+                        body=lambda: token,
+                    ))
+            def remove_listener(self, event, handler):
+                if handler in listeners.get(event, []):
+                    listeners[event].remove(handler)
+
+        class FakeViewer:
+            url = ViewerFlowTests.VIEWER_URL
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+
+        class FakePage:
+            url = "https://gateway2.geico.com/policy"
+            def __init__(self):
+                self.context = FakeContext()
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+
+        page = FakePage()
+        # The click opens the viewer in a new tab.
+        orig_on = FakeContext.on
+        def patched_on(self, event, handler):
+            orig_on(self, event, handler)
+            if event == "page":
+                handler(FakeViewer())
+        FakeContext.on = patched_on
+        try:
+            got_id, got_bytes = self._run(page, locator)
+        finally:
+            FakeContext.on = orig_on
+        self.assertEqual(got_id, self.DOC_ID)
+        self.assertEqual(got_bytes, token)
+        self.assertEqual(clicks, ["clicked"])
+        # Listeners are cleaned up.
+        self.assertEqual(listeners.get("response", []), [])
+        self.assertEqual(listeners.get("page", []), [])
+
+    def test_viewer_flow_same_tab_navigation(self):
+        """The viewer may load in the same tab (no popup)."""
+        token = pdf_bytes(b"same-tab")
+        locator, _ = self._locator()
+        listeners: dict[str, list] = {}
+
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+                if event == "response":
+                    handler(SimpleNamespace(
+                        url="https://edgeextended.geico.com/x.pdf",
+                        headers={"content-type": "application/pdf"},
+                        body=lambda: token,
+                    ))
+            def remove_listener(self, event, handler):
+                if handler in listeners.get(event, []):
+                    listeners[event].remove(handler)
+
+        class FakePage:
+            def __init__(self):
+                self.context = FakeContext()
+                self.url = "https://gateway2.geico.com/policy"
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+
+        page = FakePage()
+        # Simulate same-tab navigation: after click, page.url becomes viewer URL.
+        orig_click = locator.click
+        def nav_click(*a, **k):
+            orig_click(*a, **k)
+            page.url = ViewerFlowTests.VIEWER_URL
+        locator.click = nav_click
+
+        got_id, got_bytes = self._run(page, locator)
+        self.assertEqual(got_id, self.DOC_ID)
+        self.assertEqual(got_bytes, token)
+
+    def test_viewer_flow_no_notice_holds(self):
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        orig = mod._notice_match
+        class FakePage:
+            context = SimpleNamespace(on=lambda e, h: None, remove_listener=lambda e, h: None)
+        try:
+            mod._notice_match = lambda p: None
+            with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+                fetch_notice_pdf_via_viewer(FakePage())
+        finally:
+            mod._notice_match = orig
+
+    def test_viewer_flow_viewer_never_opens_holds(self):
+        locator, _ = self._locator()
+        listeners: dict[str, list] = {}
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+            def remove_listener(self, event, handler):
+                pass
+        class FakePage:
+            url = "https://gateway2.geico.com/policy"
+            def __init__(self):
+                self.context = FakeContext()
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+        with self.assertRaisesRegex(IntakeHold, "viewer did not open"):
+            self._run(FakePage(), locator)
+
+    def test_viewer_flow_html_shell_only_holds(self):
+        """Viewer HTML loads but no PDF XHR and no Download button -> hold."""
+        locator, _ = self._locator()
+        listeners: dict[str, list] = {}
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+                if event == "response":
+                    # Only the HTML shell arrives; no PDF XHR.
+                    handler(SimpleNamespace(
+                        url=ViewerFlowTests.VIEWER_URL,
+                        headers={"content-type": "text/html"},
+                        body=b"<html>viewer shell</html>",
+                    ))
+            def remove_listener(self, event, handler):
+                pass
+        class FakeViewer:
+            url = ViewerFlowTests.VIEWER_URL
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+            @property
+            def frames(self):
+                return []
+            def get_by_role(self, role, name=None, exact=True):
+                class Empty:
+                    def count(self):
+                        return 0
+                return Empty()
+        opened: list = []
+        orig_on = FakeContext.on
+        def patched_on(self, event, handler):
+            orig_on(self, event, handler)
+            if event == "page":
+                handler(FakeViewer())
+        FakeContext.on = patched_on
+        class FakePage:
+            url = "https://gateway2.geico.com/policy"
+            def __init__(self):
+                self.context = FakeContext()
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+        try:
+            with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+                self._run(FakePage(), locator)
+        finally:
+            FakeContext.on = orig_on
+
+    def test_viewer_flow_multiple_pdfs_hold(self):
+        """Two PDF XHRs is ambiguous -> hold."""
+        locator, _ = self._locator()
+        listeners: dict[str, list] = {}
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+                if event == "response":
+                    handler(SimpleNamespace(
+                        url="https://e/a.pdf", headers={"content-type": "application/pdf"},
+                        body=lambda: pdf_bytes(b"one")))
+                    handler(SimpleNamespace(
+                        url="https://e/b.pdf", headers={"content-type": "application/pdf"},
+                        body=lambda: pdf_bytes(b"two")))
+            def remove_listener(self, event, handler):
+                pass
+        class FakeViewer:
+            url = ViewerFlowTests.VIEWER_URL
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+        opened: list = []
+        orig_on = FakeContext.on
+        def patched_on(self, event, handler):
+            orig_on(self, event, handler)
+            if event == "page":
+                handler(FakeViewer())
+        FakeContext.on = patched_on
+        class FakePage:
+            url = "https://gateway2.geico.com/policy"
+            def __init__(self):
+                self.context = FakeContext()
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+        try:
+            with self.assertRaisesRegex(IntakeHold, "missing or ambiguous"):
+                self._run(FakePage(), locator)
+        finally:
+            FakeContext.on = orig_on
+
+    def test_viewer_flow_download_button_fallback(self):
+        """No XHR, but the viewer's Download button yields the PDF."""
+        import robie_job_engine.geico_pending_cancellation_noc as mod
+        token = pdf_bytes(b"download-button")
+        locator, _ = self._locator()
+        listeners: dict[str, list] = {}
+
+        class FakeButton:
+            def click(self, *a, **k):
+                return None
+            def count(self):
+                return 1
+
+        class FakeFrame:
+            def get_by_role(self, role, name=None, exact=True):
+                return FakeButton()
+
+        class FakeViewer:
+            url = ViewerFlowTests.VIEWER_URL
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+            @property
+            def frames(self):
+                return [FakeFrame()]
+            def get_by_role(self, role, name=None, exact=True):
+                class Empty:
+                    def count(self):
+                        return 0
+                return Empty()
+            def expect_download(self, timeout=None):
+                outer_token = token
+                class Ctx:
+                    def __enter__(self):
+                        return SimpleNamespace(value=SimpleNamespace())
+                    def __exit__(self, *a):
+                        return False
+                return Ctx()
+
+        opened: list = []
+        class FakeContext:
+            def on(self, event, handler):
+                listeners.setdefault(event, []).append(handler)
+            def remove_listener(self, event, handler):
+                pass
+        orig_on = FakeContext.on
+        def patched_on(self, event, handler):
+            orig_on(self, event, handler)
+            if event == "page":
+                handler(FakeViewer())
+        FakeContext.on = patched_on
+
+        class FakePage:
+            url = "https://gateway2.geico.com/policy"
+            def __init__(self):
+                self.context = FakeContext()
+            def wait_for_load_state(self, *a, **k):
+                return None
+            def wait_for_timeout(self, ms):
+                return None
+
+        orig_dl = mod._download_bytes
+        try:
+            mod._download_bytes = lambda download: token
+            got_id, got_bytes = self._run(FakePage(), locator)
+        finally:
+            FakeContext.on = orig_on
+            mod._download_bytes = orig_dl
+        self.assertEqual(got_id, self.DOC_ID)
+        self.assertEqual(got_bytes, token)
 
 
 class PdfCaptureTests(unittest.TestCase):
@@ -737,7 +1374,7 @@ class NodeLocator:
     def count(self):
         return len(self.nodes)
 
-    def click(self):
+    def click(self, *args, **kwargs):
         node = self.nodes[0]
         self.page.clicks.append(node.name)
         self.page.on_click(node)
@@ -846,7 +1483,9 @@ class NavPage:
                     nodes.append(FakeNode("link", "Billing"))
                 if self.billing_open:
                     notice = "CANCELLATION NOTICE" if self.policy == PANELLA else "Pending Cancellation Notice"
-                    nodes.append(FakeNode("link", notice))
+                    # Live 2026-10-05: href is "#" (Angular). The documentId
+                    # comes from the viewer URL after clicking.
+                    nodes.append(FakeNode("link", notice, attrs={"href": "#"}))
             return nodes
         nodes.append(FakeNode("combobox", text=self.combo_text))
         if self.table_visible:
@@ -872,9 +1511,9 @@ class NavPage:
             found.extend(node.find_role(role, name, exact))
         return NodeLocator(found, self)
 
-    def screenshot(self, full_page=True, type="png"):
+    def screenshot(self, full_page=True, type="png", timeout=None):
         self.screenshot_calls += 1
-        if full_page and type == "png" and self.table_visible and self.state in {"list", "chips"}:
+        if type == "png" and self.table_visible and self.state in {"list", "chips"}:
             return LIST_PNG
         return b""
 
@@ -920,25 +1559,74 @@ class NavPage:
         elif node.name == "Billing":
             self.billing_open = True
         elif node.name in {"Pending Cancellation Notice", "CANCELLATION NOTICE"}:
+            # Viewer flow (live 2026-10-05): clicking the notice (href="#")
+            # opens the consolidated viewer in a new tab with documentId in
+            # the URL; the PDF arrives via XHR.
+            doc_id = f"00000000-0000-4000-8000-{int(self.policy or '0'):012d}"
+            viewer_url = (
+                "https://edgeextended.geico.com/documents/consolidated-document-viewer"
+                f"?documentId={doc_id}&token=test&visitAppId=E01&convToken="
+            )
+            viewer = NavViewerPage(viewer_url)
+            for fn in list(self.context.listeners):
+                fn(viewer)
             token = pdf_bytes(self.policy.encode())
-            self._download = SimpleNamespace(save_as=lambda path, token=token: Path(path).write_bytes(token))
+            resp = SimpleNamespace(
+                url="https://edgeextended.geico.com/api/documents/stream",
+                headers={"content-type": "application/pdf"},
+                body=lambda: token,
+            )
+            for fn in list(self.context.response_listeners):
+                fn(resp)
+
+
+class NavViewerPage:
+    """Mock for the consolidated document viewer popup."""
+    def __init__(self, url):
+        self.url = url
+    def wait_for_load_state(self, *a, **k):
+        return None
+    def wait_for_timeout(self, ms):
+        return None
+    @property
+    def frames(self):
+        return []
+    def get_by_role(self, role, name=None, exact=True):
+        class Empty:
+            def count(self):
+                return 0
+        return Empty()
+    def close(self):
+        return None
 
 
 class NavContext:
     def __init__(self, page):
         self.page = page
         self.listeners = []
+        self.response_listeners = []
         self.request = SimpleNamespace(get=self._get)
 
     def on(self, event, fn):
         if event == "page":
             self.listeners.append(fn)
+        elif event == "response":
+            self.response_listeners.append(fn)
 
     def remove_listener(self, event, fn):
-        if fn in self.listeners:
+        if event == "page" and fn in self.listeners:
             self.listeners.remove(fn)
+        elif event == "response" and fn in self.response_listeners:
+            self.response_listeners.remove(fn)
 
     def _get(self, url, timeout):
+        # Direct-fetch: return PDF bytes for document URLs.
+        # The documentId encodes the policy number in the last 12 digits.
+        import re
+        m = re.search(r"documentId=00000000-0000-4000-8000-(\d{12})", str(url or ""))
+        if m:
+            policy = str(int(m.group(1)))
+            return SimpleNamespace(ok=True, body=lambda: pdf_bytes(policy.encode()))
         return SimpleNamespace(ok=True, body=lambda: b"")
 
 
@@ -951,8 +1639,10 @@ class NavigationTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.output = Path(self.tmp.name) / "pull"
 
-    def test_home_navigation_downloads_personal_notices_and_holds_billing_only(self):
-        page = NavPage(start="home")
+    def test_chip_navigation_downloads_personal_notices_and_holds_billing_only(self):
+        # bda3df83 removed the Client Alerts fallback: the live Gateway exposes
+        # Pending Cancellations as a count-suffixed filter chip, clicked directly.
+        page = NavPage(chip_mode="open")
         browser = PlaywrightGeicoNocBrowser(page)
         receipt = run_pull(
             browser,
@@ -966,15 +1656,20 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual((self.output / PERSONAL_NAMES[0]).read_bytes(), pdf_bytes(GUEVARA.encode()))
         self.assertEqual((self.output / PERSONAL_NAMES[1]).read_bytes(), pdf_bytes(PANELLA.encode()))
         self.assertFalse((self.output / f"{COMMERCIAL} NOC Geico.pdf").exists())
-        self.assertEqual(page.clicks[:2], ["Client Alerts", "Pending Cancellations"])
+        self.assertEqual(page.clicks[0], "Pending Cancellations (3)")
+        self.assertNotIn("Client Alerts", page.clicks)
         self.assertIn("Documents", page.clicks)
+        # Viewer flow (live 2026-10-05): the notice link (href="#") IS clicked;
+        # the viewer opens with documentId in the URL and the PDF is captured
+        # via XHR interception.
         self.assertIn("Pending Cancellation Notice", page.clicks)
         self.assertIn("CANCELLATION NOTICE", page.clicks)
         self.assertEqual(page.url, LIST_URL)
         self.assertEqual(page.screenshot_calls, 1)
-        notice_at = page.clicks.index("Pending Cancellation Notice")
-        self.assertLess(page.clicks.index("Documents"), notice_at)
-        self.assertLess(page.clicks.index("Billing"), notice_at)
+        # Viewer flow: Documents and Billing are clicked to reach the notice
+        # list, then the notice link itself is clicked to open the viewer.
+        self.assertIn("Documents", page.clicks)
+        self.assertIn("Billing", page.clicks)
 
     def test_filter_chip_selects_pending_cancellations_without_client_alerts(self):
         page = NavPage(chip_mode="open")
