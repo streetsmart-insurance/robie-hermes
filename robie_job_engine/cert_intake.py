@@ -211,6 +211,45 @@ def is_duplicate(email: CertEmail, store: Any) -> tuple[bool, str]:
     return False, ""
 
 
+def is_noise(email: CertEmail) -> tuple[bool, str]:
+    """True when this email is not a certificate request and should be skipped.
+
+    Noise includes:
+    - [cert-task-callback] emails: the bot's own Zap callback confirmations,
+      not new certificate requests.
+    - Auto-replies: "Automatic reply", "Out of office", etc.
+    - Bounces: "Delivery Status Notification", "Undeliverable", mailer-daemon.
+    - System notifications that are never certificate requests.
+
+    Returns (True, reason) if noise, (False, "") if it might be a real request.
+    When noise, callers should mark_processed() and skip (not unverified).
+    """
+    subject = (email.subject or "").lower()
+    from_hdr = (email.from_header or "").lower()
+
+    # Bot's own callback confirmations — not new requests
+    if "[cert-task-callback]" in subject:
+        return True, "cert-task-callback (bot's own confirmation, not a request)"
+
+    # Bounces and delivery failures
+    if "delivery status notification" in subject:
+        return True, "bounce: delivery status notification"
+    if subject.startswith("undeliverable"):
+        return True, "bounce: undeliverable"
+    if "mailer-daemon" in from_hdr or "postmaster" in from_hdr:
+        return True, "bounce: mailer-daemon/postmaster"
+
+    # Auto-replies
+    if subject.startswith("automatic reply"):
+        return True, "auto-reply"
+    if subject.startswith("auto:"):
+        return True, "auto-reply"
+    if "out of office" in subject:
+        return True, "auto-reply: out of office"
+
+    return False, ""
+
+
 def mark_processed(
     email: CertEmail, store: Any, meta: dict[str, Any] | None = None
 ) -> None:

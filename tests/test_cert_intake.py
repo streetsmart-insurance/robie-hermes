@@ -15,6 +15,7 @@ from robie_job_engine.cert_intake import (
     discover_messages,
     extract_request_facts,
     is_duplicate,
+    is_noise,
     mark_processed,
     summarize_for_note,
 )
@@ -171,6 +172,80 @@ def test_changed_attachment_bytes_is_not_duplicate():
         _email(gid="g2", mid="<m2@x>", atts=[("coi.pdf", b"V2-NEW", "a2")]), store
     )
     assert not dup  # new bytes may be a new version
+
+
+# ---------------------------------------------------------------------------
+# Noise filtering
+# ---------------------------------------------------------------------------
+
+
+def _noise_email(subject, frm="sender@example.com"):
+    """Build a CertEmail with specific subject/from for noise testing."""
+    blobs = {}
+    g = FakeGmail([], {}, blobs)
+    return CertEmail.from_gmail_api(
+        _gmail_payload(
+            gid="g-noise",
+            message_id="<noise@example.com>",
+            frm=frm,
+            subject=subject,
+            body="Some body text",
+        ),
+        g.get_attachment,
+    )
+
+
+def test_noise_cert_task_callback():
+    e = _noise_email("[cert-task-callback] certificate task for applicant 123")
+    noise, reason = is_noise(e)
+    assert noise
+    assert "callback" in reason.lower()
+
+
+def test_noise_delivery_status_notification():
+    e = _noise_email("Delivery Status Notification (Failure)")
+    noise, reason = is_noise(e)
+    assert noise
+    assert "bounce" in reason.lower()
+
+
+def test_noise_undeliverable():
+    e = _noise_email("Undeliverable: Certificate request")
+    noise, reason = is_noise(e)
+    assert noise
+    assert "bounce" in reason.lower()
+
+
+def test_noise_mailer_daemon():
+    e = _noise_email("Some subject", frm="mailer-daemon@example.com")
+    noise, reason = is_noise(e)
+    assert noise
+    assert "bounce" in reason.lower()
+
+
+def test_noise_automatic_reply():
+    e = _noise_email("Automatic reply: Out of office")
+    noise, reason = is_noise(e)
+    assert noise
+    assert "auto-reply" in reason.lower()
+
+
+def test_noise_out_of_office():
+    e = _noise_email("Re: Certificate - Out of Office")
+    noise, reason = is_noise(e)
+    assert noise
+
+
+def test_not_noise_real_request():
+    e = _noise_email("Certificate request for ABC Construction")
+    noise, _ = is_noise(e)
+    assert not noise
+
+
+def test_not_noise_fwd_request():
+    e = _noise_email("Fwd: Insurance Certificate Request")
+    noise, _ = is_noise(e)
+    assert not noise
 
 
 # ---------------------------------------------------------------------------
