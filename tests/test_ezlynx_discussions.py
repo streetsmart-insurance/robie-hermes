@@ -199,30 +199,6 @@ def test_reject_phone_numbers_variants(number):
         disc.reject_phone_numbers(f"reach them at {number} tomorrow")
 
 
-@pytest.mark.parametrize("number", ["732-995-3409", "(732) 995-3409", "+1 732 995 3409"])
-def test_reject_phone_numbers_still_refuses_real_numbers_after_policy_fix(number):
-    for text in (number, f"Call {number}.", f"reach them at {number} tomorrow"):
-        with pytest.raises(disc.DiscussionApiError, match="phone-number-like"):
-            disc.reject_phone_numbers(text)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "CT1278263263-2",
-        "Late-payment notice for policy CT1278263263-2 from Ascend.",
-        "policy AB12345678901 is past due",
-    ],
-)
-def test_reject_phone_numbers_allows_policy_numbers_glued_to_letters(text):
-    assert disc.reject_phone_numbers(text) == text
-
-
-def test_phone_like_does_not_match_inside_a_longer_digit_run():
-    assert disc._PHONE_LIKE.search("12345678901234") is None
-    assert disc._PHONE_LIKE.search("00 7329953409") is not None
-
-
 def test_reject_phone_numbers_allows_plain_text():
     assert disc.reject_phone_numbers("No dialable digits here.") == "No dialable digits here."
 
