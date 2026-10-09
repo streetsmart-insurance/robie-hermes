@@ -1,0 +1,117 @@
+# Cross Sell Verification - September 2026
+# Status as of 2026-09-27
+
+> Note-screening only. Final status requires EZLynx issuance evidence.
+> Flagged = note contradicts label; pending review, NOT a final rejection.
+
+## Methodology
+- Cross Sell = NEW line/policy sold to EXISTING client
+- Must verify: (1) client was already a customer, (2) new policy was actually issued
+- "App sent" or "shell" = NOT issued, flag
+- BOR/renewal = NOT a cross-sell, flag
+
+## STRONG (issued, verify in EZLynx)
+1. Taylor Cimei | TOP NOTCH LAWN & LANDSCAPING LLC | "issued new wc policy" - waiting download
+2. Taylor Cimei | SK Direct LLC | "issued new WC policy" - waiting download
+3. Taylor Cimei | Jeffrey and Theresa Bruder | "New Vacant Express gl was issued"
+
+## NEEDS VERIFICATION (sold/bound, check issuance)
+4. Zeus Quezada | MCM Home Services LLC | Sold CAIP PROG 880297566 - waiting download
+5. Zeus Quezada | Michael Caruso & Rosemarie Fratta-Caruso | Sold event liability Markel - "will set up"
+6. Zeus Quezada | EG Smart Home LLC | Bound with Next Ins - "cross-sell completed"
+7. Zeus Quezada | Puma Enterprise LLC | Binder with Tapco
+8. Zeus Quezada | Jaguar Tree Service LLC | Sold WC NJCRIB
+
+## WEAK (not issued)
+9. Jazmin Molina | Murray King | "sent app for signature" - not issued
+10. Jazmin Molina | Elizabeth & Timothy Slavin | "sending app for signature" - not issued
+11. Zeus Quezada | J Swat Contracting LLC | "policy shell... wait" - not issued
+12. Taylor Cimei | Mansukh Auto Repair Inc | "sent bind request" - not bound
+
+## FLAGGED FOR REVIEW (not a cross-sell)
+13. Taylor Cimei | Top Notch Tree Service LLC | "sent updated BOR for renewal" - This is a renewal BOR, NOT a new sale to existing client. Pending review.
+
+## EZLynx PolicyApi Issuance Check (2026-09-27, PRODUCTION API)
+
+**VEP0386394** (Taylor Cimei | Jeffrey and Theresa Bruder) — **Inactive**, CGL, term 2025-08-12 to 2026-08-12. The note says "New Vacant Express gl was issued. Please key in new policy" but cites last year's policy number. FLAGGED: the cited policy number is the old term, not a new issuance. (The "please key in new policy" note suggests the new policy may not be keyed in EZLynx yet — check for the new policy number.)
+
+## Total: 13 rows
+## By employee: Zeus 6, Taylor 5, Jazmin 2
+
+## Browser Verification — Batch 1 (2026-09-27 ~21:55 EDT, read-only, signed in as Carlo Ferrara)
+
+- **Murray King** — EXISTING client (since 2021/22). New Foremost dwelling fire 502754335100 ($3,316, placed 9/26/26, PENDING, eff 10/2/26–10/2/27). October-effective, not yet active. Cross-sell label correct; New Customer labels wrong. Agent: Jazmin Molina.
+- **Elizabeth & Timothy Slavin** — EXISTING (since 2018). New umbrella to REPLACE cancelled Nationwide umbrella 51291U000067; eSignature still PENDING as of 9/27 — NOT issued, no policy number/carrier/effective date in system. Cross-sell label questionable (replacement of a cancelled line, not new coverage). Agent: Jazmin Molina.
+- **MCM Home Services LLC** — EXISTING (since 2024). Progressive commercial auto 880297566 (Active, $3,005, eff 9/22/26–9/22/27). Clean cross-sell; New Customer CSR label wrong. Agent: Zeus Quezada.
+- **Michael Caruso & Rosemarie Fratta-Caruso** — EXISTING (since ~2023). Markel event liability 3DS5477 (Active, $106 — note said $111 — eff 2/1/26–2/1/27). Clean cross-sell. Agent: Zeus Quezada.
+- **Jeffrey & Theresa Bruder** — EXISTING (since ~2023). Old VEP0386394 (Inactive, 8/12/25–8/12/26) replaced by NEW VEP0440216 (Vacant Express, Active, $433.30, eff 9/4/26–9/4/27, Transaction Date 9/8/26). Issued and active — but it is the same GL line renewed, so the Cross Sell label is questionable. Agent: Taylor Cimei.
+
+## Browser Verification — Batch 2 (running 2026-09-27 ~22:00 EDT)
+
+Top Notch Lawn & Landscaping LLC, EG Smart Home LLC, Puma Enterprise LLC, SK Direct LLC / Mrs. K's Motel & Restaurant, Mansukh Auto Repair Inc.
+
+## Browser Verification — Batch 3 (queued)
+
+Top Notch Tree Service LLC; Jaguar Tree Service LLC prior-client determination (new WC WC533SB27T34016 verified issued 9/3/26 — cross-sell if existing client, new customer if not).
+
+## Browser Verification — Batch 2 (2026-09-27 ~22:00 EDT, read-only, signed in as Carlo Ferrara)
+
+All five verified as ISSUED and ACTIVE; every account is an existing client.
+
+- **Top Notch Lawn & Landscaping LLC** — EXISTING (GL with Coterie since Nov 2025). New Hartford workers comp 13WECCF3B49 (Active, $2,018, term 9/1/26–9/1/27, New Business, Transaction Date 9/1/26, pay-as-you-go, owner excluded). Clean cross-sell. "New Policy Added" automation sent 9/2/26. Agent: Taylor Cimei.
+- **EG Smart Home LLC** — EXISTING (Pie WC, Liberty Mutual bond, Utica BOP). New Next Insurance commercial package NXTWRTLWHW-00-GL (Active, $2,277.16 = GL $1,870 + Umbrella-Comm $362.16, term 9/8/26–9/8/27, New Business, Transaction Date 9/8/26). The umbrella cross-sell in Zeus's 8/24 note is confirmed as the $362.16 Umbrella-Comm line. Clean cross-sell. "New Policy Added" automation sent 9/9/26. Agent: Zeus Quezada.
+- **Puma Enterprise, LLC** — EXISTING (since 2024, acquired from AW Warta Agency). New Tapco commercial package BACTA-X (Active, $2,686, term 9/6/26–9/6/27, New Business, Transaction Date 9/9/26, Lloyd's of London, Ascend billing). The "New Customer CSR" label on this row is a confirmed mislabel — existing client, so this is a cross-sell. CAUTION: two Accounting tasks from 9/9/26 unresolved — binder dates (9/3/26–6/3/27) differ from the entered policy term (9/6/26–9/6/27), and the named-insured question (Puma Enterprise, LLC vs Piotr Konefal) is unanswered. Agent: Zeus Quezada.
+- **SK Direct LLC / Mrs. K's Motel & Restaurant** — EXISTING (since 2015). New Hartford workers comp 13WECCE5FJ6 (Active, $1,170, term 9/15/26–9/15/27, Transaction Date 9/23/26, Transaction Type "Policy Change"). The requested named-insured endorsement (dropping "Koudello Inc.") has an OPEN change request effective 9/15/26 — account title still shows the old name. Clean cross-sell; endorsement pending. Agent: Taylor Cimei.
+- **Mansukh Auto Repair Inc** — EXISTING (Utica BOP prior). New Amwins/StarStone commercial package CBG01476426P-00 (Active, $2,825, term 9/3/26–9/3/27, New Business, Transaction Date 9/4/26, 10% commission, Ascend). CORRECTION to the task brief: this is NOT workers comp — it is Garage & Dealers + Commercial Property package. Clean cross-sell. "New Policy Added" automation sent 9/8/26. Agent: Taylor Cimei. (Note: this row also carries AutoPay Setup — "set up on auto pay" per note; autopay verification still pending.)
+
+## Browser Verification — Batch 3 (running 2026-09-27 ~22:25 EDT)
+
+Top Notch Tree Service LLC (BOR renewal — genuine cross-sell or not?); Jaguar Tree Service LLC prior-client determination (cross-sell vs new customer).
+
+## Browser Verification — Batch 3 (2026-09-27 ~22:25 EDT, read-only, signed in as Carlo Ferrara)
+
+- **Top Notch Tree Service LLC** — NOT a genuine cross-sell. Existing client since Oct 2025 (GL NPP1674285 Tapco $4,635, term 10/28/25–10/28/26, renewal due 10/28/26; Progressive commercial auto 988537063 $13,129, term 4/24/26–10/24/26, renewal quoted). The September WC entry (6S61UB-A424589-8-26, NJCRIB/Continental Assigned Risk, $4,508, term 11/7/26–11/7/27, entered 9/18/26 as "New Business") is a BROKER-OF-RECORD transfer — the e-signature "Agent/Broker of Record Change" was sent ~Sep 4 and ~Sep 9, matching the note "sent updated BOR for renewal." Existing WC coverage moved to StreetSmart for the renewal term; no new coverage sold. The "Cross Sell" label is incorrect. (Open task: Taylor to get a copy of the renewal and close out, due Oct 7.)
+- **Jaguar Tree Service LLC** — CROSS-SELL CONFIRMED. Existing client since 2021 (pinned note by Carlo Ferrara, Sep 24, 2021). Most decisively: active GL CPS4120548 (Tapco/Scottsdale, $2,872) renewed 7/17/2026 — one month before the September WC sale. The September WC WC533SB27T34016 (NJCRIB/Liberty Mutual, $2,848, term 9/3/26–9/3/27, New Business, Transaction Date 9/3/26) is NEW coverage on an EXISTING client. "Cross Sell" label CORRECT; "New Customer CSR" label WRONG. Completed task confirms: "Sold WC with NJCRIB, assigned risk went with LM Insurance Corporation under Application ID 283718." Agent: Zeus Quezada.
+
+## Cross Sell — FINAL TALLY (13 rows, all browser-verified 2026-09-27)
+
+- CLEAN (genuine cross-sells, existing clients): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar — 9.
+- TIMING ISSUE (October-effective, not yet active): Murray King — 1.
+- QUESTIONABLE (replacement/renewal of same line, not new coverage): Slavin (nothing issued), Bruder (same GL line renewed) — 2.
+- REJECTED (not a cross-sell): Top Notch Tree Service (BOR transfer) — 1.
+
+## Carlo's Rulings (2026-09-28 ~06:30 EDT)
+
+1. **Murray King** — moves to OCTOBER. The Foremost dwelling fire (eff 10/2/26) earns October credit, not September.
+2. **Top Notch Tree Service** — COUNTS as a cross-sell. Carlo: "even though it is a BOR, that's how we got it." The WC coverage came to the agency via the September BOR, so the cross-sell credit stands despite it being a transfer rather than a new sale.
+3. **Slavin** — pending: when did the Nationwide umbrella (51291U000067) cancel? (Browser check running.)
+4. **Bruder** — pending: did the new VEP0440216 add liability coverage the old VEP0386394 lacked (property-only → property + liability)? (Browser check running.)
+
+## Cross Sell — FINAL TALLY (revised per Carlo 2026-09-28)
+
+- CLEAN (10): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar, Top Notch Tree Service (per Carlo's BOR ruling).
+- OCTOBER (1): Murray King — Foremost dwelling fire eff 10/2/26; October credit per Carlo.
+- QUESTIONABLE (2): Slavin (replacement umbrella, nothing issued — cancel date pending), Bruder (same-line renewal vs added liability — coverage comparison pending).
+- REJECTED (0).
+
+## Cross-Sell Definition — Carlo's Principle (2026-09-28 ~06:35 EDT)
+
+A cross-sell earns credit when the agency NEWLY CONTROLS a line of business it did not control before — whether that arrives as a fresh sale or through a broker-of-record transfer. "Sometimes the only way to get it is through a BOR."
+
+Consequences:
+- Top Notch Tree Service counts: the agency did not control the WC line before; the September BOR brought it in.
+- A straight renewal of a line the agency already controlled is NOT a cross-sell (this is what keeps Bruder questionable unless liability was added).
+- A pending replacement that has not issued earns nothing yet (Slavin), but when it issues it would qualify under this principle as a newly controlled line.
+
+## Slavin + Bruder — Coverage Questions Resolved (2026-09-28 ~06:35 EDT, read-only)
+
+**Slavin (account 51402216):** Nationwide umbrella 51291U000067 — CANCELLATION DATE 8/1/2026 (effective 8/1/26, expiration 8/1/27, Transaction Type "Cancel Confirmation", Transaction Date 8/27/26, $152.50, Direct bill, Harleysville writing company). Cancelled at inception; no cancellation reason shown. REPLACEMENT: none in the system. The eSignature umbrella application is STILL PENDING (sent 9/25/26 3:19 PM to Elizabeth Slavin, Received blank). No policy number, carrier, or effective date for a replacement. Verdict: the umbrella line is currently uninsured; under Carlo's principle the replacement would qualify when it issues, but there is nothing to credit in September.
+
+**Bruder (account 21587364):** The new policy did NOT add coverage. BOTH policies are classified "Genl Liability" (label "Vacant General Liability") — the old VEP0386394 was not property-only. Old: VEP0386394, Vacant Express MGA / Diamond State, $361.08, term 8/12/25–8/12/26, inactive. New: VEP0440216, Vacant Express MGA / United National-Diamond State Group, $433.30, term 9/4/26–9/4/27, active, Transaction Date 9/8/26. Same line renewed; the agency already controlled the GL line. Per Carlo's principle (newly controlled line = cross-sell; renewal of an already-controlled line = not), the Cross Sell label is REJECTED. Supporting: Steffany Canales's 9/8/26 pinned note — "Master COI was renewed for the 26-27 term."
+
+## Cross Sell — FINAL TALLY (all resolved 2026-09-28)
+
+- CLEAN (10): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar, Top Notch Tree Service (BOR — newly controlled WC line per Carlo).
+- OCTOBER (1): Murray King — Foremost dwelling fire eff 10/2/26; October credit.
+- QUESTIONABLE (1): Slavin — replacement umbrella not yet issued (eSignature pending); qualifies when it issues.
+- REJECTED (1): Bruder — same GL line renewed; agency already controlled it.
