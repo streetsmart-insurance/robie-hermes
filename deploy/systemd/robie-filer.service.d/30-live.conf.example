@@ -1,0 +1,6 @@
+# Step 1 (approved 2026-10-08): live for the Queue and Needs review tabs only.
+# Uploads and notes reach only the compiled allowlist (test account 220250093).
+# Install as /etc/systemd/system/robie-filer.service.d/30-live.conf
+[Service]
+ExecStart=
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.robie_filer --live

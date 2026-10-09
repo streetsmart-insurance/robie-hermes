@@ -1,0 +1,32 @@
+[Unit]
+Description=ROBIE filer: robie@ email and attachments to EZLynx Documents (dry-run unless 30-live.conf)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_GMAIL_DELEGATION_SA=hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+Environment=ROBIE_FILER_STATE_DIR=/var/lib/robie-filer
+Environment=ROBIE_FILER_INDEX_CSV=/var/lib/robie-filer/cert-applicant-index.csv
+# No write-scope variables. Writes stay on the compiled allowlist (test
+# account 220250093) unless a drop-in adds --any-applicant, which widens
+# only document upload and note append (ezlynx_write_scope).
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0700 /var/lib/robie-filer
+# Fresh copy of the full-book client list each run. The live file is mode
+# 0600 under another owner. Read-only copy; the original is not touched.
+ExecStartPre=+/bin/sh -c 'src=/opt/streetsmart-hermes/robie-job-engine/data/cert-applicant-index.csv; if [ -f "$src" ]; then install -o streetsmart-hermes -g streetsmart-hermes -m 0600 "$src" /var/lib/robie-filer/cert-applicant-index.csv; fi'
+# Dry run. 30-live.conf.example replaces this line with --live.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.robie_filer
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/robie-filer
+TimeoutStartSec=9min

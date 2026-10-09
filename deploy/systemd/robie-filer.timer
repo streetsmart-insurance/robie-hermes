@@ -1,0 +1,14 @@
+[Unit]
+Description=ROBIE filer every 10 minutes
+
+[Timer]
+# OnActiveSec arms the first run; OnUnitActiveSec repeats it.
+OnBootSec=5min
+OnActiveSec=10min
+OnUnitActiveSec=10min
+Persistent=true
+AccuracySec=1min
+Unit=robie-filer.service
+
+[Install]
+WantedBy=timers.target
