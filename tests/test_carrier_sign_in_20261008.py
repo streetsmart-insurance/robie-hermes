@@ -407,6 +407,16 @@ class ProgressiveServicingTests(unittest.TestCase):
         self.assertTrue(fao.is_cancellation_document("Cancel Notice"))
         self.assertTrue(fao.is_cancellation_document("Nonpayment"))
         self.assertEqual(fao.parse_carrier_date("09/25/26"), date(2026, 9, 25))
+        dashed = fao.parse_archive_document(
+            policy_number="935495408",
+            date_text="—",
+            title="Cancel Notice (PDF)",
+            delivery="USPS",
+            row_index=0,
+            row_text="09/25/26 Cancel Notice (PDF) USPS",
+        )
+        self.assertEqual(dashed.document_date, date(2026, 9, 25))
+        self.assertEqual(dashed.document_name, "Cancel Notice")
 
     def test_page_wait_retries_once_then_holds(self):
         from robie_job_engine import progressive_pending_cancellation as fao
@@ -742,7 +752,64 @@ class FaoBudgetAndLogTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "PARTIAL")
         self.assertEqual(receipt["unprocessed"], 1)
         self.assertIn("connection is dead", receipt["reason"])
-        self.assertIn("1 policies left unprocessed", receipt["reason"])
+
+    def test_hard_deadline_writes_a_partial_summary_and_exits(self):
+        import io
+        import threading
+        import time
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        buffer = io.StringIO()
+        exits = []
+        fao.write_hard_partial(
+            {"found": 5, "done": 1, "count": 1, "downloaded": [{}], "held": []},
+            exit_fn=exits.append,
+            stream=buffer,
+        )
+        self.assertEqual(exits, [124])
+        text = buffer.getvalue()
+        self.assertIn('"status": "PARTIAL"', text)
+        self.assertIn("4 policies left unprocessed", text)
+        fired = []
+        stop = threading.Event()
+        fao.arm_worker_watchdog(
+            0.05,
+            {"found": 3, "done": 0, "downloaded": [], "held": []},
+            exit_fn=fired.append,
+            stop=stop,
+        )
+        time.sleep(0.3)
+        self.assertEqual(fired, [124])
+
+    def test_leftover_pdfhandler_and_document_summary_tabs_are_closed(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        class Page:
+            def __init__(self, url, title=""):
+                self.url = url
+                self._title = title
+                self.closed = False
+
+            def title(self):
+                return self._title
+
+            def close(self, **_kwargs):
+                self.closed = True
+
+        report = Page("https://www.foragentsonly.com/managepolicies/reports/policiesneedservice/policiespendingcancellation/")
+        pdf = Page("https://clpolicy.foragentsonly.com/Express/PDFHandler.ashx?x=1")
+        summary = Page("https://policyservicing.apps.foragentsonly.com/app/documents-hub/find-document", "Document Summary")
+        timeout = Page("https://policy.americanstrategic.com/Express/Default.aspx", "Timeout")
+        context = SimpleNamespace(pages=[report, pdf, summary, timeout])
+        browser = SimpleNamespace(contexts=[context])
+        with mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"), \
+                mock.patch("robie_job_engine.progressive_login.is_signed_in", return_value=True):
+            kept = fao.ensure_fao_page(browser)
+        self.assertIs(kept, report)
+        self.assertFalse(report.closed)
+        self.assertTrue(pdf.closed and summary.closed and timeout.closed)
 
 
 class UticaTabTests(unittest.TestCase):

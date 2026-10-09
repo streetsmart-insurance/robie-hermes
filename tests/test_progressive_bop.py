@@ -386,8 +386,9 @@ class ProgressiveBopTests(unittest.TestCase):
             require_loopback_cdp("http://10.0.0.8:9222")
         page = FakePage(set(), url="https://www.foragentsonly.com/home")
         self.assertIs(select_fao_page([page, FakePage(set(), url="https://example.test")]), page)
-        with self.assertRaises(IntakeHold):
-            select_fao_page([page, FakePage(set(), url="https://portal.foragentsonly.com/other")])
+        extra = FakePage(set(), url="https://portal.foragentsonly.com/other")
+        self.assertIs(select_fao_page([page, extra]), page)
+        self.assertTrue(extra.closed)
         with self.assertRaises(IntakeHold):
             select_fao_page([])
 

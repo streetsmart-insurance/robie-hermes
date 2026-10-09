@@ -562,8 +562,7 @@ class SelectPageTest(unittest.TestCase):
         self.assertIs(select_fao_page([other, good]), good)
         with self.assertRaises(IntakeHold):
             select_fao_page([other])
-        with self.assertRaises(IntakeHold):
-            select_fao_page([good, good])
+        self.assertIs(select_fao_page([good, good]), good)
 
 
 if __name__ == "__main__":

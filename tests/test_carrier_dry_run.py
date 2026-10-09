@@ -145,6 +145,25 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(r["status"], "HELD")
         self.assertEqual(r["held"][0]["reason"], "ledger conflict")
 
+    def test_raised_pull_keeps_the_downloaded_count(self):
+        import tempfile
+
+        class Saved(IntakeHold):
+            def __init__(self):
+                super().__init__("Finys table is missing or ambiguous")
+                self.details = {
+                    "downloaded": [{"filename": "a.pdf"}, {"filename": "b.pdf"}],
+                    "count": 2,
+                    "held": [{"reason": "Finys table is missing or ambiguous"}],
+                    "skipped": [],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = _run_with_patches(Path(tmp), {"farmersofsalem": Saved()}, carriers="farmersofsalem")
+        result = summary["carriers"]["farmersofsalem"]
+        self.assertEqual(result["downloaded"], 2)
+        self.assertEqual(result["status"], "PARTIAL")
+
     def test_partial_receipt_is_summarized(self):
         import tempfile
         receipt = {

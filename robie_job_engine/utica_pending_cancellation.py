@@ -1128,7 +1128,15 @@ def _utica_pull_body(
     png = browser.screenshot_transactions()
     ledger.save_screenshot(as_of, png)
     rows = browser.load_transactions()
-    targets = [row for row in rows if is_cancellation_transaction(row.transaction_type)]
+    targets = []
+    seen_policies: set[str] = set()
+    for row in rows:
+        if not is_cancellation_transaction(row.transaction_type):
+            continue
+        if row.policy_number in seen_policies:
+            continue
+        seen_policies.add(row.policy_number)
+        targets.append(row)
 
     for row in targets:
         try:
@@ -1209,6 +1217,17 @@ def _utica_pull_body(
             targeted.append(doc.document_id)
             rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
         browser.return_to_transactions()
+
+    deduped_holds: list[dict[str, Any]] = []
+    seen_holds: set[str] = set()
+    for item in held:
+        key = str(item.get("policy_number") or "")
+        if key and key in seen_holds:
+            continue
+        if key:
+            seen_holds.add(key)
+        deduped_holds.append(item)
+    held = deduped_holds
 
     return {
         "status": "PULLED",

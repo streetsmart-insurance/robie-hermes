@@ -2321,10 +2321,10 @@ def connect_cdp_browser(cdp_url: str | None, *, agent_code: str) -> tuple[Playwr
 
 
 def select_fao_page(pages: list[Any]) -> Any:
+    from .progressive_pending_cancellation import choose_one_fao_page
+
     matches = [page for page in pages if _is_fao_app_url(str(getattr(page, "url", "") or ""))]
-    if len(matches) != 1:
-        raise IntakeHold("Expected exactly one Progressive FAO tab")
-    return matches[0]
+    return choose_one_fao_page(matches)
 
 
 def require_loopback_cdp(url: str) -> str:

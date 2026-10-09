@@ -72,8 +72,9 @@ _ACTION_TIMEOUT_MS = 8000
 PORTAL_GOTO_MS = 15000
 LEDGER_NAME = "farmersofsalem-noc-ledger.json"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
-DOWNLOAD_TIMEOUT_MS = 8000
-_NAV_TIMEOUT_MS = 8000
+DOWNLOAD_TIMEOUT_MS = 2500
+_NAV_TIMEOUT_MS = 4000
+ACTIONABLE_DAYS = 45
 _EASTERN = ZoneInfo("America/New_York")
 _PDF_MAGIC = b"%PDF-"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -756,7 +757,7 @@ def _type_into(box: Any, value: str) -> None:
     box.fill("")
     typer = getattr(box, "press_sequentially", None)
     if callable(typer):
-        typer(value, delay=40)
+        typer(value, delay=10)
     else:
         box.fill(value)
 
@@ -1212,10 +1213,10 @@ class FinysFoSBrowser:
             _control(self.page, "link", "My Open Tasks").click()
         require_finys_url(str(getattr(self.page, "url", "") or ""))
         # The task grid renders a few seconds after the landing loads
-        # (live 2026-10-08); wait for it before re-reading.
-        _wait_for(lambda: _has_pending_grid(self.page))
-        # The list must still be readable after navigation.
-        extract_pending_items(self.page)
+        # (live 2026-10-08); wait for it. Re-reading every row here was
+        # most of the time between policies.
+        if not _wait_for(lambda: _has_pending_grid(self.page)):
+            raise IntakeHold("Finys table is missing or ambiguous")
 
 
 # --- Local delivery ledger --------------------------------------------------
@@ -1362,6 +1363,24 @@ def run_pull(
     *,
     as_of: date,
 ) -> dict[str, Any]:
+    """Pull notices. Tabs this run opened are closed even when a policy holds."""
+    from .carrier_tabs import close_new_pages, snapshot_ids
+
+    page = getattr(browser, "page", None)
+    before = snapshot_ids(page)
+    try:
+        return _run_pull_impl(browser, ledger, archive, as_of=as_of)
+    finally:
+        close_new_pages(page, before, keep=page)
+
+
+def _run_pull_impl(
+    browser: FinysFoSBrowser,
+    ledger: LocalDeliveryLedger,
+    archive: SourceArchive,
+    *,
+    as_of: date,
+) -> dict[str, Any]:
     """Pull the most recent target notice for each Finys pending item.
 
     Returns a receipt dict with status/count/downloaded/held/skipped. Raises
@@ -1418,27 +1437,43 @@ def run_pull(
             },
         )
 
-    for index, item in enumerate(items):
+    unique = _dedupe_pending(items)
+    _fos_log(f"kept {len(unique)} after dropping duplicate policies from {len(items)}")
+    recent = _due_within(unique, as_of, ACTIONABLE_DAYS)
+    _fos_log(f"kept {len(recent)} due within {ACTIONABLE_DAYS} days of {len(unique)}")
+    on_disk = _policies_in_output(ledger.root) if hasattr(ledger, "root") else set()
+    pending = []
+    for item in recent:
+        if item.policy_number in delivered or item.policy_number in on_disk:
+            prior = delivered.get(item.policy_number) or item.policy_number
+            skipped.append(prior)
+            continue
+        pending.append(item)
+    _fos_log(f"kept {len(pending)} after skipping {len(recent) - len(pending)} already downloaded")
+
+    for index, item in enumerate(pending):
         if monotonic() >= deadline:
-            left = len(items) - index
+            left = len(pending) - index
             reason = f"Farmers of Salem worker deadline reached; {left} policies left unprocessed"
             _fos_log(reason)
             return receipt("PARTIAL", reason=reason, unprocessed=left)
-        prior = delivered.get(item.policy_number)
-        if prior:
-            skipped.append(prior)
-            _fos_log(f"policy {item.policy_number} already downloaded; skipping")
-            continue
         _fos_log(f"policy {item.policy_number} start")
-        browser.return_to_pending_items()
         try:
+            browser.return_to_pending_items()
             browser.open_policy(item.policy_number)
             browser.open_document_summary()
             documents = browser.list_documents()
         except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
-            held.append(_held_row(item, str(exc) if isinstance(exc, IntakeHold) else (
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
                 f"Finys policy {item.policy_number} did not open ({type(exc).__name__})"
-            )))
+            )
+            page = getattr(browser, "page", None)
+            url = str(getattr(page, "url", "") or "")
+            tables = _count(page.locator("table")) if page is not None else -1
+            _fos_log(f"policy {item.policy_number} held at {url} tables={tables}: {reason}")
+            if "Finys table is missing" in reason:
+                reason = f"{reason} at {url} ({tables} tables)"
+            held.append(_held_row(item, reason))
             continue
         target = select_target_document(documents)
         if target is None or target.doc_date is None or target.notice_key is None:
@@ -1498,6 +1533,36 @@ def run_pull(
         )
 
     return receipt("PULLED")
+
+
+def _dedupe_pending(items: tuple[PendingItem, ...] | list[PendingItem]) -> list[PendingItem]:
+    seen: set[str] = set()
+    kept: list[PendingItem] = []
+    for item in items:
+        if item.policy_number in seen:
+            continue
+        seen.add(item.policy_number)
+        kept.append(item)
+    return kept
+
+
+def _due_within(items: list[PendingItem], as_of: date, days: int) -> list[PendingItem]:
+    from datetime import timedelta
+
+    floor = as_of - timedelta(days=days)
+    return [item for item in items if item.due_on >= floor]
+
+
+def _policies_in_output(root: Path) -> set[str]:
+    found: set[str] = set()
+    folder = Path(root)
+    if not folder.exists():
+        return found
+    for path in folder.rglob("*.pdf"):
+        token = path.name.split(" ", 1)[0].upper()
+        if _POLICY_NUMBER.fullmatch(token):
+            found.add(token)
+    return found
 
 
 # --- Test-only CLI ----------------------------------------------------------

@@ -802,8 +802,7 @@ class SecondLiveRoundTests(unittest.TestCase):
         other = SimpleNamespace(url="https://bop.americanstrategic.com/")
         self.assertIs(fao.select_fao_page([cl, other]), cl)
         fao_tab = SimpleNamespace(url="https://www.foragentsonly.com/home/")
-        with self.assertRaises(IntakeHold):
-            fao.select_fao_page([cl, fao_tab])
+        self.assertIs(fao.select_fao_page([cl, fao_tab]), fao_tab)
 
     def test_fao_report_load_from_policy_page_goes_home_before_agent_check(self):
         from robie_job_engine import progressive_pending_cancellation as fao

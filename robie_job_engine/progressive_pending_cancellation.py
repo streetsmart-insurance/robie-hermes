@@ -30,6 +30,7 @@ import re
 import signal
 import socket
 import sys
+import threading
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -155,6 +156,83 @@ class FaoDeadline(BaseException):
 
 class FaoReconnectFailed(BaseException):
     """The connected browser could not open a fresh report page. The pull stops."""
+
+
+_WATCHDOG_STOP = threading.Event()
+_ROW_DATE = re.compile(r"\b(\d{1,2}/\d{1,2}/(?:\d{4}|\d{2}))\b")
+
+
+def _date_in_text(*parts: Any) -> str:
+    """The first MM/DD/YY or MM/DD/YYYY in any of the pieces of row text."""
+    for part in parts:
+        match = _ROW_DATE.search(str(part or ""))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def write_hard_partial(snapshot: Any, *, exit_fn: Callable[[int], None] = os._exit, stream: Any = None) -> dict[str, Any]:
+    """Write a PARTIAL summary and exit. Used when a Playwright call will not return.
+
+    ``snapshot`` is the latest receipt, or a callable that returns it. The
+    bytes are written to ``stream`` when one is given, otherwise straight to
+    stdout. A summary file next to the progress log is fsynced too.
+    """
+    payload = dict(snapshot() if callable(snapshot) else (snapshot or {}))
+    found = int(payload.get("found") or 0)
+    done = payload.get("done")
+    if not isinstance(done, int):
+        done = int(payload.get("count") or 0)
+    left = payload.get("unprocessed")
+    if not isinstance(left, int):
+        left = max(0, found - done)
+    payload["status"] = "PARTIAL"
+    payload["unprocessed"] = left
+    payload["reason"] = (
+        f"Progressive FAO worker deadline reached; {left} policies left unprocessed"
+    )
+    raw = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    step_log(payload["reason"])
+    if stream is not None:
+        stream.write(raw)
+        flush = getattr(stream, "flush", None)
+        if callable(flush):
+            flush()
+    else:
+        os.write(1, raw.encode())
+    path = _STEP_LOG
+    if path is not None:
+        summary_path = path.with_name("fao-summary.json")
+        try:
+            with summary_path.open("w", encoding="utf-8") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            pass
+    exit_fn(124)
+    return payload
+
+
+def arm_worker_watchdog(
+    seconds: float,
+    snapshot: Any,
+    *,
+    exit_fn: Callable[[int], None] = os._exit,
+    stop: threading.Event | None = None,
+) -> threading.Thread:
+    """Exit with a PARTIAL summary if the pull is still blocked when the deadline hits."""
+    flag = stop if stop is not None else _WATCHDOG_STOP
+    flag.clear()
+
+    def run() -> None:
+        if flag.wait(seconds):
+            return
+        write_hard_partial(snapshot, exit_fn=exit_fn)
+
+    thread = threading.Thread(target=run, name="fao-deadline", daemon=True)
+    thread.start()
+    return thread
 
 
 def _log_hold(browser: Any, policy_number: str, reason: str) -> None:
@@ -606,15 +684,24 @@ def parse_archive_document(
     title: str,
     delivery: str,
     row_index: int,
+    row_text: str = "",
 ) -> FaoDocument:
-    """One documents-hub row. The date and the title share a cell."""
+    """One documents-hub row. The date and the title share a cell.
+
+    The archive date span can be an em dash. The date is whatever
+    MM/DD/YY or MM/DD/YYYY appears in the span, the Date and Type cell,
+    or the rest of the row. The title still comes from the link.
+    """
     name = re.sub(r"\s*\(pdf\)\s*$", "", _norm(title), flags=re.IGNORECASE).strip()
     if not name:
         raise IntakeHold("Progressive personal document title is missing or ambiguous")
+    found = _date_in_text(date_text, row_text)
+    if not found:
+        raise IntakeHold("Progressive personal document date is missing or ambiguous")
     return FaoDocument(
         policy_number=require_policy_number(policy_number),
         document_name=name,
-        document_date=parse_carrier_date(date_text),
+        document_date=parse_carrier_date(found),
         delivery=_norm(delivery),
         row_index=row_index,
     )
@@ -647,13 +734,23 @@ def read_archive_documents(page: Any, policy_number: str) -> tuple[FaoDocument, 
                 delivery = _read_text(cells.nth(1) if hasattr(cells, "nth") else cells)
         except Exception:
             delivery = ""
-        docs.append(parse_archive_document(
-            policy_number=policy,
-            date_text=_read_text(date_target),
-            title=_read_text(title),
-            delivery=delivery,
-            row_index=index,
-        ))
+        cell_text = ""
+        try:
+            if int(cells.count()) >= 1:
+                cell_text = _read_text(cells.nth(0) if hasattr(cells, "nth") else cells)
+        except Exception:
+            cell_text = ""
+        try:
+            docs.append(parse_archive_document(
+                policy_number=policy,
+                date_text=_read_text(date_target),
+                title=_read_text(title),
+                delivery=delivery,
+                row_index=index,
+                row_text=f"{cell_text} {_read_text(row)}",
+            ))
+        except IntakeHold:
+            continue
     if not docs:
         raise IntakeHold("Progressive personal document list is empty")
     return tuple(docs)
@@ -924,6 +1021,21 @@ def _read_text(node: Any) -> str:
     return str(getattr(node, "text", "") or "")
 
 
+def _click_document(page: Any, click_action: Callable[[], None]) -> None:
+    """Click without waiting for the popup navigation, then wait for the popup itself."""
+    expect_popup = getattr(page, "expect_popup", None)
+    if not callable(expect_popup) or type(expect_popup).__module__.startswith("unittest.mock"):
+        click_action()
+        return
+    try:
+        with expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup_info:
+            click_action()
+        popup = popup_info.value
+        step_log(f"document popup {_page_url(popup)}")
+    except Exception as exc:
+        _log_caught_timeout(exc, "document popup")
+
+
 def _fetch_open_page_pdf(page: Any) -> bytes | None:
     """Read a PDF the click left on this tab, when there was no download or popup."""
     url = _page_url(page)
@@ -976,10 +1088,10 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
         context.on("page", _on_page)
     try:
         with time_budget(PAGE_BUDGET_S, "Progressive FAO document capture exceeded its time budget"):
-            step_log("document capture")
+            step_log("document capture click")
             try:
                 with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
-                    click_action()
+                    _click_document(page, click_action)
                 download = download_info.value
                 path = download.path()
                 content = Path(str(path)).read_bytes()
@@ -993,27 +1105,29 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
                     raise IntakeHold("Progressive FAO document capture is missing or ambiguous") from exc
             viewer_pdfs: list[bytes] = []
             for new_page in list(opened):
-                wait = getattr(new_page, "wait_for_load_state", None)
-                if callable(wait):
-                    try:
-                        wait("domcontentloaded", timeout=DOWNLOAD_TIMEOUT_MS)
-                    except Exception:
-                        pass
                 url = str(getattr(new_page, "url", "") or "")
+                step_log(f"document tab fetch {url}")
                 host = (urllib.parse.urlsplit(url).hostname or "").lower()
                 if host and not (host == FAO_HOST or host.endswith(".foragentsonly.com")):
+                    step_log(f"document tab close {url}")
                     continue
-                try:
-                    view = read_playwright_pdf_view(new_page)
-                    viewer_pdfs.extend(view.pdfs)
-                except IntakeHold:
-                    raise
-                except Exception as exc:
-                    # Live 2026-10-08 (4a22f443): the PDFHandler GET timed out and
-                    # crashed the whole carrier, leaving the viewer tab open.
-                    raise IntakeHold(
-                        f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
-                    ) from exc
+                fetched = _fetch_open_page_pdf(new_page)
+                if fetched is not None:
+                    downloads.append(fetched)
+                    step_log(f"document tab fetched {len(fetched)} bytes from {url}")
+                else:
+                    try:
+                        view = read_playwright_pdf_view(new_page)
+                        viewer_pdfs.extend(view.pdfs)
+                        step_log(f"document tab viewer {len(view.pdfs)} pdfs from {url}")
+                    except IntakeHold:
+                        raise
+                    except Exception as exc:
+                        _log_caught_timeout(exc, "document tab")
+                        raise IntakeHold(
+                            f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
+                        ) from exc
+                step_log(f"document tab close {url}")
             if not downloads and not viewer_pdfs:
                 fetched = _fetch_open_page_pdf(page)
                 if fetched is not None:
@@ -1280,9 +1394,7 @@ class PlaywrightFaoCancellationBrowser:
         is collected afterwards.
         """
         button = self.document_button(doc)
-        if getattr(self, "_archive_documents", False):
-            return collect_document_capture(self.page, lambda: _click(button, no_wait_after=True))
-        return collect_document_capture(self.page, button.click)
+        return collect_document_capture(self.page, lambda: _click(button, no_wait_after=True))
 
     def replace_stuck_tab(self) -> None:
         """Swap a hung FAO tab for a fresh one on the report, same signed-in context.
@@ -1355,9 +1467,10 @@ class PlaywrightFaoCancellationBrowser:
         # A swap that failed to close the old Manage Policies tab is in _retire.
         # Also drop a second FAO tab that appeared in this context after the snapshot.
         for page in context_pages(self.page):
-            if page is self.page or id(page) in before:
+            if page is self.page:
                 continue
-            close_listed([page])
+            if id(page) not in before or _is_stray_progressive_page(page):
+                close_listed([page])
 
     def return_to_report(self) -> None:
         step_log("return to report")
@@ -1674,6 +1787,18 @@ def run_pull(
         step_log(f"summary found={payload['found']} downloaded={payload['count']} held={len(held)}")
         return payload
 
+    def watchdog_snapshot() -> dict[str, Any]:
+        left = max(0, len(all_rows) - progress["done"])
+        payload = dict(_LATEST)
+        payload["found"] = len(all_rows)
+        payload["done"] = progress["done"]
+        payload["unprocessed"] = left
+        payload["count"] = len(downloaded)
+        payload["downloaded"] = list(downloaded)
+        payload["held"] = list(held)
+        return payload
+
+    arm_worker_watchdog(WORKER_DEADLINE_S, watchdog_snapshot)
     try:
         with time_budget(
             WORKER_DEADLINE_S,
@@ -1695,6 +1820,7 @@ def run_pull(
         step_log(reason)
         return publish({"status": "PARTIAL", "reason": reason, "unprocessed": left, "deadline": str(exc)})
     finally:
+        _WATCHDOG_STOP.set()
         finish = getattr(browser, "finish_tabs", None)
         if callable(finish):
             try:
@@ -1908,6 +2034,72 @@ def _fao_family_host(url: str) -> bool:
     return host == "foragentsonlylogin.progressive.com" or host.endswith(".foragentsonlylogin.progressive.com")
 
 
+def _page_title(page: Any) -> str:
+    title = getattr(page, "title", None)
+    if callable(title):
+        try:
+            return str(title() or "")
+        except Exception:
+            return ""
+    return str(title or "")
+
+
+def _is_stray_progressive_page(page: Any) -> bool:
+    """A tab this pull opened and should not leave behind.
+
+    PDFHandler, a Document Summary, or an American Strategic timeout page.
+    """
+    url = _page_url(page).lower()
+    title = _page_title(page).lower()
+    if "pdfhandler" in url:
+        return True
+    if "document summary" in title or "documentsummary" in url:
+        return True
+    if "americanstrategic" in url and "timeout" in title:
+        return True
+    return False
+
+
+def close_stray_progressive_pages(pages: list[Any]) -> list[Any]:
+    """Close leftover Progressive tabs and return the ones still in use."""
+    from .carrier_tabs import close_page
+
+    kept: list[Any] = []
+    for page in pages:
+        if not _is_stray_progressive_page(page):
+            kept.append(page)
+            continue
+        step_log(f"closing leftover tab {_page_url(page)} { _page_title(page)}")
+        close_page(page)
+    return kept
+
+
+def choose_one_fao_page(pages: list[Any]) -> Any:
+    """Keep the report or landing tab and close leftover Progressive tabs."""
+    from .carrier_tabs import close_page
+
+    remaining = close_stray_progressive_pages(list(pages))
+    if len(remaining) == 1:
+        return remaining[0]
+    if not remaining:
+        raise IntakeHold("Expected exactly one Progressive FAO tab")
+
+    def rank(page: Any) -> tuple[int, str]:
+        url = _page_url(page).lower()
+        if "policiespendingcancellation" in url or "/managepolicies/" in url:
+            return (0, url)
+        if "www.foragentsonly.com" in url:
+            return (1, url)
+        return (2, url)
+
+    keep = sorted(remaining, key=rank)[0]
+    step_log(f"keeping FAO tab {_page_url(keep)}; closing {len(remaining) - 1} extra tabs")
+    for page in remaining:
+        if page is not keep:
+            close_page(page)
+    return keep
+
+
 def ensure_fao_page(cdp_browser: Any) -> Any:
     """Return one signed-in ForAgentsOnly tab, signing in once if there is none."""
     from . import progressive_login
@@ -1916,12 +2108,11 @@ def ensure_fao_page(cdp_browser: Any) -> Any:
     require_carrier_pull("fao")
     refuse_production_host()
     pages = [page for context in getattr(cdp_browser, "contexts", []) or [] for page in context.pages]
+    pages = close_stray_progressive_pages(pages)
     family = [page for page in pages if _fao_family_host(getattr(page, "url", ""))]
     signed = [page for page in family if progressive_login.is_signed_in(page)]
-    if len(signed) == 1:
-        return signed[0]
-    if len(signed) > 1:
-        raise IntakeHold("Expected exactly one Progressive FAO tab")
+    if len(signed) >= 1:
+        return choose_one_fao_page(signed)
     require_hermes_test_host()
     contexts = list(getattr(cdp_browser, "contexts", None) or [])
     if not contexts:
@@ -1949,9 +2140,7 @@ def select_fao_page(pages: list[Any]) -> Any:
         page for page in pages
         if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() in hosts
     ]
-    if len(matches) != 1:
-        raise IntakeHold("Expected exactly one Progressive FAO tab")
-    return matches[0]
+    return choose_one_fao_page(matches)
 
 
 def connect_cdp_browser(

@@ -343,12 +343,26 @@ def _run_one(
             if isinstance(details, dict):
                 held = details.get("held")
             held_list = held if isinstance(held, list) and held else [{"reason": str(exc)}]
+            downloaded_n = 0
+            skipped_n = 0
+            if isinstance(details, dict):
+                raw_downloaded = details.get("downloaded")
+                if isinstance(raw_downloaded, list):
+                    downloaded_n = len(raw_downloaded)
+                elif isinstance(raw_downloaded, int):
+                    downloaded_n = raw_downloaded
+                count = details.get("count")
+                if isinstance(count, int):
+                    downloaded_n = count
+                raw_skipped = details.get("skipped")
+                if isinstance(raw_skipped, list):
+                    skipped_n = len(raw_skipped)
             return {
                 "display": spec.display,
-                "status": "HELD",
+                "status": "PARTIAL" if downloaded_n else "HELD",
                 "reason": str(exc),
-                "downloaded": 0,
-                "skipped": 0,
+                "downloaded": downloaded_n,
+                "skipped": skipped_n,
                 "held": held_list,
                 "hold_reasons": [hold_reason(item) for item in held_list],
                 "error": None,

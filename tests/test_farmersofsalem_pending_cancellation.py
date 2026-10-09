@@ -774,6 +774,49 @@ class PullTests(unittest.TestCase):
         self.assertEqual(receipt2["count"], 0)
         self.assertEqual(receipt2["skipped"], ["farmersofsalem:HONJ038633:2026-09-28:intent-to-cancel"])
 
+    def test_one_missing_table_holds_that_policy_and_the_pull_continues(self):
+        import io
+
+        token = pdf_bytes(b"hodj-notice")
+        page = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:2],
+            docs_by_policy={
+                HONJ: _docs_for(HONJ, pdf_bytes(b"honj")),
+                HODJ: _docs_for(HODJ, token),
+            },
+        )
+        browser = FinysFoSBrowser(page)
+        real_return = browser.return_to_pending_items
+        calls = {"n": 0}
+
+        def flaky_return():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise IntakeHold("Finys table is missing or ambiguous")
+            return real_return()
+
+        browser.return_to_pending_items = flaky_return
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        buffer = io.StringIO()
+        with patch.object(fos.sys, "stderr", buffer):
+            receipt = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(receipt["status"], "PULLED")
+        self.assertEqual(receipt["count"], 1)
+        self.assertEqual(receipt["held"][0]["policy_number"], HONJ)
+        self.assertIn("tables=", buffer.getvalue())
+
+    def test_duplicate_and_old_rows_are_filtered_before_open(self):
+        from robie_job_engine.farmersofsalem_pending_cancellation import PendingItem
+
+        old = PendingItem(HONJ, "Old", "home", date(2020, 1, 1))
+        current = PendingItem(HODJ, "New", "home", date(2026, 10, 8))
+        duplicate = PendingItem(HODJ, "New", "home", date(2026, 10, 9))
+        unique = fos._dedupe_pending([current, duplicate, old])
+        self.assertEqual([item.policy_number for item in unique], [HODJ, HONJ])
+        kept = fos._due_within(unique, AS_OF, 45)
+        self.assertEqual([item.policy_number for item in kept], [HODJ])
+
     def test_worker_deadline_is_partial_before_the_outer_limit(self):
         page = FakeFinysPage(pending_rows=PENDING_ROWS[:2])
         browser = FinysFoSBrowser(page)
