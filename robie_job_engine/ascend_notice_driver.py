@@ -1979,9 +1979,16 @@ def _note_has_policy_and_type(body: str, policy_numbers: list[str], notice_type:
     compact = _compact_policy(body)
     named = False
     for number in policy_numbers:
-        token = _compact_policy(number)
-        if len(token) >= 4 and token in compact:
-            named = True
+        # Notes name a policy masked (triage.mask_policy_for_note); notes filed
+        # before masking carry the full number. Either one names the policy.
+        for token in (
+            _compact_policy(number),
+            _compact_policy(triage.mask_policy_for_note(number)),
+        ):
+            if len(token) >= 4 and token in compact:
+                named = True
+                break
+        if named:
             break
     if not named:
         return False
