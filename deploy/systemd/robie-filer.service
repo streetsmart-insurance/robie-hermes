@@ -18,7 +18,13 @@ Environment=ROBIE_FILER_INDEX_CSV=/var/lib/robie-filer/cert-applicant-index.csv
 # No write-scope variables. Writes stay on the compiled allowlist (test
 # account 220250093) unless a drop-in adds --any-applicant, which widens
 # only document upload and note append (ezlynx_write_scope).
-ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0700 /var/lib/robie-filer
+# systemd creates /var/lib/robie-filer (owner User=, mode 0700) before it
+# sets up the ProtectSystem=strict namespace, and makes it writable inside
+# it. A ReadWritePaths= entry for a folder that does not exist yet fails
+# the unit with 226/NAMESPACE before any ExecStartPre can create it
+# (hermes-poc-01, 2026-10-09 08:34 ET).
+StateDirectory=robie-filer
+StateDirectoryMode=0700
 # Fresh copy of the full-book client list each run. The live file is mode
 # 0600 under another owner. Read-only copy; the original is not touched.
 ExecStartPre=+/bin/sh -c 'src=/opt/streetsmart-hermes/robie-job-engine/data/cert-applicant-index.csv; if [ -f "$src" ]; then install -o streetsmart-hermes -g streetsmart-hermes -m 0600 "$src" /var/lib/robie-filer/cert-applicant-index.csv; fi'
@@ -28,5 +34,4 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/robie-filer
 TimeoutStartSec=9min
