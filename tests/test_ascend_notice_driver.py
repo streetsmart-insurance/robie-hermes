@@ -2909,3 +2909,49 @@ def test_unreadable_legacy_ledger_is_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "is_file", guarded)
     assert note_ledger.migrate_driver_note_ledger(dest, legacy) == "absent"
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# A supplied discussion id matches an untitled discussion in the dry-run
+# preview, the same rule the live write uses (#823). Guessing by title does not.
+
+
+def _preview_note(rows, discussion_id):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=rows,
+    )
+    return driver._prepare_dry_run_note(
+        discussion_client, "220250093", "Past-due notice received.", discussion_id=discussion_id
+    )
+
+
+def test_dry_run_preview_matches_a_pinned_untitled_discussion():
+    preview = _preview_note([{"discussionId": "d1", "title": ""}], "d1")
+    assert preview["status"] == "dry_run"
+    assert preview["discussion_id"] == "d1"
+
+
+def test_dry_run_preview_matches_a_pinned_literal_untitled_discussion():
+    preview = _preview_note([{"discussionId": "d1", "title": "Untitled"}], "d1")
+    assert preview["status"] == "dry_run"
+    assert preview["discussion_id"] == "d1"
+
+
+def test_dry_run_preview_skips_a_deleted_pinned_discussion():
+    preview = _preview_note([{"discussionId": "d1", "title": "", "deleted": True}], "d1")
+    assert preview["status"] == "pending"
+    assert preview["reason"] == "no matching discussion"
+
+
+def test_dry_run_preview_needs_the_exact_id():
+    preview = _preview_note([{"discussionId": "d1", "title": ""}], "d2")
+    assert preview["status"] == "pending"
+
+
+def test_title_guessing_still_ignores_untitled_discussions():
+    assert driver.choose_category_discussion(
+        [{"discussionId": "d1", "title": ""}, {"discussionId": "d2", "title": "Untitled"}],
+        "Ascend - Cancellation Notices",
+    ) == (None, 0)

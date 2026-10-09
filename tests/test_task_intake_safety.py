@@ -1843,3 +1843,26 @@ def test_the_save_method_itself_refuses_until_the_contract_is_established(monkey
     monkeypatch.setenv(cdp.REASSIGN_GATE_ENV, "1")
     with pytest.raises(cdp.FieldContractNotEstablished):  # a browser use would AssertionError
         cdp.PlaywrightTaskReassigner().reassign("63429523", "220250093", "Carlo Ferrara")
+
+
+# ---------------------------------------------------------------------------
+# A task that names its discussion posts there even when it has no title.
+# The no-note-id rule is unchanged: a POST that returns no note id is never
+# reposted and never confirmed from text.
+
+
+def test_pinned_untitled_discussion_receives_and_confirms_the_note(context):
+    store, job = context
+    client = FakeDiscussionClient(title="")
+    assert post(client, store, job) == "note-123"
+    assert client.posts == [("849945654", "one intent")]
+
+
+def test_post_without_a_note_id_is_held_and_never_reposted_even_untitled(context):
+    store, job = context
+    client = FakeDiscussionClient(title="", return_note_id=False)
+    with pytest.raises(UnverifiedNoteError, match="No durable destination note ID"):
+        post(client, store, job)
+    with pytest.raises(UnverifiedNoteError):
+        post(client, JobStore(store.path), job)
+    assert len(client.posts) == 1
