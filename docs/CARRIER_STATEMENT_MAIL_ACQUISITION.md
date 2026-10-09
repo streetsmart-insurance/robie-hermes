@@ -82,3 +82,20 @@ Sending scope and runtime signing permission are separate from the read-only
 acquisition identity. No sender grant, per-message approval loop, financial
 effect, new payment route, schedule or Production change is introduced here.
 Routine sending can run under the configured scope after the lane is released.
+
+## Initial request planner
+
+`request_plan.plan_missing_request` produces a private draft only. It requires
+exact entity/agency/carrier/account/period, a verified monthly obligation,
+verified sender/contact/thread, fresh referenced source evidence and explicit
+negative checks for already received/chased/unknown send/staff work/new replies.
+Unchecked stores, portals or partial email searches hold the draft. Invoice-only
+carriers are not monthly-source gaps. The duplicate key includes the exact
+entity/carrier/account/period; changing a contact does not reset it. No API send
+or follow-up timing is inferred. Input attestations do not authenticate release
+authority. Twelve synthetic request-policy tests extend the focused total to 82.
+
+The inherited stacked branch had a fixed-date freshness fixture that prevented
+the broad CI gate from reaching accounting tests. Its minimal received_at
+freshness correction is ported from current main; application behavior and
+stale-source refusal are unchanged. CI must pass on the final candidate SHA.
