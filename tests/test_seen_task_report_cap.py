@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from robie_job_engine.ezlynx_seen_tasks import SeenTaskStore
@@ -126,7 +127,7 @@ def test_previously_seen_terminal_task_is_not_reopened(tmp_path, monkeypatch):
         message_id="msg-synthetic",
         filename="Robie_AI_-_Task_Check-In_synthetic.csv",
         digest="digest-new",
-        received_at="2026-10-05T16:00:00Z",
+        received_at=(datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         tasks=(changed,),
         row_count=1,
     )
