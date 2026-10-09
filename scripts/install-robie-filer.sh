@@ -147,6 +147,7 @@ restore_from_backup() {
   if grep -qx dropins "${backup}/manifest.txt"; then cp -a "${backup}/${DROPIN_NAME}" "$DROPIN_DIR"; fi
   "${SYSTEMCTL}" daemon-reload
   "${SYSTEMCTL}" disable --now "$TIMER" || true
+  "${SYSTEMCTL}" reset-failed "$UNIT" 2>/dev/null || true
   echo "ROLLBACK=${backup}"
   echo "timer left stopped"
 }
@@ -187,7 +188,10 @@ install_release() {
   if ! "${SYSTEMCTL}" start "$UNIT"; then
     "${JOURNALCTL}" -u "$UNIT" --since "$since" --no-pager -o cat || true
     "${SYSTEMCTL}" disable --now "$TIMER" || true
-    die "verification dry run failed; timer left stopped. Rollback: --rollback ${backup}"
+    # Do not leave a failed unit behind (systemctl --failed, health checks).
+    # The journal above keeps the evidence.
+    "${SYSTEMCTL}" reset-failed "$UNIT" || true
+    die "verification dry run failed; timer left stopped; failed state cleared. Rollback: --rollback ${backup}"
   fi
   echo "--- verification dry run output ---"
   "${JOURNALCTL}" -u "$UNIT" --since "$since" --no-pager -o cat || true

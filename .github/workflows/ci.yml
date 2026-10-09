@@ -119,6 +119,8 @@ jobs:
           PYTHONPATH=. python -m pytest -q -rs tests/test_gcp_secret_reader.py
       - name: Build immutable release candidate
         run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
+      - name: robie-filer unit, installer, and job (fresh-host systemd check)
+        run: ROBIE_SYSTEMD_TESTS=1 PYTHONPATH=.:tests python -m pytest -q -rs tests/test_robie_filer_unit_state_dir.py tests/test_install_robie_filer.py tests/test_robie_filer.py
 
   canonical-paths:
     runs-on: macos-latest

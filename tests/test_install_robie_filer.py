@@ -84,6 +84,16 @@ def test_failed_dry_run_installs_no_live_and_keeps_timer_stopped(tmp_path):
     assert "verification dry run failed" in proc.stderr
     assert not (_etc(tmp_path) / f"{UNIT}.d" / "30-live.conf").exists()
     assert f"systemctl enable --now {TIMER}" not in log
+    # No failed unit is left behind for systemctl --failed or health checks.
+    assert f"systemctl reset-failed {UNIT}" in log
+    assert "failed state cleared" in proc.stderr
+
+
+def test_successful_install_does_not_reset_or_enable_by_default(tmp_path):
+    proc, log = _run(tmp_path, "--release-dir", str(ROOT))
+    assert proc.returncode == 0, proc.stderr
+    assert f"systemctl reset-failed {UNIT}" not in log
+    assert f"systemctl enable --now {TIMER}" not in log
 
 
 def test_rollback_restores_previous_files_and_stops_timer(tmp_path):
