@@ -122,6 +122,7 @@ _CANCELLATION_TERMS = frozenset({
     "cancellation", "cancel", "cancelled", "canceled",
     "notice of cancellation", "pending cancellation",
     "intent to cancel", "pre-cancellation",
+    "nonpayment", "non-payment", "non payment",
 })
 _CANCELLATION_DOC_TYPES = frozenset({"CANCNTC"})
 # Underwriting memo scope (UNDERWRITING tab rows only): standalone
@@ -292,9 +293,9 @@ def _is_pdf(content: bytes) -> bool:
 
 
 def parse_carrier_date(text: str) -> date:
-    """Parse FAO date text: MM/DD/YYYY, ISO, or ISO-8601 with time."""
+    """Parse FAO date text: MM/DD/YYYY, MM/DD/YY, ISO, or ISO-8601 with time."""
     cleaned = _norm(text)
-    for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d"):
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:
@@ -394,8 +395,19 @@ def newest_cancellation_documents(docs: tuple["FaoDocument", ...] | list["FaoDoc
 
 
 def _is_policy_page_url(url: Any) -> bool:
-    host = (urllib.parse.urlsplit(str(url or "")).hostname or "").lower()
-    return host in POLICY_PAGE_HOSTS
+    """A finished policy page.
+
+    Personal lines pass through ``/app/token`` in about 3 seconds and only
+    then reach ``/app/policy-hub/<policy>/...``. The token URL is not ready.
+    """
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    if host == CL_POLICY_HOST:
+        return True
+    if host != POLICY_SERVICING_HOST:
+        return False
+    path = (parsed.path or "").lower()
+    return "/app/policy-hub/" in path and "/app/token" not in path
 
 
 def _is_bop_policy_url(url: Any) -> bool:
@@ -411,7 +423,15 @@ def _page_url(page: Any) -> str:
 
 
 _DOCUMENTS_NAME = re.compile(r"^\s*documents\s*$", re.IGNORECASE)
-_POLICY_HUB_PATH = re.compile(r"^/app/policy-hub/([A-Za-z0-9-]+)/[^/]+/?$")
+_POLICY_HUB_PATH = re.compile(r"/app/policy-hub/([A-Za-z0-9-]+)(?:/|$)")
+# Live 2026-10-08: /app/policy-hub/<policy>/documents is a "couldn't find" page.
+# The session's documents list is the documents hub. The heading settles 7-18s
+# after the policy-hub URL.
+DOCUMENTS_HUB_URL = f"https://{POLICY_SERVICING_HOST}/app/documents-hub/find-document"
+ARCHIVE_TABLE_CSS = "ps-policy-document-archive-table table"
+ARCHIVE_ROW_CSS = "ps-policy-document-archive-table table tbody tr"
+POLICY_HUB_SETTLE_MS = 20000
+SHOW_MORE_BUDGET_S = 20
 DOCUMENTS_WAIT_MS = 20000
 
 
@@ -477,15 +497,166 @@ def documents_control(page: Any) -> Any | None:
     return None
 
 
-def policy_hub_documents_url(url: str) -> str:
-    """``.../policy-hub/<policy>/documents`` for a policy-hub page, else ''."""
-    parsed = urllib.parse.urlsplit(str(url or "").strip())
-    if (parsed.hostname or "").lower() != POLICY_SERVICING_HOST or parsed.scheme != "https":
-        return ""
-    match = _POLICY_HUB_PATH.match(parsed.path or "")
+def policy_hub_policy_number(url: str) -> str:
+    """The policy id in a policy-hub path, or ''."""
+    match = _POLICY_HUB_PATH.search(urllib.parse.urlsplit(str(url or "")).path or "")
     if match is None:
         return ""
-    return f"https://{POLICY_SERVICING_HOST}/app/policy-hub/{match.group(1)}/documents"
+    try:
+        return require_policy_number(match.group(1))
+    except IntakeHold:
+        return ""
+
+
+def policy_heading_text(page: Any) -> str:
+    """Visible headings, such as 'Auto 935495408'."""
+    try:
+        nodes = page.locator("h1, h2, h3, h4").all()
+    except Exception:
+        nodes = []
+    if not isinstance(nodes, list):
+        nodes = []
+    return _norm(" ".join(text for text in (_norm(_read_text(node)) for node in nodes) if text))
+
+
+def require_policy_heading(page: Any, policy_number: str) -> str:
+    """Hold unless a heading names this policy."""
+    policy = require_policy_number(policy_number)
+    text = policy_heading_text(page)
+    if policy in text.upper():
+        return text
+    raise IntakeHold(f"Progressive personal policy heading does not match {policy}")
+
+
+def _wait_for_policy_heading(page: Any, policy_number: str, *, timeout: int = POLICY_HUB_SETTLE_MS) -> str:
+    """Wait until the policy heading is on the page. The hub settles in 7-18s."""
+    policy = require_policy_number(policy_number)
+    if policy in policy_heading_text(page).upper():
+        return policy_heading_text(page)
+    waiter = getattr(page, "wait_for_function", None)
+    if not callable(waiter) or type(waiter).__module__.startswith("unittest.mock"):
+        return require_policy_heading(page, policy)
+    try:
+        waiter(
+            """(policy) => {
+              const heads = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
+              return heads.some(node => (node.innerText || '').includes(policy));
+            }""",
+            arg=policy,
+            timeout=timeout,
+        )
+    except TypeError:
+        try:
+            waiter(
+                """(policy) => {
+                  const heads = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
+                  return heads.some(node => (node.innerText || '').includes(policy));
+                }""",
+                timeout=timeout,
+            )
+        except Exception as exc:
+            _log_caught_timeout(exc, f"policy {policy} heading")
+            raise IntakeHold(f"Progressive personal policy heading does not match {policy}") from exc
+    except Exception as exc:
+        _log_caught_timeout(exc, f"policy {policy} heading")
+        raise IntakeHold(f"Progressive personal policy heading does not match {policy}") from exc
+    return require_policy_heading(page, policy)
+
+
+def _show_more_control(page: Any) -> Any | None:
+    for selector in (
+        "button:has-text('Show More')",
+        "a:has-text('Show More')",
+        "[role='button']:has-text('Show More')",
+    ):
+        try:
+            locator = page.locator(selector)
+            count = int(locator.count())
+        except Exception:
+            continue
+        if count < 1:
+            continue
+        node = locator.first if hasattr(locator, "first") else locator
+        if _node_visible(node):
+            return node
+    return None
+
+
+def expand_archive_rows(page: Any) -> None:
+    """Click Show More until it is gone, or the time budget is spent."""
+    deadline = monotonic() + SHOW_MORE_BUDGET_S
+    clicks = 0
+    while monotonic() < deadline and clicks < 30:
+        control = _show_more_control(page)
+        if control is None:
+            if clicks:
+                step_log(f"documents show more finished after {clicks}")
+            return
+        _click(control, no_wait_after=True)
+        clicks += 1
+        step_log(f"documents show more {clicks}")
+    if _show_more_control(page) is not None:
+        step_log("documents show more stopped at the time budget")
+
+
+def parse_archive_document(
+    *,
+    policy_number: str,
+    date_text: str,
+    title: str,
+    delivery: str,
+    row_index: int,
+) -> FaoDocument:
+    """One documents-hub row. The date and the title share a cell."""
+    name = re.sub(r"\s*\(pdf\)\s*$", "", _norm(title), flags=re.IGNORECASE).strip()
+    if not name:
+        raise IntakeHold("Progressive personal document title is missing or ambiguous")
+    return FaoDocument(
+        policy_number=require_policy_number(policy_number),
+        document_name=name,
+        document_date=parse_carrier_date(date_text),
+        delivery=_norm(delivery),
+        row_index=row_index,
+    )
+
+
+def read_archive_documents(page: Any, policy_number: str) -> tuple[FaoDocument, ...]:
+    """Parse ``ps-policy-document-archive-table`` without the CL column parser."""
+    policy = require_policy_number(policy_number)
+    try:
+        rows = page.locator(ARCHIVE_ROW_CSS)
+        count = int(rows.count())
+    except Exception as exc:
+        raise IntakeHold("Progressive personal document list is missing or ambiguous") from exc
+    docs: list[FaoDocument] = []
+    for index in range(count):
+        row = rows.nth(index) if hasattr(rows, "nth") else rows
+        date_node = row.locator("span[data-pgr-id^='lblArchiveDate']")
+        title_node = row.locator(f"a[data-pgr-id^='lnkDisplayTitle{policy}_']")
+        try:
+            if int(title_node.count()) < 1:
+                continue
+        except Exception:
+            continue
+        title = title_node.first if hasattr(title_node, "first") else title_node
+        date_target = date_node.first if hasattr(date_node, "first") else date_node
+        delivery = ""
+        cells = row.locator("td")
+        try:
+            if int(cells.count()) >= 2:
+                delivery = _read_text(cells.nth(1) if hasattr(cells, "nth") else cells)
+        except Exception:
+            delivery = ""
+        docs.append(parse_archive_document(
+            policy_number=policy,
+            date_text=_read_text(date_target),
+            title=_read_text(title),
+            delivery=delivery,
+            row_index=index,
+        ))
+    if not docs:
+        raise IntakeHold("Progressive personal document list is empty")
+    return tuple(docs)
 
 
 def _wait_for_policy_documents(page: Any) -> None:
@@ -507,42 +678,34 @@ def open_cl_documents(page: Any) -> None:
         _with_one_retry(lambda: _wait_for_policy_documents(page), what="CL Express documents list")
 
 
-def open_policy_servicing_documents(page: Any) -> None:
-    """Personal-lines policy servicing: the same DOCUMENTS control as CL Express.
+def open_policy_servicing_documents(page: Any, policy_number: str = "") -> None:
+    """Open the documents hub for the policy already on screen.
 
-    The policy-hub coverages page may not show it. One navigation to the
-    policy's documents route is tried, then the control again. The documents
-    list wait is bounded and retried once. Anything else holds this policy
-    with a specific reason.
+    The coverages page has no Documents control. ``policy-hub/<policy>/documents``
+    is a missing page. ``/app/documents-hub/find-document`` keeps the policy
+    the session just opened. The heading must still name that policy.
     """
-    step_log("policyservicing documents")
+    policy = require_policy_number(policy_number) if policy_number else policy_hub_policy_number(_page_url(page))
+    if not policy:
+        raise IntakeHold("Progressive personal policy number is missing or ambiguous")
+    step_log(f"policyservicing documents hub for {policy} from {_page_url(page)}")
+    require_policy_heading(page, policy)
+
+    def go() -> None:
+        try:
+            page.goto(DOCUMENTS_HUB_URL, wait_until="domcontentloaded", timeout=15000)
+        except TypeError:
+            page.goto(DOCUMENTS_HUB_URL)
+
     with time_budget(PAGE_BUDGET_S, "Progressive policyservicing documents page exceeded its time budget"):
-        control = documents_control(page)
-        if control is None:
-            url = _page_url(page)
-            target = policy_hub_documents_url(url)
-            if not target:
-                step_log(f"no Documents control at {url}; policy-hub documents route was not matched")
-                raise IntakeHold(
-                    "Progressive personal policy on policyservicing has no Documents control"
-                )
-            step_log(f"policyservicing documents route {target} from {url}")
-
-            def go() -> None:
-                page.goto(target, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
-
-            _with_one_retry(go, what="policyservicing documents route")
-            control = documents_control(page)
-        if control is not None:
-            _click(control, no_wait_after=True)
-        elif not str(getattr(page, "url", "") or "").rstrip("/").endswith("/documents"):
-            raise IntakeHold(
-                "Progressive personal policy on policyservicing has no Documents control"
-            )
-        _with_one_retry(
-            lambda: _wait_for_policy_documents(page),
-            what="policyservicing documents list",
-        )
+        _with_one_retry(go, what="policyservicing documents hub")
+        try:
+            page.wait_for_selector(ARCHIVE_TABLE_CSS, timeout=DOCUMENTS_WAIT_MS)
+        except Exception as exc:
+            step_log(f"documents hub has no archive table at {_page_url(page)}")
+            raise IntakeHold("Progressive personal document list is missing or ambiguous") from exc
+        require_policy_heading(page, policy)
+        expand_archive_rows(page)
 
 
 def is_billing_document(document_name: str) -> bool:
@@ -761,6 +924,32 @@ def _read_text(node: Any) -> str:
     return str(getattr(node, "text", "") or "")
 
 
+def _fetch_open_page_pdf(page: Any) -> bytes | None:
+    """Read a PDF the click left on this tab, when there was no download or popup."""
+    url = _page_url(page)
+    lowered = url.lower()
+    if not url or lowered.startswith("javascript:"):
+        return None
+    path = urllib.parse.urlsplit(lowered).path
+    if not path.endswith(".pdf") and "pdf" not in lowered:
+        return None
+    context = getattr(page, "context", None)
+    request = getattr(context, "request", None) if context is not None else None
+    getter = getattr(request, "get", None)
+    if not callable(getter):
+        return None
+    try:
+        response = getter(url, timeout=DOWNLOAD_TIMEOUT_MS)
+        body = response.body() if callable(getattr(response, "body", None)) else b""
+        content = bytes(body)
+    except Exception:
+        return None
+    if not _is_pdf(content):
+        return None
+    step_log("document read from the open page")
+    return content
+
+
 def collect_document_capture(page: Any, click_action: Callable[[], None]) -> DocumentCapture:
     """Click a document control and keep a unique PDF from a download or a new tab.
 
@@ -825,6 +1014,10 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
                     raise IntakeHold(
                         f"Progressive FAO PDF viewer did not return the PDF ({type(exc).__name__})"
                     ) from exc
+            if not downloads and not viewer_pdfs:
+                fetched = _fetch_open_page_pdf(page)
+                if fetched is not None:
+                    downloads.append(fetched)
             return DocumentCapture(tuple(downloads), tuple(viewer_pdfs))
     finally:
         _close_opened()
@@ -948,6 +1141,10 @@ class PlaywrightFaoCancellationBrowser:
             step_log(f"policy {policy_number} opened on the BOP site {url}")
             raise IntakeHold("BOP policy, handled by the BOP pull")
         require_fao_url(url)
+        self._open_policy = require_policy_number(policy_number)
+        if "/app/policy-hub/" in url:
+            step_log(f"policy {policy_number} policy-hub url matched; waiting for the heading")
+            _wait_for_policy_heading(self.page, self._open_policy)
 
     def open_documents_tab(self) -> None:
         """Open the policy's documents list (CL Express or policy servicing)."""
@@ -955,22 +1152,42 @@ class PlaywrightFaoCancellationBrowser:
         host = (urllib.parse.urlsplit(url).hostname or "").lower()
         step_log(f"documents from {url}")
         if host == POLICY_SERVICING_HOST:
-            open_policy_servicing_documents(self.page)
+            policy = getattr(self, "_open_policy", "") or policy_hub_policy_number(url)
+            open_policy_servicing_documents(self.page, policy)
             return
         open_cl_documents(self.page)
 
     def list_documents(self, policy_number: str) -> tuple[FaoDocument, ...]:
         """Parse the Policy Documents table on the DOCUMENTS tab.
 
-        Live columns: (icon) | Date | Delivery | Document name. The document
-        name is a button that opens the PDF in the viewer.
+        Personal lines use the documents-hub archive table: date and title
+        share one cell. CL Express keeps the column-header parser.
         """
+        archive = self._archive_table()
+        if archive is not None:
+            require_policy_heading(self.page, policy_number)
+            self._archive_documents = True
+            self._doc_table = archive
+            self._doc_row_selector = "tbody tr"
+            self._doc_row_offset = 0
+            return read_archive_documents(self.page, policy_number)
+        self._archive_documents = False
         table, headers, row_nodes = self._document_table()
         rows = tuple(
             tuple(_norm(_read_text(cell)) for cell in row.locator("td").all())
             for row in row_nodes
         )
         return parse_policy_documents(headers, rows, policy_number=policy_number)
+
+    def _archive_table(self) -> Any | None:
+        try:
+            table = self.page.locator(ARCHIVE_TABLE_CSS)
+            count = int(table.count())
+        except Exception:
+            return None
+        if count < 1:
+            return None
+        return table.first if hasattr(table, "first") else table
 
     def _document_table(self) -> tuple[Any, tuple[str, ...], list[Any]]:
         """The documents table, its headers, and its data rows.
@@ -1038,7 +1255,10 @@ class PlaywrightFaoCancellationBrowser:
             raise IntakeHold(
                 f"Progressive FAO document row {doc.row_index} is missing or ambiguous"
             )
-        button = row.get_by_role("button", name=doc.document_name, exact=False)
+        if getattr(self, "_archive_documents", False):
+            button = row.locator(f"a[data-pgr-id^='lnkDisplayTitle{doc.policy_number}_']")
+        else:
+            button = row.get_by_role("button", name=doc.document_name, exact=False)
         try:
             if int(button.count()) != 1:
                 raise IntakeHold(
@@ -1053,8 +1273,15 @@ class PlaywrightFaoCancellationBrowser:
         return button.first
 
     def capture_document(self, doc: FaoDocument) -> DocumentCapture:
-        """Click the document's button and observe the outcome."""
+        """Click the document's control and observe the outcome.
+
+        The documents-hub title is a javascript: link. The click must not
+        wait for a navigation; a download, popup, new tab, or same-tab PDF
+        is collected afterwards.
+        """
         button = self.document_button(doc)
+        if getattr(self, "_archive_documents", False):
+            return collect_document_capture(self.page, lambda: _click(button, no_wait_after=True))
         return collect_document_capture(self.page, button.click)
 
     def replace_stuck_tab(self) -> None:

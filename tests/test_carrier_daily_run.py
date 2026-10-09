@@ -539,6 +539,57 @@ class GeicoNatgenLoginTests(unittest.TestCase):
             nl.login_natgen(ctx, sleep=lambda s: None, credentials=lambda: ("user", "pass"))
         box.fill.assert_not_called()
 
+    def test_natgen_error_panel_holds_without_clicking_enable_login(self):
+        from robie_job_engine import natgen_login as nl
+        from robie_job_engine.intake_core import IntakeHold
+
+        clicks = []
+
+        class Node:
+            def __init__(self, text="", disabled=False):
+                self.text = text
+                self.disabled = disabled
+
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            def inner_text(self):
+                return self.text
+
+            def is_disabled(self):
+                return self.disabled
+
+            def click(self, **_kwargs):
+                clicks.append("enable")
+
+            def fill(self, *_args, **_kwargs):
+                clicks.append("fill")
+
+        page = mock.Mock()
+        page.url = "https://natgenagency.com/"
+        page.evaluate.return_value = "National General home"
+
+        def locator(selector):
+            if selector == "#pnlErrorsAllstate":
+                return Node("WARNING: You appear to be logged in via another window or browser.")
+            if selector == "#btnEnableLogin":
+                return Node()
+            if selector == "#txtUserID":
+                return Node(disabled=True)
+            return Node()
+
+        page.locator.side_effect = locator
+        ctx = mock.MagicMock()
+        ctx.pages = []
+        ctx.new_page.return_value = page
+        with self.assertRaisesRegex(IntakeHold, "Enable Login needed"):
+            nl.login_natgen(ctx, sleep=lambda s: None, credentials=lambda: ("user", "pass"))
+        self.assertEqual(clicks, [])
+
 
 class PlainSummaryTests(unittest.TestCase):
     def test_summary_has_no_field_names_selectors_or_exception_names(self):

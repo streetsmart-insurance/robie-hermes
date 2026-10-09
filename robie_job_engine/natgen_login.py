@@ -56,33 +56,65 @@ def _body(page: Any, n: int = 400) -> str:
         return ""
 
 
-def _session_taken_by_another_window(page: Any) -> bool:
-    """Home page with Enable Login and a disabled User ID box.
+def _locator_text(page: Any, selector: str) -> str:
+    try:
+        locator = page.locator(selector)
+        if int(locator.count()) < 1:
+            return ""
+        node = locator.first if hasattr(locator, "first") else locator
+        getter = getattr(node, "inner_text", None)
+        if callable(getter):
+            try:
+                return _norm_login(getter())
+            except TypeError:
+                return _norm_login(getter(timeout=1000))
+    except Exception:
+        return ""
+    return ""
 
-    Another window owns the session. Do not click Enable Login.
-    """
-    text = _body(page, 800).lower()
-    taken = "another window" in text or "enable login" in text
-    disabled = False
+
+def _norm_login(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _user_id_disabled(page: Any) -> bool:
     try:
         box = page.locator("#txtUserID")
-        if int(box.count()) == 1:
-            checker = getattr(box, "is_disabled", None)
-            if callable(checker):
-                try:
-                    disabled = bool(checker())
-                except TypeError:
-                    disabled = bool(checker(timeout=1000))
-            if not disabled:
-                attr = box.get_attribute("disabled")
-                disabled = attr is not None
+        if int(box.count()) != 1:
+            return False
+        checker = getattr(box, "is_disabled", None)
+        if callable(checker):
+            try:
+                if bool(checker()):
+                    return True
+            except TypeError:
+                if bool(checker(timeout=1000)):
+                    return True
+        attr = box.get_attribute("disabled")
+        return attr is not None
     except Exception:
-        disabled = False
-    if taken and disabled:
+        return False
+
+
+def _session_taken_by_another_window(page: Any) -> bool:
+    """The Allstate warning panel, with Enable Login left unclicked.
+
+    ``#pnlErrorsAllstate`` says another window owns the session and
+    ``#txtUserID`` stays disabled until ``#btnEnableLogin`` is clicked.
+    This worker does not click it.
+    """
+    panel = _locator_text(page, "#pnlErrorsAllstate").lower()
+    if "another window" in panel:
         return True
-    if taken and "enable login" in text:
+    text = _body(page, 800).lower()
+    if "another window" in text and _user_id_disabled(page):
         return True
-    return False
+    try:
+        enable = page.locator("#btnEnableLogin")
+        enable_present = int(enable.count()) >= 1
+    except Exception:
+        enable_present = False
+    return enable_present and _user_id_disabled(page) and "enable login" in text
 
 
 def is_signed_in(page: Any) -> bool:

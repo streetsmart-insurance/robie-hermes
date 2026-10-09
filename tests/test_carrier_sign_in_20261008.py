@@ -324,35 +324,89 @@ class UticaPagingTests(unittest.TestCase):
 
 
 class ProgressiveServicingTests(unittest.TestCase):
-    def test_documents_control_on_the_policy_hub(self):
+    def _page(self, heading="Auto 871490213"):
         from robie_job_engine import progressive_pending_cancellation as fao
 
-        link = mock.Mock()
-        link.is_visible.return_value = True
-        tab = mock.Mock()
-        tab.count.return_value = 0
-        links = mock.Mock()
-        links.count.return_value = 1
-        links.nth.return_value = link
-        page = mock.Mock()
-        page.url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
-        page.get_by_role.side_effect = lambda role, name=None: tab if role == "tab" else links
-        fao.open_policy_servicing_documents(page)
-        link.click.assert_called_once()
-        page.wait_for_selector.assert_called()
+        class Head:
+            def inner_text(self):
+                return heading
 
-    def test_missing_control_tries_the_documents_route_once(self):
+        class Empty:
+            def count(self):
+                return 0
+
+            def all(self):
+                return []
+
+        class Heads:
+            def all(self):
+                return [Head()]
+
+        class Page:
+            def __init__(self):
+                self.url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
+                self.gotos = []
+                self.selectors = []
+
+            def locator(self, selector):
+                if selector == "h1, h2, h3, h4":
+                    return Heads()
+                return Empty()
+
+            def goto(self, url, **_kwargs):
+                self.gotos.append(url)
+                self.url = url
+
+            def wait_for_selector(self, selector, timeout=None):
+                self.selectors.append(selector)
+
+        page = Page()
+        page.hub = fao.DOCUMENTS_HUB_URL
+        return page
+
+    def test_documents_hub_is_opened_for_the_current_policy(self):
         from robie_job_engine import progressive_pending_cancellation as fao
 
-        page = mock.Mock()
-        page.url = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/871490213/policy-and-coverages"
-        empty = mock.Mock()
-        empty.count.return_value = 0
-        page.get_by_role.return_value = empty
-        with self.assertRaisesRegex(IntakeHold, "no Documents control"):
-            fao.open_policy_servicing_documents(page)
-        page.goto.assert_called()
-        self.assertIn("/documents", page.goto.call_args.args[0])
+        page = self._page()
+        fao.open_policy_servicing_documents(page, "871490213")
+        self.assertEqual(page.gotos, [fao.DOCUMENTS_HUB_URL])
+        self.assertNotIn("/policy-hub/871490213/documents", page.gotos[0])
+        self.assertIn(fao.ARCHIVE_TABLE_CSS, page.selectors)
+
+    def test_token_url_is_not_a_finished_policy_page(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        token = "https://policyservicing.apps.foragentsonly.com/app/token?resume=/app/policy-hub/935495408"
+        hub = "https://policyservicing.apps.foragentsonly.com/app/policy-hub/935495408/policy-and-coverages"
+        self.assertFalse(fao._is_policy_page_url(token))
+        self.assertTrue(fao._is_policy_page_url(hub))
+
+    def test_heading_must_match_before_documents_are_opened(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        page = self._page(heading="Auto 111111111")
+        with self.assertRaisesRegex(IntakeHold, "heading does not match 935495408"):
+            fao.open_policy_servicing_documents(page, "935495408")
+        self.assertEqual(page.gotos, [])
+
+    def test_archive_row_parses_the_shared_date_and_title_cell(self):
+        from datetime import date
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        doc = fao.parse_archive_document(
+            policy_number="935495408",
+            date_text="09/25/26",
+            title="Cancel Notice (PDF)",
+            delivery="USPS",
+            row_index=0,
+        )
+        self.assertEqual(doc.document_name, "Cancel Notice")
+        self.assertEqual(doc.document_date, date(2026, 9, 25))
+        self.assertEqual(doc.delivery, "USPS")
+        self.assertTrue(fao.is_cancellation_document("Cancel Notice"))
+        self.assertTrue(fao.is_cancellation_document("Nonpayment"))
+        self.assertEqual(fao.parse_carrier_date("09/25/26"), date(2026, 9, 25))
 
     def test_page_wait_retries_once_then_holds(self):
         from robie_job_engine import progressive_pending_cancellation as fao
