@@ -1,0 +1,6 @@
+interface:
+  display_name: "StreetSmart WOW Customer Service"
+  short_description: "Build and audit the monthly WOW report"
+  brand_color: "#3D8DFF"
+  default_prompt: "Use $streetsmart-wow-customer-service to prepare and verify the prior-month WOW customer-service report."
+
