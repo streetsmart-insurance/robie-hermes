@@ -123,6 +123,10 @@ class PlaygroundPorts:
                 if str(discussion_id) != selected_id:
                     raise ValueError("Wrong discussion")
                 return client.get_discussion(discussion_id)
+            def get_discussion_with_notes(self, discussion_id):
+                if str(discussion_id) != selected_id:
+                    raise ValueError("Wrong discussion")
+                return client.get_discussion_with_notes(discussion_id)
             def append_note(self, discussion_id, text, *, note_type='Note'):
                 if str(discussion_id) != selected_id or text != body.strip():
                     raise ValueError("Note destination or text changed")
