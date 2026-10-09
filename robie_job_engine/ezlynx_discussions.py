@@ -643,6 +643,17 @@ def discussion_title_of(record: dict[str, Any]) -> str:
     return ""
 
 
+def _discussion_marked_gone(record: dict[str, Any]) -> bool:
+    """True when the record is marked deleted (``deleted`` / ``Deleted``)."""
+    for key in ("deleted", "Deleted", "isDeleted", "IsDeleted"):
+        value = record.get(key)
+        if isinstance(value, str):
+            value = value.strip().casefold() in {"true", "1", "yes"}
+        if value:
+            return True
+    return False
+
+
 def is_untitled_discussion(record: dict[str, Any]) -> bool:
     """True when the card has no usable title or is literally Untitled."""
     title = discussion_title_of(record)
@@ -1288,7 +1299,8 @@ def _metadata_note_confirmation(
     latest = str(after.get("most_recent_note_id") or "")
     latest_changed = bool(latest) and latest != str(before.get("most_recent_note_id") or "")
     title = str(after.get("title") or "")
-    title_same = bool(title) and title == str(before.get("title") or "")
+    # Two empty titles are the same title (a discussion made without one).
+    title_same = title == str(before.get("title") or "")
     if gained_one and latest_changed and title_same:
         return True, "The note was added to the discussion."
     if after_count == before_count:
@@ -1368,12 +1380,16 @@ def file_note_to_existing_discussion(
     discussions = client.get_discussions(applicant)
     pinned = str(discussion_id or "").strip()
     if pinned:
-        titled = [
+        # The task named this exact discussion, so its title does not matter:
+        # a discussion made without a title (Jake's Robie Call task, 2026-10-09)
+        # is a valid destination. Only discussions marked deleted are skipped. The
+        # untitled filter stays on the guessing path below.
+        live = [
             row
             for row in discussions
-            if isinstance(row, dict) and not is_untitled_discussion(row)
+            if isinstance(row, dict) and not _discussion_marked_gone(row)
         ]
-        matched = [row for row in titled if discussion_id_of(row) == pinned]
+        matched = [row for row in live if discussion_id_of(row) == pinned]
         if len(matched) != 1:
             return {
                 "status": "pending",
@@ -1598,12 +1614,22 @@ def file_note_to_existing_discussion(
                 response=created,
             )
         identity = _new_note_identity(after_record, after, text, created)
+        body_record = after_record
+        if identity is None and not _payload_has_note_bodies(after_record):
+            # The metadata read has counts and ids but no note text, and the
+            # POST returns no note id. One read that does include note bodies
+            # (a GET, never a second POST) can show that the newest note is
+            # ours: its id is the new latest id and its text is what we sent.
+            fuller = _read_note_bodies(client, discussion_id)
+            if fuller is not None:
+                body_record = fuller
+                identity = _new_note_identity(fuller, after, text, created)
         if identity is None:
             # A higher count, or a new most-recent id with no note text and
             # no returned id, is not a receipt. Hold it so it is not posted
             # again as if it were confirmed.
-            if _payload_has_note_bodies(after_record) and not _posted_text_matches(
-                after_record, text
+            if _payload_has_note_bodies(body_record) and not _posted_text_matches(
+                body_record, text
             ):
                 hold_reason = (
                     "The note was sent, but the new text did not match. "
@@ -1705,6 +1731,23 @@ def _stable_count_reread(
     if not same:
         return None
     return latest
+
+
+def _read_note_bodies(client: Any, discussion_id: str) -> Any | None:
+    """The discussion with its note bodies, or None when it cannot be read.
+
+    Read only. A client without ``get_discussion_with_notes``, an error, or a
+    payload with no note text all return None, and the caller keeps the note
+    held as unconfirmed.
+    """
+    reader = getattr(client, "get_discussion_with_notes", None)
+    if not callable(reader):
+        return None
+    try:
+        record = reader(discussion_id)
+    except Exception:
+        return None
+    return record if _payload_has_note_bodies(record) else None
 
 
 def _new_note_identity(
