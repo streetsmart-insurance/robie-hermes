@@ -208,7 +208,7 @@ def test_cancellation_fixture_note_is_plain_and_skips_the_label():
     assert result["recommendation"]["ezlynx_label"] is None
     assert result["note_text"] == (
         "NON-PAY CANCELLATION notice from Ascend. "
-        "Policy CPS6534227 was canceled on 09/23/2026.\n"
+        "Policy CPS•••••27 was canceled on 09/23/2026.\n"
         "Fixture Insured A LLC still has an overdue balance of $133.42.\n"
         "The loan was canceled because the payment was not made."
     )
@@ -225,7 +225,7 @@ def test_late_payment_fixture_note():
     assert result["program_uuid"] == "51e835b5-b6ae-43a1-ab48-cef007d242db"
     assert result["note_text"] == (
         "LATE PAYMENT notice from Ascend. "
-        "Policy GAT5643640-26 is past due: $241.00 was due 10/01/2026.\n"
+        "Policy GAT•••••40-26 is past due: $241.00 was due 10/01/2026.\n"
         "Fixture Insured A LLC"
     )
     for banned in (
@@ -248,18 +248,18 @@ def test_late_payment_fixture_note():
 EXPECTED_NOTES = {
     "loan_canceled_nonpayment_01.json": (
         "NON-PAY CANCELLATION notice from Ascend. "
-        "Policy CPS6534227 was canceled on 09/23/2026.\n"
+        "Policy CPS•••••27 was canceled on 09/23/2026.\n"
         "Fixture Insured A LLC still has an overdue balance of $133.42.\n"
         "The loan was canceled because the payment was not made."
     ),
     "past_due_payment_01.json": (
         "LATE PAYMENT notice from Ascend. "
-        "Policy GAT5643640-26 is past due: $241.00 was due 10/01/2026.\n"
+        "Policy GAT•••••40-26 is past due: $241.00 was due 10/01/2026.\n"
         "Fixture Insured A LLC"
     ),
     "payment_failed_01.json": (
         "LATE PAYMENT notice from Ascend. "
-        "Policy DSLA97258206-00 payment failed: $567.65 could not be processed.\n"
+        "Policy DSLA••••••06-00 payment failed: $567.65 could not be processed.\n"
         "Fixture Insured B LLC"
     ),
     "payment_failed_02.json": (
@@ -269,28 +269,28 @@ EXPECTED_NOTES = {
     ),
     "payment_failed_04.json": (
         "LATE PAYMENT notice from Ascend. "
-        "Policy CBL58682451P-85 payment failed: $290.87 could not be processed.\n"
+        "Policy CBL••••••51P-85 payment failed: $290.87 could not be processed.\n"
         "Fixture Insured A LLC"
     ),
     "intent_to_cancel_copy_01.json": (
         "INTENT TO CANCEL notice from Ascend. "
-        "Policy DSLA97258206-00 is at risk of cancellation. "
+        "Policy DSLA••••••06-00 is at risk of cancellation. "
         "$525.30 was due 09/21/2026. "
         "Coverage cancels on 10/14/2026 if it stays unpaid."
     ),
     "return_premium_received_01.json": (
         "RETURN PREMIUM notice from Ascend. "
-        "Policy 2AB975879. Ascend received $8,155.52 to apply to the loan.\n"
+        "Policy 2AB••••79. Ascend received $8,155.52 to apply to the loan.\n"
         "Fixture Insured A LLC"
     ),
     "payment_confirmation_copy_01.json": (
         "PAYMENT CONFIRMATION notice from Ascend. "
-        "Policy DSLA97258206-00. Payment of $567.65 was received.\n"
+        "Policy DSLA••••••06-00. Payment of $567.65 was received.\n"
         "Fixture Insured B LLC"
     ),
     "processing_payment_01.json": (
         "PROCESSING PAYMENT notice from Ascend. "
-        "Policy NRG-DBG-GL46021. A payment of $6,628.98 is processing.\n"
+        "Policy NRG-DBG-GL•••21. A payment of $6,628.98 is processing.\n"
         "Fixture Insured A LLC"
     ),
     "refund_to_customer_01.json": (
@@ -300,7 +300,7 @@ EXPECTED_NOTES = {
     ),
     "refund_initiated_01.json": (
         "REFUND notice from Ascend. "
-        "Policy 231776-300APD-92181-SSRM. A refund of $5.51 was stopped.\n"
+        "Policy ••••76-•00APD-•••81-SSRM. A refund of $5.51 was stopped.\n"
         "Fixture Other LLC"
     ),
     "potential_policies_unpurchased_01.json": (
@@ -324,7 +324,7 @@ EXPECTED_NOTES = {
     ),
     "loan_paid_off_01.json": (
         "LOAN PAID OFF notice from Ascend. "
-        "Policy PAV1425221. The loan is paid in full.\n"
+        "Policy PAV•••••21. The loan is paid in full.\n"
         "Fixture Insured A LLC"
     ),
     "disputed_charge_01.json": (
@@ -415,7 +415,7 @@ def test_each_notice_type_renders_plain_english():
         "Fixture Insured A LLC",
     ) == (
         "NEW PROGRAM notice from Ascend. "
-        "Policy ABC123. Ascend opened a new premium finance program.\n"
+        "Policy ABC•23. Ascend opened a new premium finance program.\n"
         "Fixture Insured A LLC"
     )
     assert triage.build_staff_note(triage.SIGN_IN, "Sign in to Ascend", "", [], None) == (

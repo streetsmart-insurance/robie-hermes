@@ -374,8 +374,30 @@ def cancel_effective_date(body: str) -> str | None:
     return match.group(1) if match else None
 
 
+def mask_policy_for_note(policy: str) -> str:
+    """Mask a policy number for EZLynx note text.
+
+    Same rule as ``cert_intake._mask_policy_for_note``: every digit run of 3 or
+    more becomes bullets except its last two digits, so the alpha prefix and the
+    last digits stay for a person, and nothing digit-like (for example the
+    ``1278263263`` inside ``CT1278263263-2``) reaches note text, where the
+    phone-number filter refuses it and the call automation could read it.
+    The full number stays in the matching, the ledger and the filed email.
+    """
+
+    def _mask(match: "re.Match[str]") -> str:
+        digits = match.group(0)
+        return "\u2022" * (len(digits) - 2) + digits[-2:]
+
+    return re.sub(r"\d{3,}", _mask, str(policy or ""))
+
+
 def _policy_phrase(policy_numbers: list[str]) -> str:
-    policies = [str(item).strip() for item in policy_numbers if str(item or "").strip()]
+    policies = [
+        mask_policy_for_note(str(item).strip())
+        for item in policy_numbers
+        if str(item or "").strip()
+    ]
     if len(policies) == 1:
         return f"Policy {policies[0]}"
     if len(policies) > 1:

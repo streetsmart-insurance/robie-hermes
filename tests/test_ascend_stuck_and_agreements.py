@@ -350,7 +350,7 @@ def test_a_financed_checkout_is_one_new_agreement_notice():
         triage.NEW_PROGRAM, notice.subject, notice.body, list(notice.policy_numbers), notice.insured_name
     )
     assert note.splitlines()[0] == (
-        "NEW FINANCE AGREEMENT notice from Ascend. Policy HO-998877. The client signed a new "
+        "NEW FINANCE AGREEMENT notice from Ascend. Policy HO-••••77. The client signed a new "
         "finance agreement with Ascend: $23,024.00 financed, $5,756.00 down, 10 payments of $2,405.20."
     )
     for forbidden in ("program_id", "amount_financed", "purchased_at", "selected_payment"):

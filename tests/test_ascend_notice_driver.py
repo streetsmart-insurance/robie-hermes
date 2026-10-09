@@ -319,7 +319,7 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert detail["csr_username"] == "KarlaSS"
     assert detail["notice_type"] == triage.CANCELLATION
     assert detail["note_text"].startswith(
-        "NON-PAY CANCELLATION notice from Ascend. Policy HO-998877 was canceled for non-payment."
+        "NON-PAY CANCELLATION notice from Ascend. Policy HO-••••77 was canceled for non-payment."
     )
     assert "Email subject:" not in detail["note_text"]
     assert "Insured:" not in detail["note_text"]
@@ -2955,3 +2955,21 @@ def test_title_guessing_still_ignores_untitled_discussions():
         [{"discussionId": "d1", "title": ""}, {"discussionId": "d2", "title": "Untitled"}],
         "Ascend - Cancellation Notices",
     ) == (None, 0)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-note detection must still find a note that names the policy masked
+# (new notes) or in full (notes filed before masking).
+
+
+def test_existing_note_check_finds_a_masked_policy_and_a_full_one():
+    masked = triage.build_staff_note(
+        triage.LATE_PAYMENT, "s", "Past-due payment of $241.00 which was due on 10/01/2026.",
+        ["CT1278263263-2"], "FA Group LLC",
+    )
+    assert "1278263263" not in masked
+    assert driver._note_has_policy_and_type(masked, ["CT1278263263-2"], triage.LATE_PAYMENT)
+    legacy = "LATE PAYMENT notice from Ascend. Policy CT1278263263-2 is past due: $241.00 was due 10/01/2026."
+    assert driver._note_has_policy_and_type(legacy, ["CT1278263263-2"], triage.LATE_PAYMENT)
+    other = masked.replace("63-2", "64-2")
+    assert not driver._note_has_policy_and_type(other, ["CT1278263263-2"], triage.LATE_PAYMENT)
