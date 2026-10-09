@@ -1,0 +1,68 @@
+{
+  "Statement": [
+    [
+      "InsuredPolicyName",
+      "PolicyNumber",
+      "ChargeName",
+      "LOB",
+      "OfficeInvoiceNum",
+      "AmtBilled",
+      "Comm %",
+      "Comm Amt",
+      "NetDue",
+      "InvoiceDate",
+      "EffectiveDate",
+      "ExpirationDate",
+      "Endorsement Effective",
+      "Producer"
+    ],
+    [
+      "Example Transit LLC",
+      "SYN-POL006",
+      "Premium - New Business",
+      "Package",
+      "SYN-INV006",
+      100,
+      10,
+      10,
+      90,
+      "2025-04-01T00:00:00",
+      "2025-04-01T00:00:00",
+      "2025-04-01T00:00:00",
+      null,
+      "Example Agency LLC"
+    ],
+    [
+      "Example Transit LLC",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      90,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "Grand Total",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      90,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  ]
+}
