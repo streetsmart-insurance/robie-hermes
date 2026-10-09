@@ -12,6 +12,7 @@ def _reset_attempts() -> None:
     from robie_job_engine import farmersofsalem_login, progressive_login, travelers_login
 
     progressive_login._PASSWORD_SUBMITTED = False
+    progressive_login._PASSWORD_TYPED = False
     travelers_login._PASSWORD_SUBMITTED = False
     farmersofsalem_login._PASSWORD_SUBMITTED = False
 
@@ -149,6 +150,63 @@ class ProgressiveLoginTests(unittest.TestCase):
         self.assertEqual(page.filled[-1], ("answer", "answer-value"))
         self.assertNotIn("answer-value", page.body)
         self.assertTrue(page.url.startswith("https://www.foragentsonly.com/"))
+
+    def test_username_timeout_names_the_step_and_does_not_retry(self):
+        from robie_job_engine import progressive_login as login
+
+        page = self._page()
+        real = page.locator
+
+        def locator(sel):
+            box = real(sel)
+            if sel == "input[name='userId']":
+                def fill(value, timeout=None):
+                    raise TimeoutError("username")
+                box.fill = fill
+            return box
+
+        page.locator = locator
+        with mock.patch.object(login, "_require_test_host"):
+            with self.assertRaises(IntakeHold) as ctx:
+                login.login_progressive(page, credentials=lambda: ("33617c", "pw-value"))
+            with self.assertRaises(IntakeHold) as again:
+                login.login_progressive(self._page(), credentials=lambda: ("33617c", "pw-value"))
+        self.assertIn("username", str(ctx.exception))
+        self.assertIn("Password submitted: no", str(ctx.exception))
+        self.assertIn("Not retried", str(ctx.exception))
+        self.assertIn("already attempted", str(again.exception))
+
+    def test_report_redirect_to_login_is_one_sign_in(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        page = mock.Mock()
+        page.url = "https://www.foragentsonly.com/managepolicies/"
+        calls = []
+
+        def goto(url, **_kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                page.url = "https://www.foragentsonlylogin.progressive.com/Login/"
+            else:
+                page.url = fao.REPORT_URL
+
+        page.goto.side_effect = goto
+        browser = fao.PlaywrightFaoCancellationBrowser.__new__(fao.PlaywrightFaoCancellationBrowser)
+        browser.page = page
+        browser.agent_code = "12345"
+        browser._list_url = ""
+        signed = []
+
+        def login(target):
+            signed.append(target.url)
+            target.url = "https://www.foragentsonly.com/home"
+
+        with mock.patch.object(fao, "assert_agent_context"), \
+                mock.patch("robie_job_engine.progressive_login.login_progressive", side_effect=login):
+            browser.load_report()
+        self.assertEqual(signed, ["https://www.foragentsonlylogin.progressive.com/Login/"])
+        self.assertEqual(browser._list_url, fao.REPORT_URL)
+        self.assertGreaterEqual(calls.count(fao.REPORT_URL), 2)
 
     def test_unknown_question_holds_without_a_guess(self):
         from robie_job_engine import progressive_login as login
@@ -782,6 +840,32 @@ class FaoBudgetAndLogTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(fired, [124])
 
+    def test_watchdog_exits_while_a_playwright_call_is_blocked(self):
+        import io
+        import threading
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        release = threading.Event()
+        buffer = io.StringIO()
+
+        def blocked_click() -> None:
+            release.wait(5)
+
+        exits, worker = fao.blocked_call_loses_to_the_watchdog(
+            blocked_click,
+            {"found": 4, "done": 1, "downloaded": [{}], "held": []},
+            seconds=0.05,
+            stream=buffer,
+        )
+        self.assertEqual(exits, [124])
+        self.assertTrue(worker.is_alive())
+        self.assertIn("PARTIAL", buffer.getvalue())
+        self.assertIn("3 policies left unprocessed", buffer.getvalue())
+        release.set()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+
     def test_leftover_pdfhandler_and_document_summary_tabs_are_closed(self):
         from robie_job_engine import progressive_pending_cancellation as fao
 
@@ -886,6 +970,24 @@ class FarmersHomeTests(unittest.TestCase):
         login_page.locator = lambda sel: _Zero()
         login_page.get_by_role = lambda role, name=None: _Zero()
         self.assertFalse(login.is_signed_in(login_page))
+        finys_login = SimpleNamespace(url="https://fos.finys.com/", body="Sign in")
+        finys_login.title = lambda: "Finys"
+        finys_login.get_by_role = lambda role, name=None: _Zero()
+
+        class Password:
+            def count(self):
+                return 1
+
+            def is_visible(self):
+                return True
+
+            first = None
+
+            def nth(self, _index):
+                return self
+
+        finys_login.locator = lambda sel: Password() if "password" in sel else _Zero()
+        self.assertFalse(login.is_signed_in(finys_login))
         finys = SimpleNamespace(url="https://fos.finys.com/")
         with mock.patch.object(login, "_require_test_host"), mock.patch.object(login, "_get_secret") as secret:
             returned = login.login_farmers(page, open_portal=lambda _page: finys)

@@ -214,12 +214,45 @@ def write_hard_partial(snapshot: Any, *, exit_fn: Callable[[int], None] = os._ex
     return payload
 
 
+def blocked_call_loses_to_the_watchdog(
+    blocked: Callable[[], None],
+    snapshot: Any,
+    *,
+    seconds: float = 0.05,
+    exit_fn: Callable[[int], None] = os._exit,
+    stream: Any = None,
+) -> tuple[list[int], threading.Thread]:
+    """Run ``blocked`` on a thread and let the watchdog exit while it is still stuck.
+
+    ``blocked`` should wait until released by the caller after this returns.
+    The returned thread is the blocked call. The exit list is filled by the watchdog.
+    """
+    exits: list[int] = []
+    started = threading.Event()
+
+    def run() -> None:
+        started.set()
+        blocked()
+
+    worker = threading.Thread(target=run, name="blocked-playwright", daemon=True)
+    worker.start()
+    if not started.wait(1):
+        raise IntakeHold("blocked call did not start")
+    arm_worker_watchdog(seconds, snapshot, exit_fn=lambda code: exits.append(code), stream=stream)
+    deadline = monotonic() + 2
+    while not exits and monotonic() < deadline:
+        exits_wait = threading.Event()
+        exits_wait.wait(0.02)
+    return exits, worker
+
+
 def arm_worker_watchdog(
     seconds: float,
     snapshot: Any,
     *,
     exit_fn: Callable[[int], None] = os._exit,
     stop: threading.Event | None = None,
+    stream: Any = None,
 ) -> threading.Thread:
     """Exit with a PARTIAL summary if the pull is still blocked when the deadline hits."""
     flag = stop if stop is not None else _WATCHDOG_STOP
@@ -228,7 +261,7 @@ def arm_worker_watchdog(
     def run() -> None:
         if flag.wait(seconds):
             return
-        write_hard_partial(snapshot, exit_fn=exit_fn)
+        write_hard_partial(snapshot, exit_fn=exit_fn, stream=stream)
 
     thread = threading.Thread(target=run, name="fao-deadline", daemon=True)
     thread.start()
@@ -1142,6 +1175,20 @@ def collect_document_capture(page: Any, click_action: Callable[[], None]) -> Doc
                 pass
 
 
+def _sign_in_if_report_redirected(page: Any) -> None:
+    """A manage-policies tab can look signed in and still redirect to /Login/."""
+    from .progressive_login import is_login_url, login_progressive
+
+    if not is_login_url(str(getattr(page, "url", "") or "")):
+        return
+    step_log("report redirected to the login page; one sign-in attempt")
+    login_progressive(page)
+    step_log("sign-in returned; loading the report again")
+    page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=30_000)
+    if is_login_url(str(getattr(page, "url", "") or "")):
+        raise IntakeHold("Progressive sign-in did not leave a signed-in session. Not retried.")
+
+
 class PlaywrightFaoCancellationBrowser:
     """Drive one already-authenticated FAO tab. Does not type credentials."""
 
@@ -1158,14 +1205,14 @@ class PlaywrightFaoCancellationBrowser:
         step_log("load report")
         _cap_page_timeouts(self.page)
         page = self.page
-        current = require_fao_url(str(getattr(page, "url", "") or ""))
-        if _is_policy_page_url(current):
-            # A tab left on a policy page (CL Express / policy servicing)
-            # goes back to the FAO report before the agent check.
+        current = str(getattr(page, "url", "") or "")
+        if _is_policy_page_url(current) or not current:
             page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
-            require_fao_url(str(getattr(page, "url", "") or ""))
+        _sign_in_if_report_redirected(page)
+        require_fao_url(str(getattr(page, "url", "") or ""))
         assert_agent_context(page, self.agent_code)
         page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=POLICY_PAGE_WAIT_MS)
+        _sign_in_if_report_redirected(page)
         require_fao_url(str(getattr(page, "url", "") or ""))
         # Wait for report tabs (tables may be hidden until a tab is selected)
         try:

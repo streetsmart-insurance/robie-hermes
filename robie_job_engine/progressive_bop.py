@@ -1655,6 +1655,29 @@ def _retry_partner_sign_on(popup: Any) -> bool:
     return True
 
 
+def _open_bop_from_hplanding(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[Any, Any]]]:
+    """HPLanding is a step. Follow its BOP link, or open the application URL."""
+    target = popup if popup is not None else shell
+    try:
+        links = target.locator("a[href*='bop.americanstrategic.com']")
+        if int(links.count()) == 1:
+            links.first.click() if hasattr(links, "first") else links.click()
+            pages, frames = _await_bop_surface(shell, popup)
+            if pages or frames:
+                return pages, frames
+    except Exception:
+        pass
+    goto = getattr(target, "goto", None)
+    if not callable(goto):
+        goto = getattr(shell, "goto", None)
+    if callable(goto):
+        try:
+            goto(BOP_APP_URL, wait_until="domcontentloaded", timeout=30_000)
+        except TypeError:
+            goto(BOP_APP_URL)
+    return _await_bop_surface(shell, popup)
+
+
 def _attach_bop_application(shell: Any, popup: Any) -> Any:
     """Use the BOP application, not the dead HPLanding popup.
 
@@ -1679,6 +1702,15 @@ def _attach_bop_application(shell: Any, popup: Any) -> Any:
     if len(frames) == 1:
         _owner, frame = frames[0]
         return _BopFrameSurface(frame, _owner)
+    pages, frames = _open_bop_from_hplanding(shell, popup)
+    if len(pages) == 1:
+        _close_if_possible(popup)
+        return pages[0]
+    if len(frames) == 1:
+        _owner, frame = frames[0]
+        return _BopFrameSurface(frame, _owner)
+    if popup is not None and _is_bop_app_url(_target_url(popup)):
+        return popup
     raise IntakeHold(
         "Businessowner/Contractor GL opened HPLanding instead of the BOP application"
         " (Progressive's Businessowner site never opened after sign-on)"

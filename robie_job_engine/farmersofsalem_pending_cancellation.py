@@ -407,6 +407,33 @@ class _SplitGrid:
         return self.body_table.locator(selector)
 
 
+def _find_document_table(page: Any) -> tuple[Any, dict[str, int]]:
+    """The Document Summary table, chosen by its headers.
+
+    A policy page can have two tables. The documents table is the one whose
+    headers include a document type (or description) and a date. Row count
+    breaks a tie. Two tables are not by themselves ambiguous.
+    """
+    try:
+        tables = page.locator("table").all()
+    except Exception:
+        tables = []
+    scored: list[tuple[int, Any, dict[str, int]]] = []
+    for table in tables:
+        headers = _table_headers(table)
+        indexes = _header_indexes(headers, _DOC_FIELDS)
+        has_kind = "description" in indexes or "doc_type" in indexes
+        if not (has_kind and "doc_date" in indexes):
+            continue
+        body = _kendo_body_table(table)
+        grid = _SplitGrid(table, body) if body is not None else table
+        scored.append((len(_table_body_rows(grid)), grid, indexes))
+    if not scored:
+        raise IntakeHold("Document Summary table is missing or ambiguous")
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1], scored[0][2]
+
+
 def _find_table_by_headers(page: Any, fields: tuple[tuple[str, frozenset[str]], ...], *, required: tuple[str, ...]) -> tuple[Any, dict[str, int]]:
     try:
         tables = page.locator("table").all()
@@ -837,25 +864,42 @@ def search_policy(page: Any, policy_number: str) -> None:
     def summary_shows_policy() -> bool:
         try:
             label = page.locator(FINYS_SUMMARY_POLICY_LABEL)
-            if _count(label) == 1 and _node_text(label) == policy:
+            label_text = _node_text(label.first if hasattr(label, "first") else label) if _count(label) >= 1 else ""
+            if policy in re.sub(r"\s+", "", label_text).upper():
                 return True
         except Exception:
-            pass
+            label_text = ""
+        heading_bits = []
         try:
             headings = page.get_by_role("heading", name="Policy Summary", exact=False).all()
         except Exception:
-            return False
+            headings = []
+        if not isinstance(headings, list):
+            headings = []
         for heading in headings:
-            try:
-                text = _node_text(heading)
-            except Exception:
-                continue
-            if "policy summary" in text.casefold() and re.search(rf"\b{re.escape(policy)}\b", text):
+            text = _node_text(heading)
+            if text:
+                heading_bits.append(text)
+            if policy in re.sub(r"\s+", "", text).upper():
                 return True
+        body = ""
+        try:
+            body = _node_text(page.locator("body"))[:400]
+        except Exception:
+            body = ""
+        if policy in re.sub(r"\s+", "", body).upper() and "policy" in body.casefold():
+            return True
+        try:
+            page.summary_probe = f"label={label_text!r} headings={heading_bits!r} body={body[:180]!r}"
+        except Exception:
+            pass
         return False
 
     if not _wait_for(summary_shows_policy):
-        raise IntakeHold(f"Policy Summary for {policy} is missing or ambiguous")
+        probe = str(getattr(page, "summary_probe", "") or "")
+        _fos_log(f"policy {policy} summary not recognized; {probe}")
+        detail = f" ({probe})" if probe else ""
+        raise IntakeHold(f"Policy Summary for {policy} is missing or ambiguous{detail}")
 
 
 def open_document_summary(page: Any) -> None:
@@ -870,7 +914,7 @@ def open_document_summary(page: Any) -> None:
 
     def docs_visible() -> bool:
         try:
-            _find_table_by_headers(page, _DOC_FIELDS, required=("description",))
+            _find_document_table(page)
             return True
         except IntakeHold:
             return False
@@ -881,7 +925,7 @@ def open_document_summary(page: Any) -> None:
 
 def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
     """Parse the Document Summary table into candidate documents."""
-    table, indexes = _find_table_by_headers(page, _DOC_FIELDS, required=("description",))
+    table, indexes = _find_document_table(page)
     documents: list[FoSDocument] = []
     for row in _table_body_rows(table):
         description = _cell_text(row, indexes["description"])
@@ -1586,7 +1630,10 @@ def _finys_pages(browser: Any) -> list[Any]:
             except Exception:
                 continue
             if host == FINYS_HOST and "login" not in str(page.url or "").lower():
-                found.append(page)
+                from .farmersofsalem_login import is_signed_in
+
+                if is_signed_in(page):
+                    found.append(page)
     return found
 
 

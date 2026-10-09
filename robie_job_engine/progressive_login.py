@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import re
 import socket
+import sys
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from .intake_core import IntakeHold
 
@@ -43,8 +45,17 @@ QUESTIONS_SECRET = "progressive-robie-security-questions"
 UNUSED_PROGRESSIVE_USERNAME = "progressive_username"
 UNUSED_PROGRESSIVE_PASSWORD = "progressive_password"
 SETTLE_MS = 4000
+STEP_TIMEOUT_MS = 30_000
+_REMEMBER_TERMS = (
+    "remember this device",
+    "remember device",
+    "trust this device",
+    "private computer",
+    "save this device",
+)
 
 _PASSWORD_SUBMITTED = False
+_PASSWORD_TYPED = False
 _USER_SELECTORS = (
     "input[name='userId']",
     "input#userId",
@@ -73,9 +84,32 @@ def _get_secret(name: str) -> str:
 
 
 def _host(url: str) -> str:
-    from urllib.parse import urlsplit
-
     return (urlsplit(url or "").hostname or "").lower()
+
+
+def is_login_url(url: str) -> bool:
+    """The ForAgentsOnly login host, including /Login/ after a report redirect."""
+    host = _host(url)
+    path = (urlsplit(url or "").path or "").lower()
+    if host == LOGIN_HOST or host.endswith("." + LOGIN_HOST):
+        return True
+    return path.rstrip("/").endswith("/login")
+
+
+def _login_log(message: str) -> None:
+    sys.stderr.write(f"FAO login {message}\n")
+    sys.stderr.flush()
+
+
+def _fail_step(step: str, exc: BaseException) -> None:
+    submitted = "yes" if _PASSWORD_TYPED else "no"
+    _login_log(
+        f"{step} timed out ({type(exc).__name__}); password submitted: {submitted}; not retried"
+    )
+    raise IntakeHold(
+        f"Progressive sign-in entry failed at {step}: {type(exc).__name__}. "
+        f"Password submitted: {submitted}. Not retried."
+    ) from None
 
 
 def _body(page: Any) -> str:
@@ -177,46 +211,110 @@ def _looks_like_question(body: str) -> bool:
     return any(term in text for term in _QUESTION_TERMS)
 
 
+def _is_visible(node: Any) -> bool:
+    visible = getattr(node, "is_visible", None)
+    if not callable(visible):
+        return True
+    try:
+        return bool(visible(timeout=500))
+    except TypeError:
+        try:
+            return bool(visible())
+        except Exception:
+            return True
+    except Exception:
+        return False
+
+
+def _visible_nodes(locator: Any) -> list[Any]:
+    count = _count(locator)
+    if count <= 0:
+        return []
+    nodes = []
+    for index in range(min(count, 8)):
+        node = locator.nth(index) if hasattr(locator, "nth") else locator
+        if _is_visible(node):
+            nodes.append(node)
+        if not hasattr(locator, "nth"):
+            break
+    return nodes
+
+
 def _first(page: Any, selectors: tuple[str, ...]) -> Any | None:
+    """The one visible input. Hidden duplicates on the login page are ignored."""
     for selector in selectors:
-        locator = page.locator(selector)
-        count = _count(locator)
-        if count == 1:
-            return locator.first if hasattr(locator, "first") else locator
-        if count > 1:
+        matches = _visible_nodes(page.locator(selector))
+        if len(matches) > 1:
             raise IntakeHold("Progressive sign-in form is ambiguous")
+        if len(matches) == 1:
+            return matches[0]
     return None
 
 
-def _type(locator: Any, value: str) -> None:
+def _type(locator: Any, value: str, step: str) -> None:
     try:
-        locator.fill(value)
+        locator.fill(value, timeout=STEP_TIMEOUT_MS)
+    except TypeError:
+        try:
+            locator.fill(value)
+        except Exception as exc:
+            _fail_step(step, exc)
     except Exception as exc:
-        raise IntakeHold(f"Progressive sign-in entry failed: {type(exc).__name__}") from None
+        _fail_step(step, exc)
 
 
-def _click_submit(page: Any) -> bool:
-    for name in ("Log In", "Sign In", "Login", "Continue", "Submit"):
+def _click_target(target: Any, step: str) -> None:
+    try:
+        target.click(timeout=STEP_TIMEOUT_MS)
+    except TypeError:
+        try:
+            target.click()
+        except Exception as exc:
+            _fail_step(step, exc)
+    except Exception as exc:
+        _fail_step(step, exc)
+
+
+def _click_submit(page: Any, step: str) -> bool:
+    for name in ("Log In", "Sign In", "Login", "Continue", "Submit", "Yes", "Remember"):
         try:
             button = page.get_by_role("button", name=re.compile(rf"^{name}$", re.IGNORECASE))
         except Exception:
             continue
-        if _count(button) == 1:
-            target = button.first if hasattr(button, "first") else button
-            target.click()
+        matches = _visible_nodes(button)
+        if len(matches) == 1:
+            _click_target(matches[0], step)
             return True
     locator = page.locator("button[type='submit'], input[type='submit']")
-    if _count(locator) == 1:
-        target = locator.first if hasattr(locator, "first") else locator
-        target.click()
+    matches = _visible_nodes(locator)
+    if len(matches) == 1:
+        _click_target(matches[0], step)
         return True
     return False
 
 
-def _settle(page: Any) -> None:
+def _settle(page: Any, step: str = "post-submit wait") -> None:
     waiter = getattr(page, "wait_for_timeout", None)
-    if callable(waiter):
+    if not callable(waiter):
+        return
+    try:
         waiter(SETTLE_MS)
+    except Exception as exc:
+        _fail_step(step, exc)
+
+
+def _remember_device(page: Any) -> bool:
+    """Click through a remember-device prompt. The password is not typed again."""
+    if not any(term in _body(page).lower() for term in _REMEMBER_TERMS):
+        return False
+    _login_log("remember device step; password already submitted; not retried")
+    if not _click_submit(page, "remember device"):
+        raise IntakeHold(
+            "Progressive remember-device step did not show a continue button. "
+            "Password submitted: yes. Not retried."
+        )
+    _settle(page, "remember device")
+    return True
 
 
 def login_progressive(
@@ -234,8 +332,13 @@ def login_progressive(
         raise IntakeHold(
             "Progressive sign-in already attempted this run. Not retried, so the account is not locked."
         )
-    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
-    _settle(page)
+    try:
+        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=STEP_TIMEOUT_MS)
+    except TypeError:
+        page.goto(LOGIN_URL)
+    except Exception as exc:
+        _fail_step("open login page", exc)
+    _settle(page, "open login page")
     if is_signed_in(page):
         return
     if credentials is None:
@@ -247,22 +350,31 @@ def login_progressive(
     user_box = _first(page, _USER_SELECTORS)
     if user_box is None:
         raise IntakeHold("Progressive sign-in form did not show a user id field")
-    _type(user_box, user)
+    _PASSWORD_SUBMITTED = True
+    _type(user_box, user, "username")
     password_box = _first(page, ("input[type='password']",))
     if password_box is None:
-        if not _click_submit(page):
+        if not _click_submit(page, "username submit"):
             raise IntakeHold("Progressive sign-in form did not show a password field")
-        _settle(page)
+        _settle(page, "username submit")
         password_box = _first(page, ("input[type='password']",))
     if password_box is None:
         raise IntakeHold("Progressive sign-in form did not show a password field")
-    _PASSWORD_SUBMITTED = True
-    _type(password_box, password)
-    if not _click_submit(page):
-        raise IntakeHold("Progressive sign-in form did not show a submit button")
-    _settle(page)
+    global _PASSWORD_TYPED
+    _type(password_box, password, "password")
+    _PASSWORD_TYPED = True
+    if not _click_submit(page, "submit"):
+        raise IntakeHold(
+            "Progressive sign-in form did not show a submit button. "
+            "Password submitted: yes. Not retried."
+        )
+    _settle(page, "post-submit wait")
+    _login_log("password submitted: yes; not retried")
     if _rejected(page):
         raise IntakeHold(_rejection_message(_body(page)))
+    if is_signed_in(page):
+        return
+    _remember_device(page)
     if is_signed_in(page):
         return
     prompt = _body(page)
@@ -271,11 +383,17 @@ def login_progressive(
         answer = matching_answer(pairs, prompt)
         box = _first(page, ("input[type='text']", "input[type='password']"))
         if box is None:
-            raise IntakeHold("Progressive security question did not show an answer field. Not retried.")
-        _type(box, answer)
-        if not _click_submit(page):
-            raise IntakeHold("Progressive security question did not show a submit button. Not retried.")
-        _settle(page)
+            raise IntakeHold(
+                "Progressive security question did not show an answer field. "
+                "Password submitted: yes. Not retried."
+            )
+        _type(box, answer, "security question")
+        if not _click_submit(page, "security question"):
+            raise IntakeHold(
+                "Progressive security question did not show a submit button. "
+                "Password submitted: yes. Not retried."
+            )
+        _settle(page, "security question")
         if _rejected(page):
             raise IntakeHold(_rejection_message(_body(page)))
     if not is_signed_in(page):

@@ -132,6 +132,13 @@ def _on_agent_path(url: str) -> bool:
     return (parts.path or "").lower().startswith("/agent/")
 
 
+def _finys_login_visible(page: Any) -> bool:
+    """A password box on the Finys host. A page without locators is not a form."""
+    if not callable(getattr(page, "locator", None)):
+        return False
+    return _visible_matches(page, "input[type='password']") != []
+
+
 def _login_form_visible(page: Any) -> bool:
     """The ContentPlaceHolder1 password box is on screen. Search fields do not count."""
     return any(_visible_matches(page, selector) for selector in _PASS_SELECTORS)
@@ -173,6 +180,9 @@ def is_signed_in(page: Any) -> bool:
     host = _host(url)
     path = urlsplit(url).path.lower()
     if host == FINYS_HOST and "login" not in path:
+        # fos.finys.com/ can still be the Finys login form. The URL is not enough.
+        if _finys_login_visible(page) or _login_form_visible(page):
+            return False
         return True
     if PORTAL_HOST not in host:
         return False
@@ -250,7 +260,7 @@ def login_farmers(
     """Sign ``page`` in and return the Finys tab. One password submission."""
     global _PASSWORD_SUBMITTED
     _require_test_host()
-    if _host(str(getattr(page, "url", "") or "")) == FINYS_HOST and "login" not in str(getattr(page, "url", "") or "").lower():
+    if is_signed_in(page) and _host(str(getattr(page, "url", "") or "")) == FINYS_HOST:
         return page
     if _PASSWORD_SUBMITTED and not is_signed_in(page):
         raise IntakeHold(
@@ -280,7 +290,7 @@ def login_farmers(
             raise IntakeHold(_rejection_message(_body(page)))
         if not is_signed_in(page):
             raise IntakeHold("Farmers of Salem sign-in did not leave a signed-in session. Not retried.")
-    if _host(str(getattr(page, "url", "") or "")) == FINYS_HOST:
+    if is_signed_in(page) and _host(str(getattr(page, "url", "") or "")) == FINYS_HOST:
         return page
     opener = open_portal
     if opener is None:

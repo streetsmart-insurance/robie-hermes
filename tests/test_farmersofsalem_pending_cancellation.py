@@ -527,6 +527,34 @@ class NavigationTests(unittest.TestCase):
         with self.assertRaisesRegex(IntakeHold, "Policy Summary for HONJ038633 is missing or ambiguous"):
             browser.open_policy(HONJ)
 
+    def test_two_tables_use_the_one_with_document_type_and_date(self):
+        class TwoTables(FakeFinysPage):
+            def roots(self):
+                layout = _table(("Menu", "Link"), [("Home", "Open")])
+                docs = self._docs_table(HONJ)
+                nodes = [layout, docs]
+                return [self._adopt(node) for node in nodes]
+
+        page = TwoTables(docs_by_policy={HONJ: _docs_for(HONJ, pdf_bytes(b"n"))})
+        page.searched_policy = HONJ
+        documents = extract_documents(page)
+        self.assertEqual(documents[1].description, "Intent to Cancel Notice")
+
+    def test_policy_summary_accepts_the_number_inside_the_label(self):
+        page = FakeFinysPage()
+        real_locator = page.locator
+        label = FakeNode(tag="span", name=f"Policy {HONJ}")
+
+        def locator(selector):
+            if "PolicyNumber" in selector:
+                label.page = page
+                return FakeLocator([label], page)
+            return real_locator(selector)
+
+        page.locator = locator
+        fos.search_policy(page, HONJ)
+        self.assertEqual(page.state, "policy")
+
     def test_ambiguous_view_links_hold(self):
         ambiguous_rows = [
             (

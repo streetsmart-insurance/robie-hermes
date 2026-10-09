@@ -564,9 +564,13 @@ class ProgressiveBopTests(unittest.TestCase):
             url="https://www.foragentsonly.com/",
             popup=landing,
         )
+        def goto(url, **_kwargs):
+            landing.clicked.append(("goto", url))
+
+        landing.goto = goto
         with self.assertRaisesRegex(IntakeHold, "HPLanding"):
             navigate_to_pending_cancel(shell, "CA33617")
-        self.assertEqual(landing.clicked, [])
+        self.assertIn(("goto", "https://bop.americanstrategic.com/"), landing.clicked)
 
     def test_two_bop_windows_hold(self):
         first = FakePage(set(), url="https://bop.americanstrategic.com/one")

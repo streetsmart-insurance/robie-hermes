@@ -1304,7 +1304,7 @@ class FinysDocumentSummaryLiveTests(unittest.TestCase):
         from robie_job_engine import farmersofsalem_pending_cancellation as fos
 
         indexes = fos._header_indexes(self.HEADERS, fos._DOC_FIELDS)
-        with mock.patch.object(fos, "_find_table_by_headers", return_value=(None, indexes)), \
+        with mock.patch.object(fos, "_find_document_table", return_value=(None, indexes)), \
                 mock.patch.object(fos, "_table_body_rows", return_value=rows), \
                 mock.patch.object(fos, "_cell_text", side_effect=lambda row, i: row.cells[i]):
             return fos.extract_documents(mock.Mock()), indexes
