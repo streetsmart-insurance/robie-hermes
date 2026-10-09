@@ -32,6 +32,7 @@ import csv
 import io
 import logging
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -382,6 +383,44 @@ def _row_field(row: dict[str, str], *names: str) -> str:
     return ""
 
 
+# Title prefixes the phone watchdog writes. The watchdog picks the prefix
+# (after-hours vs office hours) and the caller label (person vs company) at
+# send time; processed_calls keeps neither, so the expected title rebuilt in
+# ingest_phone_watchdog can differ from the real one in both. 2026-10-08:
+# "[CALLBACK REQUIRED] George Conley" vs expected
+# "[AFTER-HOURS CALLBACK] Conley Electric" raised a false MISSING alert.
+PHONE_WATCHDOG_TITLE_PREFIXES = (
+    "[callback required]",
+    "[after-hours callback]",
+    "[after hours callback]",
+    "[quote request]",
+)
+_BRACKET_PREFIX = re.compile(r"^\s*\[[^\]]*\]\s*")
+
+
+def _title_core(title: str) -> str:
+    return _norm(_BRACKET_PREFIX.sub("", title or ""))
+
+
+def _title_match(report_title: str, pending: "PendingTask") -> bool:
+    """Same task title, allowing for prefix/suffix and watchdog label drift.
+
+    Phone-watchdog tasks are pinned by applicant + assignee + time window;
+    any report title carrying a watchdog prefix counts for them.
+    """
+    if not report_title:
+        return False
+    a, b = _norm(report_title), _norm(pending.title)
+    if a in b or b in a:
+        return True
+    ca, cb = _title_core(report_title), _title_core(pending.title)
+    if ca and cb and (ca in cb or cb in ca):
+        return True
+    if pending.producer == "phone-watchdog":
+        return a.startswith(PHONE_WATCHDOG_TITLE_PREFIXES)
+    return False
+
+
 def match_task(
     pending: PendingTask, report_rows: list[dict[str, str]]
 ) -> dict[str, str] | None:
@@ -406,10 +445,7 @@ def match_task(
         if not _assignee_match(assignee, pending.assignee):
             continue
         title = _row_field(row, "title", "task title", "subject", "note")
-        if not title or not (
-            _norm(title) in _norm(pending.title)
-            or _norm(pending.title) in _norm(title)
-        ):
+        if not _title_match(title, pending):
             continue
         created_raw = _row_field(row, "created date", "task created date", "created")
         if created_raw:
@@ -425,10 +461,19 @@ def match_task(
     return None
 
 
+# A report email must arrive this long after a task fired before a miss in
+# it counts as MISSING; an older report cannot contain the task yet.
+REPORT_LAG_MINUTES = int(os.environ.get("ROBIE_TASK_REPORT_LAG_MINUTES", "10"))
+# Give up waiting for a new enough report after this long: UNVERIFIED.
+REPORT_WAIT_LIMIT_HOURS = int(os.environ.get("ROBIE_TASK_REPORT_WAIT_LIMIT_HOURS", "4"))
+
+
 def verify_due_tasks(
     store: TaskVerificationStore,
     report_rows: list[dict[str, str]] | None,
     report_available: bool,
+    report_received_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> dict[str, list[PendingTask]]:
     """Verify every due PENDING task against the report.
 
@@ -457,6 +502,20 @@ def verify_due_tasks(
             detail = f"matched report row: {hit.get('title', hit.get('task', ''))[:80]}"
             store.resolve(task.id, "VERIFIED", detail)
             result["verified"].append(task)
+        elif report_received_at is not None and report_received_at < (
+            _parse_ts(task.fired_at) + timedelta(minutes=REPORT_LAG_MINUTES)
+        ):
+            # The newest report predates the task; it cannot show it yet.
+            # Stay PENDING for the next report (2026-10-08 false alarm).
+            waited = (now or datetime.now(timezone.utc)) - _parse_ts(task.fired_at)
+            if waited > timedelta(hours=REPORT_WAIT_LIMIT_HOURS):
+                store.resolve(
+                    task.id,
+                    "UNVERIFIED",
+                    f"no task report newer than the task after {REPORT_WAIT_LIMIT_HOURS}h",
+                )
+                result["unverified"].append(task)
+            continue
         else:
             detail = (
                 f"no match in task report {VERIFY_AFTER_MINUTES}min after firing "
