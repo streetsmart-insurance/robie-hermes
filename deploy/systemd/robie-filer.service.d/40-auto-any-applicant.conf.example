@@ -1,0 +1,7 @@
+# Step 2 (needs Carlo's approval after the step 1 evidence): automatic filing
+# of new robie@ mail to any matched client. Needs the filer operation scope
+# in ezlynx_write_scope.py (document upload + note append only).
+# Install as /etc/systemd/system/robie-filer.service.d/40-auto-any-applicant.conf
+[Service]
+ExecStart=
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.robie_filer --live --auto --any-applicant
