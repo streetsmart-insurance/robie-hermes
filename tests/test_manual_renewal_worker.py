@@ -235,6 +235,62 @@ class ManualRenewalWorkerTest(unittest.TestCase):
         self.assertEqual(SENT_EMAILS, [])
         self.assertEqual(self.notes.notes, [])
 
+    # 1b. A run where every policy is not_done fails with done/not_done counts.
+    def test_all_not_done_run_fails_with_counts(self):
+        global FAKE_ROWS, GATE_ACTIVE, GATE_REASON
+        FAKE_ROWS = [make_row(), make_row(policy_number="POL-2")]
+        GATE_ACTIVE, GATE_REASON = False, "policy cancelled 2026-01-01"
+        result = self._run(make_job(self.db_path))
+        statuses = [outcome["status"] for outcome in result.detail["outcomes"]]
+        self.assertEqual(statuses, ["not_done", "not_done"])
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.retryable, "a retry would re-send underwriter outreach")
+        self.assertEqual(
+            result.error,
+            "manual renewals incomplete: done=0 not_done=2 pending=0 of 2 policies",
+        )
+        self.assertEqual(result.detail["counts"], {"done": 0, "pending": 0, "not_done": 2})
+
+    # 1c. A not_done policy fails the run but keeps the pending policy's
+    #     follow-up state, so the next run continues its cadence.
+    def test_failed_run_keeps_followups_for_pending_policies(self):
+        global FAKE_ROWS
+        FAKE_ROWS = [make_row(policy_number="ACTIVE-1"), make_row(policy_number="CANCELLED-1")]
+
+        def gate(*, policy_number, **_):
+            if policy_number == "CANCELLED-1":
+                return False, "policy cancelled 2026-01-01"
+            return True, "active"
+
+        saved_gate = mrnw.check_policy_active
+        mrnw.check_policy_active = gate
+        try:
+            first = self._run(make_job(self.db_path))
+            by_policy = {o["policy_number"]: o["status"] for o in first.detail["outcomes"]}
+            self.assertEqual(by_policy, {"ACTIVE-1": "pending", "CANCELLED-1": "not_done"})
+            self.assertFalse(first.succeeded)
+            self.assertFalse(first.retryable)
+            self.assertEqual(
+                first.error,
+                "manual renewals incomplete: done=0 not_done=1 pending=1 of 2 policies",
+            )
+            self.assertEqual(len(SENT_EMAILS), 1, "initial outreach for the active policy only")
+
+            # The failed run still wrote the pending policy's cadence state.
+            state = mrnw._read_durable_state(
+                self.db_path, mrnw.NAMESPACE, mrnw._state_keys("ACTIVE-1", [])
+            )
+            self.assertTrue(state and state.get("initial_sent"))
+            self.assertTrue(state.get("next_followup_due"))
+
+            # Next run: no duplicate initial email; the policy stays pending.
+            second = self._run(make_job(self.db_path))
+            again = {o["policy_number"]: o["status"] for o in second.detail["outcomes"]}
+            self.assertEqual(again["ACTIVE-1"], "pending")
+            self.assertEqual(len(SENT_EMAILS), 1, "a failed run must not cause a re-send")
+        finally:
+            mrnw.check_policy_active = saved_gate
+
     # 2. Unauthorized email is recorded pending and never sent.
     def test_unauthorized_email_recorded_pending_not_sent(self):
         global FAKE_ROWS
@@ -403,7 +459,9 @@ class ManualRenewalWorkerTest(unittest.TestCase):
         FAKE_ROWS = [make_row()]
         job = make_job(self.db_path)
         result = self._run(job)
+        # Outreach sent and awaiting a reply is pending, which ends OK.
         self.assertTrue(result.succeeded)
+        self.assertEqual(result.detail["summary"], "done=0 not_done=0; waiting on 1 replies")
         action = {"detail": result.detail}
         verifier = mrnw.ManualRenewalVerifier(
             store=FakeStore(action), durable=make_durable_reader(self.db_path)

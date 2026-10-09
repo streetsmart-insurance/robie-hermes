@@ -1827,6 +1827,31 @@ class ManualRenewalWorker:
             "sender": SENDER_EMAIL,
             "job_type": JOB_TYPE,
         }
+        counts = detail["counts"]
+        # pending = outreach sent, waiting on a reply: a normal state, not a
+        # failure. Its cadence lives in durable_work_items (mirrored above as
+        # each outcome is produced) and the next run reads it back, so a
+        # failed run never cancels follow-ups for pending policies.
+        detail["summary"] = (
+            f"done={counts['done']} not_done={counts['not_done']}; "
+            f"waiting on {counts['pending']} replies"
+        )
+        if counts["not_done"]:
+            # Not retryable: a retry would re-send outreach for the pending
+            # policies. The message avoids retry_policy keywords so the engine
+            # keeps retryable=False.
+            return WorkerResult(
+                False,
+                JOB_TYPE,
+                destination,
+                detail=detail,
+                retryable=False,
+                error=(
+                    f"manual renewals incomplete: done={counts['done']} "
+                    f"not_done={counts['not_done']} pending={counts['pending']} "
+                    f"of {len(detail['outcomes'])} policies"
+                ),
+            )
         return WorkerResult(True, JOB_TYPE, destination, detail=detail)
 
 

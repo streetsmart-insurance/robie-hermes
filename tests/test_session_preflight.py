@@ -312,6 +312,49 @@ class TestEngineWiring(unittest.TestCase):
             self.store.get_checkpoint(job["id"], "session_preflight_recheck")["state"],
             SESSION_PRESENT,
         )
+
+    @patch("robie_job_engine.session_recovery.attempt_session_recovery")
+    @patch("robie_job_engine.session_preflight.check")
+    def test_session_refresh_runs_when_session_is_logged_out(
+        self, mock_check, mock_recover
+    ):
+        # The refresh worker is the only path that completes MFA. A
+        # logged-out session must not fail it in preflight before it runs.
+        mock_check.return_value = {
+            "state": LOGGED_OUT,
+            "blocking": True,
+            "reason": "SESSION_LOGGED_OUT: browser is on /auth/account/login",
+            "login_urls": ["https://app.ezlynx.com/auth/account/login"],
+        }
+        mock_recover.return_value = {
+            "recovered": False,
+            "reason": "INTERACTIVE_AUTH_REQUIRED: EZLynx requires MFA",
+        }
+        worker = DummyWorker(WorkerResult(True, "ezlynx.session_refresh", {"signed_in": True}))
+        engine = JobEngine(
+            self.store,
+            {"session-refresh": worker},
+            {"ezlynx.session_refresh": DummyVerifier()},
+        )
+        # Same payload the scheduler installs (scheduler.py daily refresh).
+        job = self.store.create_job(
+            "ezlynx.session_refresh",
+            {
+                "worker": "session-refresh",
+                "resource_id": "ezlynx:authenticated-browser-session",
+                "profile_id": "robie-ezlynx-canonical-profile",
+                "perform_timeout_seconds": 210,
+            },
+            max_attempts=3,
+        )
+
+        final = engine.run(job["id"])
+
+        mock_check.assert_not_called()
+        mock_recover.assert_not_called()
+        self.assertTrue(worker.called, "refresh worker must run while logged out")
+        self.assertNotEqual(final["status"], JobStatus.FAILED.value)
+        self.assertIsNone(self.store.get_checkpoint(job["id"], "session_preflight"))
         self.assertIsNone(self.store.get_checkpoint(job["id"], "email_response"))
 
     @patch("robie_job_engine.session_preflight.check")
