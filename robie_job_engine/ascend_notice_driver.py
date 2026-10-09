@@ -2131,11 +2131,15 @@ def _prepare_dry_run_note(
         raise discussions.DiscussionApiError(None, "note body is required")
     rows = discussions_for_applicant(client.get_discussions(applicant), applicant)
     pinned = str(discussion_id or "").strip()
+    # Same rule as the live write (file_note_to_existing_discussion, #823): a
+    # supplied id matches any of the applicant's discussions not marked deleted,
+    # titled or not. The untitled filter stays on the title-guessing path
+    # (choose_category_discussion).
     titled = [
         row
         for row in rows
         if discussions.discussion_id_of(row) == pinned
-        and not discussions.is_untitled_discussion(row)
+        and not discussions._discussion_marked_gone(row)
     ]
     if len(titled) != 1:
         return {
