@@ -478,6 +478,14 @@ def confirm_uploaded_document_id(
                 ids.add(doc_id)
                 break
     if doc_id not in ids:
+        from .ezlynx_api import document_search_is_complete
+
+        if not document_search_is_complete(payload):
+            raise EzlynxNoteDocReadbackError(
+                f"DocumentApi read-back UNVERIFIED for document_id {doc_id}: the "
+                f"document list was incomplete ({len(ids)} of "
+                f"{payload.get('totalSize')} read). Do not upload again; check first."
+            )
         raise EzlynxNoteDocReadbackError(
             f"DocumentApi read-back did not confirm document_id {doc_id}"
         )
