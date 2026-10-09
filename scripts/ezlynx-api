@@ -4,24 +4,43 @@
 #
 #   ezlynx-api --agent claude docs list 220250093
 #
-# Runs the current release as streetsmart-hermes from / (the same user and
-# folder robie-filer uses). It never sets write-scope variables: writes stay
-# on the compiled EZLynx allowlist. See docs/EZLYNX_API_CLI.md.
+# Runs the current release as the host's Hermes service user from / (the same
+# user and folder robie-filer uses). It never sets write-scope variables:
+# writes stay on the compiled EZLynx allowlist. See docs/EZLYNX_API_CLI.md.
+#
+# Two host layouts, chosen by the installer (it writes the settings file):
+#   Production  user streetsmart-hermes       /opt/streetsmart-hermes/current
+#   Test        user streetsmart-hermes-test  /opt/streetsmart-hermes-test/releases/current
+# With no settings file the Production layout is assumed.
 set -euo pipefail
 
-RUN_AS="streetsmart-hermes"
+# Settings written by the installer (references only, never secret values).
+# Read before switching user, because the user itself is one of the settings.
+CONF=""
+for candidate in /etc/streetsmart-hermes-test/ezlynx-api-cli.env /etc/streetsmart-hermes/ezlynx-api-cli.env; do
+  if [[ -r "${candidate}" ]]; then
+    CONF="${candidate}"
+    break
+  fi
+done
+if [[ -n "${CONF}" ]]; then
+  # shellcheck disable=SC1090
+  . "${CONF}"
+fi
+
+RUN_AS="${EZLYNX_API_RUN_AS:-streetsmart-hermes}"
+RELEASE="${EZLYNX_API_RELEASE:-/opt/streetsmart-hermes/current}"
+PYTHON_BIN="${EZLYNX_API_PYTHON:-/opt/streetsmart-hermes/venv/bin/python}"
+
 if [[ "$(id -un)" != "${RUN_AS}" ]]; then
+  if ! sudo -n -u "${RUN_AS}" -- true 2>/dev/null; then
+    echo "ezlynx-api: run this as ${RUN_AS}, or as a user that can run 'sudo -n -u ${RUN_AS}'." >&2
+    exit 2
+  fi
   exec sudo -n -u "${RUN_AS}" -- "$(readlink -f "${BASH_SOURCE[0]}")" "$@"
 fi
 
 cd /
-
-# Settings written by the installer (references only, never secret values).
-CONF=/etc/streetsmart-hermes/ezlynx-api-cli.env
-if [[ -r "${CONF}" ]]; then
-  # shellcheck disable=SC1090
-  . "${CONF}"
-fi
 
 # Writes must stay on the compiled allowlist (test client 220250093 unless
 # ops widened ROBIE_EZLYNX_WRITE_APPLICANT_IDS for the whole host). Never
@@ -29,13 +48,27 @@ fi
 unset ROBIE_EZLYNX_WRITE_SCOPE ROBIE_EZLYNX_WRITE_APPLICANT_IDS EZLYNX_WRITE_APPLICANT_IDS ROBIE_PLAYGROUND
 
 export ROBIE_ENV="${ROBIE_ENV:-PRODUCTION}"
-export ROBIE_EZLYNX_API_PROD_SECRET="${ROBIE_EZLYNX_API_PROD_SECRET:-projects/751771086524/secrets/ezlynx-api-prod/versions/latest}"
+# The Test host reads the UAT secret only; it is never pointed at the
+# Production secret.
+if [[ "${ROBIE_ENV}" != "TEST" ]]; then
+  export ROBIE_EZLYNX_API_PROD_SECRET="${ROBIE_EZLYNX_API_PROD_SECRET:-projects/751771086524/secrets/ezlynx-api-prod/versions/latest}"
+fi
 export ROBIE_EZLYNX_API_UAT_SECRET="${ROBIE_EZLYNX_API_UAT_SECRET:-projects/streetsmart-hermes-poc/secrets/ezlynx-api-uat/versions/latest}"
 export ROBIE_GEMINI_PROJECT="${ROBIE_GEMINI_PROJECT:-streetsmart-hermes-poc}"
-export ROBIE_GEMINI_LOCATION="${ROBIE_GEMINI_LOCATION:-us-central1}"
+# gemini-3.8-flash answers only in the "global" location (404 in us-central1).
+export ROBIE_GEMINI_LOCATION="${ROBIE_GEMINI_LOCATION:-global}"
 export ROBIE_GEMINI_MODEL="${ROBIE_GEMINI_MODEL:-gemini-3.8-flash}"
 export ROBIE_API_CLI_STATE_DIR="${ROBIE_API_CLI_STATE_DIR:-/var/lib/ezlynx-api-cli}"
-export PYTHONPATH="/opt/streetsmart-hermes/current"
+export PYTHONPATH="${RELEASE}"
 export PYTHONDONTWRITEBYTECODE=1
 
-exec /opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ezlynx_api_cli "$@"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "ezlynx-api: ${PYTHON_BIN} not found. This host's layout does not match the installed settings; re-run install-ezlynx-api-cli.sh." >&2
+  exit 2
+fi
+if [[ ! -d "${RELEASE}/robie_job_engine" ]]; then
+  echo "ezlynx-api: no release at ${RELEASE}. Deploy a release first." >&2
+  exit 2
+fi
+
+exec "${PYTHON_BIN}" -m robie_job_engine.ezlynx_api_cli "$@"

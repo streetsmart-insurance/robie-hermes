@@ -48,6 +48,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import stat
 import sys
@@ -88,6 +89,10 @@ DEFAULT_READ_CHARS = 200_000
 DEFAULT_ASK_CHARS = 120_000
 DEFAULT_ASK_TOKENS = 2048
 ASK_TIMEOUT_SECONDS = 90.0
+#: gemini-3.8-flash answers only in the "global" location (404 in us-central1).
+DEFAULT_GEMINI_LOCATION = "global"
+#: A PDF page with fewer extracted characters than this looks like a scan.
+SCAN_PAGE_MIN_CHARS = 20
 
 #: Paths a file upload may never read from (keys, env files, the audit itself).
 SENSITIVE_PATH_PREFIXES = (
@@ -96,7 +101,9 @@ SENSITIVE_PATH_PREFIXES = (
     "/proc/",
     "/sys/",
     "/opt/streetsmart-hermes/.hermes",
+    "/opt/streetsmart-hermes-test/.hermes",
     "/var/lib/robie-filer",
+    "/var/lib/ezlynx-api-cli",  # the audit log and note ledger (also matches ezlynx-api-cli-test)
 )
 _AUDIT_FIELD_LIMIT = 300
 _FORBIDDEN_AUDIT_KEYS = frozenset({"body", "text", "content", "note", "question", "answer", "pages"})
@@ -251,7 +258,8 @@ class LiveServices:
     def gemini(self, model: str | None) -> Any:
         from .gemini_field_helper import VertexGeminiFieldClient
 
-        client = VertexGeminiFieldClient(model=model) if model else VertexGeminiFieldClient()
+        location = gemini_location()
+        client = VertexGeminiFieldClient(location=location, model=model) if model else VertexGeminiFieldClient(location=location)
         if not client.configured():
             raise CliError(
                 "gemini_not_configured",
@@ -342,6 +350,20 @@ class DocumentText:
     page_count: int
     chars: int
     truncated: bool
+    #: Pages that came back with (almost) no text.
+    blank_pages: list[int] = field(default_factory=list)
+    #: Plain-language notes for the caller, for example "OCR is not installed".
+    warnings: list[str] = field(default_factory=list)
+
+
+def gemini_location() -> str:
+    """Vertex location for this tool: ROBIE_GEMINI_LOCATION, else ``global``."""
+    return os.environ.get("ROBIE_GEMINI_LOCATION", "").strip() or DEFAULT_GEMINI_LOCATION
+
+
+def ocr_available() -> bool:
+    """True when this host can read scanned pages (pdftoppm and tesseract)."""
+    return bool(shutil.which("pdftoppm") and shutil.which("tesseract"))
 
 
 def _document_text(svc: Any, data: bytes, *, max_pages: int, max_chars: int) -> DocumentText:
@@ -358,6 +380,12 @@ def _document_text(svc: Any, data: bytes, *, max_pages: int, max_chars: int) -> 
         except CliError:
             raise
         except Exception as exc:  # noqa: BLE001 - ExtractionUnavailable, timeouts, bad PDFs
+            if type(exc).__name__ == "ExtractionUnavailable":
+                raise CliError(
+                    "extraction_unavailable",
+                    f"this host cannot read PDF text: {exc}. Install poppler-utils (pdftotext, pdfinfo), "
+                    "or use `docs ask --direct` to send the file itself to Gemini.",
+                ) from exc
             raise CliError("extraction_failed", f"could not read the PDF text ({type(exc).__name__}: {exc})") from exc
     elif kind == "text":
         pages, ocr = [data.decode("utf-8", "replace")], []
@@ -381,7 +409,17 @@ def _document_text(svc: Any, data: bytes, *, max_pages: int, max_chars: int) -> 
             break
         kept.append(text)
         total += len(text)
-    return DocumentText(kind, kept, list(ocr), len(pages), total, truncated)
+    blank = [index + 1 for index, page in enumerate(pages) if len(page.strip()) < SCAN_PAGE_MIN_CHARS]
+    blank = [number for number in blank if number not in set(ocr)]
+    warnings: list[str] = []
+    if kind == "pdf" and blank and not ocr_available():
+        listed = ", ".join(str(number) for number in blank[:20]) + (" ..." if len(blank) > 20 else "")
+        warnings.append(
+            f"OCR is not installed on this host (tesseract and pdftoppm), so {len(blank)} of {len(pages)} page(s) "
+            f"have no text: page {listed}. They look like scans. Use `docs ask --direct` to send the file itself "
+            "to Gemini, or run this on a host with OCR."
+        )
+    return DocumentText(kind, kept, list(ocr), len(pages), total, truncated, blank, warnings)
 
 
 def _read_regular_file(path_text: str, *, max_bytes: int) -> tuple[Path, bytes]:
@@ -516,6 +554,8 @@ def cmd_docs_read(svc: Any, args: argparse.Namespace) -> Outcome:
             "ocr_pages": text.ocr_pages,
             "chars": text.chars,
             "truncated": text.truncated,
+            "blank_pages": text.blank_pages,
+            "warnings": text.warnings,
             "pages": [{"page": index + 1, "text": page} for index, page in enumerate(text.pages)],
         },
         {
@@ -579,6 +619,12 @@ def cmd_docs_ask(svc: Any, args: argparse.Namespace) -> Outcome:
         sent_chars, input_mode = 0, "inline_data_UNVERIFIED"
     else:
         text = _document_text(svc, data, max_pages=args.max_pages, max_chars=args.max_chars)
+        if text.pages and not any(page.strip() for page in text.pages):
+            raise CliError(
+                "no_text_in_document",
+                (text.warnings[0] if text.warnings else "the document has no readable text.")
+                + " Nothing was sent to Gemini.",
+            )
         prompt = ASK_PROMPT.format(question=question, document=_ask_document_block(text))
         sent_chars, input_mode = text.chars, "extracted_text"
     client = svc.gemini(args.model)
@@ -603,6 +649,7 @@ def cmd_docs_ask(svc: Any, args: argparse.Namespace) -> Outcome:
         "pages_sent": len(text.pages) if text else None,
         "chars_sent": sent_chars,
         "truncated": bool(text.truncated) if text else False,
+        "warnings": list(text.warnings) if text else [],
     }
     return Outcome(
         result,
@@ -814,8 +861,6 @@ def cmd_policy_lookup(svc: Any, args: argparse.Namespace) -> Outcome:
 
 def cmd_selftest(svc: Any, args: argparse.Namespace) -> Outcome:
     """Local checks only: no EZLynx call, no Gemini call, no secret read."""
-    import shutil
-
     from . import ezlynx_write_scope as scope
 
     binaries = {name: bool(shutil.which(name)) for name in ("pdftotext", "pdfinfo", "pdftoppm", "tesseract")}
@@ -823,7 +868,7 @@ def cmd_selftest(svc: Any, args: argparse.Namespace) -> Outcome:
     try:
         from .gemini_field_helper import VertexGeminiFieldClient
 
-        gem = VertexGeminiFieldClient()
+        gem = VertexGeminiFieldClient(location=gemini_location())
         gemini = {"configured": gem.configured(), "project": gem.project, "location": gem.location, "model": gem.model}
     except Exception as exc:  # noqa: BLE001
         gemini = {"configured": False, "error": type(exc).__name__}
@@ -843,7 +888,12 @@ def cmd_selftest(svc: Any, args: argparse.Namespace) -> Outcome:
             "note": "writes refuse any client not on this list",
         },
         "gemini": gemini,
-        "ocr_available": binaries["pdftoppm"] and binaries["tesseract"],
+        "ocr_available": ocr_available(),
+        "warnings": (
+            []
+            if ocr_available()
+            else ["OCR is not installed (tesseract/pdftoppm): scanned PDF pages come back empty; use `docs ask --direct` for scans."]
+        ),
     }
     return Outcome(result, {"binaries_ok": binaries["pdftotext"] and binaries["pdfinfo"], "gemini_configured": gemini.get("configured")})
 
