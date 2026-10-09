@@ -314,8 +314,22 @@ class VertexGeminiFieldClient:
             raise RuntimeError("Vertex generateContent returned no text")
         return text
 
-    def generate_content(self, prompt: str) -> str:
-        """Free-text generation for HITL suggestions (no JSON constraint)."""
+    def generate_content(
+        self,
+        prompt: str,
+        *,
+        max_output_tokens: int = 512,
+        timeout: float = 30.0,
+        temperature: float = 0.2,
+        inline_parts: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Free-text generation (no JSON constraint).
+
+        The defaults are the original HITL-suggestion settings. The shared
+        EZLynx API CLI raises ``max_output_tokens`` and ``timeout`` for document
+        questions, and may pass ``inline_parts`` (``{"inlineData": {...}}``)
+        for direct PDF or image input.
+        """
         if not self.configured():
             raise RuntimeError("Vertex Gemini project is not configured")
         token = self._access_token()
@@ -326,10 +340,15 @@ class VertexGeminiFieldClient:
         )
         body = json.dumps(
             {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}, *(inline_parts or [])],
+                    }
+                ],
                 "generationConfig": {
-                    "temperature": 0.2,
-                    "maxOutputTokens": 512,
+                    "temperature": temperature,
+                    "maxOutputTokens": int(max_output_tokens),
                 },
             }
         ).encode("utf-8")
@@ -344,7 +363,7 @@ class VertexGeminiFieldClient:
         )
         opener = self._opener or urllib.request.urlopen
         try:
-            with opener(request, timeout=30) as response:
+            with opener(request, timeout=timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"Vertex generateContent failed: HTTP {exc.code}") from exc

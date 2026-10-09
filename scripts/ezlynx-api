@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ezlynx-api: shared EZLynx command line for agents. Installed at
+# /usr/local/bin/ezlynx-api by scripts/install-ezlynx-api-cli.sh.
+#
+#   ezlynx-api --agent claude docs list 220250093
+#
+# Runs the current release as streetsmart-hermes from / (the same user and
+# folder robie-filer uses). It never sets write-scope variables: writes stay
+# on the compiled EZLynx allowlist. See docs/EZLYNX_API_CLI.md.
+set -euo pipefail
+
+RUN_AS="streetsmart-hermes"
+if [[ "$(id -un)" != "${RUN_AS}" ]]; then
+  exec sudo -n -u "${RUN_AS}" -- "$(readlink -f "${BASH_SOURCE[0]}")" "$@"
+fi
+
+cd /
+
+# Settings written by the installer (references only, never secret values).
+CONF=/etc/streetsmart-hermes/ezlynx-api-cli.env
+if [[ -r "${CONF}" ]]; then
+  # shellcheck disable=SC1090
+  . "${CONF}"
+fi
+
+# Writes must stay on the compiled allowlist (test client 220250093 unless
+# ops widened ROBIE_EZLYNX_WRITE_APPLICANT_IDS for the whole host). Never
+# inherit an all-clients switch into this tool.
+unset ROBIE_EZLYNX_WRITE_SCOPE ROBIE_EZLYNX_WRITE_APPLICANT_IDS EZLYNX_WRITE_APPLICANT_IDS ROBIE_PLAYGROUND
+
+export ROBIE_ENV="${ROBIE_ENV:-PRODUCTION}"
+export ROBIE_EZLYNX_API_PROD_SECRET="${ROBIE_EZLYNX_API_PROD_SECRET:-projects/751771086524/secrets/ezlynx-api-prod/versions/latest}"
+export ROBIE_EZLYNX_API_UAT_SECRET="${ROBIE_EZLYNX_API_UAT_SECRET:-projects/streetsmart-hermes-poc/secrets/ezlynx-api-uat/versions/latest}"
+export ROBIE_GEMINI_PROJECT="${ROBIE_GEMINI_PROJECT:-streetsmart-hermes-poc}"
+export ROBIE_GEMINI_LOCATION="${ROBIE_GEMINI_LOCATION:-us-central1}"
+export ROBIE_GEMINI_MODEL="${ROBIE_GEMINI_MODEL:-gemini-3.8-flash}"
+export ROBIE_API_CLI_STATE_DIR="${ROBIE_API_CLI_STATE_DIR:-/var/lib/ezlynx-api-cli}"
+export PYTHONPATH="/opt/streetsmart-hermes/current"
+export PYTHONDONTWRITEBYTECODE=1
+
+exec /opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.ezlynx_api_cli "$@"
