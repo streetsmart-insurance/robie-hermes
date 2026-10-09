@@ -276,7 +276,7 @@ def test_triage_late_payment_resolves_by_uuid():
     assert result["recommendation"]["ezlynx_workflow"] == "Ascend NOC"
     assert result["note_text"] == (
         "LATE PAYMENT notice from Ascend. "
-        "Policy MXL0446256 is past due: $3,528.22 was due 09/11/2026.\n"
+        "Policy MXL•••••56 is past due: $3,528.22 was due 09/11/2026.\n"
         "Shoreline Builders LLC"
     )
     assert "past_due" not in result["note_text"]
@@ -490,3 +490,4 @@ def test_fire_task_dry_run_validates_without_firing():
 def test_fire_task_rejects_incomplete_payload():
     with pytest.raises(ValueError):
         zapier_tasks.fire_task({"task_title": "no ids"}, dry_run=True)
+
