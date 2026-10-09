@@ -72,8 +72,8 @@ def test_missing_email_and_non_zero_and_stale_run_alert_during_hours():
 
 
 def test_newest_created_date_stall_uses_eastern_time():
-    # 10:15 AM ET, checked at 12:00 PM ET, is 105 minutes and over the default 90.
-    problems = check_task_intake(now=_at(5, 12), heartbeats=[_beat()])
+    # 10:15 AM ET, checked at 12:00 PM ET, is 105 minutes and over an explicit 90.
+    problems = check_task_intake(now=_at(5, 12), heartbeats=[_beat()], stall_limit=90)
     assert any("newest Created Date" in item for item in problems)
 
     fresh_task = check_task_intake(
@@ -173,16 +173,16 @@ def test_stall_alerts_once_then_one_recovery_line():
         created_at="2026-10-05T15:55:00+00:00",
         newest_created_et="2026-10-05T10:15:00-04:00",
     )]
-    first = check_task_intake(now=_at(5, 12), heartbeats=old, episode=episode)
+    first = check_task_intake(now=_at(5, 12), heartbeats=old, episode=episode, stall_limit=90)
     assert any("newest Created Date has not moved" in item for item in first)
     assert episode["stall_open"] is True
-    second = check_task_intake(now=_at(5, 12, 10), heartbeats=old, episode=episode)
+    second = check_task_intake(now=_at(5, 12, 10), heartbeats=old, episode=episode, stall_limit=90)
     assert not any("newest Created Date" in item for item in second)
     fresh = [_beat(
         created_at="2026-10-05T16:00:00+00:00",
         newest_created_et="2026-10-05T12:00:00-04:00",
     )]
-    recovery = check_task_intake(now=_at(5, 12, 5), heartbeats=fresh, episode=episode)
+    recovery = check_task_intake(now=_at(5, 12, 5), heartbeats=fresh, episode=episode, stall_limit=90)
     assert recovery == [RECOVERY_LINE]
     assert episode["stall_open"] is False
     quiet = check_task_intake(now=_at(5, 12, 10), heartbeats=fresh, episode=episode)
@@ -207,9 +207,9 @@ def test_stall_episode_is_remembered_across_probe_runs(tmp_path):
     )
     conn.commit()
     conn.close()
-    first = check_task_intake(now=_at(5, 12), db_path=str(db))
+    first = check_task_intake(now=_at(5, 12), db_path=str(db), stall_limit=90)
     assert any("newest Created Date has not moved" in item for item in first)
-    second = check_task_intake(now=_at(5, 12, 10), db_path=str(db))
+    second = check_task_intake(now=_at(5, 12, 10), db_path=str(db), stall_limit=90)
     assert not any("newest Created Date" in item for item in second)
 
 
@@ -583,3 +583,64 @@ def test_health_unit_loads_the_chat_identity_files():
     ).read_text(encoding="utf-8")
     assert "EnvironmentFile=-/etc/streetsmart-hermes/robie-4359-health.env" in unit
     assert "EnvironmentFile=-/etc/streetsmart-hermes/robie-svc-chat-key.env" in unit
+
+
+# ---- 2026-10-09: stall threshold and recovery exit code ----
+def _friday_beat(newest_et: str) -> list[dict]:
+    return [_beat(created_at="2026-10-09T21:30:00+00:00", newest_created_et=newest_et)]
+
+
+def test_default_stall_limit_is_120_minutes(monkeypatch):
+    from robie_job_engine.task_intake_health import DEFAULT_STALL_MINUTES, stall_minutes
+
+    monkeypatch.delenv("ROBIE_TASK_INTAKE_STALL_MINUTES", raising=False)
+    assert DEFAULT_STALL_MINUTES == 120 and stall_minutes() == 120
+
+
+def test_report_lag_race_does_not_page(monkeypatch):
+    """17:32 saw a 15:59 row (93 min) one minute before the 17:33 ingest showed 17:00."""
+    monkeypatch.delenv("ROBIE_TASK_INTAKE_STALL_MINUTES", raising=False)
+    beats = _friday_beat("2026-10-09T15:59:21-04:00")
+    assert check_task_intake(now=_at(9, 17, 32), heartbeats=beats, episode={}) == []
+    beats = _friday_beat("2026-10-09T14:54:09-04:00")
+    assert check_task_intake(now=_at(9, 16, 32), heartbeats=beats, episode={}) == []  # 98 min
+
+
+def test_a_real_two_hour_stall_still_pages_once(monkeypatch):
+    monkeypatch.delenv("ROBIE_TASK_INTAKE_STALL_MINUTES", raising=False)
+    beats = _friday_beat("2026-10-09T15:20:00-04:00")
+    episode: dict = {}
+    first = check_task_intake(now=_at(9, 17, 32), heartbeats=beats, episode=episode)
+    assert any("has not moved for 120 minutes" in item for item in first)
+    second = check_task_intake(now=_at(9, 17, 37), heartbeats=beats, episode=episode)
+    assert not any("newest Created Date" in item for item in second)
+
+
+def _main_with(monkeypatch, problems, posted=None, fail_post=False):
+    monkeypatch.setattr(
+        "robie_job_engine.task_intake_health.check_task_intake", lambda **_k: list(problems),
+    )
+
+    def fake_alert(items):
+        if fail_post:
+            raise RuntimeError("chat down")
+        if posted is not None:
+            posted.append(list(items))
+
+    monkeypatch.setattr("robie_job_engine.task_intake_health.alert", fake_alert)
+    return main([])
+
+
+def test_recovery_only_notice_exits_zero_and_still_posts(monkeypatch):
+    posted: list = []
+    assert _main_with(monkeypatch, [RECOVERY_LINE], posted) == 0
+    assert posted == [[RECOVERY_LINE]]
+    posted.clear()
+    assert _main_with(monkeypatch, [RECOVERY_LINE, LEASE_RECOVERY_LINE], posted) == 0
+    assert len(posted) == 1
+
+
+def test_recovery_mixed_with_a_problem_or_a_failed_post_still_exits_two(monkeypatch):
+    assert _main_with(monkeypatch, [RECOVERY_LINE, "the Task Check-In email is missing"]) == 2
+    assert _main_with(monkeypatch, ["the Task Check-In email is missing"]) == 2
+    assert _main_with(monkeypatch, [RECOVERY_LINE], fail_post=True) == 2

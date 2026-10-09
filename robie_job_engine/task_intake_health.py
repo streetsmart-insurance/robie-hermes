@@ -8,7 +8,7 @@ health Chat when:
   non-zero
 - the check-in email is missing
 - the newest Created Date, converted to Eastern, has not moved for longer
-  than the stall threshold (default 90 minutes). That stall pages once
+  than the stall threshold (default 120 minutes). That stall pages once
   per episode, then stays quiet until the row moves again (one recovery
   line). It does not page before 10:30 AM ET, so a quiet Monday morning
   does not page.
@@ -47,7 +47,12 @@ from .report_clock import age_minutes, as_eastern_clock, in_business_hours, repo
 logger = logging.getLogger("task_intake_health")
 
 DEFAULT_FRESH_MINUTES = 20
-DEFAULT_STALL_MINUTES = 90
+# The Task Check-In report arrives every 30 minutes and tasks are created
+# about an hour apart, so a healthy feed can show a newest row up to ~95
+# minutes old just before the next report is ingested. On 2026-10-09 a 90
+# minute limit paged at :32 (16:32, 17:32) one minute before the :33 ingest
+# showed a newer task, then sent a recovery line half an hour later.
+DEFAULT_STALL_MINUTES = 120
 DEFAULT_SAME_DIGEST_LIMIT = 3
 STALL_QUIET_UNTIL = time(10, 30)
 DEFAULT_DROPIN_DIR = "/etc/systemd/system/robie-task-intake.service.d"
@@ -56,6 +61,7 @@ DEFAULT_ENV_CHECK_STATE = (
 )
 RECOVERY_LINE = "the newest Created Date is moving again"
 LEASE_RECOVERY_LINE = "the driver lease is back with PRODUCTION"
+RECOVERY_ONLY_LINES = frozenset({RECOVERY_LINE, LEASE_RECOVERY_LINE})
 _ENV_FILE_ASSIGN_RE = re.compile(
     r"^(?:export\s+)?(?:ROBIE_EZLYNX_WRITE_SCOPE|ROBIE_PLAYGROUND)="
 )
@@ -568,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
     if args.no_chat:
         return 2
+    recovery_only = all(item in RECOVERY_ONLY_LINES for item in problems)
     try:
         alert(problems)
     except Exception as exc:  # noqa: BLE001
@@ -585,7 +592,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"task intake health alert could not post: {reason}"
             )
         return 2
-    return 2
+    # A recovery notice is good news. Exit 0 so the unit is not left "failed"
+    # until the next run.
+    return 0 if recovery_only else 2
 
 
 if __name__ == "__main__":
