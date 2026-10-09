@@ -117,6 +117,7 @@ from zoneinfo import ZoneInfo
 
 from .business_calendar import us_federal_holidays
 from .call_opt_out import pressed_opt_out
+from . import call_contact as cc
 from .bland_config import (
     CALLBACK_NUMBER,
     CALLBACK_NUMBER_SPOKEN,
@@ -756,9 +757,11 @@ def _policy_token_spans(text: str) -> List[tuple]:
     return [(m.start(), m.end()) for m in _POLICY_ALNUM_RE.finditer(text or "")]
 
 
-def _clear_phone_texts(text: str) -> List[str]:
-    """Raw spans the request clearly gives as a phone number."""
-    found: List[str] = []
+def _clear_phone_matches(text: str) -> List[tuple]:
+    """(start, raw) for spans the request clearly gives as a phone number,
+    in text order, after #814's exclusions (callback/voicemail wording and
+    StreetSmart numbers)."""
+    found: List[tuple] = []
     policy_spans = _policy_token_spans(text or "")
     formatted = list(_PHONE_FORMATTED_RE.finditer(text or ""))
     spans = [(m.start(), m.end()) for m in formatted]
@@ -769,7 +772,7 @@ def _clear_phone_texts(text: str) -> List[str]:
             continue
         if _never_dial(text, match.start(), match.group(0)):
             continue
-        found.append(match.group(0))
+        found.append((match.start(), match.group(0)))
     for match in _BARE_DIGIT_RUN_RE.finditer(text or ""):
         if _overlaps(match.start(), match.end(), spans):
             continue
@@ -783,8 +786,129 @@ def _clear_phone_texts(text: str) -> List[str]:
         if _never_dial(text, match.start(), digits):
             continue
         if _PHONE_WORDING_RE.search(_context_before(text, match.start())):
-            found.append(digits)
+            found.append((match.start(), digits))
+    found.sort(key=lambda item: item[0])
     return found
+
+
+def _clear_phone_texts(text: str) -> List[str]:
+    """Raw spans the request clearly gives as a phone number."""
+    return [raw for _, raw in _clear_phone_matches(text)]
+
+
+# A number explicitly labeled as the one to call: "phone", "cell", "mobile",
+# "number", "at", "call <someone> at", "home"/"work"/"office" (a label too,
+# so two labeled numbers still ask). Only the text right before the number
+# on the same line counts.
+_DIAL_LABEL_RE = re.compile(
+    r"(?i)(?:\b(?:phone|cell|cellphone|cell\s+phone|mobile|telephone|tel|"
+    r"home|work|office|landline|number)\b\.?(?:\s+(?:is|number|#|no\.?))?"
+    r"|\bat\b|\bcall\b(?:\s+\S+){0,6}\s+\bat\b)"
+    r"\s*[:#.\-]?\s*(?:\+?1[\s.\-]?)?\(?$"
+)
+
+# Why a Robie Call did not get one number to dial.
+AMBIGUOUS_DIGITS = "ambiguous_digits"
+MULTIPLE_NUMBERS = "multiple_numbers"
+
+
+def _line_before(text: str, start: int) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    return text[line_start:start]
+
+
+def _first_line_span(text: str) -> tuple:
+    """(start, end) of the first line that has any text."""
+    pos = 0
+    for line in text.split("\n"):
+        if line.strip():
+            return pos, pos + len(line)
+        pos += len(line) + 1
+    return 0, 0
+
+
+# A first line that is only a phone number: "7326688161", "+1 7326688161",
+# "17326688161". Area code and exchange must start 2-9 (a dialable NANP
+# number).
+_BARE_FIRST_LINE_RE = re.compile(r"^\s*(\+?1[\s.\-]?)?([2-9]\d{2}[2-9]\d{6})\s*[.,;]?\s*$")
+
+
+def _bare_first_line_phone(text: str) -> Optional[tuple]:
+    """(start, digits) when the first line of the description is a bare
+    phone number and nothing else. Robie Call treats that as the number to
+    dial (Jake writes his test tasks this way, task 63558413). A bare
+    10-digit run anywhere else still asks: it could be a policy number.
+    #814's exclusions still apply (a StreetSmart number is never dialed)."""
+    first_start, first_end = _first_line_span(text or "")
+    if first_end <= first_start:
+        return None
+    match = _BARE_FIRST_LINE_RE.match(text[first_start:first_end])
+    if not match:
+        return None
+    digits = "".join(c for c in match.group(0) if c.isdigit())
+    if _never_dial(text, first_start + match.start(2), digits):
+        return None
+    return first_start + match.start(2), digits
+
+
+def _typed_phone_choice(instruction: str) -> tuple:
+    """(normalized phone or None, why-not or None, how it was chosen).
+
+    One distinct typed number: dial it. Two or more distinct typed numbers
+    (after #814's callback/voicemail and StreetSmart exclusions): dial only
+    the one that clearly wins, the one on the first line or the one
+    explicitly labeled ("phone", "cell", "at", "call X at"). A first line
+    that is only a phone number counts as typed. If none wins,
+    or more than one does, do not guess: why-not is MULTIPLE_NUMBERS (the
+    same rule as the Cloud Run Robie Call hard block, #811). A bare 10-digit
+    run with no phone wording anywhere but alone on the first line stays
+    AMBIGUOUS_DIGITS: it could be a policy number.
+    """
+    text = instruction or ""
+    matches = _clear_phone_matches(text)
+    bare_first = _bare_first_line_phone(text)
+    if bare_first is not None and all(start != bare_first[0] for start, _ in matches):
+        matches = sorted(matches + [bare_first], key=lambda item: item[0])
+    distinct: List[str] = []
+    for _, raw in matches:
+        phone = _normalize_phone("".join(c for c in raw if c.isdigit()))
+        if phone and phone not in distinct:
+            distinct.append(phone)
+    if len(distinct) == 1:
+        return distinct[0], None, "only"
+    if len(distinct) > 1:
+        first_start, first_end = _first_line_span(text)
+        first_line: List[str] = []
+        labeled: List[str] = []
+        for start, raw in matches:
+            phone = _normalize_phone("".join(c for c in raw if c.isdigit()))
+            if not phone:
+                continue
+            if first_start <= start < first_end and phone not in first_line:
+                first_line.append(phone)
+            if _DIAL_LABEL_RE.search(_line_before(text, start)) and phone not in labeled:
+                labeled.append(phone)
+        winners = list(dict.fromkeys(first_line + labeled))
+        if len(winners) == 1:
+            how = "first_line" if winners[0] in first_line else "labeled"
+            return winners[0], None, how
+        return None, MULTIPLE_NUMBERS, ""
+    formatted = list(_PHONE_FORMATTED_RE.finditer(text))
+    spans = [(m.start(), m.end()) for m in formatted] + _policy_token_spans(text)
+    for match in _BARE_DIGIT_RUN_RE.finditer(text):
+        if _overlaps(match.start(), match.end(), spans):
+            continue
+        if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
+            continue
+        digits = match.group(0)
+        if _is_known_policy_shape(digits):
+            continue
+        if _never_dial(text, match.start(), digits):
+            continue
+        # Bare 10-digit (or leading-1) run, no phone wording: could be
+        # a policy number. Ask. Do not dial it.
+        return None, AMBIGUOUS_DIGITS, ""
+    return None, None, ""
 
 
 def _phone_directive(instruction: str) -> tuple:
@@ -800,28 +924,12 @@ def _phone_directive(instruction: str) -> tuple:
     however it is worded.
     Digits after policy/pol/claim/quote are never a phone. A known policy
     shape is never a phone. A bare 10-digit run with none of those signals
-    is ambiguous — the caller must ask, not dial.
+    is ambiguous — the caller must ask, not dial. Two or more typed
+    numbers with no clear winner (first line or labeled) are ambiguous
+    too; see _typed_phone_choice.
     """
-    text = instruction or ""
-    clear = _clear_phone_texts(text)
-    if clear:
-        return _normalize_phone("".join(c for c in clear[0] if c.isdigit())), False
-    formatted = list(_PHONE_FORMATTED_RE.finditer(text))
-    spans = [(m.start(), m.end()) for m in formatted] + _policy_token_spans(text)
-    for match in _BARE_DIGIT_RUN_RE.finditer(text):
-        if _overlaps(match.start(), match.end(), spans):
-            continue
-        if _POLICY_CONTEXT_RE.search(_context_before(text, match.start())):
-            continue
-        digits = match.group(0)
-        if _is_known_policy_shape(digits):
-            continue
-        if _never_dial(text, match.start(), digits):
-            continue
-        # Bare 10-digit (or leading-1) run, no phone wording: could be
-        # a policy number. Ask. Do not dial it.
-        return None, True
-    return None, False
+    phone, why_not, _ = _typed_phone_choice(instruction)
+    return phone, why_not is not None
 
 
 def _extract_explicit_phone(instruction: str) -> Optional[str]:
@@ -1227,30 +1335,27 @@ def _poll_call_status(
     return last
 
 
-def _call_was_connected(status_result: Dict[str, Any]) -> bool:
-    """Did this terminal call status represent an actual successful connection?
+def _call_was_connected(status_result: Dict[str, Any], *,
+                        message_left: bool = False) -> bool:
+    """Did this terminal call reach a live person (or leave the voicemail)?
 
     A call that ended as "failed", "busy", "no-answer", or "canceled" is
-    terminal but NOT successful. Only "completed" with evidence of actual
-    connection (answered_by human/voicemail, or positive duration) counts.
-    This separates "call ended" from "task succeeded."
+    terminal but NOT successful. A "completed" call is successful only when
+    the transcript (or Bland's answered_by when there is no transcript)
+    shows a live person, or Robie left the voicemail message. A recording,
+    robocall, phone menu, hold message, call screener or voicemail greeting
+    with no message is NOT successful (call d25f46d6, Oct 8 2026). See
+    call_contact.classify_contact.
     """
     if not status_result.get("terminal"):
         return False
     status = str(status_result.get("status") or "").lower()
     if status not in SUCCESSFUL_TERMINAL_STATUSES:
         return False
-    # "completed" needs evidence of actual connection
-    answered = str(status_result.get("answered_by") or "").lower()
-    if answered in ("human", "voicemail"):
-        return True
-    try:
-        dur = float(status_result.get("duration")
-                    or status_result.get("duration_s")
-                    or status_result.get("call_duration") or 0)
-    except (TypeError, ValueError):
-        dur = 0
-    return dur > 0
+    contact = status_result.get("contact")
+    if not contact:
+        contact, _ = cc.classify_contact(status_result, message_left=message_left)
+    return contact in cc.SUCCESSFUL_CONTACTS
 
 
 def _was_transferred(status_result: Dict[str, Any]) -> bool:
@@ -1316,22 +1421,33 @@ def _format_transfer_note(applicant_name: str, instruction: str,
 
 
 def _verify_call_outcome(
-    bland_port: Any, call_ids: List[str], config: RobieCallConfig
+    bland_port: Any, call_ids: List[str], config: RobieCallConfig,
+    *, redialed: bool = False,
 ) -> Dict[str, Any]:
     """Verify every placed call_id against Bland.
 
     Returns {"verified": bool, "successful": bool, "available": bool,
-             "statuses": {call_id: poll-result}}.
+             "contact": str, "statuses": {call_id: poll-result}}.
     verified=True when at least one call reached a terminal status.
-    successful=True only when at least one call reached a SUCCESSFUL
-    terminal status with evidence of actual connection. A call that ended
-    as failed/busy/no-answer/canceled is verified (we know it ended) but
-    NOT successful (it must not count as task completion).
+    successful=True only when at least one call reached a live person or
+    left the voicemail message (call_contact.SUCCESSFUL_CONTACTS). A call
+    that ended as failed/busy/no-answer/canceled, or reached only a
+    recording, phone menu, hold message, call screener or voicemail
+    greeting, is verified (we know it ended) but NOT successful.
+    The second dial (Jake's double dial) is the one that leaves the
+    voicemail message, so a voicemail there counts as message left.
     """
     statuses: Dict[str, Dict[str, Any]] = {}
     available = False
-    for cid in call_ids:
+    contacts: List[str] = []
+    for index, cid in enumerate(call_ids):
         res = _poll_call_status(bland_port, cid, config)
+        if res.get("terminal"):
+            contact, reason = cc.classify_contact(
+                res, message_left=bool(redialed or index >= 1))
+            res["contact"] = contact
+            res["contact_reason"] = reason
+            contacts.append(contact)
         statuses[cid] = res
         if res.get("available"):
             available = True
@@ -1343,6 +1459,7 @@ def _verify_call_outcome(
         "verified": verified,
         "successful": successful,
         "available": available,
+        "contact": cc.best_contact(contacts) if contacts else None,
         "statuses": statuses,
     }
 
@@ -1364,6 +1481,11 @@ def _attach_verified_status(
             "answered_by": st.get("answered_by"),
             "duration": st.get("duration_s"),
             "outcome_verified": True,
+            "contact": st.get("contact"),
+            "contact_reason": st.get("contact_reason"),
+            "recording_kind": (
+                cc.recording_kind(st) if st.get("contact") == cc.RECORDING else None
+            ),
         }
         if i < len(attempts) and isinstance(attempts[i], dict):
             attempts[i] = {**attempts[i], "final_status": final_status}
@@ -1773,6 +1895,7 @@ def _format_outcome_note(
     name_mismatch: Optional[str] = None,
     producer_name: str = "",
     called_party: str = "",
+    phone_choice: str = "",
 ) -> str:
     """Outcome note. Plain English, first line states the outcome.
 
@@ -1787,27 +1910,40 @@ def _format_outcome_note(
     behalf = (producer_name or "").strip()
     opened = _outcome_opening(who, behalf, instruction, dry_run=False)
 
-    # Verdict: did the call verifiably happen? A completed call with
-    # duration connected, even if answered_by is "unknown" (we know it
-    # ran; we just don't know who picked up).
-    def _connected(a: Dict[str, Any]) -> bool:
+    # Verdict: who or what answered. Bland's "completed" only means the
+    # line picked up; the transcript decides whether a live person was
+    # reached (call_contact.classify_contact). A recording, phone menu,
+    # hold message or call screener is said plainly: nobody was reached.
+    vm_hit = bool(call.get("voicemail_hit"))
+    message_left = bool(call.get("redialed")) or any(
+        str(
+            (a.get("final_status") or {}).get("voicemail_action")
+            or a.get("voicemail_action")
+            or ""
+        ) == "leave_message"
+        for a in attempts
+    )
+    contacts: List[str] = []
+    recording_kind = ""
+    for a in attempts:
         if not a.get("success"):
-            return False
+            continue
         final = a.get("final_status") or {}
-        answered = str(final.get("answered_by") or "").lower()
-        if answered in ("human", "voicemail"):
-            return True
-        if str(final.get("status") or "").lower() == "completed":
-            try:
-                dur = float(final.get("duration") or
-                            final.get("call_duration") or 0)
-            except (TypeError, ValueError):
-                dur = 0
-            if dur > 0:
-                return True
-        return False
-
-    connected = any(_connected(a) for a in attempts)
+        if not final:
+            continue
+        contact = final.get("contact")
+        if not contact:
+            contact, _ = cc.classify_contact(final, message_left=message_left)
+        if contact == cc.UNCONFIRMED and vm_hit:
+            contact = (cc.VOICEMAIL_MESSAGE_LEFT if message_left
+                       else cc.VOICEMAIL_NO_MESSAGE)
+        if contact == cc.RECORDING and not recording_kind:
+            recording_kind = str(final.get("recording_kind") or "")
+        contacts.append(contact)
+    contact = cc.best_contact(contacts) if contacts else ""
+    connected = contact in (cc.PERSON, cc.VOICEMAIL_MESSAGE_LEFT,
+                            cc.VOICEMAIL_NO_MESSAGE, cc.RECORDING,
+                            cc.UNCONFIRMED)
     # "unknown" covers the placed-but-unverifiable case: Bland accepted the
     # dial (top-level success) but no attempt proves a connection. Only a
     # top-level failure renders as NOT successful.
@@ -1820,37 +1956,29 @@ def _format_outcome_note(
 
     disclose = False
     if connected:
-        vm_hit = bool(call.get("voicemail_hit"))
-        redialed = bool(call.get("redialed"))
-        answered = ""
-        for a in reversed(attempts):
-            if a.get("success"):
-                answered = str((a.get("final_status") or {}).get("answered_by")
-                               or "").lower()
-                break
-        message_left = redialed or any(
-            str(
-                (a.get("final_status") or {}).get("voicemail_action")
-                or a.get("voicemail_action")
-                or ""
-            ) == "leave_message"
-            for a in attempts
-        )
-        if answered == "human":
-            happened = "They answered and I talked to them."
+        if contact == cc.PERSON:
+            lines = [opened, "They answered and I talked to them."]
             disclose = True
-        elif answered == "voicemail" or vm_hit:
-            if message_left:
-                happened = "No answer, left a voicemail."
-                disclose = True
-            else:
-                happened = "No answer, no message."
+        elif contact == cc.VOICEMAIL_MESSAGE_LEFT:
+            lines = [opened, "No answer, left a voicemail."]
+            disclose = True
+        elif contact == cc.VOICEMAIL_NO_MESSAGE:
+            lines = [opened, "No answer, no message."]
+        elif contact == cc.RECORDING:
+            what = recording_kind or "a recording or automated phone system"
+            lines = [
+                opened,
+                f"Nobody was reached. Only {what} answered, not a live "
+                "person, so I hung up and left no message.",
+                "This task is left open for a person to follow up.",
+            ]
         else:
-            happened = (
+            lines = [
+                opened,
                 "The call connected, but I couldn't confirm whether it "
-                "reached the person or voicemail."
-            )
-        lines = [opened, happened]
+                "reached the person or voicemail.",
+                "This task is left open for a person to check.",
+            ]
     elif unknown and not _is_definite_no_answer(attempts):
         lines = [
             opened,
@@ -1873,6 +2001,11 @@ def _format_outcome_note(
     if phone_mismatch:
         lines.append("Note: the task mentioned a different phone number than "
                      "the one on file; we called the number on file.")
+    if phone_choice in ("first_line", "labeled"):
+        where = ("the one on the first line" if phone_choice == "first_line"
+                 else "the one labeled as the number to call")
+        lines.append("Note: the task had more than one phone number; I "
+                     f"called {where}.")
     if name_mismatch:
         lines.append(f"Note: the task mentioned {name_mismatch}, but the "
                      f"applicant on file is {client} — please check the right "
@@ -2293,8 +2426,35 @@ def _handle_call_task(
         phone_policy = "on_file_only"
     explicit_phone = None
     phone_text_ambiguous = False
+    phone_why_not = None
+    phone_choice = ""
     if phone_policy != "on_file_only":
-        explicit_phone, phone_text_ambiguous = _phone_directive(instruction)
+        explicit_phone, phone_why_not, phone_choice = _typed_phone_choice(instruction)
+        phone_text_ambiguous = phone_why_not is not None
+    if phone_why_not == MULTIPLE_NUMBERS:
+        # Two or more typed numbers and none clearly wins (first line or
+        # labeled). Same rule as the Cloud Run Robie Call block (#811):
+        # do not guess, ask for the one number.
+        log.warning("more than one typed number in task %s and none clearly "
+                    "wins; asking instead of dialing", task_id)
+        clar_note = (
+            "Robie did not call because more than one phone number was "
+            f"typed in this {_request_word(task)}, and Robie will not guess "
+            f"which one to call. {_redo_hint(task)} with just the one "
+            "number to call, or put it on the first line."
+        )
+        wb = _writeback_once(
+            ports, task_id, "clarification_multiple_numbers",
+            applicant_id, clar_note, title_hint=None)
+        _mark_processed(task_id)
+        _mark_content_processed(applicant_id, instruction)
+        return fail(
+            "more than one phone number typed in the task and none clearly "
+            "wins; asked for the one number, task left open",
+            writeback=wb,
+            multiple_numbers=True,
+            clarification_note_filed=wb.get("status") in ("filed", "dry_run"),
+        )
     if phone_text_ambiguous:
         log.warning("ambiguous number in task %s; asking instead of dialing",
                     task_id)
@@ -2476,9 +2636,11 @@ def _handle_call_task(
     # applicant ("call Mary Smith" on John Doe's account), do NOT dial —
     # the phone belongs to the applicant, not the named person. Fail closed
     # with a clarification note instead of merely flagging it in the note.
+    # A Robie Call dials the typed number it chose, so the other typed
+    # numbers are not a "different number than the one on file".
     phone_mismatch = (
         None
-        if phone_policy == "on_file_only"
+        if phone_policy in ("on_file_only", "typed_only")
         else _instruction_phone_mismatch(instruction, phone)
     )
     name_mismatch = _instruction_name_mismatch(instruction, applicant_name)
@@ -2910,7 +3072,9 @@ def _handle_call_task(
             "statuses": {}, "source": "dry_run",
         }
     else:
-        outcome = _verify_call_outcome(ports.bland, call_ids, config)
+        outcome = _verify_call_outcome(
+            ports.bland, call_ids, config,
+            redialed=bool(call_result.get("redialed")))
     call_result = _attach_verified_status(call_result, outcome)
     outcome_verified = bool(outcome.get("verified"))
     outcome_successful = bool(outcome.get("successful"))
@@ -2927,6 +3091,7 @@ def _handle_call_task(
             applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
+            phone_choice=phone_choice,
         )
         writeback = _writeback_once(
             ports, task_id, "outcome_unverified",
@@ -2971,28 +3136,44 @@ def _handle_call_task(
             applicant_name, note_topic, call_result, "skipped",
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
+            phone_choice=phone_choice,
         )
         writeback = _writeback_once(
             ports, task_id, "outcome_unsuccessful",
             applicant_id, note_body, title_hint=None
         )
+        contact = outcome.get("contact") or cc.MISS
+        reached_line = {
+            cc.RECORDING: "Nobody was reached: only a recording or automated "
+                          "phone system answered.",
+            cc.VOICEMAIL_NO_MESSAGE: "Nobody was reached: voicemail "
+                                     "greeting, no message left.",
+            cc.UNCONFIRMED: "The line connected, but nothing shows a live "
+                            "person was reached.",
+        }.get(contact, "The call did not connect.")
         chat_alerted = _chat_alert(
             ports, config,
             f"Robie Call ENDED WITHOUT SUCCESS for applicant "
             f"{applicant_id} (task {task_id}, {'; '.join(terminal_statuses)}). "
-            f"The call did not connect. Task left OPEN for human review — "
+            f"{reached_line} Task left OPEN for human review — "
             f"not reassigned.",
         )
         _mark_processed(task_id)
         _mark_content_processed(applicant_id, instruction)
+        if contact == cc.MISS:
+            error = ("call ended without success (failed/busy/no-answer/"
+                     "canceled); task left open")
+        else:
+            error = (f"call ended without success (no live person reached: "
+                     f"{contact}); task left open")
         return fail(
-            "call ended without success (failed/busy/no-answer/canceled); "
-            "task left open",
+            error,
             call=call_result,
             writeback=writeback,
             outcome_verified=True,
             outcome_successful=False,
             outcome_verification_available=outcome.get("available"),
+            contact=contact,
             chat_alerted=chat_alerted,
         )
 
@@ -3029,6 +3210,7 @@ def _handle_call_task(
             applicant_name, note_topic, call_result, recording_status,
             phone_mismatch=phone_mismatch, name_mismatch=name_mismatch,
             producer_name=producer_name, called_party=called_party,
+            phone_choice=phone_choice,
         )
     return _finalize_call(
         task_id=task_id,
@@ -3262,6 +3444,7 @@ def _finalize_call(
         "outcome_verified": outcome_verified,
         "outcome_successful": outcome_successful,
         "outcome_verification_available": outcome.get("available"),
+        "contact": outcome.get("contact"),
         "error": error,
     }
     if call_result.get("recovered_from_checkpoint"):
@@ -3358,7 +3541,8 @@ def _recover_interrupted_call(
             ports, config,
             f"Recovered Robie Call for applicant {applicant_id} (task "
             f"{task_id}): the previous attempt's call ENDED WITHOUT SUCCESS "
-            f"(failed/busy/no-answer/canceled). Task left OPEN for human review.",
+            f"(no live person reached: {outcome.get('contact') or 'miss'}). "
+            f"Task left OPEN for human review.",
         )
         _mark_processed(task_id)
         _mark_content_processed(applicant_id, instruction)

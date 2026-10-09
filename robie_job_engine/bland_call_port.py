@@ -317,10 +317,20 @@ class BlandTransportCallPort:
             )
         except (BlandTransportRefused, BlandTransportError):
             return {"ok": False, "status": "unknown"}
+        # The transcript and Bland's summary decide whether a live person
+        # was reached (call_contact.classify_contact). "completed" alone
+        # only means the line picked up: call d25f46d6 reached a hold
+        # message and a recorded sales pitch and was still "completed".
+        transcripts = detail.get("transcripts")
         return {
             "ok": True,
             "status": detail.get("status") or detail.get("queue_status") or "unknown",
             "answered_by": detail.get("answered_by"),
             "duration_s": detail.get("call_length") or detail.get("duration"),
             "ended_at": detail.get("end_at") or detail.get("ended_at"),
+            "transcripts": transcripts if isinstance(transcripts, list) else None,
+            "concatenated_transcript": detail.get("concatenated_transcript"),
+            "summary": detail.get("summary"),
+            "call_ended_by": detail.get("call_ended_by"),
+            "error_message": detail.get("error_message"),
         }
