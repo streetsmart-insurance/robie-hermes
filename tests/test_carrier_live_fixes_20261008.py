@@ -1182,6 +1182,77 @@ class FaoStuckTabTests(unittest.TestCase):
                          as_of=__import__("datetime").date(2026, 10, 8))
         self.assertEqual(browser.replace_stuck_tab.call_count, 2)
 
+    def test_recovery_reuses_the_open_browser_under_a_timeout(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        browser, _stuck, fresh = self._browser()
+        import inspect
+        self.assertNotIn("sync_playwright", inspect.getsource(type(browser).reconnect_after_timeout))
+        browser.reconnect_after_timeout()
+        self.assertIs(browser.page, fresh)
+        fresh.goto.assert_called_once_with(
+            fao.REPORT_URL, wait_until="domcontentloaded", timeout=fao.STUCK_TAB_GOTO_MS,
+        )
+
+    def test_dead_connection_during_recovery_is_partial(self):
+        import os
+        import tempfile
+
+        from robie_job_engine import progressive_pending_cancellation as fao
+        from robie_job_engine.intake_core import SourceArchive
+
+        browser, stuck, _fresh = self._browser()
+        stuck.context.new_page.side_effect = RuntimeError("Target closed")
+        rows = tuple(
+            SimpleNamespace(policy_number=n, tab_label="", reason="NON-PAYMENT", insured_name="A",
+                            cancel_date=None, list_url="u")
+            for n in ("970498127", "871490213")
+        )
+        browser.load_report = lambda: None
+        browser.screenshot_report = lambda: b"\x89PNG\r\n\x1a\n"
+        browser.select_tab = lambda _label: None
+        seen = {"n": 0}
+
+        def load_tab(_label):
+            seen["n"] += 1
+            return rows if seen["n"] == 1 else ()
+
+        browser.load_current_tab = load_tab
+        browser.open_policy_summary = mock.Mock(side_effect=TimeoutError("summary page timed out"))
+        browser.finish_tabs = lambda: None
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"ROBIE_ENV": "TEST", "ROBIE_BROWSER_CDP_URL": "http://127.0.0.1:9223"},
+        ), mock.patch.object(fao, "_row_payload", side_effect=lambda row, **kw: {"policy": row.policy_number, **kw}), \
+                mock.patch("robie_job_engine.document_retrieval_filing.require_carrier_pull"), \
+                mock.patch.object(fao, "refuse_production_host"):
+            receipt = fao.run_pull(
+                browser, fao.FaoCancellationLedger(Path(tmp)), SourceArchive(Path(tmp) / "s"),
+                as_of=__import__("datetime").date(2026, 10, 8),
+            )
+        self.assertEqual(receipt["status"], "PARTIAL")
+        self.assertEqual(receipt["unprocessed"], 1)
+        self.assertIn("connection is dead", receipt["reason"])
+
+    def test_american_strategic_policy_is_held_as_bop(self):
+        from robie_job_engine import progressive_pending_cancellation as fao
+
+        browser = fao.PlaywrightFaoCancellationBrowser.__new__(fao.PlaywrightFaoCancellationBrowser)
+        page = mock.Mock()
+        page.url = "https://www.foragentsonly.com/managepolicies/"
+        link = mock.Mock()
+        link.count.return_value = 1
+        page.get_by_role.return_value = link
+
+        def wait_for_url(predicate, timeout):
+            page.url = "https://policy.americanstrategic.com/Express/Default.aspx"
+            self.assertTrue(predicate(page.url))
+            self.assertGreaterEqual(timeout, 30000)
+
+        page.wait_for_url.side_effect = wait_for_url
+        browser.page = page
+        with self.assertRaisesRegex(IntakeHold, "BOP policy, handled by the BOP pull"):
+            browser.open_policy_summary("NJA129565")
+
 
 class FinysLandingReloadTests(unittest.TestCase):
     """Live 2026-10-08 c01e424c: tab left on Policy Summary -> "Finys table is missing"."""
@@ -1198,7 +1269,9 @@ class FinysLandingReloadTests(unittest.TestCase):
                 mock.patch.object(fos, "_has_pending_grid", return_value=True), \
                 mock.patch.object(fos, "_dismiss_finys_message") as dismiss:
             self.assertEqual(browser.load_pending_items(), items)
-        page.goto.assert_called_once_with(fos.FINYS_LANDING_URL, wait_until="domcontentloaded")
+        page.goto.assert_called_once_with(
+            fos.FINYS_LANDING_URL, wait_until="domcontentloaded", timeout=fos._ACTION_TIMEOUT_MS,
+        )
         dismiss.assert_called_once()
 
     def test_still_missing_after_reload_holds(self):

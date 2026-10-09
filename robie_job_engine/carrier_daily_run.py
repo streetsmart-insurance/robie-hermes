@@ -345,7 +345,10 @@ def render_summary(summary: dict[str, Any]) -> str:
         for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]:
             lines.append(f"    {count} held: {reason}")
     t = summary["totals"]
-    lines.append(f"Total: {t['pdfs']} new PDFs, {t['uploaded']} uploaded to Drive, {t['failed']} carrier(s) failed.")
+    lines.append(
+        f"Total: {t['pdfs']} new PDFs, {t['uploaded']} uploaded to Drive, "
+        f"{t['failed']} carrier(s) failed, {t.get('partial', 0)} partial."
+    )
     return "\n".join(lines)
 
 
@@ -435,6 +438,7 @@ def run_daily(
         "pdfs": sum(int(r.get("downloaded") or 0) for r in results.values()),
         "uploaded": sum(len((r.get("drive") or {}).get("uploaded") or []) for r in results.values()),
         "failed": sum(1 for r in results.values() if r["status"] == "FAILED"),
+        "partial": sum(1 for r in results.values() if r["status"] == "PARTIAL"),
     }
     summary = {"as_of": day.isoformat(), "carriers": results, "totals": totals}
     text = render_summary(summary)

@@ -56,6 +56,35 @@ def _body(page: Any, n: int = 400) -> str:
         return ""
 
 
+def _session_taken_by_another_window(page: Any) -> bool:
+    """Home page with Enable Login and a disabled User ID box.
+
+    Another window owns the session. Do not click Enable Login.
+    """
+    text = _body(page, 800).lower()
+    taken = "another window" in text or "enable login" in text
+    disabled = False
+    try:
+        box = page.locator("#txtUserID")
+        if int(box.count()) == 1:
+            checker = getattr(box, "is_disabled", None)
+            if callable(checker):
+                try:
+                    disabled = bool(checker())
+                except TypeError:
+                    disabled = bool(checker(timeout=1000))
+            if not disabled:
+                attr = box.get_attribute("disabled")
+                disabled = attr is not None
+    except Exception:
+        disabled = False
+    if taken and disabled:
+        return True
+    if taken and "enable login" in text:
+        return True
+    return False
+
+
 def is_signed_in(page: Any) -> bool:
     host = _host(getattr(page, "url", "") or "")
     if host != NATGEN_HOST:
@@ -144,6 +173,8 @@ def login_natgen(
         page.goto(NATGEN_REPORTS, wait_until="domcontentloaded", timeout=60_000)
         sleep(5)
         return page
+    if _session_taken_by_another_window(page):
+        raise IntakeHold("NatGen session was taken by another window; Enable Login needed")
     if credentials is None:
         user, password = _get_secret(USER_SECRET), _get_secret(PASS_SECRET)
     else:

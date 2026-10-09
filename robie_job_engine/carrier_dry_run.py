@@ -417,9 +417,10 @@ def run_dry_run(
             for name in names:
                 spec = SPECS[name]
                 results[name] = _run_one(spec, day, output_root, lambda s=spec: _wrap_browser(s, cdp_browser))
-    totals = {"ok": 0, "held": 0, "failed": 0}
+    totals = {"ok": 0, "held": 0, "failed": 0, "partial": 0}
+    buckets = {"OK": "ok", "HELD": "held", "FAILED": "failed", "PARTIAL": "partial"}
     for r in results.values():
-        totals[{"OK": "ok", "HELD": "held", "FAILED": "failed"}[r["status"]]] += 1
+        totals[buckets.get(r["status"], "failed")] += 1
     return {
         "as_of": day.isoformat(),
         "mode": "dry-run",
@@ -457,10 +458,18 @@ def render_summary(summary: dict[str, Any]) -> str:
             # Do not repeat the run-level reason as its only item.
             if not (len(r["held"]) == 1 and hold_reason(r["held"][0]) == reason):
                 lines.extend(item_lines)
+        elif r["status"] == "PARTIAL":
+            left = r.get("unprocessed")
+            extra = f", {left} left" if left is not None else ""
+            reason = r.get("reason") or "the pull stopped early"
+            lines.append(f"- {r['display']}: PARTIAL — {r['downloaded']} downloaded{extra}. {reason}")
+            lines.extend(_held_lines(r["held"]))
         else:
             lines.append(f"- {r['display']}: FAILED — {r['error']}")
     t = summary["totals"]
-    lines.append(f"Totals: {t['ok']} ok, {t['held']} held, {t['failed']} failed.")
+    lines.append(
+        f"Totals: {t['ok']} ok, {t['held']} held, {t['failed']} failed, {t.get('partial', 0)} partial."
+    )
     return "\n".join(lines)
 
 
@@ -498,7 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(render_summary(summary))
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
-    return 0 if summary["totals"]["failed"] == 0 else 1
+    incomplete = summary["totals"]["failed"] or summary["totals"].get("partial", 0)
+    return 0 if not incomplete else 1
 
 
 if __name__ == "__main__":

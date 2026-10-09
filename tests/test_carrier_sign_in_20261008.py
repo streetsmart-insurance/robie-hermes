@@ -687,7 +687,7 @@ class FaoBudgetAndLogTests(unittest.TestCase):
             )
         self.assertEqual(receipt["status"], "PARTIAL")
         self.assertEqual(receipt["unprocessed"], 1)
-        self.assertIn("reconnect", receipt["reason"])
+        self.assertIn("connection is dead", receipt["reason"])
         self.assertIn("1 policies left unprocessed", receipt["reason"])
 
 

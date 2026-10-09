@@ -63,8 +63,12 @@ NAVBAR_TOGGLER = "nav div.navbar-toggler"
 FOS_PORTAL_LINK = "FOS PORTAL"
 DIARY_GRID_ID = "MyOpenTasks_DiaryGrid"
 KENDO_PAGE_SIZE = 100
-# 771 open tasks at 100 per page is eight pages. Stop rather than read forever.
-GRID_PAGE_BUDGET_S = 90
+# 771 open tasks at 100 per page is eight pages. A 90s budget stopped on page 7.
+GRID_PAGE_BUDGET_S = 240
+# Under the 25-minute outer limit, so a cutoff still writes a PARTIAL summary.
+FOS_DEADLINE_S = 18 * 60
+# Playwright's 30s default, applied to hidden cells, was about 3 minutes a policy.
+_ACTION_TIMEOUT_MS = 8000
 PORTAL_GOTO_MS = 15000
 LEDGER_NAME = "farmersofsalem-noc-ledger.json"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
@@ -115,6 +119,7 @@ _PENDING_FIELDS = (
     ("product", frozenset({"product", "line", "lob", "policy type"})),
     ("due_date", frozenset({"due date", "due", "due on", "cancel date", "cancellation date", "effective date"})),
     ("item_type", frozenset({"type", "task type", "item type"})),
+    ("notes", frozenset({"notes", "note"})),
     ("department", frozenset({"department", "dept"})),
 )
 # Open-task types that are cancellation notices. Referral, Reinstatement and
@@ -196,6 +201,50 @@ def require_finys_url(url: str) -> str:
 
 def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _node_text(node: Any) -> str:
+    """Read a cell without waiting out Playwright's default 30s visibility timeout.
+
+    ``text_content`` does not wait to become visible. Hidden Kendo tables
+    were holding each policy for minutes on Document Summary.
+    """
+    content = getattr(node, "text_content", None)
+    if callable(content):
+        try:
+            return _norm(content())
+        except Exception:
+            return ""
+    getter = getattr(node, "inner_text", None)
+    if not callable(getter):
+        return ""
+    try:
+        return _norm(getter(timeout=500))
+    except TypeError:
+        try:
+            return _norm(getter())
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _cap_page_timeouts(page: Any) -> None:
+    for name in ("set_default_timeout", "set_default_navigation_timeout"):
+        setter = getattr(page, name, None)
+        if not callable(setter):
+            continue
+        try:
+            setter(_ACTION_TIMEOUT_MS)
+        except Exception:
+            pass
+
+
+def _goto(page: Any, url: str) -> None:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=_ACTION_TIMEOUT_MS)
+    except TypeError:
+        page.goto(url)
 
 
 def _received_at(day: date) -> str:
@@ -292,18 +341,12 @@ def _header_label(cell: Any) -> str:
             nodes = []
         texts = []
         for node in nodes or []:
-            try:
-                text = _norm(node.inner_text())
-            except Exception:
-                text = ""
+            text = _node_text(node)
             if text:
                 texts.append(text)
         if len(texts) == 1:
             return texts[0]
-    try:
-        return _norm(cell.inner_text())
-    except Exception:
-        return ""
+    return _node_text(cell)
 
 
 def _table_headers(table: Any) -> tuple[str, ...]:
@@ -392,10 +435,7 @@ def _cell_text(row: Any, index: int) -> str:
         cells = []
     if index >= len(cells):
         return ""
-    try:
-        return _norm(cells[index].inner_text())
-    except Exception:
-        return ""
+    return _node_text(cells[index])
 
 
 @dataclass(frozen=True)
@@ -431,14 +471,23 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
     )
     items: list[PendingItem] = []
     holds: list[dict[str, str]] = []
+    scanned = 0
+    # A Type or Notes column is the live grid. Tables without either (the
+    # fixture) are already the cancellation list.
+    filter_rows = "item_type" in indexes or "notes" in indexes
     for row in _table_body_rows(table):
+        scanned += 1
         item_type = _cell_text(row, indexes["item_type"]) if "item_type" in indexes else ""
+        notes = _cell_text(row, indexes["notes"]) if "notes" in indexes else ""
         policy_text = _cell_text(row, indexes["policy_number"])
         insured = _cell_text(row, indexes["insured_name"]) if "insured_name" in indexes else ""
         product = _cell_text(row, indexes["product"]) if "product" in indexes else ""
         department = _cell_text(row, indexes["department"]) if "department" in indexes else ""
         commercial = _commercial_text(product, department, item_type)
-        cancel = (not item_type) or is_cancellation_task_type(item_type)
+        if filter_rows:
+            cancel = is_cancellation_task_type(item_type) or is_cancellation_task_type(notes)
+        else:
+            cancel = True
         if not cancel and commercial:
             try:
                 parse_policy_number(policy_text)
@@ -488,13 +537,16 @@ def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
         items.append(PendingItem(policy_number=policy, insured_name=insured, product=product, due_on=due_on))
     try:
         page.fos_row_holds = holds
+        page.fos_page_scanned = scanned
+        page.fos_page_kept = len(items)
     except Exception:
         pass
     return tuple(items)
 
 
 def _fos_log(message: str) -> None:
-    sys.stderr.write(f"FoS {message}\n")
+    stamp = datetime.now(_EASTERN).strftime("%H:%M:%S")
+    sys.stderr.write(f"{stamp} FoS {message}\n")
     sys.stderr.flush()
 
 
@@ -595,7 +647,12 @@ def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
     """
     evaluate = _page_evaluate(page)
     if evaluate is None:
-        return extract_pending_items(page)
+        items = extract_pending_items(page)
+        _fos_log(
+            f"kept {getattr(page, 'fos_page_kept', len(items))} cancellation rows "
+            f"of {getattr(page, 'fos_page_scanned', len(items))} grid rows"
+        )
+        return items
     deadline = monotonic() + GRID_PAGE_BUDGET_S
     _fos_log(f"open tasks grid page size {KENDO_PAGE_SIZE}")
     try:
@@ -607,6 +664,7 @@ def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
     holds: list[dict[str, str]] = []
     seen_items: set[tuple[str, str]] = set()
     seen_holds: set[tuple[str, str, str]] = set()
+    scanned = 0
     stopped = False
     page_index = 0
     while True:
@@ -614,7 +672,9 @@ def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
             stopped = True
             break
         page_index += 1
-        for item in extract_pending_items(page):
+        batch = extract_pending_items(page)
+        scanned += int(getattr(page, "fos_page_scanned", 0) or 0)
+        for item in batch:
             key = (item.policy_number, item.due_on.isoformat())
             if key in seen_items:
                 continue
@@ -645,8 +705,11 @@ def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
             ),
         })
         _fos_log("open tasks paging stopped at the time budget")
+    _fos_log(f"kept {len(items)} cancellation rows of {scanned} grid rows")
     try:
         page.fos_row_holds = holds
+        page.fos_page_scanned = scanned
+        page.fos_page_kept = len(items)
     except Exception:
         pass
     return tuple(items)
@@ -773,7 +836,7 @@ def search_policy(page: Any, policy_number: str) -> None:
     def summary_shows_policy() -> bool:
         try:
             label = page.locator(FINYS_SUMMARY_POLICY_LABEL)
-            if _count(label) == 1 and _norm(label.inner_text()) == policy:
+            if _count(label) == 1 and _node_text(label) == policy:
                 return True
         except Exception:
             pass
@@ -783,7 +846,7 @@ def search_policy(page: Any, policy_number: str) -> None:
             return False
         for heading in headings:
             try:
-                text = _norm(heading.inner_text())
+                text = _node_text(heading)
             except Exception:
                 continue
             if "policy summary" in text.casefold() and re.search(rf"\b{re.escape(policy)}\b", text):
@@ -1090,6 +1153,7 @@ class FinysFoSBrowser:
     def __init__(self, page: Any):
         self.page = page
         self._tasks_url: str | None = None
+        _cap_page_timeouts(page)
 
     def load_pending_items(self) -> tuple[PendingItem, ...]:
         require_finys_url(str(getattr(self.page, "url", "") or ""))
@@ -1100,7 +1164,7 @@ class FinysFoSBrowser:
             # https://fos.finys.com/ URL), so the task grid was absent. Close
             # any Finys message, reload the landing page once, and re-read.
             _dismiss_finys_message(self.page)
-            self.page.goto(FINYS_LANDING_URL, wait_until="domcontentloaded")
+            _goto(self.page, FINYS_LANDING_URL)
             if not _wait_for(lambda: _has_pending_grid(self.page)):
                 raise
             items = read_all_pending_items(self.page)
@@ -1141,7 +1205,7 @@ class FinysFoSBrowser:
     def return_to_pending_items(self) -> None:
         if self._tasks_url:
             try:
-                self.page.goto(self._tasks_url)
+                _goto(self.page, self._tasks_url)
             except Exception as exc:
                 raise IntakeHold("Could not return to the pending items list") from exc
         else:
@@ -1214,6 +1278,30 @@ class LocalDeliveryLedger:
     def pdf_path(self, day: date, filename: str) -> Path:
         return self.date_dir(day) / self._basename(filename)
 
+    def delivered_policy_ids(self) -> dict[str, str]:
+        """Policy number to document id for notices already saved.
+
+        A later run on the same ledger skips these policies instead of
+        opening Document Summary again.
+        """
+        found: dict[str, str] = {}
+        for key, entry in self._load()["items"].items():
+            if not isinstance(entry, dict):
+                continue
+            parts = str(key).split(":")
+            if len(parts) < 2:
+                continue
+            filename = str(entry.get("filename") or "")
+            processed = str(entry.get("processed_date") or "")
+            try:
+                day = date.fromisoformat(processed)
+            except ValueError:
+                continue
+            path = self.root / day.isoformat() / filename
+            if path.is_file() and not path.is_symlink():
+                found[parts[1].upper()] = str(key)
+        return found
+
     def delivery_status(self, *, document_id: str, filename: str, processed_on: date) -> bool:
         """True when this exact document was already delivered (dedup)."""
         self.ensure_private()
@@ -1285,6 +1373,8 @@ def run_pull(
     if not isinstance(as_of, date):
         raise IntakeHold("Pending items as-of date is missing or ambiguous")
 
+    started = monotonic()
+    deadline = started + FOS_DEADLINE_S
     items = browser.load_pending_items()
     png = browser.screenshot_pending_items()
     shot_name = f"pending-items-{as_of.isoformat()}.png"
@@ -1297,6 +1387,21 @@ def run_pull(
     downloaded: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = list(getattr(browser, "row_holds", ()) or [])
     skipped: list[str] = []
+    delivered = ledger.delivered_policy_ids()
+
+    def receipt(status: str, **extra: Any) -> dict[str, Any]:
+        payload = {
+            "status": status,
+            "carrier": CARRIER,
+            "as_of": as_of.isoformat(),
+            "count": len(downloaded),
+            "downloaded": downloaded,
+            "held": held,
+            "skipped": skipped,
+            "screenshot": shot_name,
+        }
+        payload.update(extra)
+        return payload
 
     def fail(reason: str) -> None:
         raise PullHeld(
@@ -1313,7 +1418,18 @@ def run_pull(
             },
         )
 
-    for item in items:
+    for index, item in enumerate(items):
+        if monotonic() >= deadline:
+            left = len(items) - index
+            reason = f"Farmers of Salem worker deadline reached; {left} policies left unprocessed"
+            _fos_log(reason)
+            return receipt("PARTIAL", reason=reason, unprocessed=left)
+        prior = delivered.get(item.policy_number)
+        if prior:
+            skipped.append(prior)
+            _fos_log(f"policy {item.policy_number} already downloaded; skipping")
+            continue
+        _fos_log(f"policy {item.policy_number} start")
         browser.return_to_pending_items()
         try:
             browser.open_policy(item.policy_number)
@@ -1381,16 +1497,7 @@ def run_pull(
             }
         )
 
-    return {
-        "status": "PULLED",
-        "carrier": CARRIER,
-        "as_of": as_of.isoformat(),
-        "count": len(downloaded),
-        "downloaded": downloaded,
-        "held": held,
-        "skipped": skipped,
-        "screenshot": shot_name,
-    }
+    return receipt("PULLED")
 
 
 # --- Test-only CLI ----------------------------------------------------------

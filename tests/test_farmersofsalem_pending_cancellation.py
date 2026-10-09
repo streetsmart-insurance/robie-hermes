@@ -732,6 +732,61 @@ class PullTests(unittest.TestCase):
         with self.assertRaisesRegex(PullHeld, "Document View download is not a PDF"):
             self._run(page)
 
+    def test_cancellation_type_or_notes_are_kept_and_counted(self):
+        class TypedPage(FakeFinysPage):
+            def _tasks_table(self):
+                return _table(
+                    ("Policy/Quote", "Insured Name", "Notes", "Type", "Due On"),
+                    [
+                        (HONJ, "Maria Lua", "please review", "Cancellation", "10/8/2026"),
+                        (HODJ, "Robert Diaz", "referral to underwriting", "Referral", "10/30/2026"),
+                        (HOMJ3, "Susan Park", "non-pay follow up", "Diary", "10/6/2026"),
+                    ],
+                )
+
+        page = TypedPage(pending_rows=())
+        import io
+        buffer = io.StringIO()
+        with patch.object(fos.sys, "stderr", buffer):
+            items = fos.read_all_pending_items(page)
+        self.assertEqual([item.policy_number for item in items], [HONJ, HOMJ3])
+        self.assertIn("kept 2 cancellation rows of 3 grid rows", buffer.getvalue())
+
+    def test_already_downloaded_policy_is_not_opened_again(self):
+        token = pdf_bytes(b"honj-notice")
+        page = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:1],
+            docs_by_policy={HONJ: _docs_for(HONJ, token)},
+        )
+        receipt, _ledger = self._run(page)
+        self.assertEqual(receipt["count"], 1)
+        again = FakeFinysPage(
+            pending_rows=PENDING_ROWS[:1],
+            docs_by_policy={HONJ: _docs_for(HONJ, token)},
+        )
+        opened = []
+        browser = FinysFoSBrowser(again)
+        browser.open_policy = lambda policy: opened.append(policy)
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        receipt2 = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(opened, [])
+        self.assertEqual(receipt2["count"], 0)
+        self.assertEqual(receipt2["skipped"], ["farmersofsalem:HONJ038633:2026-09-28:intent-to-cancel"])
+
+    def test_worker_deadline_is_partial_before_the_outer_limit(self):
+        page = FakeFinysPage(pending_rows=PENDING_ROWS[:2])
+        browser = FinysFoSBrowser(page)
+        browser.open_policy = lambda policy: (_ for _ in ()).throw(AssertionError(policy))
+        ledger = LocalDeliveryLedger(self.output)
+        archive = SourceArchive(self.output / "sources")
+        self.assertLess(fos.FOS_DEADLINE_S, 25 * 60)
+        with patch.object(fos, "FOS_DEADLINE_S", 0):
+            receipt = run_pull(browser, ledger, archive, as_of=AS_OF)
+        self.assertEqual(receipt["status"], "PARTIAL")
+        self.assertEqual(receipt["unprocessed"], 2)
+        self.assertIn("deadline", receipt["reason"])
+
     def test_non_test_env_blocks_pull(self):
         # farmersofsalem is not in the production filing allowlist, so any
         # non-TEST env holds before any browser work.

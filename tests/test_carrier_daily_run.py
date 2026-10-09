@@ -521,6 +521,24 @@ class GeicoNatgenLoginTests(unittest.TestCase):
         self.assertEqual(codes, [1000.0])
         loc.first.fill.assert_any_call("123456")
 
+    def test_natgen_other_window_holds_without_clicking_enable_login(self):
+        from robie_job_engine import natgen_login as nl
+        from robie_job_engine.intake_core import IntakeHold
+
+        page = mock.MagicMock()
+        page.url = "https://natgenagency.com/"
+        page.evaluate.return_value = "You appear to be logged in via another window. Enable Login"
+        box = mock.Mock()
+        box.count.return_value = 1
+        box.is_disabled.return_value = True
+        page.locator.return_value = box
+        ctx = mock.MagicMock()
+        ctx.pages = []
+        ctx.new_page.return_value = page
+        with self.assertRaisesRegex(IntakeHold, "NatGen session was taken by another window; Enable Login needed"):
+            nl.login_natgen(ctx, sleep=lambda s: None, credentials=lambda: ("user", "pass"))
+        box.fill.assert_not_called()
+
 
 class PlainSummaryTests(unittest.TestCase):
     def test_summary_has_no_field_names_selectors_or_exception_names(self):
@@ -547,6 +565,32 @@ class PlainSummaryTests(unittest.TestCase):
         self.assertIn("Progressive BOP: held. a carrier page did not look as expected", text)
         self.assertIn("not uploaded to Drive: Drive was not reachable", text)
         self.assertIn("1 held: Utica First policy X has no notice document", text)
+
+    def test_partial_is_not_reported_as_ok(self):
+        summary = {
+            "as_of": "2026-10-09",
+            "carriers": {
+                "progressive": {
+                    "display": "Progressive (FAO)",
+                    "status": "PARTIAL",
+                    "downloaded": 3,
+                    "held": [],
+                    "reason": "the pull stopped early",
+                    "unprocessed": 26,
+                },
+            },
+            "totals": {"pdfs": 3, "uploaded": 0, "failed": 0, "partial": 1},
+        }
+        text = daily.render_summary(summary)
+        self.assertIn("Progressive (FAO): partial. 3 downloaded, 26 policies left.", text)
+        self.assertNotIn("OK", text)
+        payload = {"carriers": {"progressive": {
+            "status": "PARTIAL", "downloaded": 3, "held": [], "reason": "the pull stopped early",
+            "unprocessed": 26,
+        }}}
+        result = daily.normalize_result("progressive", payload, returncode=1, stderr="")
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["unprocessed"], 26)
 
 
 class GeicoSessionExpiredTests(unittest.TestCase):

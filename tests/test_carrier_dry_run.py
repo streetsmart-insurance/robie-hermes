@@ -106,7 +106,7 @@ class DryRunTests(unittest.TestCase):
             summary = _run_with_patches(Path(tmp), {})
         self.assertEqual(summary["as_of"], "2026-10-05")
         self.assertEqual(summary["mode"], "dry-run")
-        self.assertEqual(summary["totals"], {"ok": 7, "held": 0, "failed": 0})
+        self.assertEqual(summary["totals"], {"ok": 7, "held": 0, "failed": 0, "partial": 0})
         for name, r in summary["carriers"].items():
             self.assertEqual(r["status"], "OK", name)
             self.assertEqual(r["downloaded"], 2, name)
@@ -129,7 +129,7 @@ class DryRunTests(unittest.TestCase):
         # Everyone else still ran.
         for name in ("geico", "travelers", "natgen", "uticafirst", "farmersofsalem"):
             self.assertEqual(carriers[name]["status"], "OK", name)
-        self.assertEqual(summary["totals"], {"ok": 5, "held": 1, "failed": 1})
+        self.assertEqual(summary["totals"], {"ok": 5, "held": 1, "failed": 1, "partial": 0})
 
     def test_pull_held_details_surface_as_held(self):
         import tempfile
@@ -144,6 +144,29 @@ class DryRunTests(unittest.TestCase):
         r = summary["carriers"]["geico"]
         self.assertEqual(r["status"], "HELD")
         self.assertEqual(r["held"][0]["reason"], "ledger conflict")
+
+    def test_partial_receipt_is_summarized(self):
+        import tempfile
+        receipt = {
+            "status": "PARTIAL",
+            "count": 3,
+            "downloaded": [{"filename": "a.pdf"}, {"filename": "b.pdf"}, {"filename": "c.pdf"}],
+            "held": [{"reason": "one policy timed out"}],
+            "skipped": [],
+            "reason": "Progressive FAO browser connection is dead; 26 policies left unprocessed",
+            "unprocessed": 26,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = _run_with_patches(Path(tmp), {"progressive": receipt}, carriers="progressive")
+        result = summary["carriers"]["progressive"]
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["downloaded"], 3)
+        self.assertEqual(result["unprocessed"], 26)
+        self.assertEqual(summary["totals"]["partial"], 1)
+        text = render_summary(summary)
+        self.assertIn("Progressive (FAO): PARTIAL", text)
+        self.assertIn("26 left", text)
+        self.assertNotIn("Dry run refused", text)
 
     def test_subset_runs_only_named_carriers(self):
         import tempfile
