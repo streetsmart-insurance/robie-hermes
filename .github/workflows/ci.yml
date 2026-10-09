@@ -26,6 +26,8 @@ jobs:
           fi
       - name: Install test and workbook dependencies
         run: python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "pypdf>=5,<7" "PyYAML>=6.0,<7"
+      - name: Test read-only Plaid candidate (synthetic only)
+        run: PYTHONPATH=. python -m pytest -q tests/test_plaid_bank_reader.py
       - name: Install Google Chat bridge dependencies
         run: python -m pip install -r services/chat-http-bridge/requirements.txt "cryptography>=41,<46"
       - name: Test Google Chat bridge
