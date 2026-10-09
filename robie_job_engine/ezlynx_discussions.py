@@ -66,8 +66,13 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # Production intentionally has no default: pass the literal base explicitly.
 UAT_DISCUSSION_BASE_URL = "https://app.uatezlynx.com/DiscussionApi/"
 
+# A dialable number is not part of a longer token: digits glued to letters or
+# other digits (a policy number such as "CT1278263263-2") are not a phone.
+# The lookbehind also stops a match from starting inside a longer digit run.
 _PHONE_LIKE = re.compile(
-    r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}"
+    r"(?<![A-Za-z0-9])"
+    r"(?:(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]?\d{3}[-.\s]?\d{4})"
+    r"(?![0-9])"
 )
 
 
