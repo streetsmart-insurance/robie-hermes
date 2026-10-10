@@ -1026,6 +1026,11 @@ class TaskAssignmentWorker:
             elif legacy.get("state") != "confirmed":
                 raise UnverifiedNoteError("Earlier note intent is unresolved; not sent")
         self._last_note_kind = kind
+        # EZLynx's POST .../notes returns no note id. Before the first post,
+        # record the note ids already in the discussion so the new note can be
+        # told apart afterwards. None when that cannot be proven complete.
+        prior_ids = (self._complete_note_ids(discussion_id)
+                     if store.get_checkpoint(job["id"], kind) is None else None)
         self._fence()
         # INSERT is a durable compare-and-set, following the outbox contract.
         # No time-based lease can allow a second POST of an uncertain note.
@@ -1037,7 +1042,8 @@ class TaskAssignmentWorker:
             row = conn.execute("SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?",
                                (job["id"], kind)).fetchone()
             fresh = row is None
-            intent = ({**identity, "state": "uncertain", "note_id": "", "reserved_at": utc_now()}
+            intent = ({**identity, "state": "uncertain", "note_id": "", "reserved_at": utc_now(),
+                       "prior_note_ids": prior_ids}
                       if fresh else json.loads(row[0]))
             if any(intent.get(k) != v for k, v in identity.items()):
                 raise UnverifiedNoteError("Existing note intent differs; not sent")
@@ -1060,8 +1066,20 @@ class TaskAssignmentWorker:
             self._write(store, job["id"], kind, intent)
         note_id = str(intent.get("note_id") or "")
         if not note_id:
+            # Read-only reconcile (after the post, or on a resume): exactly one
+            # note id that was not there before, with exactly this text.
+            note_id = self._new_note_id_by_text(store, job["id"], kind, intent, discussion_id, body)
+            if note_id:
+                intent["note_id"] = note_id
+                intent["confirmed_by"] = "new_note_id_with_exact_text"
+                self._write(store, job["id"], kind, intent)
+        if not note_id:
             raise UnverifiedNoteError("No durable destination note ID; not reposting")
         record = self.client.get_discussion(discussion_id)
+        reader = getattr(self.client, "get_discussion_with_notes", None)
+        if not _contains_note_id(record, note_id) and callable(reader):
+            # A later note can push ours off "most recent"; the full read lists every id.
+            record = reader(discussion_id)
         adopted_pending = bool(intent.get("adopted")) and intent.get("state") != "confirmed"
         try:
             if not _contains_note_id(record, note_id):
@@ -1079,6 +1097,54 @@ class TaskAssignmentWorker:
         intent["state"] = "confirmed"
         self._write(store, job["id"], kind, intent)
         return note_id
+
+    def _complete_note_ids(self, discussion_id: str) -> list[str] | None:
+        """Every note id in the discussion, or None when the read is not provably whole."""
+        from .ezlynx_discussions import (
+            _note_id_of, discussion_note_snapshot, iter_discussion_notes, with_notes_read_is_complete,
+        )
+
+        reader = getattr(self.client, "get_discussion_with_notes", None)
+        if not callable(reader):
+            return None
+        try:
+            plain = discussion_note_snapshot(self.client.get_discussion(discussion_id))
+            if plain.get("note_count") == 0:
+                return []
+            record = reader(discussion_id)
+        except Exception:  # noqa: BLE001 - no proof means the old rule applies
+            return None
+        if not with_notes_read_is_complete(record, plain):
+            return None
+        return sorted({_note_id_of(row) for row in iter_discussion_notes(record) if _note_id_of(row)})
+
+    def _new_note_id_by_text(self, store: Any, job_id: str, kind: str, intent: dict[str, Any],
+                             discussion_id: str, body: str) -> str:
+        """The one new note with exactly this text, or "" when that is not proven.
+
+        Needs the note ids recorded before the post. A note that was already
+        there, two new notes with this text, an incomplete read, or an id that
+        belongs to another note of this job all return "" (held, never reposted).
+        """
+        from .ezlynx_discussions import _note_body, _note_id_of, iter_discussion_notes
+
+        prior = intent.get("prior_note_ids")
+        if not isinstance(prior, list):
+            return ""
+        after = self._complete_note_ids(discussion_id)
+        reader = getattr(self.client, "get_discussion_with_notes", None)
+        if after is None or not callable(reader):
+            return ""
+        before = {str(x) for x in prior}
+        record = reader(discussion_id)
+        matches = [
+            _note_id_of(row) for row in iter_discussion_notes(record)
+            if _note_id_of(row) and _note_id_of(row) not in before
+            and _note_id_of(row) in after and _norm_text(_note_body(row)) == _norm_text(body)
+        ]
+        if len(matches) != 1 or _note_id_used_elsewhere(store, job_id, kind, matches[0]):
+            return ""
+        return matches[0]
 
     @staticmethod
     def _assert_adopted_note(store: Any, job: dict[str, Any], kind: str, intent: dict[str, Any],
@@ -1378,6 +1444,16 @@ class TaskIntakeVerifier:
         try:
             record = self.client.get_discussion(discussion_id)
             snapshot = discussion_note_snapshot(record)
+            reader = getattr(self.client, "get_discussion_with_notes", None)
+            if not _contains_note_id(record, note_id) and callable(reader):
+                # A later note can push ours off "most recent"; the full read
+                # lists every id, and its text must be the note Robie wrote.
+                full = reader(discussion_id)
+                want = str((action.get("note") or {}).get("body_norm_sha256") or "")
+                text = _note_text_for_id(full, note_id)
+                if (text is not None and want
+                        and hashlib.sha256(_norm_text(text).encode()).hexdigest() == want):
+                    record = full
         except Exception as e:  # noqa: BLE001 — transient read failure retries
             return _unverified(
                 job, captured, discussion_id,
