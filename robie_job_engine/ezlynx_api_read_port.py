@@ -57,6 +57,15 @@ class EzlynxApiClientReadPort:
             )
         return out
 
+    def document_listing(self, applicant_id: str) -> dict[str, Any]:
+        """Every document row, and whether the list is known to be complete."""
+        from .ezlynx_api import document_search_is_complete, extract_document_api_results
+
+        payload = self._require_client().search_applicant_documents(applicant_id)
+        rows = [{"id": row["id"], "name": row.get("name") or ""} for row in extract_document_api_results(payload)]
+        total = payload.get("totalSize") if isinstance(payload, dict) else None
+        return {"rows": rows, "complete": document_search_is_complete(payload), "total": total}
+
     def download_document(self, document_id: str) -> bytes:
         downloaded = self._require_client().download_document(document_id)
         return downloaded.body

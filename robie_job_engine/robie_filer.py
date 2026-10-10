@@ -351,10 +351,16 @@ class Ezlynx:
         return cls(EzlynxApiClient(load_ezlynx_api_config()), note_ledger=state_dir / "discussion-note-ledger.json")
 
     def find_document(self, applicant_id: str, document_name: str) -> str:
-        from .ezlynx_api import extract_document_api_results
+        from .ezlynx_api import document_search_is_complete, extract_document_api_results
 
-        rows = extract_document_api_results(self.api.search_applicant_documents(applicant_id))
+        payload = self.api.search_applicant_documents(applicant_id)
+        rows = extract_document_api_results(payload)
         ids = [str(r.get("id")) for r in rows if str(r.get("name") or "").strip() == document_name]
+        if not ids and not document_search_is_complete(payload):
+            raise FilerError(
+                "an earlier upload was not confirmed and the client's document list is "
+                "incomplete, so it cannot be checked; not uploading again"
+            )
         return ids[0] if len(ids) == 1 else ""
 
     def upload(self, applicant_id: str, document_name: str, data: bytes, *, policy_master_id: str, content_type: str) -> str:

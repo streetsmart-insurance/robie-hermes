@@ -80,6 +80,8 @@ DOCUMENT_API_SEARCH_PATH = "/documentapi/documents/v1/account/{applicant_id}/doc
 DOCUMENT_API_DOWNLOAD_PATH = "/documentapi/documents/v1/{document_id}/download"
 DOCUMENT_API_UPLOAD_PATH = "/DocumentApi/documents/v1/account/{applicant_id}/document"
 DEFAULT_POLICY_MASTER_ID = "0"
+# 50 pages x 30 rows = 1,500 documents before a search reports incomplete.
+DOCUMENT_SEARCH_MAX_PAGES = 50
 DOCUMENT_RECORD_KEYS = (
     "Records",
     "records",
@@ -247,6 +249,21 @@ def is_vendor_document_api_username(username: str) -> bool:
     """True for the vendor integration user that 403s on agency DocumentApi."""
     folded = str(username or "").strip().casefold()
     return folded in VENDOR_DOCUMENT_API_USERNAMES or folded.startswith("ssr_user")
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def document_search_is_complete(payload: Any) -> bool:
+    """False only when a paged search says rows were not all read."""
+
+    return not (isinstance(payload, dict) and payload.get("complete") is False)
 
 
 def _document_api_result_rows(payload: Any) -> list[Any]:
@@ -1017,10 +1034,19 @@ class EzlynxApiClient:
             raise EzlynxApiError(None, "EZLynx API download transport failed") from exc
 
     def search_applicant_documents(self, applicant_id: str) -> dict[str, Any]:
-        """OAuth GET DocumentApi document-search. Read-only.
+        """OAuth GET DocumentApi document-search, every page. Read-only.
 
         Proven path: ``/documentapi/documents/v1/account/{ApplicantID}/document-search``.
         Callers must use ``results[].id``, never ``documentUrl``.
+
+        One request returns one page (30 rows on Production). The first
+        request is the proven call with no query. When ``totalSize`` says
+        there is more, later pages are asked for with ``pageIndex`` and
+        ``pageSize``. A page counts only if the reply echoes the requested
+        ``pageIndex`` and carries ids not seen yet; anything else stops the
+        walk. The merged payload has ``complete`` (True only when every row
+        of ``totalSize`` was seen) and ``pages_read``. An incomplete list is
+        never proof that a document is missing.
         """
         applicant = str(applicant_id or "").strip()
         if not applicant:
@@ -1033,9 +1059,36 @@ class EzlynxApiClient:
             "Accept": "application/json",
         }
         parsed = self._request_json("GET", url, data=None, headers=headers)
-        if isinstance(parsed, dict):
-            return parsed
-        return {"results": parsed}
+        if not isinstance(parsed, dict):
+            return {"results": parsed, "complete": True, "pages_read": 1}
+        rows = list(_document_api_result_rows(parsed))
+        seen = {str(row.get("id")) for row in rows if isinstance(row, dict)}
+        total = _int_or_none(parsed.get("totalSize"))
+        page_size = _int_or_none(parsed.get("pageSize")) or len(rows)
+        first_index = _int_or_none(parsed.get("pageIndex"))
+        pages = 1
+        if total is not None and len(seen) < total and first_index is not None and page_size:
+            next_index = first_index + 1
+            while len(seen) < total and pages < DOCUMENT_SEARCH_MAX_PAGES:
+                query = parse.urlencode({"pageIndex": next_index, "pageSize": page_size})
+                page = self._request_json("GET", url + "?" + query, data=None, headers=headers)
+                if not isinstance(page, dict) or _int_or_none(page.get("pageIndex")) != next_index:
+                    break
+                fresh = [
+                    row for row in _document_api_result_rows(page)
+                    if isinstance(row, dict) and str(row.get("id")) not in seen
+                ]
+                if not fresh:
+                    break
+                rows.extend(fresh)
+                seen.update(str(row.get("id")) for row in fresh)
+                pages += 1
+                next_index += 1
+        merged = dict(parsed)
+        merged["results"] = rows
+        merged["complete"] = total is None or len(seen) >= total
+        merged["pages_read"] = pages
+        return merged
 
     def download_document(self, document_id: str) -> EzlynxDocumentDownload:
         """OAuth GET DocumentApi download. Read-only. Returns file bytes.

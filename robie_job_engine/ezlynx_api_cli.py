@@ -518,16 +518,27 @@ class Outcome:
 
 def cmd_docs_list(svc: Any, args: argparse.Namespace) -> Outcome:
     applicant = _applicant(args.applicant)
-    rows = list(svc.port.documents_for_applicant(applicant))
+    listing = _document_listing(svc, applicant)
+    rows = listing["rows"]
     needle = (args.name_contains or "").casefold()
     if needle:
         rows = [row for row in rows if needle in str(row.get("name") or "").casefold()]
     shown = rows[: args.limit]
     docs = [{"id": str(row.get("id")), "name": str(row.get("name") or "")} for row in shown]
     return Outcome(
-        {"applicant_id": applicant, "count": len(rows), "returned": len(docs), "documents": docs},
-        {"applicant": applicant, "count": len(rows)},
+        {"applicant_id": applicant, "count": len(rows), "returned": len(docs),
+         "complete": listing["complete"], "total_on_file": listing["total"], "documents": docs},
+        {"applicant": applicant, "count": len(rows), "complete": listing["complete"]},
     )
+
+
+def _document_listing(svc: Any, applicant: str) -> dict[str, Any]:
+    """Rows plus completeness. Ports without paging info count as complete."""
+
+    listing = getattr(svc.port, "document_listing", None)
+    if callable(listing):
+        return listing(applicant)
+    return {"rows": list(svc.port.documents_for_applicant(applicant)), "complete": True, "total": None}
 
 
 def cmd_docs_get(svc: Any, args: argparse.Namespace) -> Outcome:
@@ -698,10 +709,20 @@ def cmd_docs_upload(svc: Any, args: argparse.Namespace) -> Outcome:
     except Exception as exc:  # noqa: BLE001
         raise _map_write_error(exc) from exc
 
+    listing = _document_listing(svc, applicant)
     existing = [
-        str(row.get("id")) for row in svc.port.documents_for_applicant(applicant)
+        str(row.get("id")) for row in listing["rows"]
         if str(row.get("name") or "").strip() == name
     ]
+    if not existing and not listing["complete"] and not args.allow_duplicate:
+        audit["complete"] = False
+        return Outcome(
+            {"status": "unchecked", "uploaded": False, "applicant_id": applicant, "document_name": name,
+             "total_on_file": listing["total"], "read": len(listing["rows"]),
+             "note": "the client's document list could not be read in full, so a same-name document "
+                     "cannot be ruled out; nothing was uploaded. Pass --allow-duplicate to upload anyway"},
+            audit, status="unchecked",
+        )
     if existing and not args.allow_duplicate:
         audit["document_ids"] = existing
         return Outcome(
