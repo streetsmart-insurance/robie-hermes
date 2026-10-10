@@ -125,6 +125,40 @@ jobs:
       - name: robie-filer unit, installer, and job (fresh-host systemd check)
         run: ROBIE_SYSTEMD_TESTS=1 PYTHONPATH=.:tests python -m pytest -q -rs tests/test_robie_filer_unit_state_dir.py tests/test_install_robie_filer.py tests/test_robie_filer.py
 
+  full-suite-report:
+    # Report only. The "test" job above runs a fixed list of files (about 57
+    # of 444). This job runs every test file so failures outside that list are
+    # visible. It does not block a merge; once its baseline is clean or the
+    # known failures are listed, make it required and drop continue-on-error.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the package with test dependencies
+        run: python -m pip install -e ".[test]" "Flask>=3.0" "requests>=2.31" "cryptography>=41,<46"
+      - name: Run every test file and keep the failure list
+        run: |
+          set +e
+          PYTHONPATH=.:tests python -m pytest -q -p no:cacheprovider -rfE tests > full-suite.txt 2>&1
+          status=$?
+          tail -n 5 full-suite.txt
+          grep -E "^(FAILED|ERROR) " full-suite.txt | sed 's/ - .*//' | sort > full-suite-failures.txt
+          echo "failing tests: $(wc -l < full-suite-failures.txt)"
+          exit $status
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-suite-report
+          path: |
+            full-suite.txt
+            full-suite-failures.txt
+          if-no-files-found: warn
+
   canonical-paths:
     runs-on: macos-latest
     timeout-minutes: 10
