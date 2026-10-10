@@ -25,6 +25,11 @@ summary is also posted to the ROBIE health Chat.
 Safety gates (checked before anything runs): ROBIE_ENV=TEST, Production hosts
 refused, ``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX`` forced to 0 for this process
 and every child, CDP limited to the local carrier Chrome. No email is sent.
+
+Exit codes, after the summary, Drive upload, and Chat post have finished:
+0 when every non-skipped carrier is OK or held with a reason; 2 when an
+environment gate refuses the run before any carrier starts; 3 when any
+carrier FAILED or the run was PARTIAL. Skipped carriers do not count.
 """
 
 from __future__ import annotations
@@ -64,6 +69,7 @@ DAILY_CARRIERS = (
 SKIP_ENV = "ROBIE_CARRIER_DAILY_SKIP"
 DEFAULT_DAILY_SKIP = ("guard", "travelers")
 SKIP_REASON = "skipped, login not ready"
+LOGIN_SECRET_LINE = "could not read the saved login, permission problem"
 DISPLAY = {name: spec.display for name, spec in SPECS.items()}
 DISPLAY["progressive_bop"] = "Progressive BOP"
 CARRIER_TIMEOUT_S = {"progressive": 2400, "progressive_bop": 900}
@@ -305,6 +311,8 @@ def plain(text: Any, fallback: str) -> str:
     text = " ".join(str(text or "").split())
     if not text:
         return fallback
+    if "SecretManagerAccessError" in text or "NEEDS_AUTH" in text:
+        return LOGIN_SECRET_LINE
     if "timed out" in text.lower() or "timeout" in text.lower():
         return "did not finish in time"
     if re.fullmatch(r"exit -?\d+", text):
@@ -361,6 +369,27 @@ def render_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def carrier_exit_code(summary: dict[str, Any]) -> int:
+    """0 when every non-skipped carrier is OK or held with a reason.
+
+    3 when any carrier FAILED or PARTIAL. Skipped (login not ready) carriers
+    are ignored. Call this only after the summary, Drive upload, and Chat
+    notify have finished.
+    """
+    for result in summary.get("carriers", {}).values():
+        status = str(result.get("status") or "")
+        if status == "SKIPPED":
+            continue
+        if status in {"FAILED", "PARTIAL"}:
+            return 3
+        if status == "OK":
+            continue
+        if status == "HELD" and str(result.get("reason") or "").strip():
+            continue
+        return 3
+    return 0
+
+
 def notify(text: str) -> str:
     """Post to the ROBIE health Chat when configured. Returns a status line."""
     space = os.environ.get("ROBIE_HEALTH_CHAT_SPACE", "").strip()
@@ -383,13 +412,19 @@ def run_daily(
     cdp_url: str = DEFAULT_CDP_URL,
     upload_drive: bool = False,
     do_notify: bool = False,
-    run_one: Callable[..., dict[str, Any]] = run_carrier,
-    close_tabs: Callable[[str], list[str]] = close_stale_tabs,
-    open_tab: Callable[[str, str], str | None] = ensure_carrier_tab,
+    run_one: Callable[..., dict[str, Any]] | None = None,
+    close_tabs: Callable[[str], list[str]] | None = None,
+    open_tab: Callable[[str, str], str | None] | None = None,
     drive_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     from .intake_core import IntakeHold
 
+    if run_one is None:
+        run_one = run_carrier
+    if close_tabs is None:
+        close_tabs = close_stale_tabs
+    if open_tab is None:
+        open_tab = ensure_carrier_tab
     _require_daily_environment()
     os.environ[KILL_SWITCH_ENV] = "0"
     cdp_url = _require_local_cdp(cdp_url)
@@ -427,6 +462,16 @@ def run_daily(
             }
             continue
         except Exception as exc:  # noqa: BLE001 - the pull's own tab check decides
+            if type(exc).__name__ == "SecretManagerAccessError":
+                # Do not start the pull. It would try the same secret again.
+                results[name] = {
+                    "display": DISPLAY.get(name, name),
+                    "status": "FAILED",
+                    "downloaded": 0,
+                    "held": [],
+                    "error": f"SecretManagerAccessError: {exc}",
+                }
+                continue
             opened = f"(could not open a tab: {type(exc).__name__})"
         result = run_one(name, day=day, root=root, cdp_url=cdp_url)
         result["closed_tabs"] = closed
@@ -515,8 +560,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Daily carrier run refused: {exc}", file=sys.stderr)
         return 2
     print(summary.pop("text"))
+    code = carrier_exit_code(summary)
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
-    return 0
+    return code
 
 
 if __name__ == "__main__":

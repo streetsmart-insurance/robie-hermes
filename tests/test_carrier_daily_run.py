@@ -191,6 +191,91 @@ class DailyRunTests(unittest.TestCase):
             )
         self.assertEqual(calls, ["guard", "travelers"])
 
+    def test_exit_0_when_the_rest_are_ok_or_held_and_skipped_do_not_count(self):
+        def run_one(name, **_kw):
+            if name == "geico":
+                return {"display": "GEICO", "status": "HELD", "reason": "the portal asked to sign in again",
+                        "downloaded": 0, "held": []}
+            return self._ok(name)
+
+        summary = daily.run_daily(
+            day=date(2026, 10, 10), root=self.root, carriers=("geico", "guard", "natgen"),
+            run_one=run_one, close_tabs=lambda url: [], open_tab=lambda name, url: None,
+        )
+        self.assertEqual(summary["carriers"]["guard"]["status"], "SKIPPED")
+        self.assertEqual(daily.carrier_exit_code(summary), 0)
+
+    def test_exit_3_after_drive_and_notify_when_a_carrier_failed_or_was_partial(self):
+        events = []
+
+        def run_one(name, **_kw):
+            events.append("pull")
+            if name == "uticafirst":
+                return {"display": "Utica First", "status": "FAILED", "downloaded": 0, "held": [],
+                        "error": "SecretManagerAccessError: NEEDS_AUTH: cannot read secret 'utica_password'"}
+            return {"display": "Progressive (FAO)", "status": "PARTIAL", "downloaded": 1, "held": [],
+                    "reason": "the pull stopped early", "unprocessed": 4}
+
+        def drive_factory():
+            events.append("drive")
+            return object()
+
+        with mock.patch.object(daily, "upload_carrier", side_effect=lambda *a, **k: events.append("upload") or {"status": "OK", "uploaded": [], "skipped": [], "held": []}), \
+                mock.patch.object(daily, "notify", side_effect=lambda text: events.append("notify") or "posted"):
+            summary = daily.run_daily(
+                day=date(2026, 10, 10), root=self.root, carriers=("uticafirst", "progressive"),
+                upload_drive=True, do_notify=True, run_one=run_one,
+                close_tabs=lambda url: [], open_tab=lambda name, url: None, drive_factory=drive_factory,
+            )
+        self.assertEqual(events, ["drive", "pull", "upload", "pull", "upload", "notify"])
+        self.assertEqual(daily.carrier_exit_code(summary), 3)
+        text = (self.root / "runs" / "2026-10-10" / "summary.txt").read_text()
+        self.assertIn("could not read the saved login, permission problem", text)
+        self.assertNotIn("SecretManagerAccessError", text)
+        self.assertNotIn("utica_password", text)
+        self.assertNotIn("stopped with an error", text)
+
+    def test_main_returns_3_for_a_failure_and_2_when_the_environment_refuses(self):
+        def run_one(name, **_kw):
+            if name == "geico":
+                return {"display": "GEICO", "status": "HELD", "reason": "session was not signed in",
+                        "downloaded": 0, "held": []}
+            return {"display": name, "status": "OK", "downloaded": 0, "held": []}
+
+        with mock.patch.object(daily, "run_carrier", side_effect=run_one):
+            code = daily.main(["--root", str(self.root), "--as-of", "2026-10-10", "--carriers", "geico,natgen,guard"])
+        self.assertEqual(code, 0)
+        with mock.patch.object(daily, "run_carrier", side_effect=lambda name, **kw: {
+            "display": "Utica First", "status": "FAILED", "downloaded": 0, "held": [], "error": "boom",
+        }):
+            code = daily.main(["--root", str(self.root), "--as-of", "2026-10-10", "--carriers", "uticafirst"])
+        self.assertEqual(code, 3)
+        refused = self.root / "refused"
+        with mock.patch.dict(os.environ, {"ROBIE_ENV": "PROD"}):
+            code = daily.main(["--root", str(refused), "--as-of", "2026-10-10", "--carriers", "geico"])
+        self.assertEqual(code, 2)
+        self.assertFalse((refused / "runs").exists())
+
+    def test_secret_manager_error_during_sign_in_is_a_failed_carrier_and_does_not_start_the_pull(self):
+        from robie_job_engine.gcp_secret_reader import SecretManagerAccessError
+
+        ran = []
+
+        def open_tab(name, _url):
+            raise SecretManagerAccessError("NEEDS_AUTH: the runtime service account cannot read secret 'geico_password'")
+
+        summary = daily.run_daily(
+            day=date(2026, 10, 10), root=self.root, carriers=("geico",),
+            run_one=lambda name, **kw: ran.append(name) or self._ok(name),
+            close_tabs=lambda url: [], open_tab=open_tab,
+        )
+        self.assertEqual(ran, [])
+        self.assertEqual(summary["carriers"]["geico"]["status"], "FAILED")
+        self.assertEqual(daily.carrier_exit_code(summary), 3)
+        text = summary["text"]
+        self.assertIn("GEICO: failed, could not read the saved login, permission problem", text)
+        self.assertNotIn("geico_password", text)
+
     def test_one_carrier_failing_or_hanging_never_stops_the_others(self):
         def runner(cmd, **kw):
             if "progressive" in cmd and "--carriers" in cmd:
@@ -653,6 +738,26 @@ class PlainSummaryTests(unittest.TestCase):
         self.assertIn("Progressive BOP: held. a carrier page did not look as expected", text)
         self.assertIn("not uploaded to Drive: Drive was not reachable", text)
         self.assertIn("1 held: Utica First policy X has no notice document", text)
+
+    def test_secret_manager_permission_is_plain_english(self):
+        summary = {
+            "as_of": "2026-10-10",
+            "carriers": {
+                "uticafirst": {
+                    "display": "Utica First",
+                    "status": "FAILED",
+                    "downloaded": 0,
+                    "held": [],
+                    "error": "SecretManagerAccessError: NEEDS_AUTH: cannot read secret 'utica_password'",
+                },
+            },
+            "totals": {"pdfs": 0, "uploaded": 0, "failed": 1, "partial": 0},
+        }
+        text = daily.render_summary(summary)
+        self.assertIn("Utica First: failed, could not read the saved login, permission problem", text)
+        self.assertNotIn("SecretManagerAccessError", text)
+        self.assertNotIn("NEEDS_AUTH", text)
+        self.assertNotIn("stopped with an error", text)
 
     def test_partial_is_not_reported_as_ok(self):
         summary = {
