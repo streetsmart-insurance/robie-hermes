@@ -299,6 +299,7 @@ def require_complete_postcondition(
     intended: str | None = None,
     action: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    action_type: str | None = None,
 ) -> None:
     if current != JobStatus.VERIFYING or authority != verifier_authority:
         raise PermissionError(
@@ -334,6 +335,11 @@ def require_complete_postcondition(
     )
     if note_doc:
         raise PermissionError(note_doc)
+    from .ezlynx_shared_writes import shared_write_evidence_missing
+
+    shared = shared_write_evidence_missing(action_type, expected, observed)
+    if shared:
+        raise PermissionError(shared)
     prohibited = complete_is_prohibited(observed)
     if prohibited:
         raise PermissionError(prohibited)
