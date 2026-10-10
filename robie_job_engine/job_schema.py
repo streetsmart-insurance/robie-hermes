@@ -189,6 +189,48 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
             "the canonical browser profile cannot be locked or verified",
         ),
     ),
+    # Shared EZLynx writes. API only, no browser, so recording is EXEMPT.
+    # Every Robie worker files documents and notes through these two jobs.
+    "ezlynx.document_upload": ExecutableSkillContract(
+        expected_destination_result=(
+            "the exact document (same name, same SHA-256 bytes) is on that "
+            "applicant, shown by a fresh DocumentApi search that read every page"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="EzlynxDocumentUploadVerifier",
+        maximum_attempts=3,
+        success_conditions=(
+            "a fresh DocumentApi search of the bound applicant reports complete=True",
+            "exactly one document id not present before the upload (or the adopted "
+            "existing id) has the requested name and downloads to the requested SHA-256",
+            "expected and observed evidence is persisted with the DocumentApi document_id",
+        ),
+        failure_conditions=(
+            "the applicant is not on the EZLynx write allowlist",
+            "the file bytes no longer match the job's SHA-256",
+            "the document list cannot be read in full (UNVERIFIED; never uploaded again)",
+        ),
+    ),
+    "ezlynx.note_append": ExecutableSkillContract(
+        expected_destination_result=(
+            "exactly one new note with exactly the requested text is in the "
+            "requested discussion of the bound applicant"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="EzlynxNoteAppendVerifier",
+        maximum_attempts=3,
+        success_conditions=(
+            "the discussion is one of the bound applicant's discussions",
+            "a full discussion read proven complete shows exactly one note id that was "
+            "not in the pre-post snapshot, with exactly the requested normalized text",
+            "expected and observed evidence is persisted with that note_id",
+        ),
+        failure_conditions=(
+            "the applicant is not on the EZLynx write allowlist",
+            "the discussion does not belong to the applicant",
+            "the notes cannot be read in full (UNVERIFIED; never posted again)",
+        ),
+    ),
     "filesystem.skill_update": _contract(
         "the allowlisted SKILL.md path contains the exact requested bytes and hash",
         "FilesystemSkillUpdateVerifier",
@@ -332,6 +374,21 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": ("resource_id", "profile_id"),
         "identity": ("resource_id",),
+    },
+    "ezlynx.document_upload": {
+        "schema_verified": True,
+        "required": ("applicant_id", "document_name", "file_path", "file_sha256", "resource_id"),
+        # Job idempotency key: applicant + file sha256 + document name.
+        "identity": ("applicant_id", "file_sha256", "document_name"),
+    },
+    "ezlynx.note_append": {
+        "schema_verified": True,
+        "required": (
+            "applicant_id", "discussion_id", "body", "body_norm_sha256",
+            "caller_job_id", "resource_id",
+        ),
+        # Job idempotency key: discussion + body sha256 + caller job id.
+        "identity": ("discussion_id", "body_norm_sha256", "caller_job_id"),
     },
     "filesystem.skill_update": {
         "schema_verified": True,

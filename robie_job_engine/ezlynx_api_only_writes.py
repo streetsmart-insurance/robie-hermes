@@ -48,6 +48,7 @@ NOTE_ACTION_TYPES = frozenset(
         "ezlynx.add_note",
         "ezlynx.file_note",
         "ezlynx.post_note",
+        "ezlynx.note_append",
     }
 )
 DOCUMENT_ACTION_TYPES = frozenset(

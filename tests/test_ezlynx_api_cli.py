@@ -77,6 +77,9 @@ class FakeEzlynx:
             doc_id = str(self.next_id)
             name_match = re.search(rb'name="DocumentName"\r\n\r\n(.*?)\r\n', data)
             name = name_match.group(1).decode() if name_match else "?"
+            file_match = re.search(rb'name="File"; filename="[^"]*"\r\nContent-Type: [^\r]*\r\n\r\n(.*?)\r\n--', data, re.S)
+            if file_match:
+                self.bodies[doc_id] = file_match.group(1)
             if self.list_new_upload:
                 self.docs.setdefault(match.group(1), []).append({"id": int(doc_id), "documentName": name})
             return FakeResponse(doc_id.encode(), headers={"Content-Type": "text/plain"})
@@ -110,12 +113,15 @@ class FakeDiscussions:
         self.reads += 1
         return [{"discussionId": self.id, "title": self.title, "applicantId": int(applicant_id), "noteCount": 1}]
 
+    def get_discussion_ids(self, applicant_id):
+        return [self.id]
+
     def get_discussion(self, discussion_id):
         after = self.posts > 0
         return {"discussionId": discussion_id, "title": self.title, "noteCount": 1 + int(after),
                 "mostRecentNoteId": "1001" if after else "1000", "deleted": False}
 
-    def append_note(self, discussion_id, text, note_type="Note"):
+    def append_note(self, discussion_id, text, note_type="Note", applicant_id=None):
         self.posts += 1
         self.posted_text = text
         return {}
@@ -151,6 +157,8 @@ class Svc:
         self._extract = extract
         self.gemini_models: list = []
         self.ledger_path = self.state_dir / cli.NOTE_LEDGER_FILE
+        # Shared write jobs need a store the engine accepts (not /tmp).
+        self.jobs_db = durable_jobs_db()
 
     def extract_pages(self, data):
         if self._extract is not None:
@@ -160,6 +168,26 @@ class Svc:
     def gemini(self, model):
         self.gemini_models.append(model)
         return self._gemini
+
+
+_DURABLE_ROOT = Path(__file__).resolve().parent.parent / ".robie-durable-test" / "unit"
+_DURABLE_DIRS: list[Path] = []
+
+
+def durable_jobs_db() -> Path:
+    import tempfile
+
+    _DURABLE_ROOT.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(dir=_DURABLE_ROOT))
+    _DURABLE_DIRS.append(path)
+    return path / "jobs.db"
+
+
+@pytest.fixture(autouse=True)
+def _durable_cleanup():
+    yield
+    while _DURABLE_DIRS:
+        shutil.rmtree(_DURABLE_DIRS.pop(), ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -626,7 +654,7 @@ def test_notes_add_files_confirms_and_keeps_text_out_of_audit(tmp_path):
     assert result["status"] == "filed" and result["note_id"] == "1001" and result["read_back"] is True
     assert svc.discussions.posts == 1 and svc.discussions.posted_text == NOTE_SENTINEL
     assert NOTE_SENTINEL not in json.dumps(payload)
-    assert svc.ledger_path.exists()
+    assert result["job_status"] == "COMPLETE" and svc.jobs_db.exists()
     text = (svc.state_dir / cli.AUDIT_FILE).read_text()
     assert NOTE_SENTINEL not in text
     lines = audit_lines(svc)

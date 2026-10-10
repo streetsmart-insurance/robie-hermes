@@ -17,12 +17,14 @@ with that authoritative evidence. A note Robie wrote, a screenshot, an HTTP
 
 | Job type | Done means | Status |
 |---|---|---|
-| `ezlynx.document_upload` | The exact document is on that applicant (fresh DocumentApi search, every page). | Being built (item 1). |
-| `ezlynx.note_append` | Exactly one new note with exactly that text is in that discussion. | Being built (item 1). |
+| `ezlynx.document_upload` | The exact document is on that applicant (fresh DocumentApi search, every page). | Built (item 1), in code; needs 3 clean Test jobs before Production. |
+| `ezlynx.note_append` | Exactly one new note with exactly that text is in that discussion. | Built (item 1), in code; needs 3 clean Test jobs before Production. |
 
-Until they land, a worker that has to file uses `upload_document_via_api` and
-`file_note_to_existing_discussion`, which already read back. Do not call
-DocumentApi or DiscussionApi POSTs yourself.
+Create them with `ensure_document_upload_job` / `ensure_note_append_job` in
+`robie_job_engine/ezlynx_shared_writes.py` and run them through the Job
+Engine. Until a worker is moved over it may keep using
+`upload_document_via_api` and `file_note_to_existing_discussion`, which
+already read back. Do not call DocumentApi or DiscussionApi POSTs yourself.
 
 ## Steps
 
@@ -73,4 +75,4 @@ DocumentApi or DiscussionApi POSTs yourself.
 | Audits (`audit_verification`) | 3 clean Test jobs recorded | Same as renewals, for audit papers. |
 | Policy changes (`policy_change_verification`) | Off in code (`POLICY_CHANGE_ENABLED = False`) | All steps, then 3 clean Test jobs. |
 | robie-filer | Live on Production for test client 220250093 only | Move uploads and notes to the shared jobs (after item 1). |
-| `ezlynx-api` command line writes | Read-back and audit log, outside the Job Engine | Becomes the shared jobs (item 1). |
+| `ezlynx-api` command line writes | `docs upload` and `notes add` run as the shared jobs (item 1) | 3 clean Test jobs per type; Production holds them until then. |

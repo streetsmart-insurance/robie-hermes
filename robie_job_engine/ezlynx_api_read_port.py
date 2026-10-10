@@ -27,8 +27,10 @@ class EzlynxApiClientReadPort:
     omitted and is loaded from Secret Manager on first use.
     """
 
-    def __init__(self, client: Any = None):
+    def __init__(self, client: Any = None, *, discussion_client: Any = None):
         self._client = client
+        if discussion_client is not None:
+            self._discussion_client = discussion_client
 
     def _require_client(self) -> Any:
         if self._client is None:
@@ -66,6 +68,11 @@ class EzlynxApiClientReadPort:
         total = payload.get("totalSize") if isinstance(payload, dict) else None
         return {"rows": rows, "complete": document_search_is_complete(payload), "total": total}
 
+    def document_search(self, applicant_id: str) -> dict[str, Any]:
+        """The raw merged DocumentApi search: ``results``, ``complete``, ``pages_read``."""
+        payload = self._require_client().search_applicant_documents(applicant_id)
+        return payload if isinstance(payload, dict) else {"results": payload}
+
     def download_document(self, document_id: str) -> bytes:
         downloaded = self._require_client().download_document(document_id)
         return downloaded.body
@@ -93,3 +100,20 @@ class EzlynxApiClientReadPort:
             self._discussion_client = client
         record = client.get_discussion(discussion_id)
         return record if isinstance(record, dict) else {}
+
+    def _discussions(self) -> Any:
+        if getattr(self, "_discussion_client", None) is None:
+            from .ezlynx_api_only_writes import load_discussion_api_config
+            from .ezlynx_discussions import DiscussionApiClient
+
+            self._discussion_client = DiscussionApiClient(load_discussion_api_config())
+        return self._discussion_client
+
+    def get_discussion_with_notes(self, discussion_id: str) -> dict[str, Any]:
+        """One discussion with every note body (read-only)."""
+        record = self._discussions().get_discussion_with_notes(discussion_id)
+        return record if isinstance(record, dict) else {}
+
+    def discussion_ids_for_applicant(self, applicant_id: str) -> list[str]:
+        """Discussion ids on the applicant (read-only ownership check)."""
+        return [str(item) for item in self._discussions().get_discussion_ids(applicant_id) or []]

@@ -166,6 +166,23 @@ def build_runtime_engine(
     )
     verifiers["ezlynx.overdue_submission_reports"] = OverdueSubmissionReportVerifier()
     verifiers["ezlynx.session_refresh"] = EzlynxSessionVerifier()
+    # Shared EZLynx writes (documents and notes). Live clients load lazily
+    # from Secret Manager on the first job; nothing connects at wiring time.
+    from .ezlynx_shared_writes import (
+        DOCUMENT_UPLOAD,
+        DOCUMENT_UPLOAD_WORKER,
+        NOTE_APPEND,
+        NOTE_APPEND_WORKER,
+        EzlynxDocumentUploadVerifier,
+        EzlynxDocumentUploadWorker,
+        EzlynxNoteAppendVerifier,
+        EzlynxNoteAppendWorker,
+    )
+
+    workers[DOCUMENT_UPLOAD_WORKER] = EzlynxDocumentUploadWorker(store)
+    workers[NOTE_APPEND_WORKER] = EzlynxNoteAppendWorker(store)
+    verifiers[DOCUMENT_UPLOAD] = EzlynxDocumentUploadVerifier(store)
+    verifiers[NOTE_APPEND] = EzlynxNoteAppendVerifier(store)
     # Daily verification workers (EZLynx reports 4247/4246/4372/4359 + digest).
     # The policy-change worker stays kill-switched off (POLICY_CHANGE_ENABLED
     # is False in its module) until report 4359's schema is verified.
