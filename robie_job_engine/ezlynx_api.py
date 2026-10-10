@@ -43,7 +43,7 @@ from typing import Any, Callable
 from urllib import error, parse, request
 from urllib.parse import quote, urlparse
 
-from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
+from .ezlynx_write_scope import OPERATION_DOCUMENT_UPLOAD, require_allowed_ezlynx_write_applicant
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
 from .secrets import redact_text
@@ -1137,7 +1137,9 @@ class EzlynxApiClient:
 
         assert_chat_applicant(applicant_id)
         assert_live_write_allowed()
-        applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+        applicant = require_allowed_ezlynx_write_applicant(
+            applicant_id, operation=OPERATION_DOCUMENT_UPLOAD
+        )
         name = str(document_name or "").strip()
         if not name:
             raise EzlynxApiError(None, "document name is required")

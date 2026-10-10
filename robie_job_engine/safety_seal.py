@@ -34,6 +34,7 @@ class SafetySealError(RuntimeError):
 _STATE: dict[str, Any] = {
     "installed": False,
     "allow_obj": None,
+    "operation_scope": None,
     "codes": {},
     "require_driver": None,
     "hard_block": None,
@@ -58,11 +59,18 @@ def install_agent_seal() -> None:
 
     scope = ezlynx_write_scope
     _STATE["allow_obj"] = scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    # The agent interpreter never holds an operation scope. Whatever is there
+    # at install is the baseline; a later change is tampering.
+    _STATE["operation_scope"] = scope._OPERATION_SCOPE
     _STATE["codes"] = {
         "applicant_is_write_allowed": scope.applicant_is_write_allowed.__code__,
         "require_allowed_ezlynx_write_applicant": (
             scope.require_allowed_ezlynx_write_applicant.__code__
         ),
+        "operation_is_write_allowed": scope.operation_is_write_allowed.__code__,
+        "applicant_is_write_allowed_for": scope.applicant_is_write_allowed_for.__code__,
+        "register_operation_scope": scope.register_operation_scope.__code__,
+        "load_write_scope_policy": scope.load_write_scope_policy.__code__,
         "note_id_in_discussion": ezlynx_api_only_writes.note_id_in_discussion.__code__,
         "_note_id_of": ezlynx_discussions._note_id_of.__code__,
         "require_driver_in": ezlynx_driver_gate.require_driver_in.__code__,
@@ -92,6 +100,10 @@ def assert_write_checks_intact() -> None:
         "require_allowed_ezlynx_write_applicant": (
             ezlynx_write_scope.require_allowed_ezlynx_write_applicant
         ),
+        "operation_is_write_allowed": ezlynx_write_scope.operation_is_write_allowed,
+        "applicant_is_write_allowed_for": ezlynx_write_scope.applicant_is_write_allowed_for,
+        "register_operation_scope": ezlynx_write_scope.register_operation_scope,
+        "load_write_scope_policy": ezlynx_write_scope.load_write_scope_policy,
         "note_id_in_discussion": ezlynx_api_only_writes.note_id_in_discussion,
         "_note_id_of": ezlynx_discussions._note_id_of,
         "require_driver_in": ezlynx_driver_gate.require_driver_in,
@@ -109,6 +121,11 @@ def assert_write_checks_intact() -> None:
     if ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is not _STATE["allow_obj"]:
         raise SafetySealError(
             f"{TAMPERED}: the EZLynx write allowlist was changed in the agent "
+            "interpreter. The write was not sent."
+        )
+    if ezlynx_write_scope._OPERATION_SCOPE is not _STATE["operation_scope"]:
+        raise SafetySealError(
+            f"{TAMPERED}: an EZLynx operation scope was set in the agent "
             "interpreter. The write was not sent."
         )
 

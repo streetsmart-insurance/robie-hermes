@@ -257,8 +257,12 @@ def test_no_any_applicant_flag_exists(tmp_path):
     assert code == cli.EXIT_USAGE
     assert "any-applicant" not in cli.build_parser().format_help()
     source = Path(cli.__file__).read_text()
+    # Any client is possible only through the root-owned policy file naming
+    # this CLI; never the filer's registration, never an environment switch.
     assert "register_filer_operation_scope" not in source
-    assert "operation=" not in source
+    assert "register_operation_scope(scope.ENTRYPOINT_EZLYNX_API_CLI)" in source
+    assert "operation=OPERATION_DOCUMENT_UPLOAD" in source
+    assert "write_scope_all_refused" in source
 
 
 def test_audit_unwritable_refuses_before_anything_happens(tmp_path):

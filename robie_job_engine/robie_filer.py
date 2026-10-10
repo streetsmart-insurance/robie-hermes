@@ -617,15 +617,21 @@ class Filer:
 
 # ------------------------------------------------------------------- main
 def _register_any_applicant_scope() -> None:
+    """``--any-applicant``: needs the root-owned write-scope policy to list robie_filer.
+
+    The scope is document upload and note append only. Without the policy
+    file the run stops here and nothing is written to any client.
+    """
     from . import ezlynx_write_scope
 
-    register = getattr(ezlynx_write_scope, "register_filer_operation_scope", None)
-    if register is None:
-        raise SystemExit(
-            "--any-applicant needs the filer operation scope in ezlynx_write_scope "
-            "(not in this release). Writes stay on the applicant allowlist."
-        )
-    register()
+    try:
+        policy = ezlynx_write_scope.register_filer_operation_scope()
+    except ezlynx_write_scope.EzlynxWriteScopeError as exc:
+        raise SystemExit(str(exc)) from exc
+    logger.warning(
+        "robie-filer --any-applicant: write-scope policy sha256=%s operations=%s approved_by=%s approved_at=%s",
+        policy["sha256"], ",".join(sorted(policy["operations"])), policy["approved_by"], policy["approved_at"],
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

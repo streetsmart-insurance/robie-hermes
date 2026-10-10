@@ -88,7 +88,14 @@ What guards them (unchanged, none of it is new code here):
 - `ezlynx_write_scope`: the compiled applicant allowlist. Today that is the
   test client `220250093` only. A client not on it is refused before any
   EZLynx request (`EZLYNX_WRITE_SCOPE_REFUSED`, exit 3).
-- There is no `--any-applicant` flag and no way to widen scope from this tool.
+- Any client for `docs upload` and `notes add` (and nothing else) is possible only
+  when the root-owned `/etc/streetsmart-hermes/ezlynx-write-scope.json` lists
+  `ezlynx_api_cli`. That entry is separate from the robie-filer one and is not
+  installed today. See `docs/EZLYNX_WRITE_SCOPE_POLICY_RUNBOOK.md`. A damaged
+  file makes writes refuse with `write_scope_policy_refused`; each audited write
+  then carries `write_scope_policy_sha256`.
+- There is no `--any-applicant` flag and no way to widen scope from this tool's
+  arguments or environment.
   The wrapper unsets `ROBIE_EZLYNX_WRITE_SCOPE`, `ROBIE_EZLYNX_WRITE_APPLICANT_IDS`
   and `ROBIE_PLAYGROUND`, and the tool also refuses to write if an all-clients
   setting is present in its process.

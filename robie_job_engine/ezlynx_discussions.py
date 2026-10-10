@@ -55,7 +55,7 @@ from urllib import error, parse, request
 from urllib.parse import urlparse
 
 from .discussion_note_ledger import with_serialized_ledger
-from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
+from .ezlynx_write_scope import OPERATION_NOTE_APPEND, require_allowed_ezlynx_write_applicant
 
 GRANT_TYPE = "vendor_data_access"
 TOKEN_EXPIRY_SKEW_SECONDS = 60
@@ -585,7 +585,7 @@ class DiscussionApiClient:
         an outcome note. Hold notes and reassignment notes pass it.
         """
         if applicant_id is not None:
-            require_allowed_ezlynx_write_applicant(applicant_id)
+            require_allowed_ezlynx_write_applicant(applicant_id, operation=OPERATION_NOTE_APPEND)
         discussion = str(discussion_id or "").strip()
         if not discussion:
             raise DiscussionApiError(None, "discussion id is required")
@@ -1369,7 +1369,7 @@ def file_note_to_existing_discussion(
     ``held`` / ``dry_run``, plus ``applicant_id``, ``discussion_id``,
     ``note_id`` and a human-readable ``reason``.
     """
-    applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+    applicant = require_allowed_ezlynx_write_applicant(applicant_id, operation=OPERATION_NOTE_APPEND)
     from .chat_write_boundary import assert_chat_applicant
 
     assert_chat_applicant(applicant)
