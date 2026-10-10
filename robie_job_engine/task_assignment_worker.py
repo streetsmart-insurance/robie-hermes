@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from .ezlynx_shared_writes import body_norm_sha256, complete_note_ids, new_note_ids_with_text, norm_note_text
 from .ezlynx_task_report import AssignedTask
 from .models import JobStatus, VerificationEvidence, VerificationResult
 
@@ -1100,23 +1101,7 @@ class TaskAssignmentWorker:
 
     def _complete_note_ids(self, discussion_id: str) -> list[str] | None:
         """Every note id in the discussion, or None when the read is not provably whole."""
-        from .ezlynx_discussions import (
-            _note_id_of, discussion_note_snapshot, iter_discussion_notes, with_notes_read_is_complete,
-        )
-
-        reader = getattr(self.client, "get_discussion_with_notes", None)
-        if not callable(reader):
-            return None
-        try:
-            plain = discussion_note_snapshot(self.client.get_discussion(discussion_id))
-            if plain.get("note_count") == 0:
-                return []
-            record = reader(discussion_id)
-        except Exception:  # noqa: BLE001 - no proof means the old rule applies
-            return None
-        if not with_notes_read_is_complete(record, plain):
-            return None
-        return sorted({_note_id_of(row) for row in iter_discussion_notes(record) if _note_id_of(row)})
+        return complete_note_ids(self.client, discussion_id)
 
     def _new_note_id_by_text(self, store: Any, job_id: str, kind: str, intent: dict[str, Any],
                              discussion_id: str, body: str) -> str:
@@ -1126,23 +1111,8 @@ class TaskAssignmentWorker:
         there, two new notes with this text, an incomplete read, or an id that
         belongs to another note of this job all return "" (held, never reposted).
         """
-        from .ezlynx_discussions import _note_body, _note_id_of, iter_discussion_notes
-
-        prior = intent.get("prior_note_ids")
-        if not isinstance(prior, list):
-            return ""
-        after = self._complete_note_ids(discussion_id)
-        reader = getattr(self.client, "get_discussion_with_notes", None)
-        if after is None or not callable(reader):
-            return ""
-        before = {str(x) for x in prior}
-        record = reader(discussion_id)
-        matches = [
-            _note_id_of(row) for row in iter_discussion_notes(record)
-            if _note_id_of(row) and _note_id_of(row) not in before
-            and _note_id_of(row) in after and _norm_text(_note_body(row)) == _norm_text(body)
-        ]
-        if len(matches) != 1 or _note_id_used_elsewhere(store, job_id, kind, matches[0]):
+        matches = new_note_ids_with_text(self.client, intent.get("prior_note_ids"), discussion_id, body)
+        if not matches or len(matches) != 1 or _note_id_used_elsewhere(store, job_id, kind, matches[0]):
             return ""
         return matches[0]
 
@@ -1194,7 +1164,7 @@ class TaskAssignmentWorker:
             "text": text,
             "purpose": purpose,
             "round": job_round(job),
-            "body_norm_sha256": hashlib.sha256(_norm_text(body).encode()).hexdigest(),
+            "body_norm_sha256": body_norm_sha256(body),
             "adopted": bool(intent.get("adopted")),
             "reserved_at": intent.get("reserved_at"),
         }
@@ -1256,8 +1226,7 @@ def _note_id_used_elsewhere(store: Any, job_id: str, this_kind: str, note_id: st
 _NOTE_TEXT_KEYS = ("body", "Body", "text", "Text", "noteText", "NoteText", "note", "Note", "content", "Content")
 
 
-def _norm_text(text: Any) -> str:
-    return " ".join(str(text or "").split())
+_norm_text = norm_note_text
 
 
 def _note_text_for_id(record: Any, note_id: str) -> str | None:
@@ -1452,7 +1421,7 @@ class TaskIntakeVerifier:
                 want = str((action.get("note") or {}).get("body_norm_sha256") or "")
                 text = _note_text_for_id(full, note_id)
                 if (text is not None and want
-                        and hashlib.sha256(_norm_text(text).encode()).hexdigest() == want):
+                        and body_norm_sha256(text) == want):
                     record = full
         except Exception as e:  # noqa: BLE001 — transient read failure retries
             return _unverified(
@@ -1467,7 +1436,7 @@ class TaskIntakeVerifier:
         if (action.get("note") or {}).get("adopted"):
             text = _note_text_for_id(record, note_id)
             want = str((action.get("note") or {}).get("body_norm_sha256") or "")
-            if text is None or hashlib.sha256(_norm_text(text).encode()).hexdigest() != want:
+            if text is None or body_norm_sha256(text) != want:
                 return _unverified(
                     job, captured, discussion_id,
                     {"note_id": note_id, "discussion_id": discussion_id}, {},

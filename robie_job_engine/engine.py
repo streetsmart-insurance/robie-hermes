@@ -998,7 +998,12 @@ class JobEngine:
                 ),
                 job_id=job.get("id"),
             )
-            reason = prohibited or mismatch or stale or identity
+            from .ezlynx_shared_writes import shared_write_evidence_missing
+
+            shared = shared_write_evidence_missing(
+                job.get("action_type"), result.evidence.expected, result.evidence.observed
+            )
+            reason = prohibited or mismatch or stale or identity or shared
             if reason:
                 return self.store.transition(
                     job["id"],

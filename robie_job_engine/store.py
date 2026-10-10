@@ -603,7 +603,7 @@ class JobStore:
                     (job_id,),
                 ).fetchone()
                 job_meta = conn.execute(
-                    "SELECT created_at, payload_json FROM jobs WHERE id=?", (job_id,)
+                    "SELECT created_at, payload_json, action_type FROM jobs WHERE id=?", (job_id,)
                 ).fetchone()
                 perform = conn.execute(
                     """SELECT created_at FROM attempts
@@ -654,6 +654,7 @@ class JobStore:
                     ),
                     action=action_data,
                     payload=payload,
+                    action_type=job_meta["action_type"] if job_meta else None,
                 )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(

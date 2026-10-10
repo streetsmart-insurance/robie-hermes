@@ -21,6 +21,13 @@ there is no ``--any-applicant`` and no way to widen them from here):
 * ``docs upload <applicant> --file F --name N``   DocumentApi upload + fresh read-back
 * ``notes add <applicant> --discussion-id ID --text T``   existing discussion only
 
+Both write verbs run as shared Job Engine jobs (``ezlynx.document_upload`` and
+``ezlynx.note_append``, see ``ezlynx_shared_writes``). The job's independent
+verifier decides done; the CLI only reports the job's status. A rerun with the
+same document (applicant + file hash + name) or the same note (discussion +
+text hash + ``--caller-job-id``) finds the existing job and never writes twice.
+Jobs live in ``jobs.db`` in the state dir (or ``$ROBIE_API_CLI_JOBS_DB``).
+
 Every call needs ``--agent NAME`` and appends one line (two for a live write)
 to ``audit.jsonl`` in the state dir. The audit never holds document or note
 text: only ids, sizes, a hash, and the result. If the audit file cannot be
@@ -65,6 +72,8 @@ STATE_DIR_ENV = "ROBIE_API_CLI_STATE_DIR"
 DEFAULT_STATE_DIR = "/var/lib/ezlynx-api-cli"
 AUDIT_FILE = "audit.jsonl"
 NOTE_LEDGER_FILE = "discussion-note-ledger.json"
+JOBS_DB_FILE = "jobs.db"
+JOBS_DB_ENV = "ROBIE_API_CLI_JOBS_DB"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -249,6 +258,13 @@ class LiveServices:
 
             self._port = EzlynxApiClientReadPort(self.api)
         return self._port
+
+    @property
+    def note_port(self) -> Any:
+        """Read-only port the note verifier uses (never the write client's report)."""
+        from .ezlynx_api_read_port import EzlynxApiClientReadPort
+
+        return EzlynxApiClientReadPort(self.api, discussion_client=self.discussions)
 
     def extract_pages(self, pdf_bytes: bytes) -> tuple[list[str], list[int]]:
         from .robie_filer_extract import extract_pages
@@ -504,8 +520,70 @@ def _map_write_error(exc: Exception) -> CliError:
     return CliError("error", f"{name}: {text}")
 
 
+def svc_agent(svc: Any) -> str:
+    return str(getattr(svc, "cli_agent", "") or "unknown")
+
+
 def _short(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:400]
+
+
+# ------------------------------------------------------------- shared jobs
+def _jobs_store(svc: Any) -> Any:
+    from .store import JobStore
+
+    path = getattr(svc, "jobs_db", None) or os.environ.get(JOBS_DB_ENV) or Path(svc.state_dir) / JOBS_DB_FILE
+    return JobStore(str(path))
+
+
+def _shared_engine(svc: Any, store: Any) -> Any:
+    """The shared EZLynx write jobs, bound to this CLI's clients."""
+    from .engine import JobEngine
+    from .ezlynx_shared_writes import (
+        DOCUMENT_UPLOAD,
+        DOCUMENT_UPLOAD_WORKER,
+        NOTE_APPEND,
+        NOTE_APPEND_WORKER,
+        EzlynxDocumentUploadVerifier,
+        EzlynxDocumentUploadWorker,
+        EzlynxNoteAppendVerifier,
+        EzlynxNoteAppendWorker,
+    )
+
+    workers = {
+        DOCUMENT_UPLOAD_WORKER: EzlynxDocumentUploadWorker(store, client_factory=lambda: svc.api),
+        NOTE_APPEND_WORKER: EzlynxNoteAppendWorker(store, client_factory=lambda: svc.discussions),
+    }
+    verifiers = {
+        DOCUMENT_UPLOAD: EzlynxDocumentUploadVerifier(store, port_factory=lambda: svc.port),
+        NOTE_APPEND: EzlynxNoteAppendVerifier(
+            store, port_factory=lambda: getattr(svc, "note_port", None) or svc.discussions
+        ),
+    }
+    return JobEngine(store, workers, verifiers, enforce_recording_policy=False)
+
+
+def _run_job(svc: Any, store: Any, job: dict[str, Any]) -> dict[str, Any]:
+    from .ezlynx_shared_writes import run_shared_write_job
+
+    return run_shared_write_job(store, job["id"], _shared_engine(svc, store))
+
+
+def _job_error(job: dict[str, Any], *, unconfirmed: CliError) -> CliError:
+    """A job that did not end COMPLETE, as a CLI error. Never reported as done."""
+    status = str(job.get("status") or "")
+    error = str(job.get("last_error") or "")
+    where = f" (job {job.get('id')}, {status})"
+    if status == "UNVERIFIED":
+        unconfirmed.message = f"{unconfirmed.message} {error}{where}".strip()
+        return unconfirmed
+    if "EZLYNX_WRITE_SCOPE_REFUSED" in error:
+        return CliRefused("EZLYNX_WRITE_SCOPE_REFUSED", error)
+    if "not Production-ready" in error:
+        return CliRefused("job_type_not_production_ready", error + where)
+    if status == "FAILED":
+        return CliError("job_failed", (error or "the job failed") + where)
+    return CliError("job_pending", f"the job is {status} and not confirmed; nothing more was sent. {error}{where}")
 
 
 # ------------------------------------------------------------------- handlers
@@ -730,24 +808,31 @@ def cmd_docs_upload(svc: Any, args: argparse.Namespace) -> Outcome:
              "document_ids": existing, "note": "a document with this exact name is already filed; pass --allow-duplicate to upload again"},
             audit, status="exists",
         )
-    from .ezlynx_api_only_writes import EzlynxNoteDocReadbackError, upload_document_via_api
+    from .ezlynx_shared_writes import ensure_document_upload_job, verified_destination_id
 
+    store = _jobs_store(svc)
+    job = ensure_document_upload_job(
+        store, applicant_id=applicant, document_name=name, file_path=path, caller=f"{PROG}:{svc_agent(svc)}",
+        filename=path.name, policy_master_id=args.policy_master_id or None,
+        content_type=content_type, file_sha256=digest,
+    )
+    audit["job_id"] = job["id"]
     try:
-        uploaded = upload_document_via_api(
-            applicant, name, data, client=svc.api, filename=path.name,
-            policy_master_id=args.policy_master_id or None, file_content_type=content_type,
-        )
-    except EzlynxNoteDocReadbackError as exc:
-        raise CliUnconfirmed(
-            "readback_failed",
-            f"{exc}. The upload may have gone through: run `docs list {applicant}` before trying again.",
-        ) from exc
+        job = _run_job(svc, store, job)
     except Exception as exc:  # noqa: BLE001
         raise _map_write_error(exc) from exc
-    audit["doc_id"] = uploaded.get("document_id")
+    if job["status"] != "COMPLETE":
+        raise _job_error(job, unconfirmed=CliUnconfirmed(
+            "readback_failed",
+            f"The upload could not be confirmed and will not be sent again. Run `docs list {applicant}` "
+            "before trying again.",
+        ))
+    document_id = verified_destination_id(store, job["id"], "document_id")
+    audit["doc_id"] = document_id
     return Outcome(
-        {"status": "uploaded", "uploaded": True, "applicant_id": applicant, "document_id": uploaded.get("document_id"),
-         "document_name": name, "read_back": bool(uploaded.get("read_back")), "bytes": len(data), "sha256": digest},
+        {"status": "uploaded", "uploaded": True, "applicant_id": applicant, "document_id": document_id,
+         "document_name": name, "read_back": True, "job_id": job["id"], "job_status": job["status"],
+         "bytes": len(data), "sha256": digest},
         audit, status="uploaded",
     )
 
@@ -771,6 +856,8 @@ def cmd_notes_add(svc: Any, args: argparse.Namespace) -> Outcome:
         raise CliUsage("bad_discussion", "give exactly one of --discussion-id or --title")
     if args.discussion_id and not ID_RE.fullmatch(args.discussion_id):
         raise CliUsage("bad_discussion", "discussion id has unexpected characters")
+    if args.caller_job_id and not ID_RE.fullmatch(args.caller_job_id):
+        raise CliUsage("bad_caller_job_id", "--caller-job-id has unexpected characters")
     text = _note_text(args)
     audit = {
         "applicant": applicant,
@@ -782,27 +869,54 @@ def cmd_notes_add(svc: Any, args: argparse.Namespace) -> Outcome:
     _guard_write_context()
     from .ezlynx_discussions import DiscussionApiError, file_note_to_existing_discussion
 
+    # Read-only resolution first (allowlist, phone numbers, the one matching
+    # discussion). Nothing is posted here; the job posts.
     try:
-        filed = file_note_to_existing_discussion(
+        checked = file_note_to_existing_discussion(
             svc.discussions, applicant, text,
             title_hint=args.title or None, discussion_id=args.discussion_id or None,
-            dry_run=bool(args.dry_run), ledger_path=svc.ledger_path,
+            dry_run=True,
         )
     except DiscussionApiError as exc:
         raise CliRefused("note_refused", str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise _map_write_error(exc) from exc
-    result = {key: value for key, value in dict(filed).items() if key not in _NOTE_RESULT_DROP}
+    result = {key: value for key, value in dict(checked).items() if key not in _NOTE_RESULT_DROP}
     status = str(result.get("status") or "")
-    audit.update({"discussion_id": result.get("discussion_id") or args.discussion_id, "note_id": result.get("note_id")})
-    if status in {"filed", "dry_run"}:
-        return Outcome(result, audit, status=status)
-    if status == "held":
-        raise CliUnconfirmed(
+    discussion_id = str(result.get("discussion_id") or "")
+    audit["discussion_id"] = discussion_id or args.discussion_id
+    if status != "dry_run" or not discussion_id:
+        return Outcome(result, audit, status=status or "pending")
+    if args.dry_run:
+        return Outcome(result, audit, status="dry_run")
+    from .ezlynx_shared_writes import ensure_note_append_job, verified_destination_id
+
+    store = _jobs_store(svc)
+    caller = args.caller_job_id or f"{PROG}:{svc_agent(svc)}"
+    job = ensure_note_append_job(
+        store, applicant_id=applicant, discussion_id=discussion_id, body=text, caller_job_id=caller,
+    )
+    audit["job_id"] = job["id"]
+    try:
+        job = _run_job(svc, store, job)
+    except DiscussionApiError as exc:
+        raise CliRefused("note_refused", str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _map_write_error(exc) from exc
+    if job["status"] != "COMPLETE":
+        raise _job_error(job, unconfirmed=CliUnconfirmed(
             "note_unconfirmed",
-            "The note was sent but could not be confirmed. Do not send it again; check the discussion with `discussions get`.",
-        )
-    return Outcome(result, audit, status=status or "pending")
+            "The note was sent but could not be confirmed. Do not send it again; check the discussion "
+            "with `discussions get`.",
+        ))
+    note_id = verified_destination_id(store, job["id"], "note_id")
+    audit["note_id"] = note_id
+    return Outcome(
+        {"status": "filed", "applicant_id": applicant, "discussion_id": discussion_id,
+         "discussion_title": result.get("discussion_title"), "note_id": note_id, "read_back": True,
+         "job_id": job["id"], "job_status": job["status"]},
+        audit, status="filed",
+    )
 
 
 def cmd_discussions_list(svc: Any, args: argparse.Namespace) -> Outcome:
@@ -1010,6 +1124,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title", help="title of an existing discussion (used only when exactly one matches)")
     p.add_argument("--text")
     p.add_argument("--text-file", help="read the note from a file, or - for stdin (avoids ssh quoting)")
+    p.add_argument("--caller-job-id", help="the job this note belongs to; the same text is posted once per caller "
+                                           "(default ezlynx-api:<agent>)")
     p.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -1052,6 +1168,7 @@ def main(
         svc = services if services is not None else LiveServices(state_dir)
         if not hasattr(svc, "state_dir"):
             svc.state_dir = state_dir
+        svc.cli_agent = agent
         is_write = command in WRITE_COMMANDS and not getattr(args, "dry_run", False)
         if is_write:
             audit.append("start", applicant=applicant_arg, result="started")

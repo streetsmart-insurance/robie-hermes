@@ -20,6 +20,8 @@ WORKER_FOR_ACTION = {
     "ezlynx.submission_audit": "submission-audit",
     "ezlynx.overdue_submission_reports": "overdue-submission-reports",
     "ezlynx.session_refresh": "session-refresh",
+    "ezlynx.document_upload": "ezlynx-document-upload",
+    "ezlynx.note_append": "ezlynx-note-append",
     "filesystem.skill_update": "hermes-cua",
     "appsheet.smart_reward": "hermes-cua",
     "appsheet.qa_audit": "hermes-cua",
@@ -59,6 +61,8 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.submission_audit",
         "ezlynx.overdue_submission_reports",
         "ezlynx.session_refresh",
+        "ezlynx.document_upload",
+        "ezlynx.note_append",
         # appsheet.smart_reward / appsheet.qa_audit were bounded but have never
         # had a verifier class, so every such job terminated UNVERIFIED by
         # construction. Production jobs.db shows ZERO rows for either, all

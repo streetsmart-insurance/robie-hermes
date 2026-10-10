@@ -983,6 +983,9 @@ def retarget_recorder_hint(
     return {"url": chosen.url, "identity": chosen.identity, "job_id": job_id or ""}
 
 
+_API_ONLY_ACTIONS = frozenset({"ezlynx.document_upload", "ezlynx.note_append"})
+
+
 def cleanup_terminal_job_tabs(
     db_path: str | Path | None,
     job_id: str,
@@ -1005,6 +1008,11 @@ def cleanup_terminal_job_tabs(
             job = None
     if job is not None and JobStatus(job["status"]) not in TERMINAL_STATUSES:
         return {"ok": True, "skipped": "job is not terminal", "job_id": job_id}
+    if job is not None and job.get("action_type") in _API_ONLY_ACTIONS:
+        # Shared EZLynx writes use DocumentApi / DiscussionApi only. They open
+        # no tab, and their store (the ezlynx-api CLI's jobs.db) cannot see the
+        # live Chat jobs, so a reset here could disturb a running browser job.
+        return {"ok": True, "skipped": "API-only job; no browser used", "job_id": job_id}
     job_claims = claims_for_job(store, job) if store is not None and job is not None else claims_from_text(job_id)
     live = live_tab_claims(path)
     if pages is not None:
