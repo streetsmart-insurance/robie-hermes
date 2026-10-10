@@ -11,6 +11,7 @@ ENSURE = ROOT / "scripts" / "ensure-gcloud-ssh-key.sh"
 CLOUD = ROOT / "scripts" / "cloud-shell-restart-ssh-proof.sh"
 GRANT_DEPLOYER = ROOT / "scripts" / "grant-test-deployer-iap-ssh.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "diagnose-test-iap-ssh.yml"
+BOOTSTRAP = ROOT / "docs" / "TEST_DEPLOYER_IAP_SSH_BOOTSTRAP.md"
 
 
 class EnsureGcloudSshKeyContractTests(unittest.TestCase):
@@ -29,7 +30,7 @@ class EnsureGcloudSshKeyContractTests(unittest.TestCase):
         self.assertIn("BatchMode=yes", text)
         self.assertIn("ROBIE_CLOUD_SHELL_SSH_PROOF_BEGIN", text)
 
-    def test_deployer_grant_script_has_rollback(self):
+    def test_deployer_grant_script_uses_iap_tunnel_api_not_compute_iap(self):
         text = GRANT_DEPLOYER.read_text(encoding="utf-8")
         self.assertIn("roles/iap.tunnelResourceAccessor", text)
         self.assertIn("roles/compute.osAdminLogin", text)
@@ -37,16 +38,23 @@ class EnsureGcloudSshKeyContractTests(unittest.TestCase):
         self.assertIn("rollback", text)
         self.assertNotIn("keys create", text)
         self.assertNotIn("0.0.0.0/0", text)
-        # IAP must be instance-scoped; project-level would open hermes-poc-01.
-        self.assertIn(
-            'gcloud compute instances add-iam-policy-binding "${VM}"',
-            text,
-        )
         self.assertIn('"${VM}" != "hermes-test-01"', text)
+        # IAP must be granted on the IAP tunnel instance resource.
+        self.assertIn("iap.googleapis.com/v1/projects/", text)
+        self.assertIn("iap_tunnel/zones/", text)
+        self.assertIn("setIamPolicy", text)
+        self.assertIn("HTTP 400", text)
+        # Never bind IAP via Compute instance IAM (Carlo's 400).
         for i, line in enumerate(text.splitlines()):
-            if "projects add-iam-policy-binding" in line:
+            if "compute instances add-iam-policy-binding" in line:
                 window = "\n".join(text.splitlines()[i : i + 5])
                 self.assertNotIn("iap.tunnelResourceAccessor", window)
+
+    def test_bootstrap_doc_records_fresh_runner_proof(self):
+        text = BOOTSTRAP.read_text(encoding="utf-8")
+        self.assertIn("34745695554", text)
+        self.assertIn("github-test-deployer-ssh", text)
+        self.assertIn("6971056864475829887", text)
 
     def test_iap_ssh_proof_workflow_is_main_only(self):
         text = WORKFLOW.read_text(encoding="utf-8")
