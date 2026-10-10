@@ -755,6 +755,26 @@ class DailyListAndSopTests(unittest.TestCase):
         self.assertIn("I can't", reply)
         self.assertNotIn("Ref: job", reply)
 
+    def test_email_lets_ascend_pfa_requests_reach_their_own_workflow(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            with mock.patch.dict(os.environ, {"ROBIE_PLAYGROUND": "1"}, clear=False):
+                for text in (
+                    "Please set up the Ascend program for Pantoja",
+                    "Can you send the Premium Finance agreement?",
+                    "need a financing agreement for this quote",
+                ):
+                    self.assertIsNone(
+                        handle_playground_email(
+                            db,
+                            text,
+                            sender="casey@streetsmart.insurance",
+                            thread_id="thread-pfa",
+                            message_id="e-pfa",
+                        ),
+                        text,
+                    )
+
     def test_hooks_are_in_front_of_the_agent(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(encoding="utf-8")
         email = (ROOT / "robie_job_engine/email_guard.py").read_text(encoding="utf-8")

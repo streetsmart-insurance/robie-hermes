@@ -154,6 +154,39 @@ class GenericHumanHitlTests(unittest.TestCase):
         self.assertNotIn("PLAYWRIGHT_BLOCKED", notice["body"])
         self.assertNotIn("Job ID:", notice["body"])
 
+    def test_generic_notice_names_the_stuck_step_in_plain_english(self) -> None:
+        notice = human_hitl_notice(
+            HitlRequest(
+                job_id="abc",
+                phase="end_state_report",
+                error="END_STATE_MISMATCH: readback differs",
+                page_state={},
+                attempted=[],
+                applicant_id="220250093",
+                channel="email",
+            )
+        )
+        self.assertIn("my own quality check flagged the result", notice["body"])
+        self.assertIn("my own quality check flagged the result", notice["chat"])
+        self.assertNotIn("END_STATE_MISMATCH", notice["body"])
+        self.assertIn("Reply to this email", notice["body"])
+        self.assertIn("Reply in this Chat thread", notice["chat"])
+
+    def test_generic_notice_unknown_phase_reads_as_words(self) -> None:
+        notice = human_hitl_notice(
+            HitlRequest(
+                job_id="abc",
+                phase="field_fill",
+                error="PLAYWRIGHT_BLOCKED: submit control not found",
+                page_state={},
+                attempted=[],
+                applicant_id="220250093",
+                channel="email",
+            )
+        )
+        self.assertIn("I got stuck at the field fill step.", notice["body"])
+        self.assertNotIn("field_fill", notice["body"])
+
     def test_email_blocker_says_reply_to_this_email(self) -> None:
         state = interaction_for_blocker(
             "PLAYWRIGHT_BLOCKED: submit control not found",

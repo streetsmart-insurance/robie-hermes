@@ -20,6 +20,19 @@ from typing import Any
 CHANNEL_EMAIL = "email"
 CHANNEL_CHAT = "chat"
 
+# Plain-English descriptions of job phases for HITL emails.
+# Carlo 2026-10-02: the HITL email must say what actually broke.
+_PHASE_DESCRIPTIONS = {
+    "end_state_report": (
+        "I finished the work but my own quality check flagged the result "
+        "as not matching what was asked. I did not want to tell the requester "
+        "it was done when my check says otherwise."
+    ),
+    "coverage_fill": "I got stuck filling in coverage options on the carrier page.",
+    "ascend_create": "I got stuck creating the premium finance agreement in Ascend.",
+    "email_intake": "I got stuck reading the incoming email request.",
+}
+
 # Invisible / format chars that Gmail mobile can render as letter-spacing.
 _STRIP_CHARS = dict.fromkeys(
     map(
@@ -455,8 +468,18 @@ def human_hitl_notice(request: Any, gemini_response: Any = None) -> dict[str, st
             "chat": fail_closed_human_text(channel=CHANNEL_CHAT),
         }
 
-    gemini_line = _gemini_sentence(request, gemini_response)
+    # Carlo 2026-10-02: describe what actually broke in plain English.
+    # Raw error text stays out of the body; Carlo sees the stuck step instead.
     lines: list[str] = ["I need a human to finish this step."]
+    ask_summary = str(getattr(request, "ask", "") or "").strip()
+    if ask_summary:
+        lines.append("The request was: " + ask_summary)
+    phase_desc = _PHASE_DESCRIPTIONS.get(phase)
+    if phase_desc:
+        lines.append(phase_desc)
+    elif phase:
+        lines.append("I got stuck at the " + phase.replace("_", " ") + " step.")
+    gemini_line = _gemini_sentence(request, gemini_response)
     if gemini_line:
         lines.append(gemini_line)
     elif getattr(request, "save_skipped", False):

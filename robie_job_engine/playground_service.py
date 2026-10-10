@@ -142,6 +142,10 @@ def handle_playground_email(
     """Same guardrails for robie@. None lets the existing email path run."""
     if not email_guardrails_enabled():
         return None
+    # Ascend/PFA requests bypass playground - they have their own workflow
+    _tl = text.lower()
+    if any(k in _tl for k in ["ascend", "finance agreement", "financing agreement", "payment agreement", "premium finance"]):
+        return None
     conversation = f"email:{thread_id or message_id or 'inbox'}"
     replies = _dispatch(
         db_path,
