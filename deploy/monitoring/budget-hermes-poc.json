@@ -1,0 +1,35 @@
+{
+  "displayName": "HERMES POC monthly cost spike budget",
+  "budgetFilter": {
+    "projects": [
+      "projects/streetsmart-hermes-poc"
+    ]
+  },
+  "amount": {
+    "specifiedAmount": {
+      "currencyCode": "USD",
+      "units": "300"
+    }
+  },
+  "thresholdRules": [
+    {
+      "thresholdPercent": 0.5,
+      "spendBasis": "CURRENT_SPEND"
+    },
+    {
+      "thresholdPercent": 0.8,
+      "spendBasis": "CURRENT_SPEND"
+    },
+    {
+      "thresholdPercent": 1.0,
+      "spendBasis": "CURRENT_SPEND"
+    },
+    {
+      "thresholdPercent": 1.0,
+      "spendBasis": "FORECASTED_SPEND"
+    }
+  ],
+  "notificationsRule": {
+    "enableIamRecipients": true
+  }
+}
