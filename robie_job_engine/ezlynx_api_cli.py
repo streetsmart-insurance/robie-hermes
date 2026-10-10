@@ -495,8 +495,15 @@ def _write_new_file(path_text: str, data: bytes, *, state_dir: Path) -> Path:
     return target
 
 
-def _guard_write_context() -> None:
-    """Writes keep the compiled allowlist. This CLI never runs in all-clients mode."""
+def _guard_write_context() -> dict[str, Any] | None:
+    """Writes keep the compiled allowlist unless the root-owned policy file lists this CLI.
+
+    ``ROBIE_EZLYNX_WRITE_SCOPE=all`` is never accepted here. The operation
+    scope (document upload and note append to any client) comes only from
+    ``/etc/streetsmart-hermes/ezlynx-write-scope.json``. Returns the policy
+    record to add to the audit line, or ``None`` when the CLI stays on the
+    allowlist. A policy file that exists but is damaged refuses the write.
+    """
     from . import ezlynx_write_scope as scope
 
     if scope.write_scope_requests_all():
@@ -505,6 +512,21 @@ def _guard_write_context() -> None:
             "ROBIE_EZLYNX_WRITE_SCOPE=all (or applicant ids '*') is set in this process. "
             "This CLI only writes within the compiled applicant allowlist; unset it.",
         )
+    try:
+        policy = scope.register_operation_scope(scope.ENTRYPOINT_EZLYNX_API_CLI)
+    except scope.EzlynxWriteScopeError as exc:
+        raise CliRefused("write_scope_policy_refused", str(exc)) from exc
+    return policy
+
+
+def _policy_audit(policy: dict[str, Any] | None) -> dict[str, Any]:
+    if not policy:
+        return {}
+    return {
+        "write_scope_policy_sha256": policy["sha256"],
+        "write_scope_operations": ",".join(sorted(policy["operations"])),
+        "write_scope_approved_by": policy["approved_by"],
+    }
 
 
 def _map_write_error(exc: Exception) -> CliError:
@@ -767,12 +789,16 @@ def cmd_docs_upload(svc: Any, args: argparse.Namespace) -> Outcome:
     content_type = args.content_type or _MIME.get(kind) or "application/octet-stream"
     digest = sha256_hex(data)
     audit = {"applicant": applicant, "document_name": name, "bytes": len(data), "sha256": digest}
-    _guard_write_context()
-    from .ezlynx_write_scope import applicant_is_write_allowed, require_allowed_ezlynx_write_applicant
+    audit.update(_policy_audit(_guard_write_context()))
+    from .ezlynx_write_scope import (
+        OPERATION_DOCUMENT_UPLOAD,
+        applicant_is_write_allowed_for,
+        require_allowed_ezlynx_write_applicant,
+    )
 
     try:
         if args.dry_run:
-            allowed = applicant_is_write_allowed(applicant)
+            allowed = applicant_is_write_allowed_for(applicant, OPERATION_DOCUMENT_UPLOAD)
             if not allowed:
                 require_allowed_ezlynx_write_applicant(applicant)
             return Outcome(
@@ -781,7 +807,7 @@ def cmd_docs_upload(svc: Any, args: argparse.Namespace) -> Outcome:
                  "note": "dry run: nothing was uploaded"},
                 audit, status="dry_run",
             )
-        require_allowed_ezlynx_write_applicant(applicant)
+        require_allowed_ezlynx_write_applicant(applicant, operation=OPERATION_DOCUMENT_UPLOAD)
     except CliError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -866,7 +892,7 @@ def cmd_notes_add(svc: Any, args: argparse.Namespace) -> Outcome:
         "note_chars": len(text),
         "note_sha256": sha256_hex(text),
     }
-    _guard_write_context()
+    audit.update(_policy_audit(_guard_write_context()))
     from .ezlynx_discussions import DiscussionApiError, file_note_to_existing_discussion
 
     # Read-only resolution first (allowlist, phone numbers, the one matching

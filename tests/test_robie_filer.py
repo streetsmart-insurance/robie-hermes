@@ -343,9 +343,11 @@ def test_live_auto_requires_any_applicant():
         rf.main(["--live", "--auto"])
 
 
-def test_any_applicant_refuses_when_scope_missing(monkeypatch):
+def test_any_applicant_refuses_without_a_write_scope_policy(monkeypatch, tmp_path):
     from robie_job_engine import ezlynx_write_scope
 
-    monkeypatch.delattr(ezlynx_write_scope, "register_filer_operation_scope", raising=False)
-    with pytest.raises(SystemExit, match="filer operation scope"):
+    monkeypatch.setattr(ezlynx_write_scope, "WRITE_SCOPE_POLICY_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(ezlynx_write_scope, "_OPERATION_SCOPE", None)
+    with pytest.raises(SystemExit, match="write-scope policy"):
         rf._register_any_applicant_scope()
+    assert ezlynx_write_scope.operation_scope_registered() is False

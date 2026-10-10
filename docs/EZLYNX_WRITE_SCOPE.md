@@ -61,3 +61,17 @@ targeted. The Test-account header checks remain for `220250093`.
 EZLynx notes and documents themselves are API-only (Carlo 2026-09-19).
 Playwright must never file a note or upload a document. See
 `docs/EZLYNX_NOTES_DOCS_API_ONLY.md`.
+
+## Operation scope (document upload and note append to any client)
+
+Carlo 2026-10-10: robie-filer (and later the `ezlynx-api` CLI) may upload
+documents and append notes to any client, without opening the applicant
+allowlist for anything else. It is **not** an environment setting. A
+root-owned file, `/etc/streetsmart-hermes/ezlynx-write-scope.json`, names the
+entrypoint and the two operations; no file means closed. Install, audit and
+rollback are in `docs/EZLYNX_WRITE_SCOPE_POLICY_RUNBOOK.md`.
+
+`require_allowed_ezlynx_write_applicant(value, operation=...)` accepts an
+operation only at the document upload and note append call sites. A bound
+Production Chat job is never widened, the sealed agent interpreter can never
+register the scope, and the seal refuses a write if one is planted later.

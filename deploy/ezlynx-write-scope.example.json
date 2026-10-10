@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "environment": "PRODUCTION",
+  "approved_by": "Carlo Ferrara",
+  "approved_at": "2026-10-10T17:54:00-04:00",
+  "entrypoints": {
+    "robie_filer": {
+      "operations": ["document_upload", "note_append"]
+    }
+  }
+}

@@ -28,18 +28,30 @@ limited to that applicant even if the compiled allowlist is
 unrestricted. When no Production job is bound, agency-wide API workers
 use the env policy above.
 
+Operation scope (Carlo 2026-10-10): a process may be allowed to write
+exactly two operations, ``document_upload`` and ``note_append``, to ANY
+applicant, without widening the applicant allowlist for everything else.
+It is switched on only by a root-owned policy file
+(``/etc/streetsmart-hermes/ezlynx-write-scope.json``), never by an
+environment variable, and only in the two entrypoints the file names
+(``robie_filer``, ``ezlynx_api_cli``). No file means closed. See
+``docs/EZLYNX_WRITE_SCOPE_POLICY_RUNBOOK.md``.
+
 Deletes are never authorized through this scope; the cardinal no-delete
 rule is enforced separately.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import socket
 import sqlite3
+import stat
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -346,7 +358,257 @@ def applicant_is_write_allowed(value: object) -> bool:
     return False
 
 
-def require_allowed_ezlynx_write_applicant(value: object) -> str:
+
+# --------------------------------------------------------------- operation scope
+OPERATION_DOCUMENT_UPLOAD = "document_upload"
+OPERATION_NOTE_APPEND = "note_append"
+#: The only two operations an operation scope can ever allow. Policy create,
+#: discussion create, task create, labels, reassign and every browser save pass
+#: no ``operation`` and keep the applicant allowlist.
+FILER_OPERATIONS = frozenset({OPERATION_DOCUMENT_UPLOAD, OPERATION_NOTE_APPEND})
+ENTRYPOINT_ROBIE_FILER = "robie_filer"
+ENTRYPOINT_EZLYNX_API_CLI = "ezlynx_api_cli"
+OPERATION_SCOPE_ENTRYPOINTS = frozenset({ENTRYPOINT_ROBIE_FILER, ENTRYPOINT_EZLYNX_API_CLI})
+WRITE_SCOPE_POLICY_PATH = Path("/etc/streetsmart-hermes/ezlynx-write-scope.json")
+WRITE_SCOPE_POLICY_VERSION = 1
+MAX_POLICY_BYTES = 8192
+_TRUSTED_OWNER_UID = 0  # root. Tests patch this; nothing at runtime does.
+_POLICY_HOSTS = {"PRODUCTION": "hermes-poc-01", "TEST": "hermes-test-01"}
+_POLICY_TOP_KEYS = frozenset({"version", "environment", "approved_by", "approved_at", "entrypoints"})
+_POLICY_ENTRYPOINT_KEYS = frozenset({"operations"})
+
+#: ``(entrypoint, operations)`` once :func:`register_operation_scope` succeeded
+#: in THIS process, else ``None``. Never set by an environment variable.
+_OPERATION_SCOPE: tuple[str, frozenset[str]] | None = None
+
+
+def _hostname() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+def _runtime_environment() -> str:
+    return os.environ.get("ROBIE_ENV", "").strip().upper()
+
+
+def _mode_problem(mode: int, what: str) -> str | None:
+    if mode & 0o022:
+        return f"{what} is group or world writable"
+    return None
+
+
+def load_write_scope_policy(
+    entrypoint: str,
+    *,
+    policy_path: Path | str | None = None,
+    owner_uid: int | None = None,
+) -> dict | None:
+    """Read and validate the root-owned policy file for one entrypoint.
+
+    Returns ``None`` when there is no file (closed) or the file does not list
+    ``entrypoint``. Raises :class:`EzlynxWriteScopeError` for anything wrong
+    with a file that exists: a symlink, a wrong owner, a writable file or
+    directory, bad JSON, unknown keys or operations, the wrong environment or
+    host. A damaged policy never widens anything.
+
+    ``policy_path`` and ``owner_uid`` exist for tests (as does the module's
+    ``_TRUSTED_OWNER_UID``). Production code never passes them, and the sealed agent interpreter cannot register at all.
+    """
+
+    path = Path(policy_path) if policy_path is not None else WRITE_SCOPE_POLICY_PATH
+    owner_uid = _TRUSTED_OWNER_UID if owner_uid is None else owner_uid
+
+    def refuse(reason: str) -> EzlynxWriteScopeError:
+        return EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: write-scope policy {path} refused: {reason}"
+        )
+
+    try:
+        link = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise refuse(f"cannot be inspected ({exc.__class__.__name__})") from exc
+    if not stat.S_ISREG(link.st_mode):
+        raise refuse("is not a regular file (symlinks are refused)")
+    try:
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise refuse(f"its directory cannot be inspected ({exc.__class__.__name__})") from exc
+    if parent.st_uid != owner_uid:
+        raise refuse("its directory is not owned by root")
+    problem = _mode_problem(parent.st_mode, "its directory")
+    if problem:
+        raise refuse(problem)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise refuse(f"cannot be opened ({exc.__class__.__name__})") from exc
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != (link.st_dev, link.st_ino):
+            raise refuse("changed while it was being read")
+        if info.st_uid != owner_uid:
+            raise refuse("is not owned by root")
+        problem = _mode_problem(info.st_mode, "the file")
+        if problem:
+            raise refuse(problem)
+        if info.st_size > MAX_POLICY_BYTES:
+            raise refuse("is larger than expected")
+        raw = os.read(fd, MAX_POLICY_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_POLICY_BYTES:
+        raise refuse("is larger than expected")
+    try:
+        policy = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise refuse("is not valid JSON") from exc
+    if not isinstance(policy, dict):
+        raise refuse("must be a JSON object")
+    unknown = set(policy) - _POLICY_TOP_KEYS
+    if unknown:
+        raise refuse(f"has unknown keys {sorted(unknown)}")
+    if policy.get("version") != WRITE_SCOPE_POLICY_VERSION or isinstance(policy.get("version"), bool):
+        raise refuse(f"version must be {WRITE_SCOPE_POLICY_VERSION}")
+    environment = policy.get("environment")
+    if environment not in _POLICY_HOSTS:
+        raise refuse("environment must be PRODUCTION or TEST")
+    if environment != _runtime_environment():
+        raise refuse(f"is for {environment}, this process is {_runtime_environment() or 'unset'}")
+    if _hostname() != _POLICY_HOSTS[environment]:
+        raise refuse(f"is for host {_POLICY_HOSTS[environment]}, this host is {_hostname()}")
+    approved_by = policy.get("approved_by")
+    if not isinstance(approved_by, str) or not approved_by.strip():
+        raise refuse("approved_by is required")
+    approved_at = policy.get("approved_at")
+    try:
+        datetime.fromisoformat(str(approved_at).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise refuse("approved_at must be an ISO timestamp") from exc
+    entrypoints = policy.get("entrypoints")
+    if not isinstance(entrypoints, dict) or not entrypoints:
+        raise refuse("entrypoints must be a non-empty object")
+    parsed: dict[str, frozenset[str]] = {}
+    for name, body in entrypoints.items():
+        if name not in OPERATION_SCOPE_ENTRYPOINTS:
+            raise refuse(f"unknown entrypoint {name!r}")
+        if not isinstance(body, dict) or set(body) - _POLICY_ENTRYPOINT_KEYS:
+            raise refuse(f"entrypoint {name} has unexpected keys")
+        ops = body.get("operations")
+        if not isinstance(ops, list) or not ops or not all(isinstance(op, str) for op in ops):
+            raise refuse(f"entrypoint {name} needs a non-empty operations list")
+        if len(set(ops)) != len(ops):
+            raise refuse(f"entrypoint {name} lists an operation twice")
+        extra = set(ops) - FILER_OPERATIONS
+        if extra:
+            raise refuse(f"entrypoint {name} lists operations that cannot be allowed: {sorted(extra)}")
+        parsed[name] = frozenset(ops)
+    if entrypoint not in parsed:
+        return None
+    return {
+        "entrypoint": entrypoint,
+        "operations": parsed[entrypoint],
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "environment": environment,
+        "approved_by": approved_by,
+        "approved_at": str(approved_at),
+        "contents": json.dumps(policy, sort_keys=True, separators=(",", ":")),
+    }
+
+
+def register_operation_scope(
+    entrypoint: str,
+    *,
+    policy_path: Path | str | None = None,
+    owner_uid: int | None = None,
+) -> dict | None:
+    """Allow ``document_upload`` and ``note_append`` to any applicant in THIS process.
+
+    Called by a named entrypoint at start. Needs the root-owned policy file to
+    list the entrypoint; with no file, or a file that does not list it, nothing
+    changes and ``None`` is returned. Refused in the sealed agent interpreter.
+    The policy's sha256 and contents are logged here and returned so the caller
+    records them in its own audit trail.
+    """
+
+    from .safety_seal import agent_interpreter
+
+    if agent_interpreter():
+        raise EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: operation scope refused in the agent interpreter"
+        )
+    if entrypoint not in OPERATION_SCOPE_ENTRYPOINTS:
+        raise EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: {entrypoint!r} is not an entrypoint that can hold an operation scope"
+        )
+    policy = load_write_scope_policy(entrypoint, policy_path=policy_path, owner_uid=owner_uid)
+    if policy is None:
+        return None
+    global _OPERATION_SCOPE
+    if _OPERATION_SCOPE is not None and _OPERATION_SCOPE[0] != entrypoint:
+        raise EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: this process already holds the {_OPERATION_SCOPE[0]} scope"
+        )
+    _OPERATION_SCOPE = (entrypoint, policy["operations"])
+    logger.warning(
+        "EZLynx operation scope registered: entrypoint=%s operations=%s policy_sha256=%s policy=%s",
+        entrypoint,
+        ",".join(sorted(policy["operations"])),
+        policy["sha256"],
+        policy["contents"],
+    )
+    return policy
+
+
+def register_filer_operation_scope(
+    *, policy_path: Path | str | None = None, owner_uid: int | None = None
+) -> dict:
+    """robie_filer main only (``--any-applicant``). Refuses when no policy lists the filer."""
+
+    policy = register_operation_scope(
+        ENTRYPOINT_ROBIE_FILER, policy_path=policy_path, owner_uid=owner_uid
+    )
+    if policy is None:
+        raise EzlynxWriteScopeError(
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: --any-applicant needs a root-owned write-scope policy "
+            f"({WRITE_SCOPE_POLICY_PATH}) that lists {ENTRYPOINT_ROBIE_FILER}. Writes stay on the "
+            "applicant allowlist."
+        )
+    return policy
+
+
+def operation_scope_registered() -> bool:
+    return _OPERATION_SCOPE is not None
+
+
+def operation_is_write_allowed(value: object, operation: str | None) -> bool:
+    """True when this process holds the operation scope for ``operation``.
+
+    Only ``document_upload`` and ``note_append`` can ever pass. A Production
+    Chat job bound to an applicant is never widened by it.
+    """
+
+    scope = _OPERATION_SCOPE
+    if operation is None or scope is None or operation not in FILER_OPERATIONS:
+        return False
+    if operation not in scope[1]:
+        return False
+    from .safety_seal import agent_interpreter
+
+    if agent_interpreter():
+        return False
+    applicant = normalize_applicant_id(value)
+    return is_plausible_applicant_id(applicant) and production_job_applicant() is None
+
+
+def applicant_is_write_allowed_for(value: object, operation: str | None = None) -> bool:
+    """Applicant allowlist, or the operation scope for ``operation``."""
+
+    return applicant_is_write_allowed(value) or operation_is_write_allowed(value, operation)
+
+
+def require_allowed_ezlynx_write_applicant(value: object, *, operation: str | None = None) -> str:
     from .safety_seal import assert_write_checks_intact, driver_gate_for_write
 
     # The driver lease and the startup snapshot are checked before the
@@ -354,6 +616,8 @@ def require_allowed_ezlynx_write_applicant(value: object) -> str:
     assert_write_checks_intact()
     driver_gate_for_write()
     applicant_id = normalize_applicant_id(value)
+    if operation_is_write_allowed(applicant_id, operation):
+        return applicant_id
     if not applicant_is_write_allowed(applicant_id):
         display = applicant_id or "<missing>"
         raise EzlynxWriteScopeError(

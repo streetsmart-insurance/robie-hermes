@@ -316,10 +316,10 @@ def reserve_intent(store: Any, job_id: str, intent: dict[str, Any]) -> dict[str,
     return intent
 
 
-def _scope_refusal(applicant_id: str) -> str | None:
-    from .ezlynx_write_scope import EZLYNX_WRITE_SCOPE_REFUSED, applicant_is_write_allowed
+def _scope_refusal(applicant_id: str, operation: str | None = None) -> str | None:
+    from .ezlynx_write_scope import EZLYNX_WRITE_SCOPE_REFUSED, applicant_is_write_allowed_for
 
-    if applicant_is_write_allowed(applicant_id):
+    if applicant_is_write_allowed_for(applicant_id, operation):
         return None
     return (
         f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {applicant_id or '<missing>'} is not "
@@ -370,7 +370,7 @@ class EzlynxDocumentUploadWorker:
         want_sha = str(payload.get("file_sha256") or "").strip().lower()
         if idempotency_key != document_upload_key(applicant, want_sha, name):
             return _refused(DOCUMENT_UPLOAD, "job identity does not match applicant, file hash and name")
-        refusal = _scope_refusal(applicant)
+        refusal = _scope_refusal(applicant, "document_upload")
         if refusal:
             return _refused(DOCUMENT_UPLOAD, refusal)
         intent = self.store.get_checkpoint(job["id"], INTENT_KIND)
@@ -492,7 +492,7 @@ class EzlynxNoteAppendWorker:
             return _refused(NOTE_APPEND, "job identity does not match discussion, text hash and caller")
         if not norm_note_text(body) or body_norm_sha256(body) != digest:
             return _refused(NOTE_APPEND, "note text does not match its recorded hash; nothing was sent")
-        refusal = _scope_refusal(applicant)
+        refusal = _scope_refusal(applicant, "note_append")
         if refusal:
             return _refused(NOTE_APPEND, refusal)
         intent = self.store.get_checkpoint(job["id"], INTENT_KIND)

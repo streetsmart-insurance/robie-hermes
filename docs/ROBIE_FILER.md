@@ -35,8 +35,8 @@ asks whether to add producers' mailboxes.
    Writes reach only the compiled allowlist (test account `220250093`).
    QA: one `ATTACHMENT` row and one `EMAIL` row with a `discussion_id` on
    220250093; check the document ids and the note in EZLynx.
-3. **Step 2 (needs approval after step 1 evidence)**: the write-scope patch
-   below, then `40-auto-any-applicant.conf` (`--live --auto --any-applicant`).
+3. **Step 2 (needs approval after step 1 evidence)**: the write-scope policy
+   file below, a filer dry run, then `40-auto-any-applicant.conf` (`--live --auto --any-applicant`).
    The first auto run sets a start mark; older mail is never back-filed.
 
 ## Install commands (run on the host, after the release is current)
@@ -53,61 +53,19 @@ sudo /opt/streetsmart-hermes/current/scripts/install-robie-filer.sh --rollback /
 The installer never installs `40-auto-any-applicant.conf` and removes it if
 present, so step 2 always needs its own reviewed change.
 
-## Write-scope patch (not in this branch)
+## Write-scope policy (any client, two operations)
 
-The write gate picks applicants, not actions. `--any-applicant` needs a
-process-scoped allowance for exactly two operations. This change touches the
-EZLynx write gate, so it is held for Carlo to apply or authorize separately.
+The write gate used to pick applicants, not actions. `--any-applicant` now
+gets a process-scoped allowance for exactly two operations, `document_upload`
+and `note_append`, and only when the root-owned file
+`/etc/streetsmart-hermes/ezlynx-write-scope.json` lists `robie_filer`.
+Without the file, `--any-applicant` stops before touching anything.
+Everything else (policy create, discussion create, tasks, deletes, browser
+saves) keeps the applicant allowlist. Code: `ezlynx_write_scope.py`
+(`register_filer_operation_scope`, `operation_is_write_allowed`), with the
+`operation=` argument on the three note/document write call sites and a seal
+check that the agent interpreter cannot register or plant a scope.
 
-```diff
---- robie_job_engine/ezlynx_write_scope.py
-+OPERATION_DOCUMENT_UPLOAD = "document_upload"
-+OPERATION_NOTE_APPEND = "note_append"
-+FILER_OPERATIONS = frozenset({OPERATION_DOCUMENT_UPLOAD, OPERATION_NOTE_APPEND})
-+_ANY_APPLICANT_OPERATIONS: frozenset[str] | None = None
-+
-+def register_filer_operation_scope() -> None:
-+    """robie_filer main only. Refused inside the sealed agent interpreter."""
-+    from .safety_seal import agent_interpreter
-+    if agent_interpreter():
-+        raise EzlynxWriteScopeError(f"{EZLYNX_WRITE_SCOPE_REFUSED}: filer scope refused in agent interpreter")
-+    global _ANY_APPLICANT_OPERATIONS
-+    _ANY_APPLICANT_OPERATIONS = FILER_OPERATIONS
-+
-+def operation_is_write_allowed(value: object, operation: str | None) -> bool:
-+    if operation is None or _ANY_APPLICANT_OPERATIONS is None or operation not in _ANY_APPLICANT_OPERATIONS:
-+        return False
-+    applicant = normalize_applicant_id(value)
-+    return is_plausible_applicant_id(applicant) and production_job_applicant() is None
-@@ require_allowed_ezlynx_write_applicant
--def require_allowed_ezlynx_write_applicant(value: object) -> str:
-+def require_allowed_ezlynx_write_applicant(value: object, *, operation: str | None = None) -> str:
-     ...
-     applicant_id = normalize_applicant_id(value)
-+    if operation_is_write_allowed(applicant_id, operation):
-+        return applicant_id
-     if not applicant_is_write_allowed(applicant_id):
---- robie_job_engine/ezlynx_api.py  (upload_applicant_document)
--        applicant = require_allowed_ezlynx_write_applicant(applicant_id)
-+        applicant = require_allowed_ezlynx_write_applicant(applicant_id, operation=OPERATION_DOCUMENT_UPLOAD)
---- robie_job_engine/ezlynx_discussions.py  (append_note, file_note_to_existing_discussion)
--        require_allowed_ezlynx_write_applicant(applicant_id)
-+        require_allowed_ezlynx_write_applicant(applicant_id, operation=OPERATION_NOTE_APPEND)
---- robie_job_engine/safety_seal.py
-+    snapshot and compare _ANY_APPLICANT_OPERATIONS and the code of
-+    operation_is_write_allowed / register_filer_operation_scope, like allow_obj
-```
-
-Unchanged by design: policy create, discussion create, task create, and every
-browser save pass no `operation` and keep the applicant allowlist.
-
-## Known limits
-
-- The email PDF is plain text (Helvetica, Latin-1). Images and formatting in
-  the body are not reproduced; attachments are filed as originals.
-- The sheet's `label` column is kept but not sent: DocumentApi upload takes
-  only DocumentName, File, and PolicyMasterId.
-- Policy search returns `policyId`; it is sent as `PolicyMasterId`. Step 1 QA
-  must confirm the document lands under the right policy.
-- Task reassign and due-date change have no EZLynx API and are not part of
-  this job.
+Install, check, dry run and rollback: `docs/EZLYNX_WRITE_SCOPE_POLICY_RUNBOOK.md`.
+Installing the file on Production needs Carlo's explicit approval and starts
+with a filer dry run.
