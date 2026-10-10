@@ -31,7 +31,8 @@ def evidence():
                   "service_account", "secrets", "browser", "job_db")})
     qa["installed_source"] = {"run_id": "10", "artifact_id": "20"}
     qa["check_evidence"] = {name: {"uri": f"https://evidence.example/runs/10/{name}.json",
-                                          "sha256": "e" * 64} for name in qa["checks"]}
+                                          "sha256": "e" * 64, "commit": COMMIT,
+                                          "captured_at": "2026-10-01T23:30:00Z"} for name in qa["checks"]}
     return deploy, qa
 
 
@@ -229,6 +230,8 @@ def test_timezone_offsets_compare_as_instants():
     with pytest.raises(ValueError, match="follow installation"):
         validate_evidence(deploy, qa, COMMIT, DIGEST)
     qa["verified_at"] = "2026-10-02T02:00:01+03:00"
+    for item in qa["check_evidence"].values():
+        item["captured_at"] = "2026-10-02T02:00:01+03:00"  # inside the one-second window
     validate_evidence(deploy, qa, COMMIT, DIGEST)
 
 
@@ -282,3 +285,46 @@ def test_installation_timestamp_must_be_authoritative_and_zoned(value):
     deploy["verified_at"] = value
     with pytest.raises(ValueError, match="installation timestamp"):
         validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+# ---------------------------------------------------------------------------
+# Each QA check's evidence is bound to this release (no reuse from an earlier
+# release on the same host).
+
+
+def test_evidence_from_another_release_commit_is_refused():
+    deploy, qa = evidence()
+    qa["check_evidence"]["browser"]["commit"] = "b" * 40
+    with pytest.raises(ValueError, match="not for this release commit: browser"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_evidence_without_a_commit_is_refused():
+    deploy, qa = evidence()
+    del qa["check_evidence"]["secrets"]["commit"]
+    with pytest.raises(ValueError, match="not for this release commit: secrets"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+@pytest.mark.parametrize("captured", [
+    "2026-10-01T22:00:00Z",   # before this Test install: an earlier release's run
+    "2026-10-01T23:00:00Z",   # at the install instant, not after it
+    "2026-10-02T00:00:01Z",   # after QA signed off
+])
+def test_evidence_captured_outside_the_install_to_signoff_window_is_refused(captured):
+    deploy, qa = evidence()
+    qa["check_evidence"]["job_db"]["captured_at"] = captured
+    with pytest.raises(ValueError, match="captured after this Test install and before QA sign-off: job_db"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_evidence_without_a_capture_time_is_refused():
+    deploy, qa = evidence()
+    del qa["check_evidence"]["generation_restart"]["captured_at"]
+    with pytest.raises(ValueError, match="QA evidence generation_restart timestamp missing"):
+        validate_evidence(deploy, qa, COMMIT, DIGEST)
+
+
+def test_fresh_evidence_for_this_release_passes():
+    deploy, qa = evidence()
+    validate_evidence(deploy, qa, COMMIT, DIGEST)

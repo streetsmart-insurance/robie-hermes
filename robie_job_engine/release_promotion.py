@@ -79,9 +79,9 @@ def validate_evidence(deploy: dict, qa: dict, commit: str, digest: str) -> None:
     require(qa.get("environment") == "Test" and qa.get("host") == "hermes-test-01", "wrong QA target")
     require(qa.get("passed") is True, "independent Test QA not passed")
     require(bool(qa.get("reviewer")), "QA provenance missing")
-    require(evidence_timestamp(qa.get("verified_at"), "QA") >
-            evidence_timestamp(deploy.get("verified_at"), "installation"),
-            "QA must follow installation")
+    qa_time = evidence_timestamp(qa.get("verified_at"), "QA")
+    install_time = evidence_timestamp(deploy.get("verified_at"), "installation")
+    require(qa_time > install_time, "QA must follow installation")
     source = qa.get("installed_source") or {}
     require(isinstance(source, dict) and set(source) == {"run_id", "artifact_id"}
             and all(isinstance(value, str) and value.isdecimal() for value in source.values()),
@@ -106,6 +106,13 @@ def validate_evidence(deploy: dict, qa: dict, commit: str, digest: str) -> None:
         require(isinstance(evidence.get("sha256"), str)
                 and bool(re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])),
                 f"QA evidence digest missing: {name}")
+        # Each check is run for THIS release: evidence from an earlier release
+        # (same host, same infra) is not proof for these bytes.
+        require(evidence.get("commit") == commit,
+                f"QA evidence is not for this release commit: {name}")
+        captured = evidence_timestamp(evidence.get("captured_at"), f"QA evidence {name}")
+        require(install_time < captured <= qa_time,
+                f"QA evidence must be captured after this Test install and before QA sign-off: {name}")
 
 
 def validate_directory(directory: Path, commit: str, digest: str, *, require_qa: bool = True) -> Path:

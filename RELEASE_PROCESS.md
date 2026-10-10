@@ -316,3 +316,20 @@ navigates the driven page. Carlo does not need to SSH to see that.
 The first Antigravity-managed release must be a low-risk, reversible change that does not alter EZLynx action behavior, Job state transitions, credentials, IAM, browser persistence, or message ingestion. A plain-English reporting/ledger presentation change is preferred.
 
 Acceptance requires a feature branch, passing checks, Test deployment, stored end-to-end evidence, explicit approval, immutable Production promotion, post-promotion verification, and successful rollback rehearsal. Until every item passes, Cloud Shell remains the emergency/bootstrap deployment route and Antigravity is not the standard Production interface.
+
+## QA check evidence is per release (2026-10-10)
+
+`release_promotion.validate_evidence` refuses Test QA whose check evidence was
+not produced for the release being certified. Every entry in
+`check_evidence` (one per standard check: `generation_restart`,
+`stale_receipt`, `concurrent_turn`, `reply_recovery`, `service_account`,
+`secrets`, `browser`, `job_db`) must carry, besides `uri` and `sha256`:
+
+- `commit`: the exact 40-character release commit being certified.
+- `captured_at`: an ISO-8601 time with a zone, after the Test install's
+  `verified_at` and no later than the QA `verified_at`.
+
+Evidence from an earlier release on the same host is not proof for new bytes,
+even when the infrastructure is unchanged. Re-run the checks after each Test
+install. The certify step still does not fetch the evidence files; checking
+their bytes against `sha256` needs a read identity and is a later change.
