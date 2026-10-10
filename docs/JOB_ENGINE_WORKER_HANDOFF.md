@@ -2,7 +2,7 @@
 
 Give this to any agent that builds or finishes a Robie worker (manual
 renewals, audits, policy changes, carrier pulls, filing). Approved by Carlo on
-2026-10-10. Follow `AGENTS.md` first: feature branch and pull request, Test
+2026-10-09. Follow `AGENTS.md` first: feature branch and pull request, Test
 before Production, and only Carlo approves a Production deploy.
 
 ## The rule this exists for
@@ -65,7 +65,7 @@ DocumentApi or DiscussionApi POSTs yourself.
 - Anything that dials, emails, or writes for a real client outside the
   approved worker and its gates.
 
-## Where each worker stands (2026-10-10)
+## Where each worker stands (2026-10-09)
 
 | Worker | Status | What is left |
 |---|---|---|
