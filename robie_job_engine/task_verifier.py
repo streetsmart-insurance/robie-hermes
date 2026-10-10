@@ -8,7 +8,11 @@ Carlo-approved design (2026-09-27):
      than VERIFY_AFTER_MINUTES (40 — generous, to avoid report-lag false
      negatives), it pulls the EZLynx task/activity report and matches.
   3. Match -> VERIFIED. No match after 40 min -> MISSING -> alert Carlo via
-     Google Chat (never Gmail — alerts must not depend on Gmail).
+     Google Chat (never Gmail — alerts must not depend on Gmail). Two
+     guards against false MISSING (2026-10-10): the report's timestamps are
+     Central (REPORT_TZ), and a miss only counts when the report's newest row
+     is past the task's firing (the report trails real time by 1-3 h). A task
+     the phone-watchdog already confirmed in EZLynx is VERIFIED outright.
   4. If the report itself is unavailable/stale -> UNVERIFIED (not MISSING),
      and that is also alerted. Never silently pass.
 
@@ -83,12 +87,51 @@ PHONE_WATCHDOG_TRACK_STATUSES = ("delivered", "sent_to_relay")
 # helpers below.
 LOCAL_TZ = ZoneInfo("America/New_York")
 
+# The EZLynx task report CSV carries naive timestamps in the *report's* zone,
+# which is Central, not the agency's Eastern wall clock. Verified 2026-10-10
+# against the EZLynx DiscussionApi (which returns UTC): task note 1137261034
+# was created 2026-10-10T16:19:08Z, shown in the report as 11:19:08. Across
+# 25 Zapier hand-offs 2026-10-05..10 the report's "Created Date" was always
+# fired_at minus 1h minus a few seconds. Reading it as Eastern put every row
+# an hour before its own firing, so nothing ever matched (no task has ever
+# been VERIFIED; every phone-watchdog task was flagged MISSING).
+# ROBIE_TASK_REPORT_TZ overrides the zone (IANA name) if the report setting
+# ever changes. Offset-bearing timestamps are used as they are.
+DEFAULT_REPORT_TZ = "America/Chicago"
+
+
+def _load_report_tz(name: str | None) -> ZoneInfo:
+    wanted = (name or "").strip() or DEFAULT_REPORT_TZ
+    try:
+        return ZoneInfo(wanted)
+    except Exception:
+        logger.warning(
+            "ROBIE_TASK_REPORT_TZ=%r is not a time zone; using %s", wanted, DEFAULT_REPORT_TZ
+        )
+        return ZoneInfo(DEFAULT_REPORT_TZ)
+
+
+REPORT_TZ = _load_report_tz(os.environ.get("ROBIE_TASK_REPORT_TZ"))
+
+# A report row may be stamped a little before our own "fired_at" (the producer
+# records fired_at after its call returns; clock skew). 2026-10-07 Metro Trans:
+# the task was created 56 s before the watchdog logged it.
+FIRED_CLOCK_TOLERANCE = timedelta(minutes=2)
+
 
 def _parse_ts(s: str) -> datetime:
     """Parse a timestamp string; naive values are box-local (LOCAL_TZ)."""
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt
+
+
+def _parse_report_ts(s: str, tz: ZoneInfo | None = None) -> datetime:
+    """Parse a report timestamp; naive values are in the report zone (REPORT_TZ)."""
+    dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz or REPORT_TZ)
     return dt
 
 
@@ -421,51 +464,168 @@ def _title_match(report_title: str, pending: "PendingTask") -> bool:
     return False
 
 
+def _title_core_match(report_title: str, pending: "PendingTask") -> bool:
+    """Strict title check: the task's own title text appears in the report text.
+
+    Unlike _title_match this never accepts a row just for carrying a watchdog
+    prefix, so it is safe to use when the assignee is not compared.
+    """
+    ca, cb = _title_core(report_title), _title_core(pending.title)
+    return bool(ca and cb and (ca in cb or cb in ca))
+
+
+def _created_in_window(row: dict[str, str], fired: datetime, window_end: datetime) -> bool | None:
+    """True/False when the row's created time is (not) in the window; None if unknown."""
+    created_raw = _row_field(row, "created date", "task created date", "created")
+    if not created_raw:
+        return None
+    try:
+        # Naive report timestamps are in the report's zone (REPORT_TZ, Central),
+        # not the producers' Eastern wall clock.
+        created = _parse_report_ts(created_raw)
+    except ValueError:
+        return None  # unparseable date: don't exclude on time
+    return (fired - FIRED_CLOCK_TOLERANCE) <= created <= window_end
+
+
 def match_task(
     pending: PendingTask, report_rows: list[dict[str, str]]
 ) -> dict[str, str] | None:
     """Find the report row proving this task exists. None = no match.
 
-    Match criteria (all must hold):
+    Pass 1 (all must hold):
       - applicant/account ID matches (exact, string-compared)
       - assignee matches (case-insensitive substring either way)
       - title matches (case-insensitive substring either way — the report
         title and our expected title may differ in prefix/suffix)
-      - report created timestamp is within [fired_at, fired_at + 40min + 15min
-        grace] — the task cannot predate its firing.
+      - report created timestamp (read in REPORT_TZ) is within
+        [fired_at - 2min, fired_at + 40min + 15min grace]; the task cannot
+        predate its firing beyond clock skew.
+
+    Pass 2 (reassigned task): the same applicant, a strict title match and a
+    parseable created time in the window, with a different assignee. People
+    reassign a callback task right after it is created (KCG Logistics
+    2026-10-09, Marucci 2026-10-05), and that must not make a task that
+    exists look MISSING. The returned row is a copy carrying
+    "_assignee_differs" = "1".
     """
     fired = _parse_ts(pending.fired_at)
     window_end = fired + timedelta(minutes=VERIFY_AFTER_MINUTES + 15)
 
+    reassigned: dict[str, str] | None = None
     for row in report_rows:
         applicant = _row_field(row, "applicant id", "applicant", "account")
         if applicant != pending.applicant_id:
             continue
-        assignee = _row_field(row, "task assigned to", "assignee", "assigned")
-        if not _assignee_match(assignee, pending.assignee):
-            continue
         title = _row_field(row, "title", "task title", "subject", "note")
-        if not _title_match(title, pending):
+        in_window = _created_in_window(row, fired, window_end)
+        if in_window is False:
             continue
-        created_raw = _row_field(row, "created date", "task created date", "created")
-        if created_raw:
-            try:
-                # Naive report timestamps are agency-local (America/New_York),
-                # same convention as the producers.
-                created = _parse_ts(created_raw.replace("Z", "+00:00"))
-                if not (fired <= created <= window_end):
-                    continue
-            except ValueError:
-                pass  # unparseable date: don't exclude on time
-        return row
-    return None
+        assignee = _row_field(row, "task assigned to", "assignee", "assigned")
+        if _assignee_match(assignee, pending.assignee):
+            if _title_match(title, pending):
+                return row
+        elif (
+            reassigned is None
+            and in_window is True
+            and _title_core_match(title, pending)
+        ):
+            reassigned = dict(row, _assignee_differs="1")
+    return reassigned
 
 
 # A report email must arrive this long after a task fired before a miss in
 # it counts as MISSING; an older report cannot contain the task yet.
 REPORT_LAG_MINUTES = int(os.environ.get("ROBIE_TASK_REPORT_LAG_MINUTES", "10"))
 # Give up waiting for a new enough report after this long: UNVERIFIED.
-REPORT_WAIT_LIMIT_HOURS = int(os.environ.get("ROBIE_TASK_REPORT_WAIT_LIMIT_HOURS", "4"))
+# Measured 2026-10-08..10: the report's newest row trails the email by 1-3 h
+# (Lori Radice: created 12:19 ET, first in the 14:00 ET report; Tammy Hughes:
+# created 10:03 ET, first in the 12:00 ET report) and by ~6 h overnight while
+# nobody creates tasks. 12 h keeps an overnight wait from raising an alert.
+REPORT_WAIT_LIMIT_HOURS = int(os.environ.get("ROBIE_TASK_REPORT_WAIT_LIMIT_HOURS", "12"))
+# A miss only counts when the report's newest row is at least this far past the
+# task's firing: until then the report's data may simply not include it yet.
+REPORT_COVERAGE_MARGIN_MINUTES = int(
+    os.environ.get("ROBIE_TASK_REPORT_COVERAGE_MARGIN_MINUTES", "5")
+)
+
+# Zapier fallbacks the phone-watchdog already confirmed by reading the
+# applicant's discussions through the Discussion API (fallback_confirm.py).
+# The watchdog keeps those records (state "confirmed") for 24 h in
+# zapier_fallback_confirm.json in its state directory. The verifier is the
+# same user as the watchdog on the host.
+FALLBACK_CONFIRM_FILE = "zapier_fallback_confirm.json"
+FALLBACK_CONFIRM_MATCH_SECONDS = 600
+
+
+def _fallback_confirm_paths() -> list[Path]:
+    explicit = os.environ.get("ROBIE_FALLBACK_CONFIRM_STATE", "").strip()
+    if explicit:
+        return [Path(explicit)]
+    dirs = [
+        os.environ.get("EZLYNX_TASK_API_STATE_DIR", "").strip(),
+        "/var/lib/streetsmart-phone-watchdog",
+        os.path.expanduser("~/.streetsmart-phone-watchdog"),
+    ]
+    return [Path(d) / FALLBACK_CONFIRM_FILE for d in dirs if d]
+
+
+def load_fallback_confirmations(paths: list[Path] | None = None) -> list[dict[str, Any]]:
+    """Confirmed Zapier fallback records written by the phone-watchdog. [] if none."""
+    import json
+
+    rows: list[dict[str, Any]] = []
+    for path in paths if paths is not None else _fallback_confirm_paths():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for rec in (data.get("pending") if isinstance(data, dict) else None) or []:
+            if isinstance(rec, dict) and rec.get("state") == "confirmed":
+                rows.append(rec)
+    return rows
+
+
+def watchdog_confirmation(
+    task: "PendingTask", confirmations: list[dict[str, Any]]
+) -> str | None:
+    """Where the watchdog confirmed this task in EZLynx, or None.
+
+    Same applicant, same title text, and the watchdog's hand-off time within
+    10 minutes of our fired_at. The assignee is not compared (reassignment).
+    """
+    if task.producer != "phone-watchdog":
+        return None
+    fired = _parse_ts(task.fired_at).timestamp()
+    for rec in confirmations:
+        if str(rec.get("applicant_id") or "") != task.applicant_id:
+            continue
+        try:
+            sent = float(rec.get("sent_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(sent - fired) > FALLBACK_CONFIRM_MATCH_SECONDS:
+            continue
+        ca, cb = _title_core(str(rec.get("title") or "")), _title_core(task.title)
+        if ca and cb and (ca in cb or cb in ca):
+            return str(rec.get("where") or "confirmed in EZLynx")
+    return None
+
+
+def report_coverage_end(report_rows: list[dict[str, str]]) -> datetime | None:
+    """Newest created time in the report: the report holds nothing later than this."""
+    newest: datetime | None = None
+    for row in report_rows:
+        raw = _row_field(row, "created date", "created")
+        if not raw:
+            continue
+        try:
+            created = _parse_report_ts(raw)
+        except ValueError:
+            continue
+        if newest is None or created > newest:
+            newest = created
+    return newest
 
 
 def verify_due_tasks(
@@ -474,12 +634,18 @@ def verify_due_tasks(
     report_available: bool,
     report_received_at: datetime | None = None,
     now: datetime | None = None,
+    confirmations: list[dict[str, Any]] | None = None,
 ) -> dict[str, list[PendingTask]]:
     """Verify every due PENDING task against the report.
 
     Returns {"verified": [...], "missing": [...], "unverified": [...]}.
     When the report is unavailable, due tasks become UNVERIFIED (never a
     silent pass, never a false MISSING).
+
+    A task the phone-watchdog already confirmed in EZLynx (fallback_confirm)
+    is VERIFIED without the report. A task absent from the report is MISSING
+    only when the report demonstrably covers the time it was fired; otherwise
+    it stays PENDING for a later report (the report trails real time).
     """
     result: dict[str, list[PendingTask]] = {
         "verified": [],
@@ -490,39 +656,64 @@ def verify_due_tasks(
     if not due:
         return result
 
+    if confirmations is None:
+        confirmations = load_fallback_confirmations()
+    remaining: list[PendingTask] = []
+    for task in due:
+        where = watchdog_confirmation(task, confirmations)
+        if where:
+            store.resolve(task.id, "VERIFIED", f"confirmed in EZLynx by the phone-watchdog ({where})")
+            result["verified"].append(task)
+        else:
+            remaining.append(task)
+    due = remaining
+    if not due:
+        return result
+
     if not report_available or report_rows is None:
         for task in due:
             store.resolve(task.id, "UNVERIFIED", "task report unavailable")
             result["unverified"].append(task)
         return result
 
+    coverage_end = report_coverage_end(report_rows)
+    margin = timedelta(minutes=REPORT_COVERAGE_MARGIN_MINUTES)
     for task in due:
         hit = match_task(task, report_rows)
+        fired = _parse_ts(task.fired_at)
         if hit:
-            detail = f"matched report row: {hit.get('title', hit.get('task', ''))[:80]}"
+            detail = f"matched report row: {(hit.get('title') or hit.get('task id') or '')[:80]}"
+            if hit.get("_assignee_differs"):
+                detail += (
+                    f" (task now assigned to {hit.get('task assigned to', '?')}, "
+                    f"not {task.assignee}: reassigned)"
+                )
             store.resolve(task.id, "VERIFIED", detail)
             result["verified"].append(task)
-        elif report_received_at is not None and report_received_at < (
-            _parse_ts(task.fired_at) + timedelta(minutes=REPORT_LAG_MINUTES)
-        ):
-            # The newest report predates the task; it cannot show it yet.
-            # Stay PENDING for the next report (2026-10-08 false alarm).
-            waited = (now or datetime.now(timezone.utc)) - _parse_ts(task.fired_at)
+            continue
+        report_too_old = report_received_at is not None and report_received_at < (
+            fired + timedelta(minutes=REPORT_LAG_MINUTES)
+        )
+        report_data_behind = coverage_end is not None and coverage_end < fired + margin
+        if report_too_old or report_data_behind:
+            # The newest report was sent before the task, or its data stops
+            # before the task: it cannot show it yet. Stay PENDING for the next
+            # report (2026-10-08 and 2026-10-10 false alarms).
+            waited = (now or datetime.now(timezone.utc)) - fired
             if waited > timedelta(hours=REPORT_WAIT_LIMIT_HOURS):
                 store.resolve(
                     task.id,
                     "UNVERIFIED",
-                    f"no task report newer than the task after {REPORT_WAIT_LIMIT_HOURS}h",
+                    f"no task report covering the task after {REPORT_WAIT_LIMIT_HOURS}h",
                 )
                 result["unverified"].append(task)
             continue
-        else:
-            detail = (
-                f"no match in task report {VERIFY_AFTER_MINUTES}min after firing "
-                f"(applicant={task.applicant_id}, assignee={task.assignee})"
-            )
-            store.resolve(task.id, "MISSING", detail)
-            result["missing"].append(task)
+        detail = (
+            f"no match in task report {VERIFY_AFTER_MINUTES}min after firing "
+            f"(applicant={task.applicant_id}, assignee={task.assignee})"
+        )
+        store.resolve(task.id, "MISSING", detail)
+        result["missing"].append(task)
     return result
 
 
