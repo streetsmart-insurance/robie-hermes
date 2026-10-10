@@ -22,9 +22,14 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type CAPTURE_FORMENTRY_DOM for an on-demand capture
+        description: CAPTURE_FORMENTRY_DOM (Edit header) or CAPTURE_FORMENTRY_COVERAGES_DOM (FormEntry Coverages tab)
+        required: true
+        type: string
+      formentry_url:
+        description: Required for COVERAGES mode — literal https://app.ezlynx.com/applicantportal/Policy/83651751/FormEntry/Index/<id> (never invent)
         required: false
         type: string
+        default: ""
 
 permissions:
   contents: read
@@ -33,7 +38,10 @@ permissions:
 
 jobs:
   capture:
-    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'CAPTURE_FORMENTRY_DOM'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.confirmation == 'CAPTURE_FORMENTRY_DOM' ||
+       inputs.confirmation == 'CAPTURE_FORMENTRY_COVERAGES_DOM')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: Production
@@ -45,6 +53,8 @@ jobs:
       APPLICANT_ID: "220250093"
       POLICY_ID: "83651751"
       ENTRY_URL: https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83651751
+      CONFIRMATION: ${{ inputs.confirmation }}
+      FORMENTRY_URL: ${{ inputs.formentry_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v3
@@ -62,12 +72,20 @@ jobs:
           test "${PROJECT_ID}" = "streetsmart-hermes-poc"
           test "${APPLICANT_ID}" = "220250093"
           test "${POLICY_ID}" = "83651751"
-          # the capture script may only target the allowlisted Edit URL
+          # the capture script may only target the allowlisted Edit URL or FormEntry regex
           grep -q 'applicantportal/Policy/Actions/Edit/220250093/83651751' scripts/capture_formentry_dom.py
+          grep -q 'FormEntry/Index' scripts/capture_formentry_dom.py
           # read-only contract: no write-call patterns may appear in the script
           ! grep -qE '\.(fill|type|check|select_option)\(' scripts/capture_formentry_dom.py
-          # exactly one navigation: the initial GET of the Edit URL
+          # exactly one navigation: the initial GET
           test "$(grep -c 'page.goto' scripts/capture_formentry_dom.py)" = "1"
+          if [[ "${CONFIRMATION}" == "CAPTURE_FORMENTRY_COVERAGES_DOM" ]]; then
+            test -n "${FORMENTRY_URL}" || {
+              echo "FATAL: COVERAGES mode requires literal formentry_url (D01 FormEntry was never minted successfully; do not invent an id)" >&2
+              exit 2
+            }
+            echo "${FORMENTRY_URL}" | grep -Eq '^https://app\.ezlynx\.com/applicantportal/Policy/83651751/FormEntry/Index/[0-9]+'
+          fi
           echo "bounded request OK"
 
       - name: Stage capture script on Production
@@ -99,7 +117,13 @@ jobs:
               echo \"using python: \$PY\"
               if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
               echo 'CDP listener up'
-              \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json'"
+              if [ '${CONFIRMATION}' = 'CAPTURE_FORMENTRY_COVERAGES_DOM' ]; then
+                \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json' \
+                  --url '${FORMENTRY_URL}' --prefer-tab Coverages
+              else
+                \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json' \
+                  --url '${ENTRY_URL}'
+              fi"
 
       - name: Retrieve dump
         id: retrieve
