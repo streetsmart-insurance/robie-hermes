@@ -1,0 +1,33 @@
+[Unit]
+Description=ROBIE Production daily carrier document pull (EZLynx filing off; Drive upload; Chat summary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+# Own staged release, not Production's current link. Enabling the timer is a
+# separate approved step; this unit is not started by the pull request.
+#   /var/lib/robie-carrier-pull/release -> releases/<sha>/robie-hermes-<sha>
+WorkingDirectory=/var/lib/robie-carrier-pull/release
+Environment=PYTHONPATH=/var/lib/robie-carrier-pull/release
+Environment=ROBIE_ENV=PRODUCTION
+Environment=HOME=/opt/streetsmart-hermes
+EnvironmentFile=-/etc/streetsmart-hermes/robie-message-runtime.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-carrier-pull.env
+# After the env files, so a file cannot turn EZLynx filing on for this job.
+# The Python runner also forces this to 0. BOP is not a filing carrier.
+Environment=ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0
+# Carrier Chrome only. Port 9222 is the EZLynx Chrome; the runner refuses it.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull --cdp-url http://127.0.0.1:9223 --upload-drive --notify
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/robie-carrier-pull /opt/streetsmart-hermes/.hermes
+TimeoutStartSec=4h
+
+[Install]
+WantedBy=multi-user.target

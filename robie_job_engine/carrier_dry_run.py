@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 KILL_SWITCH_ENV = "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX"
-DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 NATGEN_WINDOW_DAYS = 14
 
 
@@ -79,7 +79,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".progressive_pending_cancellation",
         browser_cls_name="PlaywrightFaoCancellationBrowser",
         ledger_cls_name="FaoCancellationLedger",
-        select_fn_name="select_fao_page",
+        select_fn_name="ensure_fao_page",
+        select_takes="browser",
     ),
     "guard": CarrierSpec(
         name="guard",
@@ -87,7 +88,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".guard_pending_cancellation",
         browser_cls_name="PlaywrightGuardBrowser",
         ledger_cls_name="GuardDeliveryLedger",
-        select_fn_name="select_guard_page",
+        select_fn_name="ensure_guard_page",
+        select_takes="browser",
     ),
     "geico": CarrierSpec(
         name="geico",
@@ -103,7 +105,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".travelers_pending_cancellation",
         browser_cls_name="PlaywrightTravelersBrowser",
         ledger_cls_name="TravelersDeliveryLedger",
-        select_fn_name="select_travelers_page",
+        select_fn_name="ensure_travelers_page",
+        select_takes="browser",
     ),
     "natgen": CarrierSpec(
         name="natgen",
@@ -121,7 +124,8 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".utica_pending_cancellation",
         browser_cls_name="PlaywrightUticaCancellationBrowser",
         ledger_cls_name="UticaDeliveryLedger",
-        select_fn_name="select_utica_page",
+        select_fn_name="ensure_utica_page",
+        select_takes="browser",
     ),
     "farmersofsalem": CarrierSpec(
         name="farmersofsalem",
@@ -129,7 +133,7 @@ SPECS: dict[str, CarrierSpec] = {
         module_name=".farmersofsalem_pending_cancellation",
         browser_cls_name="FinysFoSBrowser",
         ledger_cls_name="LocalDeliveryLedger",
-        select_fn_name="_select_finys_page",
+        select_fn_name="ensure_finys_page",
         select_takes="browser",
     ),
 }
@@ -275,6 +279,32 @@ def _shared_cdp(cdp_url: str | None) -> Iterator[Any]:
         playwright.stop()
 
 
+def hold_reason(entry: Any) -> str:
+    """The specific reason one held item was held.
+
+    Carriers disagree on the key: Utica/Guard/Progressive/Travelers use
+    ``hold_reason`` (Guard's ``reason`` is the carrier's cancellation reason,
+    not ours), GEICO/Farmers of Salem use ``reason``. Prefer ``hold_reason``.
+    """
+    if not isinstance(entry, dict):
+        return str(entry or "").strip() or "held (no reason recorded)"
+    for key in ("hold_reason", "reason", "error"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return value
+    return "held (no reason recorded)"
+
+
+def _held_label(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    parts = [str(entry.get(key) or "").strip() for key in ("policy_number", "insured_name")]
+    parts = [part for part in parts if part]
+    if not parts and entry.get("activity_date"):
+        parts = [f"activity {entry['activity_date']}"]
+    return " ".join(parts)
+
+
 def _normalize_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     downloaded = receipt.get("downloaded", []) or []
     held = receipt.get("held", []) or []
@@ -312,12 +342,29 @@ def _run_one(
             held = None
             if isinstance(details, dict):
                 held = details.get("held")
+            held_list = held if isinstance(held, list) and held else [{"reason": str(exc)}]
+            downloaded_n = 0
+            skipped_n = 0
+            if isinstance(details, dict):
+                raw_downloaded = details.get("downloaded")
+                if isinstance(raw_downloaded, list):
+                    downloaded_n = len(raw_downloaded)
+                elif isinstance(raw_downloaded, int):
+                    downloaded_n = raw_downloaded
+                count = details.get("count")
+                if isinstance(count, int):
+                    downloaded_n = count
+                raw_skipped = details.get("skipped")
+                if isinstance(raw_skipped, list):
+                    skipped_n = len(raw_skipped)
             return {
                 "display": spec.display,
-                "status": "HELD",
-                "downloaded": 0,
-                "skipped": 0,
-                "held": held if isinstance(held, list) and held else [{"reason": str(exc)}],
+                "status": "PARTIAL" if downloaded_n else "HELD",
+                "reason": str(exc),
+                "downloaded": downloaded_n,
+                "skipped": skipped_n,
+                "held": held_list,
+                "hold_reasons": [hold_reason(item) for item in held_list],
                 "error": None,
                 "pack": str(pack),
             }
@@ -327,16 +374,32 @@ def _run_one(
             "downloaded": 0,
             "skipped": 0,
             "held": [],
+            "hold_reasons": [],
             "error": f"{type(exc).__name__}: {exc}",
             "pack": str(pack),
         }
     norm = _normalize_receipt(receipt if isinstance(receipt, dict) else {})
+    receipt_status = str(receipt.get("status") or "") if isinstance(receipt, dict) else ""
+    if receipt_status in {"PARTIAL", "FAIL", "FAILED"}:
+        return {
+            "display": spec.display,
+            "status": "PARTIAL" if receipt_status == "PARTIAL" else "FAILED",
+            "reason": str(receipt.get("reason") or receipt.get("deadline") or "the pull stopped early"),
+            "downloaded": norm["downloaded"],
+            "skipped": norm["skipped"],
+            "held": norm["held"],
+            "hold_reasons": [hold_reason(item) for item in norm["held"]],
+            "unprocessed": receipt.get("unprocessed"),
+            "error": None,
+            "pack": str(pack),
+        }
     return {
         "display": spec.display,
         "status": "OK",
         "downloaded": norm["downloaded"],
         "skipped": norm["skipped"],
         "held": norm["held"],
+        "hold_reasons": [hold_reason(item) for item in norm["held"]],
         "error": None,
         "pack": str(pack),
     }
@@ -368,15 +431,25 @@ def run_dry_run(
             for name in names:
                 spec = SPECS[name]
                 results[name] = _run_one(spec, day, output_root, lambda s=spec: _wrap_browser(s, cdp_browser))
-    totals = {"ok": 0, "held": 0, "failed": 0}
+    totals = {"ok": 0, "held": 0, "failed": 0, "partial": 0}
+    buckets = {"OK": "ok", "HELD": "held", "FAILED": "failed", "PARTIAL": "partial"}
     for r in results.values():
-        totals[{"OK": "ok", "HELD": "held", "FAILED": "failed"}[r["status"]]] += 1
+        totals[buckets.get(r["status"], "failed")] += 1
     return {
         "as_of": day.isoformat(),
         "mode": "dry-run",
         "carriers": results,
         "totals": totals,
     }
+
+
+def _held_lines(held: list[Any]) -> list[str]:
+    lines = []
+    for entry in held or []:
+        label = _held_label(entry)
+        prefix = f"{label}: " if label else ""
+        lines.append(f"    · held {prefix}{hold_reason(entry)}")
+    return lines
 
 
 def render_summary(summary: dict[str, Any]) -> str:
@@ -391,13 +464,26 @@ def render_summary(summary: dict[str, Any]) -> str:
         if r["status"] == "OK":
             extra = f", {len(r['held'])} held" if r["held"] else ""
             lines.append(f"- {r['display']}: OK — {r['downloaded']} downloaded, {r['skipped']} skipped{extra}.")
+            lines.extend(_held_lines(r["held"]))
         elif r["status"] == "HELD":
-            reason = r["held"][0].get("reason", "held") if r["held"] else "held"
+            reason = r.get("reason") or (hold_reason(r["held"][0]) if r["held"] else "held")
             lines.append(f"- {r['display']}: HELD — {reason}")
+            item_lines = _held_lines(r["held"])
+            # Do not repeat the run-level reason as its only item.
+            if not (len(r["held"]) == 1 and hold_reason(r["held"][0]) == reason):
+                lines.extend(item_lines)
+        elif r["status"] == "PARTIAL":
+            left = r.get("unprocessed")
+            extra = f", {left} left" if left is not None else ""
+            reason = r.get("reason") or "the pull stopped early"
+            lines.append(f"- {r['display']}: PARTIAL — {r['downloaded']} downloaded{extra}. {reason}")
+            lines.extend(_held_lines(r["held"]))
         else:
             lines.append(f"- {r['display']}: FAILED — {r['error']}")
     t = summary["totals"]
-    lines.append(f"Totals: {t['ok']} ok, {t['held']} held, {t['failed']} failed.")
+    lines.append(
+        f"Totals: {t['ok']} ok, {t['held']} held, {t['failed']} failed, {t.get('partial', 0)} partial."
+    )
     return "\n".join(lines)
 
 
@@ -412,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--as-of", default=date.today().isoformat(), help="pull date YYYY-MM-DD")
     parser.add_argument("--output-root", default=None, help="override QA pack root (default: each carrier's own)")
-    parser.add_argument("--cdp-url", default=None, help="CDP endpoint (default: ROBIE_BROWSER_CDP_URL or 127.0.0.1:9222)")
+    parser.add_argument("--cdp-url", default=None, help="CDP endpoint (default: ROBIE_BROWSER_CDP_URL or 127.0.0.1:9223)")
     return parser
 
 
@@ -435,7 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(render_summary(summary))
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
-    return 0 if summary["totals"]["failed"] == 0 else 1
+    incomplete = summary["totals"]["failed"] or summary["totals"].get("partial", 0)
+    return 0 if not incomplete else 1
 
 
 if __name__ == "__main__":

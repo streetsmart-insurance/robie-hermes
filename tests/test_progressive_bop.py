@@ -386,8 +386,9 @@ class ProgressiveBopTests(unittest.TestCase):
             require_loopback_cdp("http://10.0.0.8:9222")
         page = FakePage(set(), url="https://www.foragentsonly.com/home")
         self.assertIs(select_fao_page([page, FakePage(set(), url="https://example.test")]), page)
-        with self.assertRaises(IntakeHold):
-            select_fao_page([page, FakePage(set(), url="https://portal.foragentsonly.com/other")])
+        extra = FakePage(set(), url="https://portal.foragentsonly.com/other")
+        self.assertIs(select_fao_page([page, extra]), page)
+        self.assertTrue(extra.closed)
         with self.assertRaises(IntakeHold):
             select_fao_page([])
 
@@ -563,9 +564,13 @@ class ProgressiveBopTests(unittest.TestCase):
             url="https://www.foragentsonly.com/",
             popup=landing,
         )
+        def goto(url, **_kwargs):
+            landing.clicked.append(("goto", url))
+
+        landing.goto = goto
         with self.assertRaisesRegex(IntakeHold, "HPLanding"):
             navigate_to_pending_cancel(shell, "CA33617")
-        self.assertEqual(landing.clicked, [])
+        self.assertIn(("goto", "https://bop.americanstrategic.com/"), landing.clicked)
 
     def test_two_bop_windows_hold(self):
         first = FakePage(set(), url="https://bop.americanstrategic.com/one")

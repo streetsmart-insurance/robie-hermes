@@ -14,13 +14,24 @@ The document grid's ID column is the durable document identity (like
 Guard's scribeItemId): identical display names are distinct documents,
 so the ledger keys on the document ID, never the name.
 
-A missing or non-unique control raises IntakeHold. This module does not
-log in, does not handle MFA, does not upload, note, task, or label in
+A missing or non-unique control raises IntakeHold. The pull itself does
+not type credentials; ``ensure_utica_page()`` (used by the carrier dry run)
+reuses a signed-in UFirst Now tab or, on hermes-test-01 only, signs in via
+``utica_login`` (Okta + email MFA; see docs/CARRIER_DOCUMENT_RETRIEVAL.md for
+the Gmail requirement). This module does not upload, note, task, or label in
 EZLynx, and does not register a timer.
 
-UNVERIFIED (live-run needed): the USER_SESSION_GUID extraction prefers the
-``USER_SESSION_GUID`` query param and falls back to the SPA's ``osst``
-token; whether they are interchangeable is proven only by a live download.
+Portal labels are Title Case live ("Policy Transactions", "Filter List");
+controls are matched case-insensitively via ``carrier_locators``.
+
+PROVEN live 2026-10-07 (hermes-test-01, Morsan BOP3001386190, 2 PDFs): the
+DocGenServlet fetch with the session GUID, DRAGON_TRANSACTION_ID and the
+Referer/Origin headers the portal's CSRF filter demands returns real PDFs;
+direct navigation without Referer is rejected. Document IDs regenerate per
+session, so they are harvested fresh every run and never cached.
+
+The transaction and document lists are ExtJS grids. ``collect_paged_rows``
+reads every page, not only the first 25 rows.
 """
 from __future__ import annotations
 
@@ -37,6 +48,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .carrier_locators import unique_control_ci, wait_for_text_ci
 from .intake_core import IntakeHold, SourceArchive, SourceItem
 
 PROCESS = "utica"
@@ -44,6 +56,7 @@ SCOPE = "pending_cancellation"
 UTICA_HOST = "ufirstnow.uticafirst.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
 DOWNLOAD_TIMEOUT_MS = 15000
+FILTER_RADIO_ATTEMPTS = 6
 LEDGER_NAME = "utica-cancellation-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _PDF_MAGIC = b"%PDF"
@@ -73,6 +86,9 @@ _CANCELLATION_TRANSACTION_TYPES = frozenset({
     "rescind pending cancellation",
     "non-renewal",
     "prerenewal notice",
+    # Live 2026-10-08 (JITOW LLC ART3000699220): the non-renewal notice
+    # transaction is labelled "Intent to Non-Renew".
+    "intent to non-renew",
 })
 # Document names that mark a notice worth pulling. The DOCUMENT LIST is
 # already scoped to a cancellation transaction, so this is a guard against
@@ -177,15 +193,79 @@ def docgen_pdf_url(*, doc_id: str, session_guid: str, transaction_id: str) -> st
     return f"https://{UTICA_HOST}/oneshield/DocGenServlet?{params}"
 
 
+def docgen_request_headers(*, referer_url: str) -> dict[str, str]:
+    """Headers the portal's CSRF filter demands on the DocGenServlet request.
+
+    Direct navigation to the DocGenServlet URL is rejected ("Try using the
+    application menu for navigation"); the same URL works from the in-app
+    viewer because that request carries Referer/Origin. The referer must be
+    the in-app page the document list was opened from, harvested from the
+    live page URL each run, never hardcoded.
+    """
+    referer = _norm(referer_url)
+    if not referer:
+        raise IntakeHold("Utica First PDF request is missing or ambiguous")
+    parsed = urllib.parse.urlsplit(referer)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != UTICA_HOST:
+        raise IntakeHold("Utica First PDF request is missing or ambiguous")
+    return {
+        "Referer": referer,
+        "Origin": f"https://{UTICA_HOST}",
+    }
+
+
+_CSRF_REJECTION_MARKERS = (
+    "try using the application menu",
+)
+
+
+def _is_csrf_rejection(content: bytes) -> bool:
+    """Detect the portal CSRF filter's rejection page.
+
+    A real PDF is never a rejection, even if it contains similar text.
+    """
+    if _is_pdf(content):
+        return False
+    try:
+        text = bytes(content or b"").decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    lowered = text.casefold()
+    return any(marker in lowered for marker in _CSRF_REJECTION_MARKERS)
+
+
+_TXN_KEY = r"""["']?DRAGON_TRANSACTION_ID["']?"""
+_TXN_VALUE = r"""\s*["']?(\d+)["']?"""
+_TRANSACTION_ID_PATTERNS = (
+    # DRAGON_TRANSACTION_ID=123, "DRAGON_TRANSACTION_ID": "123", ...ID: 123
+    re.compile(_TXN_KEY + r"\s*[:=]" + _TXN_VALUE, re.IGNORECASE),
+    # "DRAGON_TRANSACTION_ID","value":"123" and ...ID", "value" : 123
+    re.compile(_TXN_KEY + r"""\s*,\s*["']?value["']?\s*[:=]""" + _TXN_VALUE, re.IGNORECASE),
+    # {"name":"DRAGON_TRANSACTION_ID", ..., "value":"123"} within one object
+    re.compile(_TXN_KEY + r"""\s*,[^{}]{0,200}?["']value["']\s*:""" + _TXN_VALUE, re.IGNORECASE),
+    # <input name="DRAGON_TRANSACTION_ID" ... value="123">
+    re.compile(r"""name\s*=\s*["']DRAGON_TRANSACTION_ID["'][^>]*?\bvalue\s*=""" + _TXN_VALUE, re.IGNORECASE),
+)
+
+
 def transaction_id_from_page(html: str) -> str:
     """Extract the DRAGON_TRANSACTION_ID from the DOCUMENT LIST page.
 
     The PDF URL needs it; the grid does not expose it, so it is read from
-    the document-list page markup. Zero or multiple matches hold.
+    the document-list page markup. Zero or multiple distinct values hold.
+
+    Accepted shapes (live UFirst Now uses the ExtJS name/value pair, seen
+    2026-10-07 as ``"DRAGON_TRANSACTION_ID","value":"1247842754"``):
+
+    - ``DRAGON_TRANSACTION_ID=123`` / ``DRAGON_TRANSACTION_ID: "123"``
+    - ``"DRAGON_TRANSACTION_ID","value":"123"`` (ExtJS name, value pair)
+    - ``{"name":"DRAGON_TRANSACTION_ID","value":"123"}``
+    - ``<input name="DRAGON_TRANSACTION_ID" value="123">``
     """
-    matches = re.findall(
-        r"DRAGON_TRANSACTION_ID[\"']?\s*[:=]\s*[\"']?(\d+)", html or "", re.IGNORECASE
-    )
+    text = html or ""
+    matches: list[str] = []
+    for pattern in _TRANSACTION_ID_PATTERNS:
+        matches.extend(pattern.findall(text))
     unique = sorted(set(matches))
     if len(unique) != 1:
         raise IntakeHold("Utica First DRAGON_TRANSACTION_ID is missing or ambiguous")
@@ -362,35 +442,304 @@ def _read_text(node: Any) -> str:
     return str(getattr(node, "text", "") or "")
 
 
+# UFirst Now is ExtJS: each grid row is its own <table> (live 2026-10-08:
+# 29 tables on the transaction list), headers are .x-column-header divs and
+# cells are .x-grid-cell. Read visible grids as {id, headers, rows}.
+_EXT_GRIDS_JS = """() => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  return Array.from(document.querySelectorAll('.x-grid')).filter(vis).map(g => ({
+    id: g.id || '',
+    headers: Array.from(g.querySelectorAll('.x-column-header')).filter(vis)
+      .map(h => ((h.querySelector('.x-column-header-text') || h).innerText || '').trim()),
+    rows: Array.from(g.querySelectorAll('.x-grid-item')).filter(vis)
+      .map(r => Array.from(r.querySelectorAll('.x-grid-cell')).map(c => (c.innerText || '').trim()))
+  }));
+}"""
+_EXT_GRID_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def find_ext_grid(
+    grids: Any, aliases: dict[str, set[str]], *, what: str
+) -> tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """The one ExtJS grid whose headers carry every field in ``aliases``."""
+    found = []
+    for grid in grids or ():
+        if not isinstance(grid, dict):
+            continue
+        headers = tuple(_norm(str(h)) for h in grid.get("headers") or ())
+        try:
+            _match_headers(headers, aliases, what=what)
+        except IntakeHold:
+            continue
+        rows = tuple(tuple(_norm(str(c)) for c in row) for row in grid.get("rows") or ())
+        found.append((str(grid.get("id") or ""), headers, rows))
+    if len(found) != 1:
+        raise IntakeHold(f"Utica First {what} grid is missing or ambiguous (found {len(found)})")
+    grid_id = found[0][0]
+    if not _EXT_GRID_ID.fullmatch(grid_id):
+        raise IntakeHold(f"Utica First {what} grid is missing or ambiguous")
+    return found[0]
+
+
+def _row_key(row: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(row)
+
+
+def collect_paged_rows(
+    first_rows: tuple[tuple[str, ...], ...] | list[tuple[str, ...]],
+    *,
+    next_state: Callable[[], str],
+    click_next: Callable[[], bool],
+    read_rows: Callable[[], tuple[tuple[str, ...], ...]],
+    what: str,
+    max_pages: int = 40,
+) -> tuple[tuple[str, ...], ...]:
+    """Read an ExtJS grid past the first 25-row page until the pager stops.
+
+    ``next_state`` is ``next``, ``done``, ``none``, or ``missing``. A page
+    that does not advance holds. Hitting ``max_pages`` with another page
+    still available holds, so a long list is never silently truncated.
+    """
+    collected = [tuple(row) for row in first_rows]
+    seen = {_row_key(row) for row in collected}
+    pages_read = 1
+    while pages_read < max_pages:
+        state = next_state()
+        if state in {"done", "none", "missing"}:
+            return tuple(collected)
+        if state != "next":
+            raise IntakeHold(f"Utica First {what} paging control is missing or ambiguous")
+        if not click_next():
+            raise IntakeHold(f"Utica First {what} grid page {pages_read + 1} did not advance")
+        pages_read += 1
+        fresh = [tuple(row) for row in read_rows() if _row_key(tuple(row)) not in seen]
+        if not fresh:
+            raise IntakeHold(
+                f"Utica First {what} grid still shows the same rows after paging to page {pages_read}"
+            )
+        for row in fresh:
+            seen.add(_row_key(row))
+            collected.append(row)
+    if next_state() == "next":
+        raise IntakeHold(
+            f"Utica First {what} grid has more than {max_pages} pages; not all rows were read"
+        )
+    return tuple(collected)
+
+
+_EXT_PAGE_STATE_JS = """(gridId) => {
+  const grid = document.getElementById(gridId);
+  if (!grid) return {state: 'missing'};
+  const panel = grid.closest('.x-panel') || grid.parentElement || grid;
+  const next = panel.querySelector('.x-tbar-page-next');
+  if (!next) return {state: 'none'};
+  const btn = next.closest('.x-btn') || next;
+  const cls = btn.className || '';
+  const disabled = cls.indexOf('disabled') !== -1 || btn.getAttribute('aria-disabled') === 'true';
+  return {state: disabled ? 'done' : 'next'};
+}"""
+
+_EXT_PAGE_NEXT_JS = """(gridId) => {
+  const grid = document.getElementById(gridId);
+  if (!grid) return false;
+  const panel = grid.closest('.x-panel') || grid.parentElement || grid;
+  const next = panel.querySelector('.x-tbar-page-next');
+  if (!next) return false;
+  const btn = next.closest('.x-btn') || next;
+  const cls = btn.className || '';
+  if (cls.indexOf('disabled') !== -1 || btn.getAttribute('aria-disabled') === 'true') return false;
+  btn.click();
+  return true;
+}"""
+
+
+_EXT_EXIT_JS = """() => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  const hits = Array.from(document.querySelectorAll('.x-btn-inner'))
+    .filter(e => vis(e) && (e.textContent || '').trim().toLowerCase() === 'exit');
+  if (hits.length !== 1) return false;
+  (hits[0].closest('.x-btn') || hits[0]).click();
+  return true;
+}"""
+
+
+def ext_click(control: Any) -> None:
+    """Click, falling back to a DOM click when an ExtJS mask intercepts.
+
+    Live 2026-10-08: an invisible x-mask (left by the "Personalized Filter
+    Names" window) sits over UFirst Now and swallows pointer clicks.
+    """
+    try:
+        control.click(timeout=8000)
+        return
+    except TypeError:
+        control.click()
+        return
+    except Exception:  # noqa: BLE001 - fall through to the DOM click
+        pass
+    target = control.first if hasattr(control, "first") else control
+    target.evaluate("e => (e.closest('.x-btn') || e).click()")
+
+
+_EXT_RADIO_LABEL_JS = """(label) => {
+  const vis = e => !!(e.offsetParent || e.getClientRects().length);
+  const hits = Array.from(document.querySelectorAll('label.x-form-cb-label'))
+    .filter(e => vis(e) && (e.textContent || '').trim().toLowerCase() === label.toLowerCase());
+  if (hits.length !== 1) return false;
+  const field = hits[0].closest('.x-form-type-radio') || hits[0].parentElement;
+  const input = field ? field.querySelector('input[type=radio]') : null;
+  (input || hits[0]).click();
+  return true;
+}"""
+
+
+def click_ext_radio_label(page: Any, label: str) -> bool:
+    """Click the one visible ExtJS radio whose label reads ``label``."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        return bool(evaluate(_EXT_RADIO_LABEL_JS, label))
+    except Exception:
+        return False
+
+
+def click_ext_exit(page: Any) -> bool:
+    """Click the one visible ExtJS "Exit" button (DOCUMENT LIST -> policy page)."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        clicked = bool(evaluate(_EXT_EXIT_JS))
+    except Exception:
+        return False
+    if clicked:
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(6000)
+    return clicked
+
+
+def transaction_row_index(
+    headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...], row: "TransactionRow"
+) -> int:
+    """Index of ``row`` in the live grid (policy + type + effective date)."""
+    idx = _match_headers(headers, _TXN_GRID_HEADERS, what="transactions")
+    hits = []
+    for i, cells in enumerate(rows):
+        if len(cells) < len(headers):
+            continue
+        try:
+            effective = parse_carrier_date(cells[idx["effective"]])
+        except IntakeHold:
+            continue
+        if (
+            _norm(cells[idx["policy_number"]]).upper() == row.policy_number
+            and _norm(cells[idx["transaction_type"]]).casefold() == row.transaction_type.casefold()
+            and effective == row.effective_date
+        ):
+            hits.append(i)
+    if len(hits) != 1:
+        raise IntakeHold(
+            f"Utica First transaction row {row.policy_number!r} is missing or ambiguous"
+        )
+    return hits[0]
+
+
 class PlaywrightUticaCancellationBrowser:
     """Drive one already-authenticated UFirst Now tab. Does not type credentials."""
 
     def __init__(self, page: Any):
         self.page = page
         self._list_url = ""
+        self._doclist_url = ""
         self._transaction_id = ""
 
     # -- navigation -----------------------------------------------------
     def open_transactions(self) -> None:
-        """Open the POLICY TRANSACTIONS tab."""
+        """Open the Policy Transactions tab (label casing varies live).
+
+        Live 2026-10-07 the control reads "Policy Transactions" and is not an
+        ARIA tab, so the visible text is the fallback (first visible match:
+        it is a navigation click, and the grid checks below catch a miss).
+        """
         page = self.page
         require_utica_url(str(getattr(page, "url", "") or ""))
-        _unique_control(page, "tab", "POLICY TRANSACTIONS", exact=True).click()
-        page.wait_for_selector("text=POLICY | TRANSACTION LIST", timeout=15000)
+        try:
+            control = unique_control_ci(
+                page, "tab", "Policy Transactions", carrier="Utica First",
+                text_fallback=True, first_visible_text=True,
+            )
+        except IntakeHold:
+            # Live 2026-10-08: a DOCUMENT LIST page has no top navigation;
+            # its Exit button leads back to a page that has it.
+            if not click_ext_exit(page):
+                raise
+            control = unique_control_ci(
+                page, "tab", "Policy Transactions", carrier="Utica First",
+                text_fallback=True, first_visible_text=True,
+            )
+        ext_click(control)
+        if not wait_for_text_ci(page, "Transaction List", timeout_ms=15000):
+            # The heading wording is not proven live; the hand patch on Test
+            # waited a fixed 5 s. Settle briefly; the grid parse still holds
+            # if the list never rendered.
+            page.wait_for_timeout(3000)
         self._list_url = require_utica_url(str(getattr(page, "url", "") or ""))
 
     def select_filter_all(self) -> None:
-        """Select the "All" filter radio and apply it."""
+        """Select the "All" filter radio and apply it ("Filter List" live)."""
         page = self.page
-        _unique_control(page, "radio", "All", exact=True).check()
-        _unique_control(page, "button", "FILTER LIST", exact=True).click()
+        radio = None
+        for attempt in range(FILTER_RADIO_ATTEMPTS):
+            # Live 2026-10-08: right after the Policy Transactions click the
+            # ExtJS list is re-rendering and the radio is briefly absent.
+            try:
+                radio = unique_control_ci(page, "radio", "All", carrier="Utica First")
+                break
+            except IntakeHold:
+                if click_ext_radio_label(page, "All"):
+                    break
+                if attempt == FILTER_RADIO_ATTEMPTS - 1:
+                    raise
+                waiter = getattr(page, "wait_for_timeout", None)
+                if not callable(waiter):
+                    raise
+                waiter(2000)
+        if radio is not None:
+            try:
+                radio.check(timeout=8000)
+            except TypeError:
+                radio.check()
+            except Exception:  # noqa: BLE001 - ExtJS mask over the page
+                ext_click(radio)
+        ext_click(unique_control_ci(page, "button", "Filter List", carrier="Utica First"))
         page.wait_for_selector("table", timeout=15000)
+
+    def _ext_grids(self) -> Any:
+        evaluate = getattr(self.page, "evaluate", None)
+        if not callable(evaluate):
+            return []
+        try:
+            return evaluate(_EXT_GRIDS_JS) or []
+        except Exception:
+            return []
 
     def load_transactions(self) -> tuple[TransactionRow, ...]:
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
-            raise IntakeHold("Utica First transactions table is missing or ambiguous")
+        table_count = int(tables.count())
+        if table_count != 1:
+            grids = self._ext_grids()
+            if not grids:
+                raise IntakeHold(
+                    "Utica First transactions table is missing or ambiguous "
+                    f"(found {table_count} tables and no ExtJS grid)"
+                )
+            grid_id, headers, rows = find_ext_grid(grids, _TXN_GRID_HEADERS, what="transactions")
+            rows = self._all_ext_rows(grid_id, rows, _TXN_GRID_HEADERS, "transactions")
+            self._ext_mode = True
+            return parse_transactions_grid(headers, rows, list_url=self._list_url)
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -409,6 +758,51 @@ class PlaywrightUticaCancellationBrowser:
         Captures the DRAGON_TRANSACTION_ID the DocGenServlet PDF URL needs.
         """
         page = self.page
+        if getattr(self, "_ext_mode", False):
+            self._open_documents_ext(row)
+        else:
+            self._open_documents_table(row)
+        if not wait_for_text_ci(page, "Document List", timeout_ms=15000):
+            # Heading wording unproven live; the DRAGON_TRANSACTION_ID read
+            # below holds if the document list never rendered.
+            page.wait_for_timeout(3000)
+        html = page.content() if callable(getattr(page, "content", None)) else ""
+        self._transaction_id = transaction_id_from_page(str(html))
+        # The DocGenServlet request's Referer must be the in-app page the
+        # document list was opened from, harvested fresh each run.
+        self._doclist_url = require_utica_url(str(getattr(page, "url", "") or ""))
+
+    def _open_documents_ext(self, row: TransactionRow) -> None:
+        """ExtJS grid: click the row's DOCUMENTS cell text.
+
+        Grid ids are regenerated on every visit, so the grid is re-read here.
+        The cell is a <span>Documents</span> action link, and an invisible
+        ExtJS mask can sit over the page (live 2026-10-08), so the click is
+        dispatched on the element itself.
+        """
+        grid_id, headers, rows = find_ext_grid(self._ext_grids(), _TXN_GRID_HEADERS, what="transactions")
+        index = transaction_row_index(headers, rows, row)
+        doc_col = _match_headers(headers, _TXN_GRID_HEADERS, what="transactions")["documents"]
+        cell = (
+            self.page.locator(f"#{grid_id} .x-grid-item").nth(index)
+            .locator(".x-grid-cell").nth(doc_col)
+        )
+        target = cell.get_by_text(re.compile(r"^\s*documents\s*$", re.IGNORECASE))
+        try:
+            if int(target.count()) != 1:
+                raise IntakeHold(
+                    f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
+                )
+            target.evaluate("e => e.click()")
+        except IntakeHold:
+            raise
+        except Exception:
+            raise IntakeHold(
+                f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
+            )
+
+    def _open_documents_table(self, row: TransactionRow) -> None:
+        page = self.page
         grid_row = page.locator("tr", has_text=row.policy_number)
         try:
             if int(grid_row.count()) != 1:
@@ -421,28 +815,30 @@ class PlaywrightUticaCancellationBrowser:
             raise IntakeHold(
                 f"Utica First transaction row {row.policy_number!r} is missing or ambiguous"
             )
-        link = grid_row.first.get_by_role("link", name="Documents", exact=True)
         try:
-            if int(link.count()) != 1:
-                raise IntakeHold(
-                    f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
-                )
+            link = unique_control_ci(
+                grid_row.first, "link", "Documents", carrier="Utica First"
+            )
         except IntakeHold:
-            raise
-        except Exception:
             raise IntakeHold(
                 f"Utica First Documents link for {row.policy_number!r} is missing or ambiguous"
             )
         link.first.click()
-        page.wait_for_selector("text=POLICY | TRANSACTION | DOCUMENT LIST", timeout=15000)
-        html = page.content() if callable(getattr(page, "content", None)) else ""
-        self._transaction_id = transaction_id_from_page(str(html))
 
     def list_documents(self, policy_number: str) -> tuple[UticaDocument, ...]:
         page = self.page
         tables = page.locator("table")
-        if int(tables.count()) != 1:
-            raise IntakeHold("Utica First document table is missing or ambiguous")
+        table_count = int(tables.count())
+        if table_count != 1:
+            grids = self._ext_grids()
+            if not grids:
+                raise IntakeHold(
+                    "Utica First document table is missing or ambiguous "
+                    f"(found {table_count} tables and no ExtJS grid)"
+                )
+            grid_id, headers, rows = find_ext_grid(grids, _DOC_GRID_HEADERS, what="document")
+            rows = self._all_ext_rows(grid_id, rows, _DOC_GRID_HEADERS, "document")
+            return parse_document_grid(headers, rows, policy_number=policy_number)
         table = tables.first if hasattr(tables, "first") else tables
         header_nodes = table.locator("thead th").all()
         if not header_nodes:
@@ -455,11 +851,59 @@ class PlaywrightUticaCancellationBrowser:
         )
         return parse_document_grid(headers, rows, policy_number=policy_number)
 
+    def _all_ext_rows(
+        self,
+        grid_id: str,
+        first_rows: tuple[tuple[str, ...], ...],
+        aliases: dict[str, set[str]],
+        what: str,
+    ) -> tuple[tuple[str, ...], ...]:
+        page = self.page
+
+        def next_state() -> str:
+            evaluate = getattr(page, "evaluate", None)
+            if not callable(evaluate):
+                return "none"
+            try:
+                info = evaluate(_EXT_PAGE_STATE_JS, grid_id)
+            except TypeError:
+                return "none"
+            except Exception:
+                return "none"
+            if not isinstance(info, dict):
+                return "none"
+            return str(info.get("state") or "none")
+
+        def click_next() -> bool:
+            try:
+                return bool(page.evaluate(_EXT_PAGE_NEXT_JS, grid_id))
+            except Exception:
+                return False
+
+        def read_rows() -> tuple[tuple[str, ...], ...]:
+            waiter = getattr(page, "wait_for_timeout", None)
+            if callable(waiter):
+                waiter(1500)
+            _, _, rows = find_ext_grid(self._ext_grids(), aliases, what=what)
+            return rows
+
+        return collect_paged_rows(
+            first_rows, next_state=next_state, click_next=click_next, read_rows=read_rows, what=what
+        )
+
     def download_document(self, doc: UticaDocument) -> bytes:
         """Fetch the notice PDF via the portal's own DocGenServlet URL.
 
         Uses the browser context's session (cookies) so the SSO token rides
-        along. A non-PDF response raises IntakeHold and is never kept.
+        along, WITH the Referer/Origin headers the portal's CSRF filter
+        demands. Direct navigation to the URL is rejected by the filter, and
+        the in-app viewer's Download button is unreachable from automation,
+        so this authenticated request with headers is the download path.
+
+        Doc IDs, the DRAGON_TRANSACTION_ID, the session GUID, and the
+        Referer are all harvested from the live document list each run;
+        nothing is hardcoded. A CSRF rejection page or any other non-PDF
+        response raises IntakeHold and is never kept.
         """
         page = self.page
         url = docgen_pdf_url(
@@ -467,16 +911,22 @@ class PlaywrightUticaCancellationBrowser:
             session_guid=session_guid_from_url(str(getattr(page, "url", "") or "")),
             transaction_id=self._transaction_id,
         )
+        headers = docgen_request_headers(referer_url=self._doclist_url or self._list_url)
         request = getattr(getattr(page, "context", None), "request", None)
         getter = getattr(request, "get", None)
         if not callable(getter):
             raise IntakeHold("Utica First PDF request is missing or ambiguous")
         try:
-            response = getter(url, timeout=DOWNLOAD_TIMEOUT_MS)
+            response = getter(url, timeout=DOWNLOAD_TIMEOUT_MS, headers=headers)
             body = response.body() if callable(getattr(response, "body", None)) else b""
         except Exception as exc:
             raise IntakeHold(f"Utica First PDF download failed: {type(exc).__name__}")
         content = bytes(body or b"")
+        if _is_csrf_rejection(content):
+            raise IntakeHold(
+                "Utica First PDF request was rejected by the portal CSRF filter "
+                f"for document {doc.name!r}; the bytes are not kept"
+            )
         if not _is_pdf(content):
             raise IntakeHold(
                 f"Utica First document {doc.name!r} download is not a PDF"
@@ -486,11 +936,14 @@ class PlaywrightUticaCancellationBrowser:
     def return_to_transactions(self) -> None:
         # The SPA keeps one URL; go back through the tab rather than history.
         self._transaction_id = ""
+        self._doclist_url = ""
         self.open_transactions()
         self.select_filter_all()
 
     def screenshot_transactions(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        from .carrier_page_capture import capture_png
+
+        data = capture_png(self.page, full_page=True)
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Utica First transactions screenshot is missing or not a PNG")
         return bytes(data)
@@ -557,7 +1010,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Utica First filename is missing or ambiguous")
@@ -573,6 +1026,7 @@ class UticaDeliveryLedger:
             raise IntakeHold("Existing Utica First file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -639,13 +1093,50 @@ def run_pull(
     skipped: list[str] = []
     targeted: list[str] = []
     rows_payload: list[dict[str, Any]] = []
+    from .carrier_tabs import snapshot_ids
 
+    pages_before = snapshot_ids(getattr(browser, "page", None))
+
+    try:
+        return _utica_pull_body(
+            browser, ledger, archive, as_of=as_of,
+            downloaded=downloaded, held=held, skipped=skipped,
+            targeted=targeted, rows_payload=rows_payload,
+        )
+    finally:
+        from .carrier_tabs import close_new_pages, context_pages
+
+        page = getattr(browser, "page", None)
+        close_new_pages(page, pages_before, keep=page)
+        _close_extra_utica_tabs(page, context_pages(page))
+
+
+def _utica_pull_body(
+    browser: Any,
+    ledger: Any,
+    archive: Any,
+    *,
+    as_of: date,
+    downloaded: list,
+    held: list,
+    skipped: list,
+    targeted: list,
+    rows_payload: list,
+) -> dict[str, Any]:
     browser.open_transactions()
     browser.select_filter_all()
     png = browser.screenshot_transactions()
     ledger.save_screenshot(as_of, png)
     rows = browser.load_transactions()
-    targets = [row for row in rows if is_cancellation_transaction(row.transaction_type)]
+    targets = []
+    seen_policies: set[str] = set()
+    for row in rows:
+        if not is_cancellation_transaction(row.transaction_type):
+            continue
+        if row.policy_number in seen_policies:
+            continue
+        seen_policies.add(row.policy_number)
+        targets.append(row)
 
     for row in targets:
         try:
@@ -665,6 +1156,7 @@ def run_pull(
                 reason=(
                     f"Utica First policy {row.policy_number} has no notice "
                     "document in its document list"
+                    + (": " + "; ".join(d.name for d in docs[:6]) if docs else "")
                 ),
             ))
             browser.return_to_transactions()
@@ -704,7 +1196,7 @@ def run_pull(
             )
             source.validate()
             try:
-                saved = ledger.record(source, issued_on=doc.added_date)
+                saved = ledger.record(source, issued_on=doc.added_date, insured_name=row.insured_name)
                 archive.preserve(source)
             except IntakeHold as exc:
                 held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
@@ -726,6 +1218,17 @@ def run_pull(
             rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
         browser.return_to_transactions()
 
+    deduped_holds: list[dict[str, Any]] = []
+    seen_holds: set[str] = set()
+    for item in held:
+        key = str(item.get("policy_number") or "")
+        if key and key in seen_holds:
+            continue
+        if key:
+            seen_holds.add(key)
+        deduped_holds.append(item)
+    held = deduped_holds
+
     return {
         "status": "PULLED",
         "scope": SCOPE,
@@ -743,6 +1246,30 @@ def run_pull(
     }
 
 
+def _is_utica_tab(url: str) -> bool:
+    """UFirst Now, its OneShield SSO page, or the Okta host this login opens."""
+    parts = urllib.parse.urlsplit(str(url or ""))
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").lower()
+    if host == UTICA_HOST or host == "login.uticafirst.com":
+        return True
+    return "oneshield" in host or "oneshield" in path
+
+
+def _close_extra_utica_tabs(keep: Any, pages: list[Any]) -> int:
+    from .carrier_tabs import close_page
+
+    closed = 0
+    for page in pages:
+        if page is keep:
+            continue
+        if not _is_utica_tab(str(getattr(page, "url", "") or "")):
+            continue
+        if close_page(page):
+            closed += 1
+    return closed
+
+
 def select_utica_page(pages: list[Any]) -> Any:
     """Use the single UFirst Now tab."""
     matches = [
@@ -752,6 +1279,54 @@ def select_utica_page(pages: list[Any]) -> Any:
     if len(matches) != 1:
         raise IntakeHold("Expected exactly one Utica First UFirst Now tab")
     return matches[0]
+
+
+def ensure_utica_page(cdp_browser: Any) -> Any:
+    """Return the one signed-in UFirst Now tab, signing in if there is none.
+
+    BUILT 2026-10-07 (Ralph); tightened in the Test-patch reconcile.
+
+    - Exactly one signed-in UFirst Now tab: use it (expired tabs are ignored).
+    - Several signed-in tabs: hold (ambiguous, never guess).
+    - None: on hermes-test-01 only, open a new tab and run
+      ``utica_login.login_utica`` (Okta + email MFA). Production hosts and any
+      other host hold before credentials are read.
+    """
+    from . import utica_login
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("uticafirst")
+    refuse_production_host()
+    pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
+    owned = [page for page in pages if _is_utica_tab(str(getattr(page, "url", "") or ""))]
+    signed_in = [page for page in owned if utica_login.is_logged_in(page)]
+    # Reuse one existing tab. Extra OneShield SSO tabs from earlier runs are closed.
+    keep = signed_in[0] if signed_in else (owned[0] if owned else None)
+    _close_extra_utica_tabs(keep, owned)
+    if keep is not None and utica_login.is_logged_in(keep):
+        return keep
+
+    require_hermes_test_host()
+    contexts = list(getattr(cdp_browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Utica First auto-login needs an open browser context")
+    from .carrier_tabs import close_new_pages
+
+    before = {id(page) for page in pages}
+    created = keep is None
+    page = keep if keep is not None else contexts[0].new_page()
+    try:
+        utica_login.login_utica(page)
+        close_new_pages(page, before, keep=page)
+        _close_extra_utica_tabs(page, [p for ctx in cdp_browser.contexts for p in ctx.pages])
+        return page
+    except Exception:
+        if created:
+            try:
+                page.close()
+            except Exception:
+                pass
+        raise
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightUticaCancellationBrowser, Callable[[], None]]:

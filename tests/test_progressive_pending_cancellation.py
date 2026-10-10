@@ -235,10 +235,19 @@ class ParseReportTest(unittest.TestCase):
             parse_cancellations_report("Billing", HEADERS, ROWS, list_url=LIST_URL)
 
     def test_missing_header_holds(self):
+        # Cancel Effective Date is required; omitting it must raise IntakeHold
+        headers_missing_required = tuple(h for h in HEADERS if h != "Cancel Effective Date")
         with self.assertRaises(IntakeHold):
             parse_cancellations_report(
-                "Pending Cancellation Due to Non-Payment", HEADERS[:-1], ROWS, list_url=LIST_URL
+                "Pending Cancellation Due to Non-Payment", headers_missing_required, ROWS, list_url=LIST_URL
             )
+        # Amount Due is optional (e.g. Underwriting tab); omitting it does not hold
+        headers_without_amount = tuple(h for h in HEADERS if h != "Amount Due")
+        rows_without_amount = tuple(r[:-1] for r in ROWS)
+        parsed = parse_cancellations_report(
+            "Pending Cancellation Due to Non-Payment", headers_without_amount, rows_without_amount, list_url=LIST_URL
+        )
+        self.assertEqual(parsed[0].amount_due, "")
 
     def test_short_row_holds(self):
         with self.assertRaises(IntakeHold):
@@ -553,8 +562,7 @@ class SelectPageTest(unittest.TestCase):
         self.assertIs(select_fao_page([other, good]), good)
         with self.assertRaises(IntakeHold):
             select_fao_page([other])
-        with self.assertRaises(IntakeHold):
-            select_fao_page([good, good])
+        self.assertIs(select_fao_page([good, good]), good)
 
 
 if __name__ == "__main__":
