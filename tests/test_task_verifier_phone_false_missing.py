@@ -20,6 +20,8 @@ from robie_job_engine.task_verifier import (
     verify_due_tasks,
 )
 
+os.environ.setdefault("ROBIE_FALLBACK_CONFIRM_STATE", "/nonexistent/zapier_fallback_confirm.json")
+
 
 def _store():
     return TaskVerificationStore(os.path.join(tempfile.mkdtemp(), "p.db"))
@@ -31,7 +33,10 @@ def _pending(title, producer="phone-watchdog", fired=None):
                        assignee="AngieV", fired_at=fired.isoformat(), status="PENDING")
 
 
-def _rows(title, created="2026-10-08T18:07:00"):
+# The report's naive timestamps are Central: 17:07 CT is 18:07 ET, one minute
+# after the 22:06Z (18:06 ET) firing used below. (They were read as Eastern
+# until 2026-10-10.)
+def _rows(title, created="2026-10-08T17:07:00"):
     return parse_task_report_csv(
         ("Task Title,Assignee,Applicant ID,Created\n"
          f"{title},AngieV,167230246,{created}\n").encode()
@@ -59,8 +64,8 @@ class TitleMatchTest(unittest.TestCase):
         p = _pending("[AFTER-HOURS CALLBACK] Conley Electric")
         rows = parse_task_report_csv(
             b"Task Title,Assignee,Applicant ID,Created\n"
-            b"[CALLBACK REQUIRED] George Conley,AngieV,999,2026-10-08T18:07:00\n"
-            b"[CALLBACK REQUIRED] George Conley,Jazmin11,167230246,2026-10-08T18:07:00\n"
+            b"[CALLBACK REQUIRED] George Conley,AngieV,999,2026-10-08T17:07:00\n"
+            b"[CALLBACK REQUIRED] George Conley,Jazmin11,167230246,2026-10-08T17:07:00\n"
         )
         self.assertIsNone(match_task(p, rows))
 
@@ -88,7 +93,9 @@ class ReportTimingTest(unittest.TestCase):
 
     def test_waiting_too_long_is_unverified_not_missing(self):
         s = _store()
-        fired = self._due(s, minutes_ago=5 * 60)
+        # The wait limit is 12 h (raised from 4 h 2026-10-10: the report's data
+        # trails by 1-3 h, about 6 h overnight, and that must not alert).
+        fired = self._due(s, minutes_ago=13 * 60)
         out = verify_due_tasks(s, [], True, report_received_at=fired - timedelta(minutes=1))
         self.assertEqual(len(out["unverified"]), 1)
         self.assertEqual(len(out["missing"]), 0)
