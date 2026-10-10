@@ -1,0 +1,8 @@
+                                                                                                                        Account Statement
+                                                                                                                        Account No.                 SYN9005
+                                                                                                                        Statement Date              04/12/25
+Policy #            Eff. date      Description                      Amount                %              Amt                  NET                 Due Date
+SYN-POL005          Example Transit LLC
+                   04/01/25       Premium - New Business             100.00              10.00           10.00                90.00
+                                                                                       Policy Balance                         $60.00              05/01/25
+                                                                                   $100.00                    $10.00           $60.00       TOTAL

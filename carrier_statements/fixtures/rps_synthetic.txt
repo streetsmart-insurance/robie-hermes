@@ -1,0 +1,13 @@
+                         Risk Placement Services, Inc.                                         Broker Statement
+                                                                                               4/12/2025
+
+       Broker No.       SYN9001
+       Example Agency LLC
+
+ Acct Invoice                                      Tr. Eff.   Due          Insured/               Comm        Gross       Comm
+Month    #         Type      Policy Number          Date      Date        Description              Rate       Prem         Amt         NET
+
+4/25   900001    ADD     SYN-POL001                  04/01/25 05/01/25   Example Transit LLC          10.00     $100.00   $10.00     $90.00
+                                                   04/03/25             Payment # SAMPLE01                                  ($30.00)
+                                                                                                         Policy Balance Due             $60.00
+                                                                                              Balance due this statement              $60.00
