@@ -6,6 +6,39 @@
   ],
   "gated_actions": [
     {
+      "id": "ezlynx.reassign",
+      "kind": "browser-document-action",
+      "site": "ezlynx",
+      "records_from": [
+        "ezlynx.reassign COMPLETE on hermes-test-01",
+        "EZLYNX_API_READBACK or FRESH_PAGE_READBACK authoritative evidence",
+        "jobs.db post_job_audit verdict=PASS tagged with this action"
+      ],
+      "notes": "Reusable browser-verification contract. Production refused until one clean Test pass."
+    },
+    {
+      "id": "ezlynx.move_document",
+      "kind": "browser-document-action",
+      "site": "ezlynx",
+      "records_from": [
+        "ezlynx.move_document COMPLETE on hermes-test-01",
+        "EZLYNX_API_READBACK or FRESH_PAGE_READBACK authoritative evidence",
+        "jobs.db post_job_audit verdict=PASS tagged with this action"
+      ],
+      "notes": "Cross-frame Angular move dialog. Production refused until one clean Test pass."
+    },
+    {
+      "id": "ezlynx.apply_label",
+      "kind": "browser-document-action",
+      "site": "ezlynx",
+      "records_from": [
+        "ezlynx.apply_label COMPLETE on hermes-test-01",
+        "EZLYNX_API_READBACK or FRESH_PAGE_READBACK authoritative evidence",
+        "jobs.db post_job_audit verdict=PASS tagged with this action"
+      ],
+      "notes": "JE-KILL-01 live harness exists; Production refused until recorded clean Test pass."
+    },
+    {
       "id": "ascend.create_program",
       "kind": "api-program-creation",
       "site": "ascend",

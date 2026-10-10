@@ -276,8 +276,10 @@ class ReliabilityHardeningTests(unittest.TestCase):
                 "worker": "hermes-cua",
                 "resource_id": "doc-1",
                 "account_id": "acct-1",
+                "document_name": "renewal.pdf",
                 "label_id": "label-2",
                 "label": "Renewal",
+                "label_control": "add-label",
             },
             idempotency_key="ez-wait",
             max_attempts=1,
@@ -465,9 +467,11 @@ class ReliabilityHardeningTests(unittest.TestCase):
             {
                 "worker": "hermes-cua",
                 "document_id": "doc-9",
+                "document_name": "policy.pdf",
                 "account_id": "acct-9",
                 "destination_id": "folder-1",
                 "destination_name": "Policies",
+                "move_control": "move",
             },
             idempotency_key="ez-test-engine",
         )
