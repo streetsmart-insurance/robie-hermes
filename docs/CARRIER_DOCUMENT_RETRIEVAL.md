@@ -5,6 +5,25 @@ This note covers the carrier pull workers (`robie_job_engine/*_pending_cancellat
 2026-10-06/07 handoffs. The merge freeze ended Oct 5. EZLynx filing for carrier documents stays
 off (`ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0`).
 
+## Daily pull output (Carlo 2026-10-10)
+
+`carrier_daily_run --upload-drive --status-sheet --match-clients` writes:
+
+- **Drive:** `Document Retrieval/<YYYY-MM-DD>/<Carrier>/<file>.pdf` on the StreetSmart shared
+  drive (folder `1kCvgSb1W7UZN4Jm-HCQYZCrKS3Ifw6Ry`). The day folder and carrier folders are made
+  on the first upload. Each carrier's `drive-ledger.json` keeps a notice from being uploaded twice.
+- **Status sheet:** the Document Retrieval Status Sheet (`1HL6Uw5n...`) gets a tab per day
+  (`10/12.`), copied from `TEMPLATE`. Each PDF is a row under its carrier with Insured Name,
+  Policy Number, Department, Document Type, Memo Date, and a Comment linking to the PDF. A rerun
+  updates the same rows.
+- **Client match (read only):** each policy number is looked up with
+  `PolicyApi/policy/v1/search`. The Comment says whether exactly one EZLynx client has it. Zero or
+  several matches say "needs a person". Nothing is filed.
+- **Chat summary:** links the day's Drive folder and sheet tab.
+
+The host's Drive token (`ROBIE_CARRIER_DRIVE_TOKEN_FILE`, robie@) needs both the Drive and the
+Sheets scope. Without either, that step holds and the pulls still run.
+
 ## Where the code came from
 
 | Source | What it was | Where it is now |

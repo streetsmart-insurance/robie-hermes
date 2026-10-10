@@ -12,8 +12,13 @@ For each carrier, one at a time:
 2. run that carrier's pull in its own subprocess with its own time limit, so
    a crash or a hang in one carrier never stops the others;
 3. with ``--upload-drive``, copy the new PDFs to
-   ``Robie Carrier Pull QA (Nicole)/<Carrier>/<pull date>/`` through the
-   carrier Drive ledger (each notice is uploaded once).
+   ``Document Retrieval/<pull date>/<Carrier>/`` through the carrier Drive
+   ledger (each notice is uploaded once).
+
+After every carrier, with ``--status-sheet``, the day's tab of the Document
+Retrieval Status Sheet is copied from TEMPLATE and gets one row per PDF with
+a link to it in Drive. ``--match-clients`` adds a read-only EZLynx lookup by
+policy number to each row (see ``carrier_daily_report``).
 
 Guard and Travelers are in the eight-carrier set but skipped until their
 logins work. ``ROBIE_CARRIER_DAILY_SKIP`` defaults to ``guard,travelers``.
@@ -314,9 +319,27 @@ def plain(text: Any, fallback: str) -> str:
     return text.rstrip(".")[:160]
 
 
+def _env_label() -> str:
+    return "Production" if os.environ.get("ROBIE_ENV", "").strip().upper() in {"PRODUCTION", "PROD"} else "Test"
+
+
+def render_sheet(sheet: dict[str, Any]) -> list[str]:
+    if sheet.get("status") != "OK":
+        return [f"Status sheet: not updated, {plain(sheet.get('reason'), 'the sheet was not reachable')}."]
+    m = sheet.get("matches") or {}
+    person = m.get("NONE", 0) + m.get("MULTIPLE", 0) + m.get("ERROR", 0)
+    line = f"Status sheet tab {sheet['tab']}: {sheet.get('written', 0)} row(s) written"
+    if m.get("MATCHED") or person:
+        line += f", {m.get('MATCHED', 0)} matched to an EZLynx client, {person} need a person"
+    if sheet.get("held"):
+        line += f", {len(sheet['held'])} not written"
+    return [line + ".", sheet["tab_link"]]
+
+
 def render_summary(summary: dict[str, Any]) -> str:
     day = summary["as_of"]
-    lines = [f"Robie carrier pull for {day} (Test; nothing filed to EZLynx, no emails sent)."]
+    env = summary.get("env") or "Test"
+    lines = [f"Robie carrier pull for {day} ({env}; nothing filed to EZLynx, no emails sent)."]
     for name, r in summary["carriers"].items():
         if r["status"] == "SKIPPED":
             lines.append(f"- {r['display']}: {r.get('reason') or SKIP_REASON}.")
@@ -358,6 +381,10 @@ def render_summary(summary: dict[str, Any]) -> str:
         f"Total: {t['pdfs']} new PDFs, {t['uploaded']} uploaded to Drive, "
         f"{t['failed']} carrier(s) failed, {t.get('partial', 0)} partial."
     )
+    if summary.get("drive_folder"):
+        lines.append(f"Drive folder: {summary['drive_folder']}")
+    if summary.get("sheet"):
+        lines.extend(render_sheet(summary["sheet"]))
     return "\n".join(lines)
 
 
@@ -387,6 +414,10 @@ def run_daily(
     close_tabs: Callable[[str], list[str]] = close_stale_tabs,
     open_tab: Callable[[str, str], str | None] = ensure_carrier_tab,
     drive_factory: Callable[[], Any] | None = None,
+    status_sheet: bool = False,
+    match_clients: bool = False,
+    sheet_factory: Callable[[], Any] | None = None,
+    search_factory: Callable[[], Callable[[str], Any]] | None = None,
 ) -> dict[str, Any]:
     from .intake_core import IntakeHold
 
@@ -450,7 +481,21 @@ def run_daily(
         "failed": sum(1 for r in results.values() if r["status"] == "FAILED"),
         "partial": sum(1 for r in results.values() if r["status"] == "PARTIAL"),
     }
-    summary = {"as_of": day.isoformat(), "carriers": results, "totals": totals}
+    summary = {"as_of": day.isoformat(), "env": _env_label(), "carriers": results, "totals": totals}
+    if drive is not None and totals["uploaded"]:
+        try:
+            from .carrier_qa_drive import daily_day_folder, drive_folder_link
+
+            summary["drive_folder"] = drive_folder_link(daily_day_folder(drive, day.isoformat()))
+        except Exception:  # noqa: BLE001 - the link is a convenience
+            pass
+    if status_sheet:
+        from .carrier_daily_report import run_report
+
+        summary["sheet"] = run_report(
+            day=day, root=root, carriers=[n for n in carriers if n not in skip],
+            sheet_factory=sheet_factory, search_factory=search_factory, match_clients=match_clients,
+        )
     text = render_summary(summary)
     summary["notify"] = notify(text) if do_notify else "not requested"
     out = root / "runs" / day.isoformat()
@@ -497,7 +542,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Deliberately not read from ROBIE_BROWSER_CDP_URL: Test env files point
     # that at the EZLynx Chrome (9222).
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help="carrier Chrome CDP (port 9223 only)")
-    parser.add_argument("--upload-drive", action="store_true", help="upload new PDFs to the carrier QA Drive folders")
+    parser.add_argument("--upload-drive", action="store_true", help="upload new PDFs to Document Retrieval/<date>/<Carrier>/")
+    parser.add_argument("--status-sheet", action="store_true", help="copy TEMPLATE to today's status-sheet tab and add a row per PDF")
+    parser.add_argument("--match-clients", action="store_true", help="look each policy up in EZLynx (read only) for the sheet")
     parser.add_argument("--notify", action="store_true", help="post the summary to ROBIE_HEALTH_CHAT_SPACE")
     return parser
 
@@ -510,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_daily(
             day=day, root=root, carriers=_carrier_list(args.carriers), cdp_url=args.cdp_url,
             upload_drive=args.upload_drive, do_notify=args.notify,
+            status_sheet=args.status_sheet, match_clients=args.match_clients,
         )
     except Exception as exc:  # noqa: BLE001 - environment gate failures
         print(f"Daily carrier run refused: {exc}", file=sys.stderr)
