@@ -36,9 +36,8 @@ class FakeDrive:
 
     def get(self, fileId, fields, supportsAllDrives):
         meta = self.folder_meta or {
-            "id": fileId, "name": next(t for t, i in qa.CARRIER_QA_FOLDERS.values() if i == fileId),
-            "mimeType": qa.FOLDER_MIME, "trashed": False, "parents": [qa.CARRIER_QA_DRIVE_ROOT_ID],
-            "capabilities": {"canAddChildren": True},
+            "id": fileId, "name": qa.DAILY_DRIVE_ROOT_NAME,
+            "mimeType": qa.FOLDER_MIME, "trashed": False, "capabilities": {"canAddChildren": True},
         }
         return self._exec(meta)
 
@@ -74,18 +73,23 @@ class DriveUploadTests(unittest.TestCase):
         (self.pack / "sources").mkdir()
         (self.pack / "sources" / "x.pdf").write_bytes(PDF)
         (self.pack / "fao-cancellation-ledger.json").write_text("{}")
-        os.environ["ROBIE_ENV"] = "TEST"
+        env = mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_uploads_into_carrier_date_folder_and_records_ledger(self):
+    def test_uploads_into_day_then_carrier_folder_and_records_ledger(self):
         drive = FakeDrive()
         result = qa.CarrierDriveUpload(drive, "progressive", self.root).upload_pack(self.pack, "2026-10-08")
         self.assertEqual([u["name"] for u in result.uploaded], ["875934744 Cancel_Notice Progressive.pdf"])
-        folder = drive.created[0]
-        self.assertEqual((folder["name"], folder["mimeType"]), ("2026-10-08", qa.FOLDER_MIME))
-        self.assertIn(folder, drive.files_by_parent[qa.CARRIER_QA_FOLDERS["progressive"][1]])
+        day, carrier = drive.created[0], drive.created[1]
+        self.assertEqual((day["name"], day["mimeType"]), ("2026-10-08", qa.FOLDER_MIME))
+        self.assertIn(day, drive.files_by_parent[qa.DAILY_DRIVE_ROOT_ID])
+        self.assertEqual((carrier["name"], carrier["mimeType"]), ("Progressive", qa.FOLDER_MIME))
+        self.assertIn(carrier, drive.files_by_parent[day["id"]])
+        self.assertEqual(result.folder_id, carrier["id"])
         ledger = json.loads((self.root / qa.DRIVE_LEDGER_NAME).read_text())
         self.assertIn("2026-10-06/875934744 Cancel_Notice Progressive.pdf", ledger["items"])
         self.assertEqual(oct(os.stat(self.root / qa.DRIVE_LEDGER_NAME).st_mode & 0o777), "0o600")
@@ -104,6 +108,17 @@ class DriveUploadTests(unittest.TestCase):
         self.assertEqual(later.uploaded, [])
         self.assertEqual(len([c for c in drive.created if c.get("md5Checksum")]), 1)
 
+    def test_second_carrier_reuses_the_day_folder(self):
+        drive = FakeDrive()
+        qa.CarrierDriveUpload(drive, "progressive", self.root).upload_pack(self.pack, "2026-10-08")
+        geico_root = Path(self.tmp.name) / "geico"
+        (geico_root / "2026-10-08").mkdir(parents=True)
+        (geico_root / "2026-10-08" / "NOC.pdf").write_bytes(PDF + b"g")
+        qa.CarrierDriveUpload(drive, "geico", geico_root).upload_pack(geico_root / "2026-10-08", "2026-10-08")
+        self.assertEqual([f["name"] for f in drive.files_by_parent[qa.DAILY_DRIVE_ROOT_ID]], ["2026-10-08"])
+        day_id = drive.files_by_parent[qa.DAILY_DRIVE_ROOT_ID][0]["id"]
+        self.assertEqual(sorted(f["name"] for f in drive.files_by_parent[day_id]), ["Geico", "Progressive"])
+
     def test_same_bytes_under_a_new_name_are_not_uploaded_twice(self):
         drive = FakeDrive()
         up = qa.CarrierDriveUpload(drive, "progressive", self.root)
@@ -121,19 +136,33 @@ class DriveUploadTests(unittest.TestCase):
 
     def test_different_file_already_in_drive_is_held_not_overwritten(self):
         drive = FakeDrive()
-        folder_parent = qa.CARRIER_QA_FOLDERS["progressive"][1]
-        drive.files_by_parent[folder_parent] = [{"id": "f", "name": "2026-10-08", "mimeType": qa.FOLDER_MIME}]
+        drive.files_by_parent[qa.DAILY_DRIVE_ROOT_ID] = [{"id": "d", "name": "2026-10-08", "mimeType": qa.FOLDER_MIME}]
+        drive.files_by_parent["d"] = [{"id": "f", "name": "Progressive", "mimeType": qa.FOLDER_MIME}]
         drive.files_by_parent["f"] = [{"id": "x", "name": "875934744 Cancel_Notice Progressive.pdf", "md5Checksum": "zz"}]
         result = qa.CarrierDriveUpload(drive, "progressive", self.root).upload_pack(self.pack, "2026-10-08")
         self.assertEqual(result.uploaded, [])
         self.assertIn("different", result.held[0]["reason"])
 
-    def test_moved_or_retired_folder_holds(self):
-        drive = FakeDrive(folder_meta={"name": "Progressive", "mimeType": qa.FOLDER_MIME, "trashed": False,
-                                       "parents": [qa.RETIRED_NESTED_ROOT_ID], "capabilities": {"canAddChildren": True}})
-        with self.assertRaises(qa.DriveUploadHold):
+    def test_renamed_or_read_only_root_holds(self):
+        for meta in (
+            {"name": "Old name", "mimeType": qa.FOLDER_MIME, "trashed": False, "capabilities": {"canAddChildren": True}},
+            {"name": qa.DAILY_DRIVE_ROOT_NAME, "mimeType": qa.FOLDER_MIME, "trashed": False, "capabilities": {}},
+            {"name": qa.DAILY_DRIVE_ROOT_NAME, "mimeType": qa.FOLDER_MIME, "trashed": True,
+             "capabilities": {"canAddChildren": True}},
+        ):
+            drive = FakeDrive(folder_meta=meta)
+            with self.assertRaises(qa.DriveUploadHold):
+                qa.CarrierDriveUpload(drive, "progressive", self.root).upload_pack(self.pack, "2026-10-08")
+            self.assertEqual(drive.created, [])
+
+    def test_two_day_folders_with_the_same_name_hold(self):
+        drive = FakeDrive()
+        drive.files_by_parent[qa.DAILY_DRIVE_ROOT_ID] = [
+            {"id": "a", "name": "2026-10-08", "mimeType": qa.FOLDER_MIME},
+            {"id": "b", "name": "2026-10-08", "mimeType": qa.FOLDER_MIME},
+        ]
+        with self.assertRaisesRegex(qa.DriveUploadHold, "2 folders"):
             qa.CarrierDriveUpload(drive, "progressive", self.root).upload_pack(self.pack, "2026-10-08")
-        self.assertEqual(drive.created, [])
 
     def test_requires_test_and_a_token(self):
         with mock.patch.dict(os.environ, {"ROBIE_ENV": "PROD"}):
@@ -144,17 +173,22 @@ class DriveUploadTests(unittest.TestCase):
             with self.assertRaisesRegex(qa.DriveUploadHold, "not configured"):
                 qa.build_drive_service()
 
-    def test_refuses_production_host(self):
+    def test_production_host_needs_production_env(self):
         with mock.patch.object(qa.socket, "gethostname", return_value="hermes-poc-01"):
-            with self.assertRaisesRegex(qa.DriveUploadHold, "Production"):
+            with self.assertRaisesRegex(qa.DriveUploadHold, "ROBIE_ENV=PRODUCTION"):
                 qa.CarrierDriveUpload(FakeDrive(), "progressive", self.root).upload_pack(self.pack, "2026-10-08")
+            with mock.patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}):
+                result = qa.CarrierDriveUpload(FakeDrive(), "progressive", self.root).upload_pack(self.pack, "2026-10-08")
+        self.assertEqual(len(result.uploaded), 1)
 
 
 class DailyRunTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        os.environ["ROBIE_ENV"] = "TEST"
+        env = mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -234,8 +268,8 @@ class DailyRunTests(unittest.TestCase):
                 run_one=lambda name, **kw: self._ok(name),
                 close_tabs=lambda url: [], open_tab=lambda name, url: None,
             )
+            self.assertEqual(os.environ[daily.KILL_SWITCH_ENV], "0")
         self.assertEqual(summary["carriers"]["geico"]["status"], "OK")
-        self.assertEqual(os.environ[daily.KILL_SWITCH_ENV], "0")
 
     def test_refuses_outside_test(self):
         with mock.patch.dict(os.environ, {"ROBIE_ENV": "PROD"}):
@@ -476,7 +510,9 @@ class OpenCarrierTabTests(unittest.TestCase):
     def test_run_daily_opens_tabs_and_turns_failed_sign_in_into_plain_hold(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        os.environ["ROBIE_ENV"] = "TEST"
+        env = mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
+        env.start()
+        self.addCleanup(env.stop)
         opened = []
 
         def run_one(name, **_):

@@ -25,7 +25,7 @@ EnvironmentFile=-/etc/streetsmart-hermes-test/robie-carrier-pull.env
 # --notify posts the plain-English summary to ROBIE_HEALTH_CHAT_SPACE (same
 # ROBIE health Chat Prod uses). Space and Chat app key come from
 # robie-carrier-pull.env. The summary is also written to runs/<date>/summary.txt.
-ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull-test --cdp-url http://127.0.0.1:9223 --upload-drive --notify
+ExecStart=/opt/streetsmart-hermes-test/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull-test --cdp-url http://127.0.0.1:9223 --upload-drive --status-sheet --match-clients --notify
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

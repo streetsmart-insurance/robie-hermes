@@ -21,7 +21,7 @@ EnvironmentFile=-/etc/streetsmart-hermes/robie-carrier-pull.env
 # The Python runner also forces this to 0. BOP is not a filing carrier.
 Environment=ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=0
 # Carrier Chrome only. Port 9222 is the EZLynx Chrome; the runner refuses it.
-ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull --cdp-url http://127.0.0.1:9223 --upload-drive --notify
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.carrier_daily_run --root /var/lib/robie-carrier-pull --cdp-url http://127.0.0.1:9223 --upload-drive --status-sheet --match-clients --notify
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
