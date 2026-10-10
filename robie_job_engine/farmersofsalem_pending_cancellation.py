@@ -3,10 +3,14 @@
 Playbook (verified live 2026-10-02 from Nicole's training):
 
 * farmersofsalem.com/agent_login.aspx signs in to "Farmers Of Salem ::
-  Agent Home" (already signed in; this module never logs in).
-* Click the "FOS PORTAL" link (agent_portal.aspx). It opens a new tab with
-  the Finys policy admin system at https://fos.finys.com/ ("THE FINYS
-  SUITE").
+  Agent Home". ``farmersofsalem_login`` does that once, from
+  ``farmers_of_salem_username`` / ``farmers_of_salem_password`` (the newer
+  pair; ``farmers_of_salem_robie_*`` is not read).
+* Open https://www.farmersofsalem.com/agent/agent_portal.aspx in a
+  worker-owned tab. It lands on the Finys policy admin system at
+  https://fos.finys.com/ ("THE FINYS SUITE"). A signed-in Finys tab is
+  reused. The navbar toggler plus the FOS PORTAL link is the fallback
+  when that navigation is not available.
 * The Finys landing page shows "My Open Tasks - pending items" (sidebar:
   "My Pending Cancellation Items") with policy number, insured, product,
   and due date.
@@ -18,10 +22,12 @@ Playbook (verified live 2026-10-02 from Nicole's training):
 Target documents, one per policy (most recent first): Intent to Cancel
 Notice, cancellation notices, underwriting memos, billing memos.
 
-A missing or non-unique control raises IntakeHold. This module does not log
-in, does not upload, note, task, or label in EZLynx, and does not register
-a timer. The worker takes an already-signed-in Finys tab; ``open_finys_from_portal``
-takes the farmersofsalem.com tab and expects exactly one new fos.finys.com tab.
+A missing or non-unique control raises IntakeHold. This module does not
+upload, note, task, or label in EZLynx, and does not register a timer.
+``ensure_finys_page`` signs in when Finys is not already open.
+``open_finys_from_portal`` reuses a signed-in fos.finys.com tab, or
+opens the agent portal URL in a new tab. The navbar toggler plus the
+portal link is the fallback.
 """
 from __future__ import annotations
 
@@ -49,11 +55,26 @@ CARRIER = "farmersofsalem"
 PROCESS = "farmersofsalem-pending-cancellation"
 PORTAL_HOST = "farmersofsalem.com"
 FINYS_HOST = "fos.finys.com"
+# Live 2026-10-08: the FOS PORTAL anchor is in the collapsed navbar when
+# the Test window is under 992 px. Navigating here lands on fos.finys.com.
+AGENT_PORTAL_URL = "https://www.farmersofsalem.com/agent/agent_portal.aspx"
+PORTAL_LINK_HREF = 'a[href="agent_portal.aspx"]'
+NAVBAR_TOGGLER = "nav div.navbar-toggler"
 FOS_PORTAL_LINK = "FOS PORTAL"
+DIARY_GRID_ID = "MyOpenTasks_DiaryGrid"
+KENDO_PAGE_SIZE = 100
+# 771 open tasks at 100 per page is eight pages. A 90s budget stopped on page 7.
+GRID_PAGE_BUDGET_S = 240
+# Under the 25-minute outer limit, so a cutoff still writes a PARTIAL summary.
+FOS_DEADLINE_S = 18 * 60
+# Playwright's 30s default, applied to hidden cells, was about 3 minutes a policy.
+_ACTION_TIMEOUT_MS = 8000
+PORTAL_GOTO_MS = 15000
 LEDGER_NAME = "farmersofsalem-noc-ledger.json"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
-DOWNLOAD_TIMEOUT_MS = 8000
-_NAV_TIMEOUT_MS = 8000
+DOWNLOAD_TIMEOUT_MS = 2500
+_NAV_TIMEOUT_MS = 4000
+ACTIONABLE_DAYS = 45
 _EASTERN = ZoneInfo("America/New_York")
 _PDF_MAGIC = b"%PDF-"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -63,14 +84,16 @@ DEFAULT_OUTPUT_ROOT = Path(
 # Shared Drive "Robie Carrier Pull QA (Nicole)". Upload is not wired: the CLI
 # --upload-drive flag fails closed and does not call Google.
 DRIVE_QA_PARENT_ID = "1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2"
-DRIVE_QA_FOLDER_NAME = "Robie Carrier Pull QA (Nicole)/FarmersOfSalem"
+DRIVE_QA_FOLDER_NAME = "Robie Carrier Pull QA (Nicole)/Farmers of Salem"
 DRIVE_UPLOAD_UNAVAILABLE = (
     "Drive upload of the Farmers of Salem QA pack is not available; "
     "refusing to report the pack as uploaded"
 )
 
 # Live policy numbers look like HONJ038633: four letters, six digits.
-_POLICY_NUMBER = re.compile(r"^[A-Za-z]{4}\d{6}$")
+# Live Finys 2026-10-08: HONJ017732 / CDNJ001979 (4 letters + 6 digits) and
+# SCNJM07385 (5 letters + 5 digits); always 10 characters.
+_POLICY_NUMBER = re.compile(r"^(?=.{10}$)[A-Za-z]{4,5}\d{5,6}$")
 _DATE_MDY = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
 # (notice key, filename label, keywords in priority order)
@@ -89,17 +112,34 @@ _NOTICE_PRIORITY = {key: index for index, (key, _, _) in enumerate(_NOTICE_TYPES
 
 # Header aliases for the "My Open Tasks - pending items" table.
 _PENDING_FIELDS = (
-    ("policy_number", frozenset({"policy number", "policy #", "policy", "policynumber"})),
+    # Live Finys 2026-10-08 (MyOpenTasks_DiaryGrid): Details | | Loss # |
+    # Policy/Quote | Insured Name | Notes | Department | Type | Due Days |
+    # Due On | Created By.
+    ("policy_number", frozenset({"policy number", "policy #", "policy", "policynumber", "policy/quote", "policy / quote"})),
     ("insured_name", frozenset({"insured", "insured name", "named insured", "name"})),
     ("product", frozenset({"product", "line", "lob", "policy type"})),
-    ("due_date", frozenset({"due date", "due", "cancel date", "cancellation date", "effective date"})),
+    ("due_date", frozenset({"due date", "due", "due on", "cancel date", "cancellation date", "effective date"})),
+    ("item_type", frozenset({"type", "task type", "item type"})),
+    ("notes", frozenset({"notes", "note"})),
+    ("department", frozenset({"department", "dept"})),
 )
+# Open-task types that are cancellation notices. Referral, Reinstatement and
+# other diary items on the same grid are not pulled.
+_CANCELLATION_TASK_TYPES = ("cancellation", "cancel", "non-pay", "nonpay", "non pay")
 # Header aliases for the Document Summary table.
 _DOC_FIELDS = (
     ("description", frozenset({"description", "document", "document description", "type", "form", "title"})),
-    ("doc_date", frozenset({"date", "document date", "created", "issued", "effective date"})),
+    ("doc_date", frozenset({"date", "document date", "created", "issued", "effective date", "process date"})),
     ("action", frozenset({"action", "view", ""})),
+    # Live 2026-10-08 Finys Document Summary: "" | Email | Description |
+    # Department | Department Group | Type | Process Date | Remove from list.
+    # The notice kind is in Type (e.g. "Intent to Cancel Notice") while
+    # Description holds the form code (e.g. "renewal reminder notice").
+    ("doc_type", frozenset({"type", "document type"})),
 )
+# The row's download icon: <a id="dlink_<n>" onclick="...OnDownloadClick"><img></a>.
+# The Email and "Remove from list" checkboxes in the same row are never touched.
+FINYS_DOC_DOWNLOAD_LINK = "a[id^='dlink_']"
 
 
 class PullHeld(RuntimeError):
@@ -162,6 +202,50 @@ def require_finys_url(url: str) -> str:
 
 def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _node_text(node: Any) -> str:
+    """Read a cell without waiting out Playwright's default 30s visibility timeout.
+
+    ``text_content`` does not wait to become visible. Hidden Kendo tables
+    were holding each policy for minutes on Document Summary.
+    """
+    content = getattr(node, "text_content", None)
+    if callable(content):
+        try:
+            return _norm(content())
+        except Exception:
+            return ""
+    getter = getattr(node, "inner_text", None)
+    if not callable(getter):
+        return ""
+    try:
+        return _norm(getter(timeout=500))
+    except TypeError:
+        try:
+            return _norm(getter())
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _cap_page_timeouts(page: Any) -> None:
+    for name in ("set_default_timeout", "set_default_navigation_timeout"):
+        setter = getattr(page, name, None)
+        if not callable(setter):
+            continue
+        try:
+            setter(_ACTION_TIMEOUT_MS)
+        except Exception:
+            pass
+
+
+def _goto(page: Any, url: str) -> None:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=_ACTION_TIMEOUT_MS)
+    except TypeError:
+        page.goto(url)
 
 
 def _received_at(day: date) -> str:
@@ -249,6 +333,23 @@ def _header_indexes(headers: tuple[str, ...], fields: tuple[tuple[str, frozenset
     return indexes
 
 
+def _header_label(cell: Any) -> str:
+    """Kendo puts the title in ``.k-link`` / ``.k-column-title``, not the th text."""
+    for selector in (".k-link", ".k-column-title"):
+        try:
+            nodes = cell.locator(selector).all()
+        except Exception:
+            nodes = []
+        texts = []
+        for node in nodes or []:
+            text = _node_text(node)
+            if text:
+                texts.append(text)
+        if len(texts) == 1:
+            return texts[0]
+    return _node_text(cell)
+
+
 def _table_headers(table: Any) -> tuple[str, ...]:
     try:
         head_cells = table.locator("thead th").all()
@@ -260,7 +361,7 @@ def _table_headers(table: Any) -> tuple[str, ...]:
             head_cells = first_row.locator("th").all() or first_row.locator("td").all()
         except Exception:
             head_cells = []
-    return tuple(_norm(cell.inner_text()) for cell in head_cells)
+    return tuple(_header_label(cell) for cell in head_cells)
 
 
 def _table_body_rows(table: Any) -> list[Any]:
@@ -276,6 +377,63 @@ def _table_body_rows(table: Any) -> list[Any]:
     return list(rows)
 
 
+def _kendo_body_table(header_table: Any) -> Any | None:
+    """Kendo grids split headers and rows into two tables (live Finys 2026-10-08):
+    .k-grid-header table holds the <th> cells, .k-grid-content table the rows.
+    Return the body table of the same grid, or None when not split."""
+    try:
+        body = header_table.locator(
+            "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' k-grid-header ')]"
+            "/following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' k-grid-content ')][1]//table"
+        )
+        count = int(body.count())
+    except Exception:
+        return None
+    if count != 1:
+        return None
+    return body.first if hasattr(body, "first") else body
+
+
+class _SplitGrid:
+    """Header cells from one table, data rows from its Kendo body table."""
+
+    def __init__(self, header_table: Any, body_table: Any):
+        self.header_table = header_table
+        self.body_table = body_table
+
+    def locator(self, selector: str) -> Any:
+        if selector == "thead th":
+            return self.header_table.locator(selector)
+        return self.body_table.locator(selector)
+
+
+def _find_document_table(page: Any) -> tuple[Any, dict[str, int]]:
+    """The Document Summary table, chosen by its headers.
+
+    A policy page can have two tables. The documents table is the one whose
+    headers include a document type (or description) and a date. Row count
+    breaks a tie. Two tables are not by themselves ambiguous.
+    """
+    try:
+        tables = page.locator("table").all()
+    except Exception:
+        tables = []
+    scored: list[tuple[int, Any, dict[str, int]]] = []
+    for table in tables:
+        headers = _table_headers(table)
+        indexes = _header_indexes(headers, _DOC_FIELDS)
+        has_kind = "description" in indexes or "doc_type" in indexes
+        if not (has_kind and "doc_date" in indexes):
+            continue
+        body = _kendo_body_table(table)
+        grid = _SplitGrid(table, body) if body is not None else table
+        scored.append((len(_table_body_rows(grid)), grid, indexes))
+    if not scored:
+        raise IntakeHold("Document Summary table is missing or ambiguous")
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1], scored[0][2]
+
+
 def _find_table_by_headers(page: Any, fields: tuple[tuple[str, frozenset[str]], ...], *, required: tuple[str, ...]) -> tuple[Any, dict[str, int]]:
     try:
         tables = page.locator("table").all()
@@ -286,10 +444,16 @@ def _find_table_by_headers(page: Any, fields: tuple[tuple[str, frozenset[str]], 
         headers = _table_headers(table)
         indexes = _header_indexes(headers, fields)
         if all(key in indexes for key in required):
-            candidates.append((table, indexes))
+            body = _kendo_body_table(table)
+            candidates.append((_SplitGrid(table, body) if body is not None else table, indexes))
     if len(candidates) != 1:
         raise IntakeHold("Finys table is missing or ambiguous")
     return candidates[0]
+
+
+def is_cancellation_task_type(value: Any) -> bool:
+    text = _norm(value).casefold()
+    return any(term in text for term in _CANCELLATION_TASK_TYPES)
 
 
 def _cell_text(row: Any, index: int) -> str:
@@ -299,10 +463,7 @@ def _cell_text(row: Any, index: int) -> str:
         cells = []
     if index >= len(cells):
         return ""
-    try:
-        return _norm(cells[index].inner_text())
-    except Exception:
-        return ""
+    return _node_text(cells[index])
 
 
 @dataclass(frozen=True)
@@ -321,20 +482,327 @@ class FoSDocument:
     view: Any | None
 
 
+def _commercial_text(*parts: str) -> bool:
+    return "commercial" in " ".join(_norm(part).casefold() for part in parts)
+
+
 def extract_pending_items(page: Any) -> tuple[PendingItem, ...]:
-    """Parse "My Open Tasks - pending items" on the Finys landing page."""
+    """Parse "My Open Tasks - pending items" on the Finys landing page.
+
+    A cancellation row with no usable policy number is recorded on
+    ``page.fos_row_holds`` and does not fail the rest of the grid. A
+    commercial row with no policy says so.
+    """
     require_finys_url(str(getattr(page, "url", "") or ""))
     table, indexes = _find_table_by_headers(
         page, _PENDING_FIELDS, required=("policy_number", "due_date")
     )
     items: list[PendingItem] = []
+    holds: list[dict[str, str]] = []
+    scanned = 0
+    # A Type or Notes column is the live grid. Tables without either (the
+    # fixture) are already the cancellation list.
+    filter_rows = "item_type" in indexes or "notes" in indexes
     for row in _table_body_rows(table):
-        policy = parse_policy_number(_cell_text(row, indexes["policy_number"]))
-        due_on = parse_carrier_date(_cell_text(row, indexes["due_date"]))
+        scanned += 1
+        item_type = _cell_text(row, indexes["item_type"]) if "item_type" in indexes else ""
+        notes = _cell_text(row, indexes["notes"]) if "notes" in indexes else ""
+        policy_text = _cell_text(row, indexes["policy_number"])
         insured = _cell_text(row, indexes["insured_name"]) if "insured_name" in indexes else ""
         product = _cell_text(row, indexes["product"]) if "product" in indexes else ""
+        department = _cell_text(row, indexes["department"]) if "department" in indexes else ""
+        commercial = _commercial_text(product, department, item_type)
+        if filter_rows:
+            cancel = is_cancellation_task_type(item_type) or is_cancellation_task_type(notes)
+        else:
+            cancel = True
+        if not cancel and commercial:
+            try:
+                parse_policy_number(policy_text)
+            except IntakeHold:
+                who = insured or "an unnamed insured"
+                holds.append({
+                    "policy_number": _norm(policy_text),
+                    "insured_name": insured,
+                    "product": product or department or item_type,
+                    "due_date": _cell_text(row, indexes["due_date"]),
+                    "reason": (
+                        f"Farmers of Salem commercial item for {who} has no policy number, "
+                        "so no notice was pulled."
+                    ),
+                })
+            continue
+        if not cancel:
+            continue  # Referral / Reinstatement / other diary items
+        try:
+            policy = parse_policy_number(policy_text)
+            due_on = parse_carrier_date(_cell_text(row, indexes["due_date"]))
+        except IntakeHold:
+            who = insured or "an unnamed insured"
+            if commercial:
+                reason = (
+                    f"Farmers of Salem commercial item for {who} has no policy number, "
+                    "so no notice was pulled."
+                )
+            elif not _norm(policy_text):
+                reason = (
+                    f"Farmers of Salem pending item for {who} has no policy number, "
+                    "so no notice was pulled."
+                )
+            else:
+                reason = (
+                    f"Farmers of Salem pending item for {who} has no usable policy number "
+                    f"({_norm(policy_text)!r}), so no notice was pulled."
+                )
+            holds.append({
+                "policy_number": _norm(policy_text),
+                "insured_name": insured,
+                "product": product or department,
+                "due_date": _cell_text(row, indexes["due_date"]),
+                "reason": reason,
+            })
+            continue
         items.append(PendingItem(policy_number=policy, insured_name=insured, product=product, due_on=due_on))
+    try:
+        page.fos_row_holds = holds
+        page.fos_page_scanned = scanned
+        page.fos_page_kept = len(items)
+    except Exception:
+        pass
     return tuple(items)
+
+
+def _fos_log(message: str) -> None:
+    stamp = datetime.now(_EASTERN).strftime("%H:%M:%S")
+    sys.stderr.write(f"{stamp} FoS {message}\n")
+    sys.stderr.flush()
+
+
+# pageSize(100) on the live Kendo widget, then the pager sizes <select>.
+_KENDO_PAGE_SIZE_JS = """
+(wanted) => {
+  const root = document.querySelector('#MyOpenTasks_DiaryGrid');
+  const jq = window.jQuery || window.$;
+  if (root && jq) {
+    const grid = jq(root).data('kendoGrid');
+    if (grid && grid.dataSource && typeof grid.dataSource.pageSize === 'function') {
+      if (grid.dataSource.pageSize() !== wanted) grid.dataSource.pageSize(wanted);
+      return 'pageSize';
+    }
+  }
+  const select = (root || document).querySelector('.k-pager-sizes select');
+  if (!select || !select.options || !select.options.length) return 'unchanged';
+  let best = select.options[0];
+  for (const option of select.options) {
+    const value = parseInt(option.value, 10);
+    const bestValue = parseInt(best.value, 10);
+    if (!Number.isNaN(value) && (Number.isNaN(bestValue) || value > bestValue)) best = option;
+  }
+  if (String(select.value) !== String(best.value)) {
+    select.value = best.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return 'dropdown';
+}
+"""
+
+# Click the enabled Kendo next control. 'disabled' / 'absent' ends the walk.
+_KENDO_NEXT_JS = """
+() => {
+  const root = document.querySelector('#MyOpenTasks_DiaryGrid') || document;
+  const next = root.querySelector(
+    '.k-pager-next, a[title="Go to the next page"], button[title="Go to the next page"]'
+  );
+  if (!next) return 'absent';
+  const disabled = next.classList.contains('k-disabled')
+    || next.classList.contains('k-state-disabled')
+    || next.getAttribute('aria-disabled') === 'true'
+    || next.hasAttribute('disabled');
+  if (disabled) return 'disabled';
+  next.click();
+  return 'clicked';
+}
+"""
+
+
+def _wait_for_grid_idle(page: Any) -> None:
+    waiter = getattr(page, "wait_for_function", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(
+            """() => {
+              const grid = document.querySelector('#MyOpenTasks_DiaryGrid');
+              if (!grid) return true;
+              return !grid.querySelector('.k-loading-mask');
+            }""",
+            timeout=8000,
+        )
+    except Exception:
+        pass
+
+
+def _merge_page_holds(page: Any, holds: list[dict[str, str]], seen: set[tuple[str, str, str]]) -> None:
+    current = getattr(page, "fos_row_holds", None)
+    if not isinstance(current, list):
+        return
+    for hold in current:
+        if not isinstance(hold, dict):
+            continue
+        key = (str(hold.get("policy_number") or ""), str(hold.get("due_date") or ""), str(hold.get("reason") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        holds.append(hold)
+
+
+def _page_evaluate(page: Any) -> Callable[..., Any] | None:
+    """A real page script runner. A mock attribute is not one."""
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return None
+    if type(evaluate).__module__.startswith("unittest.mock"):
+        return None
+    return evaluate
+
+
+def read_all_pending_items(page: Any) -> tuple[PendingItem, ...]:
+    """Read the open-tasks grid, including pages after the first ten rows.
+
+    A page without ``evaluate`` (the fixture) is the visible page only.
+    Live Finys shows ``1 - 10 of 771``. The page size is set to 100, then
+    Next is clicked until it is disabled or the time budget is spent.
+    """
+    evaluate = _page_evaluate(page)
+    if evaluate is None:
+        items = extract_pending_items(page)
+        _fos_log(
+            f"kept {getattr(page, 'fos_page_kept', len(items))} cancellation rows "
+            f"of {getattr(page, 'fos_page_scanned', len(items))} grid rows"
+        )
+        return items
+    deadline = monotonic() + GRID_PAGE_BUDGET_S
+    _fos_log(f"open tasks grid page size {KENDO_PAGE_SIZE}")
+    try:
+        evaluate(_KENDO_PAGE_SIZE_JS, KENDO_PAGE_SIZE)
+    except Exception as exc:
+        _fos_log(f"page size was not changed ({type(exc).__name__})")
+    _wait_for_grid_idle(page)
+    items: list[PendingItem] = []
+    holds: list[dict[str, str]] = []
+    seen_items: set[tuple[str, str]] = set()
+    seen_holds: set[tuple[str, str, str]] = set()
+    scanned = 0
+    stopped = False
+    page_index = 0
+    while True:
+        if monotonic() >= deadline:
+            stopped = True
+            break
+        page_index += 1
+        batch = extract_pending_items(page)
+        scanned += int(getattr(page, "fos_page_scanned", 0) or 0)
+        for item in batch:
+            key = (item.policy_number, item.due_on.isoformat())
+            if key in seen_items:
+                continue
+            seen_items.add(key)
+            items.append(item)
+        _merge_page_holds(page, holds, seen_holds)
+        try:
+            state = evaluate(_KENDO_NEXT_JS)
+        except Exception as exc:
+            _fos_log(f"next page was not clicked ({type(exc).__name__})")
+            break
+        if state != "clicked":
+            break
+        _fos_log(f"open tasks grid page {page_index + 1}")
+        _wait_for_grid_idle(page)
+        if monotonic() >= deadline:
+            stopped = True
+            break
+    if stopped:
+        holds.append({
+            "policy_number": "",
+            "insured_name": "",
+            "product": "",
+            "due_date": "",
+            "reason": (
+                "Farmers of Salem open-tasks paging hit its time budget; "
+                "later pages were not read."
+            ),
+        })
+        _fos_log("open tasks paging stopped at the time budget")
+    _fos_log(f"kept {len(items)} cancellation rows of {scanned} grid rows")
+    try:
+        page.fos_row_holds = holds
+        page.fos_page_scanned = scanned
+        page.fos_page_kept = len(items)
+    except Exception:
+        pass
+    return tuple(items)
+
+
+# Live 2026-10-08 (f53568f6): the Finys landing has no accessible-named search
+# textbox. The Policy Quick Search widget has a Quote row (Button1) and a
+# Policy Number row (policyText, then Button2), read on hermes-test-01.
+FINYS_POLICY_SEARCH_INPUT = "#Landing_PolicyQuickSearchWidget_policyText"
+FINYS_POLICY_SEARCH_BUTTON = "#Landing_PolicyQuickSearchWidget_Button2"
+# Policy Summary markers read live: the header label carries the policy number
+# and the left-nav Document Summary anchor has this id.
+FINYS_SUMMARY_POLICY_LABEL = "#SummaryHeader_PolicyNumberLabelLabelValue"
+FINYS_DOCUMENT_SUMMARY_LINK = "#DocumentLibrarySummary"
+FINYS_MESSAGE_OK = ".k-window"
+FINYS_LANDING_URL = f"https://{FINYS_HOST}/"
+
+
+def _has_pending_grid(page: Any) -> bool:
+    try:
+        _find_table_by_headers(page, _PENDING_FIELDS, required=("policy_number", "due_date"))
+        return True
+    except IntakeHold:
+        return False
+
+
+def _dismiss_finys_message(page: Any) -> None:
+    """Close one open Finys "Message" window (Kendo modal) with its Ok button.
+
+    Live 2026-10-08: a search with an empty box leaves "Please enter a Policy
+    Number or Insured Name" open, and its overlay blocks every later click.
+    """
+    try:
+        ok = page.locator(FINYS_MESSAGE_OK).get_by_role("button", name="Ok", exact=True)
+        if _count(ok) == 1:
+            ok.click()
+    except Exception:  # noqa: BLE001 - nothing to dismiss
+        pass
+
+
+def _type_into(box: Any, value: str) -> None:
+    """Type like a user; Finys ignores a programmatic fill (live 2026-10-08)."""
+    box.click()
+    box.fill("")
+    typer = getattr(box, "press_sequentially", None)
+    if callable(typer):
+        typer(value, delay=10)
+    else:
+        box.fill(value)
+
+
+def _count(locator: Any) -> int:
+    try:
+        return int(locator.count())
+    except Exception:
+        return -1
+
+
+def _quick_search_widget(page: Any) -> tuple[Any, Any] | None:
+    """The Policy Number box and its own Search button, exactly one of each."""
+    box = page.locator(FINYS_POLICY_SEARCH_INPUT)
+    button = page.locator(FINYS_POLICY_SEARCH_BUTTON)
+    if _count(box) == 1 and _count(button) == 1:
+        return box, button
+    return None
 
 
 def _find_search_box(page: Any) -> Any:
@@ -369,17 +837,25 @@ def search_policy(page: Any, policy_number: str) -> None:
     Raises IntakeHold unless the resulting Policy Summary names the policy.
     """
     policy = parse_policy_number(policy_number)
-    search = _find_search_box(page)
+    _dismiss_finys_message(page)
+    widget = _quick_search_widget(page)
+    search = widget[0] if widget else _find_search_box(page)
     try:
-        search.fill(policy)
+        if widget:
+            _type_into(search, policy)
+        else:
+            search.fill(policy)
     except Exception as exc:
         raise IntakeHold("Finys policy search box is missing or ambiguous") from exc
     try:
-        button = page.get_by_role("button", name="Search", exact=False)
-        if int(button.count()) == 1:
-            button.click()
+        if widget:
+            widget[1].click()
         else:
-            search.press("Enter")
+            button = page.get_by_role("button", name="Search", exact=False)
+            if int(button.count()) == 1:
+                button.click()
+            else:
+                search.press("Enter")
     except IntakeHold:
         raise
     except Exception as exc:
@@ -387,29 +863,58 @@ def search_policy(page: Any, policy_number: str) -> None:
 
     def summary_shows_policy() -> bool:
         try:
+            label = page.locator(FINYS_SUMMARY_POLICY_LABEL)
+            label_text = _node_text(label.first if hasattr(label, "first") else label) if _count(label) >= 1 else ""
+            if policy in re.sub(r"\s+", "", label_text).upper():
+                return True
+        except Exception:
+            label_text = ""
+        heading_bits = []
+        try:
             headings = page.get_by_role("heading", name="Policy Summary", exact=False).all()
         except Exception:
-            return False
+            headings = []
+        if not isinstance(headings, list):
+            headings = []
         for heading in headings:
-            try:
-                text = _norm(heading.inner_text())
-            except Exception:
-                continue
-            if "policy summary" in text.casefold() and re.search(rf"\b{re.escape(policy)}\b", text):
+            text = _node_text(heading)
+            if text:
+                heading_bits.append(text)
+            if policy in re.sub(r"\s+", "", text).upper():
                 return True
+        body = ""
+        try:
+            body = _node_text(page.locator("body"))[:400]
+        except Exception:
+            body = ""
+        if policy in re.sub(r"\s+", "", body).upper() and "policy" in body.casefold():
+            return True
+        try:
+            page.summary_probe = f"label={label_text!r} headings={heading_bits!r} body={body[:180]!r}"
+        except Exception:
+            pass
         return False
 
     if not _wait_for(summary_shows_policy):
-        raise IntakeHold(f"Policy Summary for {policy} is missing or ambiguous")
+        probe = str(getattr(page, "summary_probe", "") or "")
+        _fos_log(f"policy {policy} summary not recognized; {probe}")
+        detail = f" ({probe})" if probe else ""
+        raise IntakeHold(f"Policy Summary for {policy} is missing or ambiguous{detail}")
 
 
 def open_document_summary(page: Any) -> None:
     """Click the left-nav "Document Summary" link from Policy Summary."""
-    _control(page, "link", "Document Summary").click()
+    try:
+        control = _control(page, "link", "Document Summary")
+    except IntakeHold:
+        control = page.locator(FINYS_DOCUMENT_SUMMARY_LINK)
+        if _count(control) != 1:
+            raise
+    control.click()
 
     def docs_visible() -> bool:
         try:
-            _find_table_by_headers(page, _DOC_FIELDS, required=("description",))
+            _find_document_table(page)
             return True
         except IntakeHold:
             return False
@@ -420,7 +925,7 @@ def open_document_summary(page: Any) -> None:
 
 def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
     """Parse the Document Summary table into candidate documents."""
-    table, indexes = _find_table_by_headers(page, _DOC_FIELDS, required=("description",))
+    table, indexes = _find_document_table(page)
     documents: list[FoSDocument] = []
     for row in _table_body_rows(table):
         description = _cell_text(row, indexes["description"])
@@ -432,6 +937,12 @@ def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
         except IntakeHold:
             doc_date = None
         notice_key = classify_notice(description)
+        if notice_key is None and "doc_type" in indexes and indexes["doc_type"] != indexes["description"]:
+            doc_type = _cell_text(row, indexes["doc_type"])
+            if doc_type:
+                notice_key = classify_notice(doc_type)
+                if notice_key is not None:
+                    description = f"{description} ({doc_type})"
         view: Any | None = None
         if notice_key is not None:
             try:
@@ -440,6 +951,11 @@ def extract_documents(page: Any) -> tuple[FoSDocument, ...]:
                 links = []
             exact = [link for link in links if _norm(link.inner_text()).casefold() == "view"]
             candidates = exact or links
+            if not candidates:
+                try:
+                    candidates = row.locator(FINYS_DOC_DOWNLOAD_LINK).all()
+                except Exception:
+                    candidates = []
             if len(candidates) == 1:
                 view = candidates[0]
             elif candidates:
@@ -461,22 +977,38 @@ def select_target_document(documents: tuple[FoSDocument, ...]) -> FoSDocument | 
     return candidates[0]
 
 
+def _is_pdf_url(url: str) -> bool:
+    """A PDF address, query string ignored.
+
+    Live 2026-10-08: the Finys download icon navigates the same tab to
+    /FileManager/FileManager/GetFile/<name>.pdf?ft=<token>.
+    """
+    lowered = str(url or "").lower()
+    if lowered.startswith("blob:"):
+        return True
+    path = urllib.parse.urlsplit(lowered).path
+    return path.endswith(".pdf")
+
+
 def _read_viewer_tab_pdf(page: Any) -> bytes | None:
-    """Read PDF bytes when View opened the Chrome viewer in a new tab."""
+    """Read PDF bytes when View opened the Chrome viewer (new tab or this tab)."""
     try:
         context = page.context
         pages = list(context.pages)
     except Exception:
         return None
     me = page
+    if me not in pages:
+        pages.append(me)
+    # Other tabs first; this tab last (it is navigated back by the caller).
+    pages.sort(key=lambda tab: tab is me)
     for tab in pages:
-        if tab is me:
-            continue
         url = str(getattr(tab, "url", "") or "")
         if not url:
             continue
-        lowered = url.lower()
-        if lowered.endswith(".pdf") or lowered.startswith("blob:"):
+        if tab is me and not url.lower().startswith(f"https://{FINYS_HOST}/"):
+            continue
+        if _is_pdf_url(url):
             try:
                 response = context.request.get(url, timeout=DOWNLOAD_TIMEOUT_MS)
             except Exception:
@@ -486,10 +1018,11 @@ def _read_viewer_tab_pdf(page: Any) -> bytes | None:
             except Exception:
                 continue
             if _is_pdf(body):
-                try:
-                    tab.close()
-                except Exception:
-                    pass
+                if tab is not me:
+                    try:
+                        tab.close()
+                    except Exception:
+                        pass
                 return body
     return None
 
@@ -499,13 +1032,15 @@ def download_view_pdf(page: Any, view: Any) -> bytes:
     try:
         with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
             view.click()
-    except TimeoutError:
+    except Exception as exc:
+        # Playwright's TimeoutError is not the builtin one; any "no download"
+        # outcome falls through to the viewer (new tab or same-tab PDF).
+        if type(exc).__name__ != "TimeoutError" and not isinstance(exc, TimeoutError):
+            raise IntakeHold("Document View did not produce a PDF") from exc
         pdf = _read_viewer_tab_pdf(page)
         if pdf is None:
             raise IntakeHold("Document View did not produce a PDF") from None
         return pdf
-    except Exception as exc:
-        raise IntakeHold("Document View did not produce a PDF") from exc
     download = download_info.value
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "view.pdf"
@@ -517,18 +1052,115 @@ def download_view_pdf(page: Any, view: Any) -> bytes:
     return content
 
 
-def open_finys_from_portal(portal_page: Any) -> Any:
-    """Click FOS PORTAL on the farmersofsalem.com tab; return the new Finys tab.
+def _context_page_list(portal_page: Any) -> list[Any]:
+    context = getattr(portal_page, "context", None)
+    pages = getattr(context, "pages", None)
+    if not isinstance(pages, list):
+        return []
+    return list(pages)
 
-    Raises IntakeHold unless exactly one new tab opens on fos.finys.com.
-    """
-    host = (urllib.parse.urlsplit(str(getattr(portal_page, "url", "") or "")).hostname or "").lower()
-    if PORTAL_HOST not in host:
-        raise IntakeHold("Farmers of Salem portal tab is missing or ambiguous")
-    link = _control(portal_page, "link", FOS_PORTAL_LINK)
+
+def _signed_in_finys_tabs(portal_page: Any) -> list[Any]:
+    found = []
+    for page in _context_page_list(portal_page):
+        try:
+            require_finys_url(str(getattr(page, "url", "") or ""))
+        except IntakeHold:
+            continue
+        found.append(page)
+    return found
+
+
+def _close_quietly(page: Any) -> None:
+    closer = getattr(page, "close", None)
+    if not callable(closer):
+        return
     try:
-        with portal_page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup_info:
-            link.click()
+        closer()
+    except Exception:
+        pass
+
+
+def _goto_portal(page: Any) -> None:
+    try:
+        page.goto(AGENT_PORTAL_URL, wait_until="domcontentloaded", timeout=PORTAL_GOTO_MS)
+    except TypeError:
+        page.goto(AGENT_PORTAL_URL)
+
+
+def _wait_until_finys(page: Any) -> None:
+    url = str(getattr(page, "url", "") or "")
+    if FINYS_HOST in url:
+        return
+    waiter = getattr(page, "wait_for_url", None)
+    if not callable(waiter):
+        return
+    try:
+        waiter(lambda current: FINYS_HOST in str(current or ""), timeout=PORTAL_GOTO_MS)
+    except TypeError:
+        waiter(f"**{FINYS_HOST}**", timeout=PORTAL_GOTO_MS)
+
+
+def _open_portal_in_new_tab(portal_page: Any) -> Any | None:
+    """Navigate a new tab to the agent portal. None when that path is unavailable."""
+    context = getattr(portal_page, "context", None)
+    new_page = getattr(context, "new_page", None) if context is not None else None
+    if not callable(new_page):
+        return None
+    fresh = None
+    try:
+        fresh = new_page()
+        _fos_log(f"open agent portal {AGENT_PORTAL_URL}")
+        _goto_portal(fresh)
+        _wait_until_finys(fresh)
+        require_finys_url(str(getattr(fresh, "url", "") or ""))
+    except Exception as exc:
+        _fos_log(f"agent portal navigation did not reach Finys ({type(exc).__name__})")
+        if fresh is not None:
+            _close_quietly(fresh)
+        return None
+    return fresh
+
+
+def _click_control(locator: Any) -> None:
+    try:
+        locator.click(timeout=5000)
+    except TypeError:
+        locator.click()
+
+
+def _portal_link(page: Any) -> Any:
+    """The one agent_portal.aspx anchor, including one Bootstrap has hidden."""
+    try:
+        links = page.locator(PORTAL_LINK_HREF)
+        count = int(links.count())
+    except Exception:
+        count = 0
+    if count > 1:
+        raise IntakeHold("FOS PORTAL link is missing or ambiguous")
+    if count == 1:
+        return links.first if hasattr(links, "first") else links
+    return _control(page, "link", FOS_PORTAL_LINK)
+
+
+def _open_portal_by_click(portal_page: Any) -> Any:
+    """Expand the collapsed navbar, then click the portal link."""
+    try:
+        toggler = portal_page.locator(NAVBAR_TOGGLER)
+        count = int(toggler.count())
+    except Exception:
+        count = 0
+    if count >= 1:
+        target = toggler.first if hasattr(toggler, "first") else toggler
+        try:
+            _fos_log("expand navbar toggler")
+            _click_control(target)
+        except Exception:
+            pass
+    link = _portal_link(portal_page)
+    try:
+        with portal_page.expect_popup(timeout=PORTAL_GOTO_MS) as popup_info:
+            _click_control(link)
         finys_page = popup_info.value
     except Exception as exc:
         raise IntakeHold("FOS PORTAL did not open the Finys tab") from exc
@@ -536,6 +1168,26 @@ def open_finys_from_portal(portal_page: Any) -> Any:
         raise IntakeHold("FOS PORTAL did not open the Finys tab")
     require_finys_url(str(getattr(finys_page, "url", "") or ""))
     return finys_page
+
+
+def open_finys_from_portal(portal_page: Any) -> Any:
+    """Return a signed-in Finys tab from the farmersofsalem.com session.
+
+    An existing fos.finys.com tab is reused. Otherwise a new tab opens
+    ``agent/agent_portal.aspx``. The navbar toggler plus the portal link
+    is the fallback when that navigation cannot be started.
+    """
+    host = (urllib.parse.urlsplit(str(getattr(portal_page, "url", "") or "")).hostname or "").lower()
+    if PORTAL_HOST not in host and FINYS_HOST not in host:
+        raise IntakeHold("Farmers of Salem portal tab is missing or ambiguous")
+    existing = _signed_in_finys_tabs(portal_page)
+    if existing:
+        _fos_log("reuse signed-in Finys tab")
+        return existing[0]
+    opened = _open_portal_in_new_tab(portal_page)
+    if opened is not None:
+        return opened
+    return _open_portal_by_click(portal_page)
 
 # --- Browser page object ----------------------------------------------------
 
@@ -546,10 +1198,23 @@ class FinysFoSBrowser:
     def __init__(self, page: Any):
         self.page = page
         self._tasks_url: str | None = None
+        _cap_page_timeouts(page)
 
     def load_pending_items(self) -> tuple[PendingItem, ...]:
         require_finys_url(str(getattr(self.page, "url", "") or ""))
-        items = extract_pending_items(self.page)
+        try:
+            items = read_all_pending_items(self.page)
+        except IntakeHold:
+            # Live 2026-10-08: the tab was left on a Policy Summary (same
+            # https://fos.finys.com/ URL), so the task grid was absent. Close
+            # any Finys message, reload the landing page once, and re-read.
+            _dismiss_finys_message(self.page)
+            _goto(self.page, FINYS_LANDING_URL)
+            if not _wait_for(lambda: _has_pending_grid(self.page)):
+                raise
+            items = read_all_pending_items(self.page)
+        holds = getattr(self.page, "fos_row_holds", None)
+        self.row_holds = list(holds) if isinstance(holds, list) else []
         try:
             self._tasks_url = str(getattr(self.page, "url", "") or "") or None
         except Exception:
@@ -558,7 +1223,9 @@ class FinysFoSBrowser:
 
     def screenshot_pending_items(self) -> bytes:
         try:
-            data = bytes(self.page.screenshot(full_page=True, type="png"))
+            from .carrier_page_capture import capture_png
+
+            data = capture_png(self.page, full_page=True)
         except Exception as exc:
             raise IntakeHold("Pending items screenshot is missing or not a PNG") from exc
         if data[:8] != _PNG_MAGIC:
@@ -583,14 +1250,17 @@ class FinysFoSBrowser:
     def return_to_pending_items(self) -> None:
         if self._tasks_url:
             try:
-                self.page.goto(self._tasks_url)
+                _goto(self.page, self._tasks_url)
             except Exception as exc:
                 raise IntakeHold("Could not return to the pending items list") from exc
         else:
             _control(self.page, "link", "My Open Tasks").click()
         require_finys_url(str(getattr(self.page, "url", "") or ""))
-        # The list must still be readable after navigation.
-        extract_pending_items(self.page)
+        # The task grid renders a few seconds after the landing loads
+        # (live 2026-10-08); wait for it. Re-reading every row here was
+        # most of the time between policies.
+        if not _wait_for(lambda: _has_pending_grid(self.page)):
+            raise IntakeHold("Finys table is missing or ambiguous")
 
 
 # --- Local delivery ledger --------------------------------------------------
@@ -653,6 +1323,30 @@ class LocalDeliveryLedger:
     def pdf_path(self, day: date, filename: str) -> Path:
         return self.date_dir(day) / self._basename(filename)
 
+    def delivered_policy_ids(self) -> dict[str, str]:
+        """Policy number to document id for notices already saved.
+
+        A later run on the same ledger skips these policies instead of
+        opening Document Summary again.
+        """
+        found: dict[str, str] = {}
+        for key, entry in self._load()["items"].items():
+            if not isinstance(entry, dict):
+                continue
+            parts = str(key).split(":")
+            if len(parts) < 2:
+                continue
+            filename = str(entry.get("filename") or "")
+            processed = str(entry.get("processed_date") or "")
+            try:
+                day = date.fromisoformat(processed)
+            except ValueError:
+                continue
+            path = self.root / day.isoformat() / filename
+            if path.is_file() and not path.is_symlink():
+                found[parts[1].upper()] = str(key)
+        return found
+
     def delivery_status(self, *, document_id: str, filename: str, processed_on: date) -> bool:
         """True when this exact document was already delivered (dedup)."""
         self.ensure_private()
@@ -713,6 +1407,24 @@ def run_pull(
     *,
     as_of: date,
 ) -> dict[str, Any]:
+    """Pull notices. Tabs this run opened are closed even when a policy holds."""
+    from .carrier_tabs import close_new_pages, snapshot_ids
+
+    page = getattr(browser, "page", None)
+    before = snapshot_ids(page)
+    try:
+        return _run_pull_impl(browser, ledger, archive, as_of=as_of)
+    finally:
+        close_new_pages(page, before, keep=page)
+
+
+def _run_pull_impl(
+    browser: FinysFoSBrowser,
+    ledger: LocalDeliveryLedger,
+    archive: SourceArchive,
+    *,
+    as_of: date,
+) -> dict[str, Any]:
     """Pull the most recent target notice for each Finys pending item.
 
     Returns a receipt dict with status/count/downloaded/held/skipped. Raises
@@ -724,6 +1436,8 @@ def run_pull(
     if not isinstance(as_of, date):
         raise IntakeHold("Pending items as-of date is missing or ambiguous")
 
+    started = monotonic()
+    deadline = started + FOS_DEADLINE_S
     items = browser.load_pending_items()
     png = browser.screenshot_pending_items()
     shot_name = f"pending-items-{as_of.isoformat()}.png"
@@ -734,8 +1448,23 @@ def run_pull(
         os.chmod(shot_path, 0o600)
 
     downloaded: list[dict[str, Any]] = []
-    held: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = list(getattr(browser, "row_holds", ()) or [])
     skipped: list[str] = []
+    delivered = ledger.delivered_policy_ids()
+
+    def receipt(status: str, **extra: Any) -> dict[str, Any]:
+        payload = {
+            "status": status,
+            "carrier": CARRIER,
+            "as_of": as_of.isoformat(),
+            "count": len(downloaded),
+            "downloaded": downloaded,
+            "held": held,
+            "skipped": skipped,
+            "screenshot": shot_name,
+        }
+        payload.update(extra)
+        return payload
 
     def fail(reason: str) -> None:
         raise PullHeld(
@@ -752,11 +1481,44 @@ def run_pull(
             },
         )
 
-    for item in items:
-        browser.return_to_pending_items()
-        browser.open_policy(item.policy_number)
-        browser.open_document_summary()
-        documents = browser.list_documents()
+    unique = _dedupe_pending(items)
+    _fos_log(f"kept {len(unique)} after dropping duplicate policies from {len(items)}")
+    recent = _due_within(unique, as_of, ACTIONABLE_DAYS)
+    _fos_log(f"kept {len(recent)} due within {ACTIONABLE_DAYS} days of {len(unique)}")
+    on_disk = _policies_in_output(ledger.root) if hasattr(ledger, "root") else set()
+    pending = []
+    for item in recent:
+        if item.policy_number in delivered or item.policy_number in on_disk:
+            prior = delivered.get(item.policy_number) or item.policy_number
+            skipped.append(prior)
+            continue
+        pending.append(item)
+    _fos_log(f"kept {len(pending)} after skipping {len(recent) - len(pending)} already downloaded")
+
+    for index, item in enumerate(pending):
+        if monotonic() >= deadline:
+            left = len(pending) - index
+            reason = f"Farmers of Salem worker deadline reached; {left} policies left unprocessed"
+            _fos_log(reason)
+            return receipt("PARTIAL", reason=reason, unprocessed=left)
+        _fos_log(f"policy {item.policy_number} start")
+        try:
+            browser.return_to_pending_items()
+            browser.open_policy(item.policy_number)
+            browser.open_document_summary()
+            documents = browser.list_documents()
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Finys policy {item.policy_number} did not open ({type(exc).__name__})"
+            )
+            page = getattr(browser, "page", None)
+            url = str(getattr(page, "url", "") or "")
+            tables = _count(page.locator("table")) if page is not None else -1
+            _fos_log(f"policy {item.policy_number} held at {url} tables={tables}: {reason}")
+            if "Finys table is missing" in reason:
+                reason = f"{reason} at {url} ({tables} tables)"
+            held.append(_held_row(item, reason))
+            continue
         target = select_target_document(documents)
         if target is None or target.doc_date is None or target.notice_key is None:
             held.append(_held_row(item, "no dated Intent to Cancel / cancellation / underwriting / billing document on Document Summary"))
@@ -814,16 +1576,37 @@ def run_pull(
             }
         )
 
-    return {
-        "status": "PULLED",
-        "carrier": CARRIER,
-        "as_of": as_of.isoformat(),
-        "count": len(downloaded),
-        "downloaded": downloaded,
-        "held": held,
-        "skipped": skipped,
-        "screenshot": shot_name,
-    }
+    return receipt("PULLED")
+
+
+def _dedupe_pending(items: tuple[PendingItem, ...] | list[PendingItem]) -> list[PendingItem]:
+    seen: set[str] = set()
+    kept: list[PendingItem] = []
+    for item in items:
+        if item.policy_number in seen:
+            continue
+        seen.add(item.policy_number)
+        kept.append(item)
+    return kept
+
+
+def _due_within(items: list[PendingItem], as_of: date, days: int) -> list[PendingItem]:
+    from datetime import timedelta
+
+    floor = as_of - timedelta(days=days)
+    return [item for item in items if item.due_on >= floor]
+
+
+def _policies_in_output(root: Path) -> set[str]:
+    found: set[str] = set()
+    folder = Path(root)
+    if not folder.exists():
+        return found
+    for path in folder.rglob("*.pdf"):
+        token = path.name.split(" ", 1)[0].upper()
+        if _POLICY_NUMBER.fullmatch(token):
+            found.add(token)
+    return found
 
 
 # --- Test-only CLI ----------------------------------------------------------
@@ -838,19 +1621,67 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_finys_page(browser: Any) -> Any:
+def _finys_pages(browser: Any) -> list[Any]:
     found = []
-    for context in browser.contexts:
+    for context in getattr(browser, "contexts", []) or []:
         for page in context.pages:
             try:
                 host = (urllib.parse.urlsplit(str(page.url or "")).hostname or "").lower()
             except Exception:
                 continue
-            if host == FINYS_HOST:
-                found.append(page)
+            if host == FINYS_HOST and "login" not in str(page.url or "").lower():
+                from .farmersofsalem_login import is_signed_in
+
+                if is_signed_in(page):
+                    found.append(page)
+    return found
+
+
+def _select_finys_page(browser: Any) -> Any:
+    found = _finys_pages(browser)
     if len(found) != 1:
         raise IntakeHold("Finys tab is missing or ambiguous")
     return found[0]
+
+
+def ensure_finys_page(browser: Any) -> Any:
+    """Return one Finys tab, signing in once when it is not already open."""
+    from . import farmersofsalem_login
+
+    require_carrier_pull(CARRIER)
+    refuse_production_host()
+    found = _finys_pages(browser)
+    if len(found) >= 1:
+        chosen = found[0]
+        for extra in found[1:]:
+            closer = getattr(extra, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
+        return chosen
+    require_hermes_test_host()
+    contexts = list(getattr(browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Farmers of Salem sign-in needs an open browser context")
+    portal = []
+    for context in contexts:
+        for page in context.pages:
+            host = (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower()
+            if PORTAL_HOST in host:
+                portal.append(page)
+    page = portal[0] if portal else contexts[0].new_page()
+    created = page not in portal
+    try:
+        return farmersofsalem_login.login_farmers(page)
+    except Exception:
+        if created:
+            try:
+                page.close()
+            except Exception:
+                pass
+        raise
 
 
 def main(
@@ -884,7 +1715,7 @@ def main(
 
             closer = _close
             playwright_browser = playwright.chromium.connect_over_cdp(cdp_url)
-            browser = FinysFoSBrowser(_select_finys_page(playwright_browser))
+            browser = FinysFoSBrowser(ensure_finys_page(playwright_browser))
         else:
             browser = browser_factory(args)
         ledger = LocalDeliveryLedger(pack)

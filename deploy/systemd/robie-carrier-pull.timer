@@ -1,0 +1,17 @@
+[Unit]
+Description=Weekday 07:30 ET schedule for the ROBIE Production daily carrier pull (NOT enabled until Carlo's GO)
+
+[Timer]
+# Same clock as Test's robie-carrier-pull-test.timer.
+# This timer is shipped disabled. Do not enable it from the pull request.
+# After GO, Carlo (Release / Production) runs:
+#   systemctl enable --now robie-carrier-pull.timer
+# Persistent=false: enabling the timer never starts a catch-up run.
+OnCalendar=Mon..Fri *-*-* 07:30:00 America/New_York
+Persistent=false
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=robie-carrier-pull.service
+
+[Install]
+WantedBy=timers.target

@@ -445,7 +445,7 @@ class FakeGuardPage:
     def wait_for_selector(self, selector, timeout=None):
         return None
 
-    def screenshot(self, full_page=True, type="png"):
+    def screenshot(self, full_page=True, type="png", timeout=None):
         return LIST_PNG
 
     def goto(self, url, wait_until=None):
@@ -737,8 +737,10 @@ class PullTests(unittest.TestCase):
 
     def test_ambiguous_cancellation_documents_hold_policy(self):
         rows = (
+            # Same newest date: still ambiguous (older notices are history and
+            # are skipped by newest_cancellation_documents).
             ("Cancellation", "GUARD-CXL", "09/21/2026"),
-            ("Cancellation Notice", "GUARD-CXL2", "09/20/2026"),
+            ("Cancellation Notice", "GUARD-CXL2", "09/21/2026"),
         )
         page = FakeGuardPage(doc_rows=rows)
         receipt = self._run(page)
@@ -746,6 +748,9 @@ class PullTests(unittest.TestCase):
         self.assertEqual(len(receipt["held"]), 6)
         for held in receipt["held"]:
             self.assertIn("found 2", held["hold_reason"])
+            # The hold names the colliding documents (disambiguation follow-up).
+            self.assertIn("Cancellation [", held["hold_reason"])
+            self.assertIn("Cancellation Notice [", held["hold_reason"])
 
     def test_non_pdf_download_holds(self):
         page = FakeGuardPage(doc_outcomes={"PRAU716089": "nonpdf"})

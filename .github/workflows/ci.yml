@@ -111,7 +111,26 @@ jobs:
         run: ROBIE_ENV=TEST PYTHONPATH=. python -m unittest tests.test_document_retrieval_filing tests.test_progressive_fao_memo tests.test_gemini_ui_rescue
       - name: Test shared EZLynx API CLI (stub clients, no live calls)
         run: PYTHONPATH=. python -m pytest -q tests/test_ezlynx_api_cli.py
-
+      - name: Test carrier document retrieval workers
+        run: |
+          ROBIE_ENV=TEST PYTHONPATH=.:tests python -m pytest -q \
+            tests/test_carrier_retrieval_reconcile.py \
+            tests/test_utica_login.py \
+            tests/test_utica_pending_cancellation.py \
+            tests/test_carrier_dry_run.py \
+            tests/test_guard_pending_cancellation.py \
+            tests/test_geico_pending_cancellation_noc.py \
+            tests/test_geico_page_identity.py \
+            tests/test_progressive_pending_cancellation.py \
+            tests/test_progressive_bop.py \
+            tests/test_farmersofsalem_pending_cancellation.py \
+            tests/test_travelers_pending_cancellation.py \
+            tests/test_natgen_pending_cancellation.py \
+            tests/test_carrier_pull_health_check.py \
+            tests/test_document_retrieval_prod_filing.py \
+            tests/test_carrier_live_fixes_20261008.py \
+            tests/test_carrier_daily_run.py \
+            tests/test_carrier_sign_in_20261008.py
       - name: Test Ascend API notice source
         run: PYTHONPATH=. python -m pytest -q tests/test_ascend_api_notice_source.py tests/test_ascend_notice_driver.py tests/test_ascend_note_policy_mask.py tests/test_ascend_unmatched_digest.py tests/test_install_ascend_unmatched_digest.py tests/test_ascend_stuck_and_agreements.py
 

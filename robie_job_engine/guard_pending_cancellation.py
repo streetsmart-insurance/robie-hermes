@@ -42,6 +42,9 @@ SCOPE = "pending_cancellation"
 GUARD_HOST = "gigezrate.guard.com"
 GUARD_PUBLIC_HOST = "guard.com"
 DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+CANCELLATIONS_TAB_ATTEMPTS = 3
+GUARD_RELOGIN_LIMIT = 2
+CANCELLATIONS_TAB_SETTLE_MS = 2500
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "guard-cancellation-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -169,7 +172,8 @@ def scribe_item_id_from_href(href: str) -> str:
     except Exception:
         return ""
     candidate = _norm(values[0]) if values else ""
-    return candidate if re.fullmatch(r"[A-Za-z0-9_-]+", candidate) else ""
+    # Live ids (2026-10-08) are wrapped in tildes: scribeItemId=~enrDdW..._pc_3d~
+    return candidate if re.fullmatch(r"~?[A-Za-z0-9_-]+~?", candidate) else ""
 
 
 def is_cancellation_document(description: str) -> bool:
@@ -393,6 +397,30 @@ class PlaywrightGuardBrowser:
     def __init__(self, page: Any):
         self.page = page
         self._list_url = ""
+        self._relogins = 0
+
+    # -- session ----------------------------------------------------------
+    def on_sign_in_page(self) -> bool:
+        """True when Guard bounced the tab to its /auth sign-in screen."""
+        parts = urllib.parse.urlsplit(str(getattr(self.page, "url", "") or ""))
+        path = (parts.path or "").lower()
+        return (parts.hostname or "").lower() == GUARD_HOST and (
+            path.startswith("/auth") or "login" in path
+        )
+
+    def relogin_if_signed_out(self) -> bool:
+        """Hold when the session expires mid-run. Do not submit the password again.
+
+        Live 2026-10-08: after 3 policies Guard redirected the tab to /auth,
+        and a second sign-in was rejected. Another submission can lock the
+        account, so this run keeps the one login it already made.
+        """
+        if not self.on_sign_in_page():
+            return False
+        raise IntakeHold(
+            "Guard session expired mid-pull. Not signing in again this run "
+            "(one login attempt only, so a rejected password cannot lock the account)."
+        )
 
     # -- navigation -----------------------------------------------------
     def open_cancellations(self) -> None:
@@ -400,11 +428,53 @@ class PlaywrightGuardBrowser:
         page = self.page
         require_guard_url(str(getattr(page, "url", "") or ""))
         _unique_control(page, "link", "Book of Business").click()
-        _unique_control(page, "tab", "Cancellations").click()
+        # Blazor/MudBlazor tabs don't respond to Playwright's click(); use JS click
+        if hasattr(page, "evaluate") and callable(page.evaluate):
+            page.evaluate("""(() => {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+                const cancel = tabs.find(t => t.textContent.includes('Cancellations'));
+                if (cancel) { cancel.click(); return true; }
+                return false;
+            })()""")
+        else:
+            _unique_control(page, "tab", "Cancellations").click()
         page.wait_for_selector("table", timeout=15000)
         self._list_url = require_guard_url(str(getattr(page, "url", "") or ""))
 
     def load_cancellations(self) -> tuple[CancellationRow, ...]:
+        """Parse the Cancellations grid, re-clicking the tab when Blazor ignored it.
+
+        Live 2026-10-08: about half the time the first JS click leaves the
+        In Force grid showing (Inception/Expiration headers), which fails the
+        header check. Re-select the Cancellations tab and re-read, up to
+        CANCELLATIONS_TAB_ATTEMPTS times, before holding.
+        """
+        last: IntakeHold | None = None
+        for attempt in range(CANCELLATIONS_TAB_ATTEMPTS):
+            if attempt:
+                self._select_cancellations_tab()
+            try:
+                return self._read_cancellations_grid()
+            except IntakeHold as exc:
+                last = exc
+        assert last is not None
+        raise last
+
+    def _select_cancellations_tab(self) -> None:
+        page = self.page
+        evaluate = getattr(page, "evaluate", None)
+        if callable(evaluate):
+            evaluate("""(() => {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+                const cancel = tabs.find(t => t.textContent.includes('Cancellations'));
+                if (cancel) { cancel.click(); return true; }
+                return false;
+            })()""")
+        waiter = getattr(page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(CANCELLATIONS_TAB_SETTLE_MS)
+
+    def _read_cancellations_grid(self) -> tuple[CancellationRow, ...]:
         page = self.page
         tables = page.locator("table")
         if int(tables.count()) != 1:
@@ -424,22 +494,53 @@ class PlaywrightGuardBrowser:
     def open_policy(self, policy_number: str) -> None:
         """Click the policy link on the Cancellations grid -> Policy Center."""
         require_policy_number(policy_number)
-        link = _unique_control(self.page, "link", policy_number, exact=True)
-        link.click()
+        # Blazor UI: use JS click instead of Playwright click
+        if hasattr(self.page, "evaluate") and callable(self.page.evaluate):
+            script = f"""(() => {{
+                const links = Array.from(document.querySelectorAll('a'));
+                const link = links.find(a => a.textContent.trim() === '{policy_number}');
+                if (link) {{ link.click(); return true; }}
+                return false;
+            }})()"""
+            clicked = self.page.evaluate(script)
+            if clicked is False:
+                # Live 2026-10-08: the list page came back on the In Force
+                # tab, so the next policy link was not there. Re-select
+                # Cancellations once, then hold this policy if still absent.
+                self._select_cancellations_tab()
+                if self.page.evaluate(script) is False:
+                    raise IntakeHold(
+                        f"Guard policy link {policy_number} is missing from the Cancellations grid"
+                    )
+        else:
+            link = _unique_control(self.page, "link", policy_number, exact=True)
+            link.click()
         self.page.wait_for_selector("text=Policy Center", timeout=15000)
 
     def open_printable_documents(self) -> None:
         """Related Functions (or Quick Functions) -> "printable documents"."""
         page = self.page
-        for role in ("link", "button"):
-            try:
-                control = _unique_control(page, role, "printable documents", exact=False)
-            except IntakeHold:
-                continue
-            control.click()
-            page.wait_for_selector("text=Policy Documents", timeout=15000)
-            return
-        raise IntakeHold("Guard printable documents control is missing or ambiguous")
+        # Blazor UI: use JS click instead of Playwright click
+        clicked = False
+        if hasattr(page, "evaluate") and callable(page.evaluate):
+            clicked = bool(page.evaluate("""(() => {
+                const els = Array.from(document.querySelectorAll('a, button'));
+                const el = els.find(e => e.textContent.toLowerCase().includes('printable documents'));
+                if (el) { el.click(); return true; }
+                return false;
+            })()"""))
+        if not clicked:
+            for role in ("link", "button"):
+                try:
+                    control = _unique_control(page, role, "printable documents", exact=False)
+                    control.click()
+                    clicked = True
+                    break
+                except IntakeHold:
+                    continue
+        if not clicked:
+            raise IntakeHold("Guard printable documents control is missing or ambiguous")
+        page.wait_for_selector("text=Policy Documents", timeout=15000)
 
     def list_documents(self, policy_number: str) -> tuple[GuardDocument, ...]:
         """Parse the Policy Documents / Miscellaneous Documents groups.
@@ -502,9 +603,11 @@ class PlaywrightGuardBrowser:
             next_title = _DOC_GROUPS[idx + 1] if idx + 1 < len(_DOC_GROUPS) else None
 
             # Walk following siblings in document order, stopping at next section.
-            # Use XPath to get all following siblings (elements and text).
-            # We'll iterate and check each one's text content.
-            siblings = section_elem.locator('xpath=following-sibling::*')
+            # The <b> title is inside a <div>; the document links are in the
+            # parent div's following sibling divs. Use JS to get parent's siblings.
+            siblings = page.locator(
+                f'xpath=//*[text()[normalize-space(.)="{title}"]]/parent::*/following-sibling::*'
+            )
             try:
                 sib_count = int(siblings.count())
             except Exception:
@@ -529,19 +632,34 @@ class PlaywrightGuardBrowser:
                     # This sibling starts the next section; stop.
                     break
 
-                # Only process <a> elements as documents
-                if tag != "a":
-                    continue
-
-                text = _norm(_read_text(sib))
-                if not text:
-                    continue
-                # Skip the "return to policy center" link
-                if text.lower() in ("return to policy center",):
-                    continue
-
-                href = sib.get_attribute("href") or ""
-                items.append((title, text, href))
+                # Live 2026-10-07 (hermes-test-01 hand patch): document <a>s
+                # sit inside sibling <div>s. Older markup had the <a> as the
+                # sibling itself; accept both shapes.
+                if tag == "a":
+                    anchor_nodes = [sib]
+                else:
+                    anchors = sib.locator("a")
+                    try:
+                        anchor_count = int(anchors.count())
+                    except Exception:
+                        anchor_count = 0
+                    anchor_nodes = [anchors.nth(ai) for ai in range(anchor_count)]
+                for anchor in anchor_nodes:
+                    try:
+                        text = _norm(_read_text(anchor))
+                    except Exception:
+                        continue
+                    if not text:
+                        continue
+                    # Skip the "return to policy center" link
+                    if text.lower() in ("return to policy center",):
+                        continue
+                    try:
+                        href = anchor.get_attribute("href") or ""
+                    except Exception:
+                        href = ""
+                    if href:
+                        items.append((title, text, href))
 
         if not items:
             raise IntakeHold("Guard printable documents groups are missing or ambiguous")
@@ -575,6 +693,14 @@ class PlaywrightGuardBrowser:
                     "Guard document link for "
                     f"scribeItemId {doc.scribe_item_id!r} is missing or ambiguous"
                 )
+            href = ""
+            try:
+                href = str(link.first.get_attribute("href") or "")
+            except Exception:
+                href = ""
+            fetched = fetch_document_via_session(page, href)
+            if fetched is not None:
+                return fetched
             return collect_document_observation(page, link.first.click)
         row = page.locator("tr", has_text=doc.description)
         try:
@@ -605,11 +731,27 @@ class PlaywrightGuardBrowser:
         return collect_document_observation(page, action.first.click)
 
     def return_to_cancellations(self) -> None:
+        """Reload Book of Business and re-select the Cancellations tab.
+
+        /portal/book-of-business opens on the In Force tab, so a bare goto
+        left the next policy's link off the page (live 2026-10-08).
+        """
         self.page.goto(self._list_url, wait_until="domcontentloaded")
+        if self.relogin_if_signed_out():
+            return
         self.page.wait_for_selector("table", timeout=15000)
+        self.load_cancellations()
 
     def screenshot_cancellations(self) -> bytes:
-        data = self.page.screenshot(full_page=True, type="png")
+        # full_page=True hangs on font loading; use viewport screenshot with timeout
+        try:
+            from .carrier_page_capture import bring_to_front
+
+            bring_to_front(self.page)
+            data = self.page.screenshot(full_page=False, type="png", timeout=10000)
+        except Exception:
+            # Fallback: try without waiting for fonts
+            data = self.page.screenshot(full_page=False, type="png", timeout=5000)
         if not bytes(data or b"")[:8] == _PNG_MAGIC:
             raise IntakeHold("Guard Cancellations screenshot is missing or not a PNG")
         return bytes(data)
@@ -638,8 +780,7 @@ def collect_document_observation(page: Any, click_action: Callable[[], None]) ->
             with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
                 click_action()
             download = download_info.value
-            path = download.path()
-            content = Path(str(path)).read_bytes()
+            content = _download_bytes(page, download)
         except Exception as exc:
             if type(exc).__name__ == "TimeoutError" or "timeout" in type(exc).__name__.lower():
                 content = b""
@@ -665,6 +806,74 @@ def collect_document_observation(page: Any, click_action: Callable[[], None]) ->
         # .eml quirk). Fail closed — do not claim a download.
         return DocumentOpenObservation((), (), True)
     return DocumentOpenObservation(tuple(downloads), tuple(viewer_pdfs), False)
+
+
+def _session_get(page: Any, url: str) -> bytes | None:
+    """GET ``url`` with the page's signed-in browser context. None if unavailable."""
+    request = getattr(getattr(page, "context", None), "request", None)
+    getter = getattr(request, "get", None)
+    if not callable(getter) or not url:
+        return None
+    referer = str(getattr(page, "url", "") or "")
+    try:
+        response = getter(url, headers={"Referer": referer} if referer else None, timeout=60000)
+    except Exception:
+        return None
+    status = getattr(response, "status", 200)
+    if isinstance(status, int) and status >= 400:
+        return None
+    try:
+        body = response.body()
+    except Exception:
+        return None
+    return bytes(body or b"")
+
+
+def _absolute_guard_url(page: Any, href: str) -> str:
+    href = str(href or "").strip()
+    if not href:
+        return ""
+    base = str(getattr(page, "url", "") or f"https://{GUARD_HOST}/")
+    url = urllib.parse.urljoin(base, href)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != GUARD_HOST:
+        return ""
+    return url
+
+
+def fetch_document_via_session(page: Any, href: str) -> DocumentOpenObservation | None:
+    """Fetch a Guard document link's bytes through the signed-in session.
+
+    The Test carrier Chrome runs with a private /tmp, so Playwright's
+    download artifact (in Chrome's private /tmp) cannot be read by the worker
+    (live 2026-10-08: FileNotFoundError). The DownloadScribeItem link returns
+    the PDF directly to an authenticated GET. Returns None when the session
+    fetch is unavailable so the caller can fall back to the click path.
+    A non-PDF, non-.eml body raises IntakeHold (never kept).
+    """
+    url = _absolute_guard_url(page, href)
+    if not url:
+        return None
+    content = _session_get(page, url)
+    if not content:
+        return None
+    if _looks_like_eml_notification(content):
+        return DocumentOpenObservation((), (), True)
+    if not _is_pdf(content):
+        raise IntakeHold("Guard document download is not a PDF")
+    return DocumentOpenObservation((content,), (), False)
+
+
+def _download_bytes(page: Any, download: Any) -> bytes:
+    """Bytes of a Playwright download, refetched through the session if the artifact is unreadable."""
+    try:
+        return Path(str(download.path())).read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        url = str(getattr(download, "url", "") or "")
+        content = _session_get(page, _absolute_guard_url(page, url))
+        if content:
+            return content
+        raise IntakeHold("Guard download artifact is unreadable and the session refetch failed")
 
 
 def read_playwright_pdf_view(page: Any) -> tuple[bytes, ...]:
@@ -758,7 +967,7 @@ class GuardDeliveryLedger:
             raise IntakeHold("Existing Guard file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem, *, issued_on: date) -> Path:
+    def record(self, source: SourceItem, *, issued_on: date, insured_name: str = "") -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Guard filename is missing or ambiguous")
@@ -774,6 +983,7 @@ class GuardDeliveryLedger:
             raise IntakeHold("Existing Guard file conflicts with the pull ledger")
         data["items"][source.source_id] = {
             "filename": source.filename,
+            "insured_name": insured_name,
             "sha256": digest,
             "bytes": len(source.content),
             "issued_date": issued_on.isoformat(),
@@ -813,6 +1023,51 @@ def _row_payload(row: CancellationRow, *, outcome: str, reason: str = "", filena
     return payload
 
 
+def newest_cancellation_documents(docs: Any) -> list[GuardDocument]:
+    """Cancellation documents in Policy Documents on the newest issued date.
+
+    Live 2026-10-08: Guard lists each policy's whole notice history
+    (e.g. Cancellation 09/08, Notice of Cancellation 08/17 and 05/18). The
+    current notice is the newest; two on that same newest date stay
+    ambiguous and hold.
+    """
+    cancels = [
+        doc for doc in docs
+        if doc.group.casefold() == "policy documents" and is_cancellation_document(doc.description)
+    ]
+    if not cancels:
+        return []
+    newest = max(doc.issued for doc in cancels)
+    return [doc for doc in cancels if doc.issued == newest]
+
+
+def _relogin_if_signed_out(browser: Any) -> bool:
+    relogin = getattr(browser, "relogin_if_signed_out", None)
+    return bool(relogin()) if callable(relogin) else False
+
+
+def _open_policy_with_relogin(browser: Any, policy_number: str) -> None:
+    """Open one policy; if the session expired, sign back in and retry once."""
+    try:
+        browser.open_policy(policy_number)
+    except Exception:
+        if not _relogin_if_signed_out(browser):
+            raise
+        browser.open_policy(policy_number)
+
+
+def _return_to_list_quietly(browser: Any) -> None:
+    """Best-effort return to the Cancellations list between policies.
+
+    A slow reload must not fail the whole carrier: the next policy's open
+    holds on its own if the list is not back.
+    """
+    try:
+        browser.return_to_cancellations()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_pull(
     browser: PlaywrightGuardBrowser,
     ledger: GuardDeliveryLedger,
@@ -847,27 +1102,42 @@ def run_pull(
     rows = browser.load_cancellations()
 
     for row in rows:
-        browser.open_policy(row.policy_number)
+        try:
+            _relogin_if_signed_out(browser)
+            _open_policy_with_relogin(browser, row.policy_number)
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Guard Policy Center for {row.policy_number} did not open ({type(exc).__name__})"
+            )
+            held.append(_row_payload(row, outcome="HELD", reason=reason))
+            _return_to_list_quietly(browser)
+            continue
         try:
             browser.open_printable_documents()
             docs = browser.list_documents(row.policy_number)
-        except IntakeHold as exc:
-            held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+        except Exception as exc:  # noqa: BLE001 - one policy holds, the pull goes on
+            reason = str(exc) if isinstance(exc, IntakeHold) else (
+                f"Guard printable documents for {row.policy_number} did not load ({type(exc).__name__})"
+            )
+            held.append(_row_payload(row, outcome="HELD", reason=reason))
+            _return_to_list_quietly(browser)
             continue
-        targets = [
-            doc for doc in docs
-            if doc.group.casefold() == "policy documents" and is_cancellation_document(doc.description)
-        ]
+        targets = newest_cancellation_documents(docs)
         if len(targets) != 1:
+            # Name the candidates so the next live run shows exactly which
+            # documents collided (doc disambiguation is a follow-up).
+            candidates = "; ".join(
+                f"{doc.description} [{doc.scribe_item_id or 'no id'}]" for doc in targets[:6]
+            )
             held.append(_row_payload(
                 row, outcome="HELD",
                 reason=(
                     f"Guard policy {row.policy_number} cancellation document "
                     f"is missing or ambiguous (found {len(targets)})"
+                    + (f": {candidates}" if candidates else "")
                 ),
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         doc = targets[0]
         try:
@@ -879,11 +1149,11 @@ def run_pull(
                 rows_payload.append(_row_payload(
                     row, outcome="ALREADY_DELIVERED", filename=doc.filename
                 ))
-                browser.return_to_cancellations()
+                _return_to_list_quietly(browser)
                 continue
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         observation = browser.open_document(doc)
         if observation.emailed and not observation.downloads and not observation.viewer_pdfs:
@@ -895,7 +1165,7 @@ def run_pull(
                 ),
                 filename=doc.filename,
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         content = (
             observation.downloads[0] if observation.downloads else observation.viewer_pdfs[0]
@@ -905,7 +1175,7 @@ def run_pull(
                 row, outcome="HELD",
                 reason=f"Guard document {doc.description!r} open is missing or ambiguous",
             ))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         source = SourceItem(
             system=PROCESS,
@@ -918,11 +1188,11 @@ def run_pull(
         )
         source.validate()
         try:
-            saved = ledger.record(source, issued_on=doc.issued)
+            saved = ledger.record(source, issued_on=doc.issued, insured_name=row.insured_name)
             archive.preserve(source)
         except IntakeHold as exc:
             held.append(_row_payload(row, outcome="HELD", reason=str(exc)))
-            browser.return_to_cancellations()
+            _return_to_list_quietly(browser)
             continue
         downloaded.append({
             "document_id": doc.document_id,
@@ -938,7 +1208,7 @@ def run_pull(
         })
         targeted.append(doc.document_id)
         rows_payload.append(_row_payload(row, outcome="PULLED", filename=doc.filename))
-        browser.return_to_cancellations()
+        _return_to_list_quietly(browser)
 
     return {
         "status": "PULLED",
@@ -965,6 +1235,57 @@ def select_guard_page(pages: list[Any]) -> Any:
     if len(matches) != 1:
         raise IntakeHold("Expected exactly one Guard Agency Service Center tab")
     return matches[0]
+
+
+def ensure_guard_page(cdp_browser: Any) -> Any:
+    """Return the one signed-in Guard tab, signing in (Test host only) if there is none.
+
+    - Exactly one signed-in Agency Service Center tab: use it.
+    - Several: hold (ambiguous, never guess).
+    - None: on hermes-test-01 only, close stale Guard tabs (signed-out /auth
+      pages) and sign in on a new tab via ``guard_login`` (this module never
+      types credentials itself).
+    """
+    from . import guard_login
+    from .document_retrieval_filing import require_carrier_pull
+
+    require_carrier_pull("guard")
+    refuse_production_host()
+    pages = [p for ctx in cdp_browser.contexts for p in ctx.pages]
+    matches = [
+        page for page in pages
+        if (urllib.parse.urlsplit(str(getattr(page, "url", "") or "")).hostname or "").lower() == GUARD_HOST
+    ]
+    signed_in = [page for page in matches if guard_login.is_logged_in(page)]
+    if len(signed_in) == 1:
+        for stale in matches:
+            if stale is not signed_in[0]:
+                try:
+                    stale.close()
+                except Exception:
+                    pass
+        return signed_in[0]
+    if len(signed_in) > 1:
+        raise IntakeHold("Expected exactly one signed-in Guard Agency Service Center tab")
+    require_hermes_test_host()
+    for stale in matches:
+        try:
+            stale.close()
+        except Exception:
+            pass
+    contexts = list(getattr(cdp_browser, "contexts", None) or [])
+    if not contexts:
+        raise IntakeHold("Guard auto-login needs an open browser context")
+    page = contexts[0].new_page()
+    try:
+        guard_login.login_guard(page)
+        return page
+    except Exception:
+        try:
+            page.close()
+        except Exception:
+            pass
+        raise
 
 
 def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightGuardBrowser, Callable[[], None]]:
