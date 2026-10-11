@@ -654,6 +654,44 @@ def _discussion_marked_gone(record: dict[str, Any]) -> bool:
     return False
 
 
+_PLAIN_NUMBER_RE = re.compile(r"^\d+(?:\.0+)?$")
+
+
+def _canonical_discussion_id(value: Any) -> str:
+    """A discussion id as digits. ``851486023.0`` and ``851,486,023`` are the same id."""
+    text = str(value or "").strip().replace(",", "").replace(" ", "")
+    if _PLAIN_NUMBER_RE.match(text):
+        return text.split(".")[0]
+    return str(value or "").strip()
+
+
+def _pinned_discussion_by_direct_read(
+    client: Any, applicant: str, pinned: str,
+) -> list[dict[str, Any]]:
+    """The named discussion, read by id, when it provably belongs to the applicant.
+
+    Used only when the applicant's list does not show the id the task named.
+    The record must carry this applicant's id and the same discussion id, and
+    must not be marked deleted. A read that fails, or a record that does not
+    say whose it is, is no match: the note is not posted.
+    """
+    getter = getattr(client, "get_discussion", None)
+    if not callable(getter) or not pinned:
+        return []
+    try:
+        record = getter(pinned)
+    except Exception:  # noqa: BLE001 - unreadable is not proof
+        return []
+    if not isinstance(record, dict) or _discussion_marked_gone(record):
+        return []
+    owner = str(record.get("applicantId") or record.get("ApplicantId") or "").strip()
+    if owner != str(applicant).strip():
+        return []
+    if _canonical_discussion_id(discussion_id_of(record)) != pinned:
+        return []
+    return [record]
+
+
 def is_untitled_discussion(record: dict[str, Any]) -> bool:
     """True when the card has no usable title or is literally Untitled."""
     title = discussion_title_of(record)
@@ -1384,12 +1422,26 @@ def file_note_to_existing_discussion(
         # a discussion made without a title (Jake's Robie Call task, 2026-10-09)
         # is a valid destination. Only discussions marked deleted are skipped. The
         # untitled filter stays on the guessing path below.
+        pinned = _canonical_discussion_id(pinned)
         live = [
             row
             for row in discussions
             if isinstance(row, dict) and not _discussion_marked_gone(row)
         ]
-        matched = [row for row in live if discussion_id_of(row) == pinned]
+        matched = [
+            row for row in live if _canonical_discussion_id(discussion_id_of(row)) == pinned
+        ]
+        listed = any(
+            isinstance(row, dict)
+            and _canonical_discussion_id(discussion_id_of(row)) == pinned
+            for row in discussions
+        )
+        if not matched and not listed:
+            # The list can lag a discussion made moments ago or leave one
+            # out. Read the named discussion directly. It counts only when
+            # it says it belongs to this applicant and is not deleted. A
+            # discussion the list shows as deleted is never second-guessed.
+            matched = _pinned_discussion_by_direct_read(client, applicant, pinned)
         if len(matched) != 1:
             return {
                 "status": "pending",

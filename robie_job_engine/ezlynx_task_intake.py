@@ -419,6 +419,15 @@ def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
             getattr(task, "task_id", ""), discussion_id, applicant_id,
         )
         return False
+    # EZLynx's POST .../notes returns no note id (#831), so a hold note that
+    # landed used to be recorded as "attempted, no note id". Record the ids
+    # already in the discussion first (only from a read proven whole), post
+    # once, and accept the note afterwards when the response carries an id or
+    # exactly one NEW id carries exactly this text. Anything less stays
+    # unconfirmed, and nothing here ever posts a second time.
+    from .ezlynx_shared_writes import complete_note_ids, new_note_ids_with_text
+
+    prior_ids = complete_note_ids(client, discussion_id)
     response = client.append_note(
         discussion_id,
         body,
@@ -426,8 +435,37 @@ def _post_hold_note(client: Any, task: Any, reason: str) -> bool:
     )
     if not isinstance(response, dict):
         return False
-    note_id = str(response.get("noteId") or response.get("note_id") or "")
-    return bool(note_id)
+    note_id = _response_note_id(response)
+    if note_id:
+        return True
+    if prior_ids is None:
+        return False
+    try:
+        matches = new_note_ids_with_text(client, prior_ids, discussion_id, body)
+    except Exception as exc:  # noqa: BLE001 - unreadable is not proof
+        logger.error(
+            "hold note confirmation read failed for %s: %s",
+            getattr(task, "task_id", ""), exc,
+        )
+        return False
+    if matches is not None and len(matches) == 1:
+        logger.info(
+            "hold note for %s confirmed by new note id %s with exactly the text sent",
+            getattr(task, "task_id", ""), matches[0],
+        )
+        return True
+    return False
+
+
+def _response_note_id(response: dict[str, Any]) -> str:
+    for key in ("noteId", "note_id", "NoteId"):
+        value = str(response.get(key) or "").strip()
+        if value:
+            return value
+    nested = response.get("note")
+    if isinstance(nested, dict):
+        return _response_note_id(nested)
+    return ""
 
 
 def _park_stale_job(store: JobStore, job: dict[str, Any], reason: str) -> None:
@@ -455,7 +493,8 @@ def _finish_hold(seen: Any, statuses: dict[str, str], task_id: str, posted: bool
     seen.mark(task_id, "hitl_attempted")
     statuses[task_id] = "hitl_attempted"
     logger.error(
-        "hold note for %s had no note id; recorded the attempt and will not repeat",
+        "hold note for %s was not confirmed as posted (no note id, and no single new "
+        "note with exactly the text sent); recorded the attempt and will not repeat",
         task_id,
     )
 
@@ -863,6 +902,22 @@ def _report_age_minutes(report: Any) -> float | None:
     return (_intake_now() - received).total_seconds() / 60
 
 
+def _fetch_task_report(report_email_source: Any) -> Any:
+    """The task list for this run: the API when ROBIE_TASK_SOURCE=api and it
+    answers completely, otherwise the emailed report (the original path)."""
+    from .ezlynx_task_source import MODE_API, fetch_from_api, task_source_mode
+
+    if task_source_mode() == MODE_API:
+        api_report = fetch_from_api()
+        if api_report is not None:
+            logger.info(
+                "Task source: EZLynx API (%s Robie task(s))", len(api_report.tasks),
+            )
+            return api_report
+    service = report_email_source.build_default_gmail_service()
+    return fetch_latest_task_report(service)
+
+
 def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     """Run one intake pass. Returns 0 healthy, 2 on failure (health check alerts)."""
     dry_run = _dry_run_enabled(dry_run)
@@ -890,8 +945,7 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
     from . import report_email_source
 
     try:
-        service = report_email_source.build_default_gmail_service()
-        report = fetch_latest_task_report(service)
+        report = _fetch_task_report(report_email_source)
     except (TaskInboxError, Exception) as e:  # noqa: BLE001 — fail-closed, recorded
         logger.error(f"Inbox fetch failed: {e}")
         _heartbeat(store, status="failed", error=f"inbox: {e}")
@@ -1171,7 +1225,9 @@ def run_intake(*, db_path: str | None = None, dry_run: bool = False) -> int:
             else:
                 seen.mark(task.task_id, "hitl_attempted")
                 logger.error(
-                    "hold note for %s had no note id; recorded the attempt and will not repeat",
+                    "hold note for %s was not confirmed as posted (no note id, and no "
+                    "single new note with exactly the text sent); recorded the attempt "
+                    "and will not repeat",
                     task.task_id,
                 )
 
