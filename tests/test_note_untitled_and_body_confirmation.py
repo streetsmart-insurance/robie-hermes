@@ -45,7 +45,13 @@ class Client:
     def get_discussions(self, applicant_id):
         return list(self.discussions)
 
+    allow_unlisted = False
+
     def get_discussion(self, discussion_id):
+        # A real read of an id that is not on this applicant is a 404.
+        known = {str(d["discussionId"]) for d in self.discussions}
+        if str(discussion_id) not in known and not self.allow_unlisted:
+            raise disc.DiscussionApiError(404, "HTTP 404")
         after = self.posts > 0
         return {
             "discussionId": discussion_id,
